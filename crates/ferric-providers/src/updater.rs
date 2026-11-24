@@ -188,8 +188,8 @@ pub fn parse_latest_release(
         .strip_prefix('v')
         .and_then(parse_version)
         .ok_or_else(|| "Release tag must be canonical vX.Y.Z".to_string())?;
-    let local =
-        parse_version(current_version).ok_or_else(|| "Application version is not X.Y.Z".into())?;
+    let local = parse_version(current_version)
+        .ok_or_else(|| "Application version is not X.Y.Z".to_string())?;
     if remote <= local {
         return Ok(None);
     }

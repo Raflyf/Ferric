@@ -1,5 +1,6 @@
 use ferric_core::models::{Track, format_duration_ms};
 use makepad_widgets::*;
+use std::rc::Rc;
 
 live_design! {
     use link::theme::*;
@@ -145,9 +146,9 @@ pub enum TrackListAction {
     None,
 }
 
-pub struct TrackListScope<'a> {
-    pub tracks: &'a [Track],
-    pub active_track_id: Option<&'a str>,
+pub struct TrackListScope {
+    pub tracks: Rc<Vec<Track>>,
+    pub active_track_id: Option<String>,
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -174,10 +175,15 @@ impl Widget for TrackList {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let (tracks, active_id) = scope
+            .props
+            .get::<TrackListScope>()
+            .map(|d| (Rc::clone(&d.tracks), d.active_track_id.clone()))
+            .unwrap_or_else(|| (Rc::new(Vec::new()), None));
+        let count = tracks.len();
+
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                let data = scope.props.get::<TrackListScope<'_>>();
-                let count = data.map_or(0, |d| d.tracks.len());
                 if count == 0 {
                     list.set_item_range(cx, 0, 1);
                     while let Some(item_id) = list.next_visible_item(cx) {
@@ -189,12 +195,11 @@ impl Widget for TrackList {
                 } else {
                     list.set_item_range(cx, 0, count);
                     while let Some(item_id) = list.next_visible_item(cx) {
-                        let Some(d) = data else { continue };
-                        let Some(track) = d.tracks.get(item_id) else {
+                        let Some(track) = tracks.get(item_id) else {
                             continue;
                         };
                         let row = list.item(cx, item_id, live_id!(Row));
-                        let is_active = d.active_track_id == Some(track.id.as_str());
+                        let is_active = active_id.as_deref() == Some(track.id.as_str());
                         row.apply_over(
                             cx,
                             live! {

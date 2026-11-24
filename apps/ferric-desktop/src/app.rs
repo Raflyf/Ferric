@@ -12,6 +12,7 @@ use ferric_providers::lyrics::{SyncedLyrics, fetch_lrclib_synced, read_local_sid
 use ferric_sync::{ActiveSpeakerLease, PairingPayload};
 use makepad_widgets::*;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -731,7 +732,7 @@ pub struct App {
     #[rust]
     all_tracks: Vec<Track>,
     #[rust]
-    filtered_tracks: Vec<Track>,
+    filtered_tracks: Rc<Vec<Track>>,
     #[rust]
     search_query: String,
     #[rust]
@@ -781,7 +782,7 @@ impl App {
             self.accounts = store.load_accounts().unwrap_or_default();
             self.all_tracks = store.list_tracks("").unwrap_or_default();
         }
-        self.filtered_tracks = self.all_tracks.clone();
+        self.filtered_tracks = Rc::new(self.all_tracks.clone());
         self.queue.set_tracks(self.all_tracks.clone(), None);
         self.db = db;
 
@@ -1100,24 +1101,25 @@ impl App {
         if let Some(db) = &self.db
             && let Ok(rows) = db.list_tracks(&self.search_query)
         {
-            self.filtered_tracks = rows;
+            self.filtered_tracks = Rc::new(rows);
             self.ui.redraw(cx);
             return;
         }
         let q = self.search_query.trim().to_ascii_lowercase();
         if q.is_empty() {
-            self.filtered_tracks = self.all_tracks.clone();
+            self.filtered_tracks = Rc::new(self.all_tracks.clone());
         } else {
-            self.filtered_tracks = self
-                .all_tracks
-                .iter()
-                .filter(|t| {
-                    t.title.to_ascii_lowercase().contains(&q)
-                        || t.artist.to_ascii_lowercase().contains(&q)
-                        || t.album.to_ascii_lowercase().contains(&q)
-                })
-                .cloned()
-                .collect();
+            self.filtered_tracks = Rc::new(
+                self.all_tracks
+                    .iter()
+                    .filter(|t| {
+                        t.title.to_ascii_lowercase().contains(&q)
+                            || t.artist.to_ascii_lowercase().contains(&q)
+                            || t.album.to_ascii_lowercase().contains(&q)
+                    })
+                    .cloned()
+                    .collect(),
+            );
         }
         self.ui.redraw(cx);
     }
@@ -1294,16 +1296,16 @@ impl AppMain for App {
             self.ui.text_input(id!(search_input)).set_key_focus(cx);
         }
 
-        let active_id = self.queue.current().map(|t| t.id.as_str());
         let props = TrackListScope {
-            tracks: &self.filtered_tracks,
-            active_track_id: active_id,
+            tracks: Rc::clone(&self.filtered_tracks),
+            active_track_id: self.queue.current().map(|t| t.id.clone()),
         };
-        let mut scope = Scope::with_props(&props);
-
-        let actions = cx.capture_actions(|cx| {
-            self.ui.handle_event(cx, event, &mut scope);
-        });
+        let actions = {
+            let mut scope = Scope::with_props(&props);
+            cx.capture_actions(|cx| {
+                self.ui.handle_event(cx, event, &mut scope);
+            })
+        };
 
         // Navigation buttons
         if self.ui.button(id!(nav_library)).clicked(&actions) {
@@ -1348,20 +1350,22 @@ impl AppMain for App {
                 && let Some(clicked) = self.filtered_tracks.get(filtered_idx).cloned()
             {
                 self.queue
-                    .set_tracks(self.filtered_tracks.clone(), Some(filtered_idx));
+                    .set_tracks((*self.filtered_tracks).clone(), Some(filtered_idx));
                 self.play_track(cx, clicked);
             }
         }
         if self.ui.button(id!(play_all_btn)).clicked(&actions)
             && let Some(first) = self.filtered_tracks.first().cloned()
         {
-            self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
+            self.queue
+                .set_tracks((*self.filtered_tracks).clone(), Some(0));
             self.play_track(cx, first);
         }
         if self.ui.button(id!(hero_shuffle_btn)).clicked(&actions)
             && !self.filtered_tracks.is_empty()
         {
-            self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
+            self.queue
+                .set_tracks((*self.filtered_tracks).clone(), Some(0));
             self.queue.set_shuffle(true);
             self.ui.button(id!(shuffle_btn)).set_text(cx, "Shuffle: On");
             if let Some(first) = self.queue.current().cloned() {
@@ -1376,7 +1380,8 @@ impl AppMain for App {
             let snap = audio.telemetry();
             if !snap.is_playing && self.queue.current().is_none() {
                 if let Some(first) = self.filtered_tracks.first().cloned() {
-                    self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
+                    self.queue
+                        .set_tracks((*self.filtered_tracks).clone(), Some(0));
                     self.play_track(cx, first);
                 }
             } else {

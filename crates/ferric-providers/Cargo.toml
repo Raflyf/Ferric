@@ -8,10 +8,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 ferric-core = { path = "../ferric-core" }
 lofty.workspace = true
 walkdir.workspace = true

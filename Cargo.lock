@@ -46,12 +46,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.105"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -537,7 +531,6 @@ dependencies = [
 name = "ferric-audio"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "biquad",
  "cpal",
  "ferric-core",
@@ -552,7 +545,6 @@ dependencies = [
 name = "ferric-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "directories",
  "fastrand",
  "rusqlite",
@@ -565,8 +557,6 @@ dependencies = [
 name = "ferric-desktop"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "directories",
  "fastrand",
  "ferric-audio",
  "ferric-core",
@@ -574,8 +564,6 @@ dependencies = [
  "ferric-sync",
  "makepad-widgets",
  "rfd",
- "serde",
- "serde_json",
  "souvlaki",
  "winresource",
 ]
@@ -585,11 +573,9 @@ name = "ferric-providers"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
- "anyhow",
  "ferric-core",
  "lofty",
  "serde",
- "serde_json",
  "thiserror 2.0.21",
  "ureq",
  "walkdir",

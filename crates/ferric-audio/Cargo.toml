@@ -1,0 +1,19 @@
+[package]
+name = "ferric-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+ferric-core = { path = "../ferric-core" }
+symphonia.workspace = true
+symphonia-opus.workspace = true
+rubato.workspace = true
+cpal.workspace = true
+rtrb.workspace = true
+biquad.workspace = true

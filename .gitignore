@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.pdb
+*.log
+.DS_Store
+Thumbs.db
+.env
+*.db
+*.db-wal
+*.db-shm
+dist/

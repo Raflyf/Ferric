@@ -1,0 +1,113 @@
+name: Ferric Desktop CI & Artifact Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "assets/ui_previews/**"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "assets/ui_previews/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ferric-desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check-and-test:
+    name: Check, Clippy & Unit Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy across workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace unit tests
+        run: cargo test --workspace --locked
+
+  build-windows-artifact:
+    name: Build Portable Windows Desktop Artifact (v0.1.0)
+    needs: check-and-test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Read package version
+        id: meta
+        shell: pwsh
+        run: |
+          $toml = Get-Content -Raw Cargo.toml
+          if ($toml -match 'version\s*=\s*"([^"]+)"') {
+            $ver = $Matches[1]
+          } else {
+            $ver = "0.1.0"
+          }
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Build release binary (ferric.exe)
+        run: cargo build --release -p ferric-desktop --locked
+
+      - name: Package portable Windows archive & SHA256SUMS
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.meta.outputs.version }}"
+          $stage = "dist/Ferric-v$ver-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path "$stage/resources" | Out-Null
+          Copy-Item "target/release/ferric.exe" "$stage/ferric.exe"
+          Copy-Item "README.md" "$stage/README.md"
+          Copy-Item "LICENSE" "$stage/LICENSE"
+          Copy-Item "assets/brand/ferric.ico" "$stage/resources/ferric.ico"
+          Copy-Item "assets/brand/ferric.png" "$stage/resources/ferric.png"
+
+          $zipPath = "dist/Ferric-v$ver-windows-x86_64.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zipPath -Force
+
+          $exeHash = (Get-FileHash "$stage/ferric.exe" -Algorithm SHA256).Hash.ToLower()
+          $zipHash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
+          @(
+            "$exeHash  ferric.exe"
+            "$zipHash  Ferric-v$ver-windows-x86_64.zip"
+          ) | Set-Content -Path "dist/SHA256SUMS.txt" -Encoding UTF8
+
+          Get-Item $zipPath | Select-Object Name, Length
+          Get-Content "dist/SHA256SUMS.txt"
+
+      - name: Upload downloadable preview artifact (no release tag created)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ferric-v${{ steps.meta.outputs.version }}-windows-x86_64
+          path: |
+            dist/Ferric-v${{ steps.meta.outputs.version }}-windows-x86_64.zip
+            dist/SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: error

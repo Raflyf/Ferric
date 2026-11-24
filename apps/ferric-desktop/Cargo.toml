@@ -1,0 +1,29 @@
+[package]
+name = "ferric-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ferric"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+directories.workspace = true
+ferric-core = { path = "../../crates/ferric-core" }
+ferric-audio = { path = "../../crates/ferric-audio" }
+ferric-providers = { path = "../../crates/ferric-providers" }
+ferric-sync = { path = "../../crates/ferric-sync" }
+makepad-widgets.workspace = true
+rfd.workspace = true
+souvlaki.workspace = true
+fastrand.workspace = true
+
+[build-dependencies]
+winresource.workspace = true

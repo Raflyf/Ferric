@@ -1,3 +1,9 @@
+pub mod lan;
+pub mod qr;
+
+pub use lan::{DiscoveredPeer, FERRIC_LAN_UDP_PORT, LanDiscoveryBeacon, detect_local_lan_ip};
+pub use qr::QrMatrix;
+
 use ferric_core::models::RepeatMode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -9,6 +15,8 @@ pub const FERRIC_MDNS_SERVICE: &str = "_ferric-connect._udp.local.";
 
 #[derive(Debug, Error)]
 pub enum SyncError {
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("postcard codec error: {0}")]
     Codec(#[from] postcard::Error),
     #[error("frame exceeds maximum size ({0} > {MAX_FRAME_BYTES})")]
@@ -17,6 +25,8 @@ pub enum SyncError {
     TruncatedFrame,
     #[error("invalid pairing uri: {0}")]
     InvalidPairingUri(String),
+    #[error("qr payload error: {0}")]
+    QrPayload(String),
 }
 
 pub type SyncResult<T> = Result<T, SyncError>;

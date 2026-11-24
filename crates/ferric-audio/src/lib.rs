@@ -1,3 +1,4 @@
+pub mod demo_synth;
 pub mod dsp;
 pub mod engine;
 

@@ -1,11 +1,15 @@
 use crate::CoreResult;
 use crate::eq::EqConfig;
-use crate::models::{AccountSettings, Track, TrackSource, UpdateSettings};
+use crate::models::{
+    AccountSettings, PlaybackDspSettings, Playlist, SessionResumeState, Track, TrackSource,
+    UpdateSettings,
+};
 use crate::theme::ThemeConfig;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Persistent SQLite WAL database for tracks, settings, theme, EQ, and cached lyrics.
+/// Persistent SQLite WAL database for tracks, playlists, settings, theme, EQ, and cached lyrics.
 pub struct LibraryDb {
     conn: Connection,
 }
@@ -57,6 +61,22 @@ impl LibraryDb {
             CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
             CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
 
+            CREATE TABLE IF NOT EXISTS playlists (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                etag TEXT,
+                description TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS playlist_tracks (
+                playlist_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                track_id TEXT NOT NULL,
+                PRIMARY KEY (playlist_id, position)
+            );
+
             CREATE TABLE IF NOT EXISTS music_folders (
                 path TEXT PRIMARY KEY,
                 added_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
@@ -98,12 +118,35 @@ impl LibraryDb {
                     title = excluded.title,
                     artist = excluded.artist,
                     album = excluded.album,
-                    duration_ms = excluded.duration_ms,
-                    file_path = excluded.file_path,
-                    codec = excluded.codec,
-                    sample_rate = excluded.sample_rate,
-                    bit_depth = excluded.bit_depth,
-                    bitrate_kbps = excluded.bitrate_kbps
+                    duration_ms = CASE
+                        WHEN excluded.duration_ms > 0 THEN excluded.duration_ms
+                        ELSE tracks.duration_ms
+                    END,
+                    file_path = COALESCE(excluded.file_path, tracks.file_path),
+                    codec = CASE
+                        WHEN excluded.file_path IS NULL AND tracks.file_path IS NOT NULL AND tracks.codec != '' THEN tracks.codec
+                        ELSE excluded.codec
+                    END,
+                    sample_rate = CASE
+                        WHEN excluded.sample_rate > 0 THEN excluded.sample_rate
+                        ELSE tracks.sample_rate
+                    END,
+                    bit_depth = CASE
+                        WHEN excluded.bit_depth > 0 THEN excluded.bit_depth
+                        ELSE tracks.bit_depth
+                    END,
+                    bitrate_kbps = CASE
+                        WHEN excluded.bitrate_kbps > 0 THEN excluded.bitrate_kbps
+                        ELSE tracks.bitrate_kbps
+                    END,
+                    isrc = COALESCE(excluded.isrc, tracks.isrc),
+                    spotify_id = COALESCE(excluded.spotify_id, tracks.spotify_id),
+                    youtube_video_id = COALESCE(excluded.youtube_video_id, tracks.youtube_video_id),
+                    replay_gain_db = CASE
+                        WHEN excluded.replay_gain_db != 0 THEN excluded.replay_gain_db
+                        ELSE tracks.replay_gain_db
+                    END,
+                    liked = MAX(tracks.liked, excluded.liked)
                 "#,
             )?;
             for t in tracks {
@@ -145,43 +188,242 @@ impl LibraryDb {
             )?
         };
 
-        let mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Track> {
-            let file_path: Option<String> = row.get(5)?;
-            let source_str: String = row.get(6)?;
-            Ok(Track {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                artist: row.get(2)?,
-                album: row.get(3)?,
-                duration_ms: row.get::<_, i64>(4)?.max(0) as u64,
-                path: file_path.map(PathBuf::from),
-                source: TrackSource::from_db_str(&source_str),
-                codec: row.get(7)?,
-                sample_rate: row.get::<_, i64>(8)?.max(0) as u32,
-                bit_depth: row.get::<_, i64>(9)?.max(0) as u16,
-                bitrate_kbps: row.get::<_, i64>(10)?.max(0) as u32,
-                isrc: row.get(11)?,
-                spotify_id: row.get(12)?,
-                youtube_video_id: row.get(13)?,
-                replay_gain_db: row.get(14)?,
-                liked: row.get::<_, i64>(15)? != 0,
-            })
-        };
-
         let mut out = Vec::new();
         if q.is_empty() {
-            let rows = stmt.query_map([], mapper)?;
+            let rows = stmt.query_map([], row_to_track)?;
             for item in rows {
                 out.push(item?);
             }
         } else {
             let pat = format!("%{q}%");
-            let rows = stmt.query_map([pat], mapper)?;
+            let rows = stmt.query_map([pat], row_to_track)?;
             for item in rows {
                 out.push(item?);
             }
         }
         Ok(out)
+    }
+
+    pub fn set_track_liked(&self, track_id: &str, liked: bool) -> CoreResult<()> {
+        self.conn.execute(
+            "UPDATE tracks SET liked = ?1 WHERE id = ?2",
+            params![i64::from(liked), track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_playlist(&mut self, playlist: &Playlist, track_ids: &[String]) -> CoreResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO playlists (id, name, source, etag, description, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                source = excluded.source,
+                etag = excluded.etag,
+                description = excluded.description,
+                updated_at = strftime('%s','now')
+            "#,
+            params![
+                playlist.id,
+                playlist.name,
+                playlist.source.as_badge(),
+                playlist.etag,
+                playlist.description,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+            params![playlist.id],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+            )?;
+            for (pos, track_id) in track_ids.iter().enumerate() {
+                stmt.execute(params![playlist.id, pos as i64, track_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_playlists(&self) -> CoreResult<Vec<Playlist>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                p.id,
+                p.name,
+                p.source,
+                p.etag,
+                p.description,
+                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count
+            FROM playlists p
+            ORDER BY p.name COLLATE NOCASE ASC
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let source_str: String = row.get(2)?;
+            Ok(Playlist {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                source: TrackSource::from_db_str(&source_str),
+                etag: row.get(3)?,
+                description: row.get(4)?,
+                track_count: row.get::<_, i64>(5)?.max(0) as usize,
+            })
+        })?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_playlist_tracks(&self, playlist_id: &str) -> CoreResult<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                t.id, t.title, t.artist, t.album, t.duration_ms, t.file_path, t.source,
+                t.codec, t.sample_rate, t.bit_depth, t.bitrate_kbps, t.isrc,
+                t.spotify_id, t.youtube_video_id, t.replay_gain_db, t.liked
+            FROM playlist_tracks pt
+            INNER JOIN tracks t ON t.id = pt.track_id
+            WHERE pt.playlist_id = ?1
+            ORDER BY pt.position ASC
+            "#,
+        )?;
+        let rows = stmt.query_map([playlist_id], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    /// Match cloud catalog tracks (`file_path IS NULL`) against local tracks (`file_path IS NOT NULL`)
+    /// first by case-insensitive ISRC, then by normalized lowercase `(title, artist)`, copying
+    /// `file_path`, `codec`, `sample_rate`, `bit_depth`, and `bitrate_kbps` onto matched rows.
+    pub fn match_cloud_tracks_to_local(&mut self) -> CoreResult<usize> {
+        struct LocalCandidate {
+            file_path: String,
+            codec: String,
+            sample_rate: i64,
+            bit_depth: i64,
+            bitrate_kbps: i64,
+        }
+
+        let mut locals = Vec::new();
+        let mut by_isrc: HashMap<String, usize> = HashMap::new();
+        let mut by_title_artist: HashMap<(String, String), usize> = HashMap::new();
+
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT file_path, codec, sample_rate, bit_depth, bitrate_kbps, isrc, title, artist FROM tracks WHERE file_path IS NOT NULL AND file_path != ''",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })?;
+
+            for item in rows {
+                let (file_path, codec, sample_rate, bit_depth, bitrate_kbps, isrc, title, artist) =
+                    item?;
+                let idx = locals.len();
+                if let Some(code) = isrc {
+                    let clean_isrc = code.trim().to_ascii_uppercase();
+                    if !clean_isrc.is_empty() {
+                        by_isrc.entry(clean_isrc).or_insert(idx);
+                    }
+                }
+                let norm_title = normalize_match_token(&title);
+                let norm_artist = normalize_match_token(&artist);
+                if !norm_title.is_empty() && !norm_artist.is_empty() {
+                    by_title_artist
+                        .entry((norm_title, norm_artist))
+                        .or_insert(idx);
+                }
+                locals.push(LocalCandidate {
+                    file_path,
+                    codec,
+                    sample_rate,
+                    bit_depth,
+                    bitrate_kbps,
+                });
+            }
+        }
+
+        if locals.is_empty() {
+            return Ok(0);
+        }
+
+        let mut cloud_rows = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, isrc, title, artist FROM tracks WHERE file_path IS NULL OR file_path = ''",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for item in rows {
+                cloud_rows.push(item?);
+            }
+        }
+
+        if cloud_rows.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut matched = 0usize;
+        {
+            let mut update_stmt = tx.prepare(
+                "UPDATE tracks SET file_path = ?1, codec = ?2, sample_rate = ?3, bit_depth = ?4, bitrate_kbps = ?5 WHERE id = ?6",
+            )?;
+            for (cloud_id, isrc, title, artist) in cloud_rows {
+                let candidate_idx = isrc
+                    .as_deref()
+                    .map(|s| s.trim().to_ascii_uppercase())
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| by_isrc.get(&s).copied())
+                    .or_else(|| {
+                        let key = (
+                            normalize_match_token(&title),
+                            normalize_match_token(&artist),
+                        );
+                        by_title_artist.get(&key).copied()
+                    });
+
+                if let Some(idx) = candidate_idx {
+                    let local = &locals[idx];
+                    update_stmt.execute(params![
+                        local.file_path,
+                        local.codec,
+                        local.sample_rate,
+                        local.bit_depth,
+                        local.bitrate_kbps,
+                        cloud_id,
+                    ])?;
+                    matched += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(matched)
     }
 
     pub fn add_music_folder(&self, folder: &Path) -> CoreResult<()> {
@@ -220,6 +462,15 @@ impl LibraryDb {
         Ok(self.get_setting("eq")?.unwrap_or_default())
     }
 
+    pub fn save_playback_dsp(&self, dsp: &PlaybackDspSettings) -> CoreResult<()> {
+        self.set_setting("playback_dsp", &dsp.sanitized())
+    }
+
+    pub fn load_playback_dsp(&self) -> CoreResult<PlaybackDspSettings> {
+        let loaded: PlaybackDspSettings = self.get_setting("playback_dsp")?.unwrap_or_default();
+        Ok(loaded.sanitized())
+    }
+
     pub fn save_accounts(&self, accounts: &AccountSettings) -> CoreResult<()> {
         self.set_setting("accounts", accounts)
     }
@@ -234,6 +485,14 @@ impl LibraryDb {
 
     pub fn load_update_settings(&self) -> CoreResult<UpdateSettings> {
         Ok(self.get_setting("updates")?.unwrap_or_default())
+    }
+
+    pub fn save_session_state(&self, state: &SessionResumeState) -> CoreResult<()> {
+        self.set_setting("session_resume", state)
+    }
+
+    pub fn load_session_state(&self) -> CoreResult<SessionResumeState> {
+        Ok(self.get_setting("session_resume")?.unwrap_or_default())
     }
 
     pub fn get_cached_lyrics(&self, track_key: &str) -> CoreResult<Option<String>> {
@@ -279,6 +538,40 @@ impl LibraryDb {
             None => Ok(None),
         }
     }
+}
+
+fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
+    let file_path: Option<String> = row.get(5)?;
+    let source_str: String = row.get(6)?;
+    Ok(Track {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        artist: row.get(2)?,
+        album: row.get(3)?,
+        duration_ms: row.get::<_, i64>(4)?.max(0) as u64,
+        path: file_path.map(PathBuf::from),
+        source: TrackSource::from_db_str(&source_str),
+        codec: row.get(7)?,
+        sample_rate: row.get::<_, i64>(8)?.max(0) as u32,
+        bit_depth: row.get::<_, i64>(9)?.max(0) as u16,
+        bitrate_kbps: row.get::<_, i64>(10)?.max(0) as u32,
+        isrc: row.get(11)?,
+        spotify_id: row.get(12)?,
+        youtube_video_id: row.get(13)?,
+        replay_gain_db: row.get(14)?,
+        liked: row.get::<_, i64>(15)? != 0,
+    })
+}
+
+fn normalize_match_token(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for word in raw.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&word.to_lowercase());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -331,5 +624,77 @@ mod tests {
                 .expect("loaded updates")
                 .auto_check_on_startup
         );
+    }
+
+    #[test]
+    fn playlists_dsp_and_cloud_to_local_matching_work_end_to_end() {
+        let mut db = LibraryDb::open_in_memory().expect("open memory db");
+        let local = Track {
+            id: "local:daft".to_string(),
+            title: "Instant Crush".to_string(),
+            artist: "Daft Punk".to_string(),
+            album: "Random Access Memories".to_string(),
+            duration_ms: 337_000,
+            path: Some(PathBuf::from("C:/Music/instant_crush.flac")),
+            source: TrackSource::Local,
+            codec: "FLAC".to_string(),
+            sample_rate: 96_000,
+            bit_depth: 24,
+            bitrate_kbps: 2800,
+            isrc: Some("USQX91300105".to_string()),
+            spotify_id: None,
+            youtube_video_id: None,
+            replay_gain_db: -2,
+            liked: false,
+        };
+        let cloud = Track {
+            id: "spotify:track:2cGxRwrMyEAp8dEbuZaVv6".to_string(),
+            title: "Instant Crush".to_string(),
+            artist: "Daft Punk".to_string(),
+            album: "Random Access Memories".to_string(),
+            duration_ms: 337_000,
+            path: None,
+            source: TrackSource::Spotify,
+            codec: "SPOTIFY".to_string(),
+            sample_rate: 0,
+            bit_depth: 0,
+            bitrate_kbps: 0,
+            isrc: Some("usqx91300105".to_string()),
+            spotify_id: Some("2cGxRwrMyEAp8dEbuZaVv6".to_string()),
+            youtube_video_id: None,
+            replay_gain_db: 0,
+            liked: true,
+        };
+        db.upsert_tracks(&[local, cloud]).expect("upsert");
+
+        let matched = db.match_cloud_tracks_to_local().expect("match");
+        assert_eq!(matched, 1);
+
+        let pl = Playlist {
+            id: "spotify:pl:1".to_string(),
+            name: "Late Night Hi-Fi".to_string(),
+            source: TrackSource::Spotify,
+            etag: Some("etag-1".to_string()),
+            track_count: 1,
+            description: "Synced audiophile favorites".to_string(),
+        };
+        db.upsert_playlist(&pl, &["spotify:track:2cGxRwrMyEAp8dEbuZaVv6".to_string()])
+            .expect("upsert playlist");
+
+        let playlists = db.list_playlists().expect("list playlists");
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].track_count, 1);
+
+        let pl_tracks = db
+            .list_playlist_tracks("spotify:pl:1")
+            .expect("list playlist tracks");
+        assert_eq!(pl_tracks.len(), 1);
+        assert_eq!(pl_tracks[0].codec, "FLAC");
+        assert!(pl_tracks[0].path.is_some());
+
+        db.set_track_liked("local:daft", true).expect("set liked");
+        let dsp = PlaybackDspSettings::default();
+        db.save_playback_dsp(&dsp).expect("save dsp");
+        assert_eq!(db.load_playback_dsp().expect("load dsp"), dsp);
     }
 }

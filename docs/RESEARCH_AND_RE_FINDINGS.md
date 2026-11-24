@@ -114,3 +114,31 @@ Target utama kita adalah **1 codebase Rust penuh** yang berjalan native di **Win
 | **Login Akun Musik** | Endpoint internal tidak resmi (`pathfinder` / `innertube` + `rquickjs`) | Hanya YT Music tidak resmi (`innertube` + `libquickjs.so` + `po_token`) | **Multi-Akun Resmi via OAuth 2.0 PKCE: Spotify (Free/Premium) + YouTube & YT Music (Free/Premium) + Bridge Playlist 2 Arah** |
 | **Kontrol Silang PC <-> HP** | Terbatas (`soloist` lokal, tanpa aplikasi HP) | Hanya grup sosial `ListenTogether` via server pusat | **Native Bidirectional "Connect" (`iroh 1.4` LAN + P2P Internet) + Direct PC-to-Phone Streaming** |
 | **Equalizer & DSP** | Parametric EQ + Equalizer APO | System EQ + AutoEq | **10-Band Parametric Biquad EQ di Rust + Import AutoEq & Equalizer APO + ReplayGain + Crossfade** |
+
+
+---
+
+## 5. Deep Feature & DSP Audit Lintas 3 Artefak Referensi (`Sonora` + `Auralys` + `Spotify`)
+
+Bagian ini mendokumentasikan hasil ekstraksi fitur tingkat layar UI, kunci konfigurasi (*preference keys*), dan parameter transisi audio menggunakan MCP `rea` (`open_binary`, `inspect_artifact`, `inspect_pe_resources`) dan parser statis DEX/LZMA2 terhadap ketiga artefak referensi di `reference/`:
+- **`Spotify 9.1.30.1993 [ReVanced + AB] (Merged).apk`** — SHA-256: `30a41a84cc5847fff66708054b5a4e88b89e7b98b9b09421a5d287889be9b220` (`4.141` entri ZIP, `12` file DEX, `26` pustaka native)
+- **`auralys.4.1.0.final.apk`** — SHA-256: `011479a95386ad048368682c088bc13960851d8efc10f3cc5124818fdbf34e43` (`857` entri ZIP, `3` file DEX, `93` komponen layar UI, `363` preference keys)
+- **`Sonora-Setup.exe`** — SHA-256: `510744f80c9b1e5fd2f0f5282666eb28fded3f549fc5a7f72fce965902be35de` (payload `sonora.exe` v0.50.3 `89.139.153` byte)
+
+### 5.1 Arsitektur Transisi Tanpa Jeda (*Seamless Fade-In, Crossfade & Automix*)
+Dari pembongkaran parameter internal Spotify (`audio.crossfade_v2`, `audio.fade_in_curves`, `audio.fade_in_duration`, `audio.fade_in_start_time`, `BEST_FADE_IN_CUEPOINT_FIELD_NUMBER`, `BEST_FADE_OUT_CUEPOINT_FIELD_NUMBER`, `BassCrossfade`, `automix.auto_transition_recipe`), Auralys (`CrossfadeEnabledKey`, `CrossfadeDurationKey`, `CrossfadeGaplessKey`, `SkipSilenceKey`, `SleepTimerFadeOutKey`), dan Sonora (`Gapless playback`, `trim_silence`, `ReplayGain`), ditemukan 5 mekanisme kunci yang membuat perpindahan lagu terasa menyatu tanpa jeda (*zero-gap fade-in*):
+
+1. **Dual-Deck Pre-Buffering (`Deck A` + `Deck B`):** Lagu berikutnya sudah dibuka, didekode ke PCM `f32`, dan di-resample ke sample rate hardware sebelum lagu aktif mencapai jendela akhir (`T - max(crossfade_ms + 4000, 8000)`), sehingga tidak ada jeda I/O disk/jaringan saat pergantian lagu.
+2. **Deteksi Cuepoint Hening (*Intro/Outro Silence Trim*):** Jika bagian akhir `Deck A` turun di bawah ambang hening (`-50 dBFS`) dalam 4,5 detik menjelang jendela transisi, `Deck B` langsung mulai *fade-in* tanpa menunggu sisa keheningan file habis; sampel hening di awal `Deck B` (`-52 dBFS`) juga langsung dilewati.
+3. **Bass-Swap Automix (`BassCrossfade` < 140 Hz):** Saat dua lagu bertumpuk selama crossfade, penjumlahan frekuensi rendah dari dua kick/bass dapat memicu *muddy boom* (+6 dB). Filter crossover satu kutub `140 Hz` menahan bass lagu baru hingga titik tengah transisi lalu menukarnya secara halus dengan bass lagu lama, sementara vokal/instrumen mengikuti kurva *Equal-Power* ($\cos^2 + \sin^2 = 1$) atau *Hermite S-Curve*.
+4. **Album-Aware Gapless Lock (`CrossfadeGaplessKey`):** Jika dua lagu berurutan berasal dari album yang sama, crossfade dilewati (`0 ms`) agar sambungan album konsep/live tetap presisi hingga tingkat sampel.
+5. **Micro-Fade pada Play, Pause, Seek, dan Sleep Timer:** Envelope halus `240 ms` saat *Play/Seek* dan `120 ms` saat *Pause* menghilangkan bunyi klik transien, ditambah *fade-out* bertahap 5 detik saat *Sleep Timer* berakhir.
+
+### 5.2 Matriks Paritas Fitur Lengkap Ferric Desktop v0.1.0
+| Kategori Fitur | Bukti di Spotify / Auralys / Sonora | Implementasi Clean-Room di Ferric |
+| :--- | :--- | :--- |
+| **Seamless Fade-In & Automix** | `audio.fade_in_curves`, `BassCrossfade`, `CrossfadeGaplessKey`, `SkipSilenceKey` | Dual-deck `Deck A + Deck B` pre-buffered overlap (`0–12 dtk`), Play/Seek micro-fade (`0–1500 ms`), 3 kurva (`Equal-Power`, `S-Curve Velvet`, `Bass-Swap Automix`), `Gapless Album Lock`, `Trim Intro/Outro Silence` |
+| **Login Akun Resmi & Sync** | Spotify Connect/Library, YT Music Library, Sonora OpenSubsonic | Halaman khusus **Accounts & Cloud Sync** dengan OAuth 2.0 PKCE + Loopback HTTP Callback (`127.0.0.1:43824/callback`) untuk **Spotify**, **Google / YouTube & YT Music** (`ETag 304` + `categoryId=10`), dan **OpenSubsonic / Navidrome**, ditambah pencocokan ISRC otomatis ke file FLAC/Opus lokal |
+| **Parametric EQ & AutoEq** | Auralys `GitHubAutoEqSearch` + `BiquadFilter`, Sonora `Equalizer APO` | Grafik respons frekuensi Biquad interaktif (`20 Hz–20 kHz`), 10 fader vertikal (`32 Hz–16 kHz`), Preamp, pencarian **24 profil headphone AutoEq**, Import/Export `.txt` Equalizer APO |
+| **Kontrol Ekstra Pemutaran** | `SleepTimerFadeOutKey`, `VarispeedKey`, `mono_audio`, `AudioNormalizationKey` | **Sleep Timer** (`15m`, `30m`, `45m`, `60m`, `End of Track` dengan fade-out), **Playback Speed** (`0.75x–1.5x`), **ReplayGain**, **Mono Audio**, **Floating Compact Mini-Player**, dan **Command Palette (`Ctrl+K`)** |
+| **Ferric Connect & Lyrics** | Spotify `Connect` + `Jam`, Auralys `ListenTogether` + `LRCLIB`, Sonora `qrcodegen` | Encoder matriks **QR Code ISO/IEC 18004** pure-Rust di kanvas UI, penemuan peer **UDP LAN Discovery**, Active Speaker Lease, serta **Synced Lyrics (LRCLIB + `.lrc` lokal)** |

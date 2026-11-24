@@ -176,6 +176,81 @@ impl EqConfig {
         }
         out
     }
+
+    /// Compute the cascaded RBJ biquad magnitude response in dB at `freq_hz`,
+    /// including `preamp_db`, clamped to `-18.0..=18.0`.
+    pub fn response_db_at(&self, freq_hz: f32, sample_rate: u32) -> f32 {
+        if !self.enabled {
+            return 0.0;
+        }
+        let fs = f64::from(sample_rate.max(8_000));
+        let nyquist = fs * 0.48;
+        let f_eval = f64::from(freq_hz).clamp(10.0, fs * 0.499);
+        let w = 2.0 * std::f64::consts::PI * f_eval / fs;
+        let cos_w = w.cos();
+        let sin_w = w.sin();
+        let cos_2w = (2.0 * w).cos();
+        let sin_2w = (2.0 * w).sin();
+
+        let mut total_db = f64::from(self.preamp_db);
+
+        for band in &self.bands {
+            if !band.enabled || band.gain_db.abs() < 1e-4 {
+                continue;
+            }
+            let fc = f64::from(band.freq_hz).clamp(20.0, nyquist);
+            let q = f64::from(band.q).clamp(0.1, 16.0);
+            let w0 = 2.0 * std::f64::consts::PI * fc / fs;
+            let omega_s = w0.sin();
+            let omega_c = w0.cos();
+            let alpha = omega_s / (2.0 * q);
+            let a = 10.0_f64.powf(f64::from(band.gain_db) / 40.0);
+            let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+
+            let (b0, b1, b2, a1, a2) = match band.kind {
+                EqFilterKind::Peaking => {
+                    let a0 = 1.0 + alpha / a;
+                    (
+                        (1.0 + alpha * a) / a0,
+                        (-2.0 * omega_c) / a0,
+                        (1.0 - alpha * a) / a0,
+                        (-2.0 * omega_c) / a0,
+                        (1.0 - alpha / a) / a0,
+                    )
+                }
+                EqFilterKind::LowShelf => {
+                    let a0 = (a + 1.0) + (a - 1.0) * omega_c + two_sqrt_a_alpha;
+                    (
+                        (a * ((a + 1.0) - (a - 1.0) * omega_c + two_sqrt_a_alpha)) / a0,
+                        (2.0 * a * ((a - 1.0) - (a + 1.0) * omega_c)) / a0,
+                        (a * ((a + 1.0) - (a - 1.0) * omega_c - two_sqrt_a_alpha)) / a0,
+                        (-2.0 * ((a - 1.0) + (a + 1.0) * omega_c)) / a0,
+                        ((a + 1.0) + (a - 1.0) * omega_c - two_sqrt_a_alpha) / a0,
+                    )
+                }
+                EqFilterKind::HighShelf => {
+                    let a0 = (a + 1.0) - (a - 1.0) * omega_c + two_sqrt_a_alpha;
+                    (
+                        (a * ((a + 1.0) + (a - 1.0) * omega_c + two_sqrt_a_alpha)) / a0,
+                        (-2.0 * a * ((a - 1.0) + (a + 1.0) * omega_c)) / a0,
+                        (a * ((a + 1.0) + (a - 1.0) * omega_c - two_sqrt_a_alpha)) / a0,
+                        (2.0 * ((a - 1.0) - (a + 1.0) * omega_c)) / a0,
+                        ((a + 1.0) - (a - 1.0) * omega_c - two_sqrt_a_alpha) / a0,
+                    )
+                }
+            };
+
+            let num_re = b0 + b1 * cos_w + b2 * cos_2w;
+            let num_im = -(b1 * sin_w + b2 * sin_2w);
+            let den_re = 1.0 + a1 * cos_w + a2 * cos_2w;
+            let den_im = -(a1 * sin_w + a2 * sin_2w);
+            let mag_sq = (num_re * num_re + num_im * num_im)
+                / (den_re * den_re + den_im * den_im).max(1e-18);
+            total_db += 10.0 * mag_sq.max(1e-18).log10();
+        }
+
+        (total_db as f32).clamp(-18.0, 18.0)
+    }
 }
 
 #[cfg(test)]
@@ -190,5 +265,24 @@ mod tests {
         assert_eq!(parsed.bands.len(), 10);
         assert!((parsed.preamp_db - orig.preamp_db).abs() < 0.01);
         assert!((parsed.bands[0].gain_db - 2.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn response_db_at_flat_is_zero_and_boosted_bands_are_positive() {
+        let flat = EqConfig::preset("Flat");
+        for &freq in &STANDARD_10_BAND_FREQS {
+            assert!(
+                flat.response_db_at(freq, 48_000).abs() < 1e-4,
+                "expected 0 dB at {freq} Hz"
+            );
+        }
+
+        let mut boosted = EqConfig::preset("Flat");
+        boosted.bands[5].gain_db = 6.0; // 1000 Hz peaking band
+        let center_db = boosted.response_db_at(1_000.0, 48_000);
+        assert!(
+            center_db > 5.9 && center_db <= 6.1,
+            "expected ~6 dB at 1 kHz, got {center_db}"
+        );
     }
 }

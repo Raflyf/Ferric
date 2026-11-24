@@ -1,9 +1,12 @@
-use crate::dsp::{StereoEqProcessor, equal_power_gains};
+use crate::dsp::{
+    BassSwapMixer, SpectrumAnalyzer8, StereoEqProcessor, db_to_linear, smooth_fade_envelope,
+};
 use crate::{AudioError, AudioResult};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ferric_core::eq::EqConfig;
+use ferric_core::models::{FadeCurve, PlaybackDspSettings};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
-use rubato::{Async, FixedAsync, PolynomialDegree, Resampler};
+use rubato::{Adjustable, Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,17 +34,35 @@ pub struct AudioTelemetry {
     pub sample_rate: AtomicU32,
     pub output_rate: AtomicU32,
     pub track_finished_seq: AtomicU64,
+    /// `true` when `Deck B` was already promoted gaplessly/crossfaded to `Deck A` on the most
+    /// recent `track_finished_seq` increment so the UI updates metadata without cutting audio.
+    pub auto_transitioned: AtomicBool,
+    /// Lock-free 8-band visualizer energy levels (`0..=1000`).
+    pub spectrum_bins: [AtomicU32; 8],
+    pub(crate) flush_ring: AtomicBool,
 }
 
 impl AudioTelemetry {
     pub fn snapshot(&self) -> TelemetrySnapshot {
+        let mut bins = [0_u32; 8];
+        for (i, slot) in self.spectrum_bins.iter().enumerate() {
+            bins[i] = slot.load(Ordering::Relaxed);
+        }
         TelemetrySnapshot {
-            is_playing: self.is_playing.load(Ordering::Relaxed),
+            is_playing: self.is_playing.load(Ordering::Acquire),
             position_ms: self.position_ms.load(Ordering::Relaxed),
             duration_ms: self.duration_ms.load(Ordering::Relaxed),
             sample_rate: self.sample_rate.load(Ordering::Relaxed),
             output_rate: self.output_rate.load(Ordering::Relaxed),
-            track_finished_seq: self.track_finished_seq.load(Ordering::Relaxed),
+            track_finished_seq: self.track_finished_seq.load(Ordering::Acquire),
+            auto_transitioned: self.auto_transitioned.load(Ordering::Acquire),
+            spectrum_bins: bins,
+        }
+    }
+
+    fn store_spectrum(&self, bins: [u32; 8]) {
+        for (slot, val) in self.spectrum_bins.iter().zip(bins) {
+            slot.store(val, Ordering::Relaxed);
         }
     }
 }
@@ -54,12 +75,22 @@ pub struct TelemetrySnapshot {
     pub sample_rate: u32,
     pub output_rate: u32,
     pub track_finished_seq: u64,
+    pub auto_transitioned: bool,
+    pub spectrum_bins: [u32; 8],
 }
 
 #[derive(Debug)]
 pub enum EngineCommand {
     LoadAndPlay(PathBuf),
+    LoadAndPlayTrack {
+        path: PathBuf,
+        replay_gain_db: i32,
+    },
     QueueNext(Option<PathBuf>),
+    QueueNextTrack {
+        path: Option<PathBuf>,
+        same_album_consecutive: bool,
+    },
     Play,
     Pause,
     TogglePlayPause,
@@ -68,6 +99,7 @@ pub enum EngineCommand {
     SetVolume(f32),
     SetEq(EqConfig),
     SetCrossfadeMs(u32),
+    SetDspSettings(PlaybackDspSettings),
     Shutdown,
 }
 
@@ -78,7 +110,7 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    /// Start the real-time WASAPI/cpal output stream and dedicated decode+DSP OS thread.
+    /// Start the real-time WASAPI/cpal output stream and dedicated dual-deck decode+DSP OS thread.
     pub fn start(initial_eq: EqConfig) -> AudioResult<Self> {
         let host = cpal::default_host();
         let device = host
@@ -92,23 +124,23 @@ impl AudioEngine {
         let out_channels = usize::from(default_cfg.channels()).max(1);
         let stream_cfg: cpal::StreamConfig = default_cfg.into();
 
-        // ~350 ms wait-free SPSC ring buffer (stereo interleaved f32).
-        let ring_samples = ((out_rate as usize * 350) / 1000).max(4096) * 2;
+        // ~140 ms wait-free SPSC ring buffer (stereo interleaved f32) for responsive fades & EQ.
+        let ring_samples = ((out_rate as usize * 140) / 1000).max(4096) * 2;
         let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(ring_samples);
 
         let telemetry = Arc::new(AudioTelemetry::default());
         telemetry.output_rate.store(out_rate, Ordering::Relaxed);
-        let playing_flag = Arc::clone(&telemetry);
+        let cb_telemetry = Arc::clone(&telemetry);
 
         let stream = device
             .build_output_stream(
                 stream_cfg,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if !playing_flag.is_playing.load(Ordering::Relaxed) {
-                        data.fill(0.0);
-                        return;
+                    if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
+                        while consumer.pop().is_ok() {}
                     }
-                    // Zero-allocation real-time audio hardware callback.
+                    // Drain queued stereo samples cleanly so 120 ms pause fade-outs reach exact 0.0
+                    // before silence, with zero allocations inside the audio callback.
                     for frame in data.chunks_exact_mut(out_channels) {
                         let l = consumer.pop().unwrap_or(0.0);
                         let r = consumer.pop().unwrap_or(0.0);
@@ -139,7 +171,14 @@ impl AudioEngine {
         thread::Builder::new()
             .name("ferric-audio-dsp".to_string())
             .spawn(move || {
-                decode_loop(cmd_rx, producer, out_rate, initial_eq, thread_telemetry);
+                decode_loop(
+                    cmd_rx,
+                    producer,
+                    out_rate,
+                    initial_eq,
+                    thread_telemetry,
+                    false,
+                );
             })?;
 
         Ok(Self {
@@ -153,12 +192,13 @@ impl AudioEngine {
     pub fn start_headless(initial_eq: EqConfig) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let telemetry = Arc::new(AudioTelemetry::default());
+        telemetry.output_rate.store(48_000, Ordering::Relaxed);
         let thread_telemetry = Arc::clone(&telemetry);
         let (producer, _consumer) = rtrb::RingBuffer::<f32>::new(8192);
         let _ = thread::Builder::new()
             .name("ferric-audio-headless".to_string())
             .spawn(move || {
-                decode_loop(cmd_rx, producer, 48_000, initial_eq, thread_telemetry);
+                decode_loop(cmd_rx, producer, 48_000, initial_eq, thread_telemetry, true);
             });
         Self {
             cmd_tx,
@@ -174,6 +214,10 @@ impl AudioEngine {
     pub fn telemetry(&self) -> TelemetrySnapshot {
         self.telemetry.snapshot()
     }
+
+    pub fn telemetry_arc(&self) -> &Arc<AudioTelemetry> {
+        &self.telemetry
+    }
 }
 
 impl Drop for AudioEngine {
@@ -182,7 +226,98 @@ impl Drop for AudioEngine {
     }
 }
 
+#[derive(Debug, Clone)]
+struct QueuedTrackSpec {
+    path: PathBuf,
+    same_album_consecutive: bool,
+    replay_gain_db: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveCrossfade {
+    elapsed_frames: u64,
+    total_frames: u64,
+    curve: FadeCurve,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MicroFade {
+    Steady(f32),
+    FadingIn {
+        start_gain: f32,
+        elapsed_frames: u64,
+        total_frames: u64,
+    },
+    Pausing {
+        start_gain: f32,
+        elapsed_frames: u64,
+        total_frames: u64,
+    },
+}
+
+impl MicroFade {
+    #[inline]
+    fn current_gain(self) -> f32 {
+        match self {
+            Self::Steady(g) => g,
+            Self::FadingIn {
+                start_gain,
+                elapsed_frames,
+                total_frames,
+            } => {
+                let t = (elapsed_frames as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
+                start_gain + (1.0 - start_gain) * smooth_fade_envelope(t)
+            }
+            Self::Pausing {
+                start_gain,
+                elapsed_frames,
+                total_frames,
+            } => {
+                let t = (elapsed_frames as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
+                start_gain * (1.0 - smooth_fade_envelope(t))
+            }
+        }
+    }
+
+    #[inline]
+    fn step_frame(&mut self) -> (f32, bool) {
+        match self {
+            Self::Steady(g) => (*g, false),
+            Self::FadingIn {
+                start_gain,
+                elapsed_frames,
+                total_frames,
+            } => {
+                let total = (*total_frames).max(1);
+                let t = (*elapsed_frames as f32 / total as f32).clamp(0.0, 1.0);
+                let g = *start_gain + (1.0 - *start_gain) * smooth_fade_envelope(t);
+                *elapsed_frames += 1;
+                if *elapsed_frames >= total {
+                    *self = Self::Steady(1.0);
+                }
+                (g, false)
+            }
+            Self::Pausing {
+                start_gain,
+                elapsed_frames,
+                total_frames,
+            } => {
+                let total = (*total_frames).max(1);
+                let t = (*elapsed_frames as f32 / total as f32).clamp(0.0, 1.0);
+                let g = *start_gain * (1.0 - smooth_fade_envelope(t));
+                *elapsed_frames += 1;
+                if *elapsed_frames >= total {
+                    *self = Self::Steady(0.0);
+                    return (0.0, true);
+                }
+                (g, false)
+            }
+        }
+    }
+}
+
 struct ActiveDeck {
+    path: PathBuf,
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
@@ -193,11 +328,22 @@ struct ActiveDeck {
     resampler: Option<StereoResampler>,
     pending_stereo: Vec<f32>,
     pending_offset: usize,
+    pos_ms_f64: f64,
+    replay_gain_linear: f32,
+    last_chunk_rms: f32,
+    quiet_outro_frames: usize,
     eof: bool,
+    tail_flushed: bool,
 }
 
 impl ActiveDeck {
-    fn open(path: &Path, out_rate: u32, codecs: &CodecRegistry) -> AudioResult<Self> {
+    fn open(
+        path: &Path,
+        out_rate: u32,
+        playback_speed: f32,
+        replay_gain_db: i32,
+        codecs: &CodecRegistry,
+    ) -> AudioResult<Self> {
         let file = File::open(path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
@@ -246,13 +392,19 @@ impl ActiveDeck {
             .make_audio_decoder(&codec_params, &AudioDecoderOptions::default())
             .map_err(|e| AudioError::Decode(e.to_string()))?;
 
-        let resampler = if sample_rate != out_rate {
-            StereoResampler::new(sample_rate, out_rate).ok()
+        let clamped_speed = playback_speed.clamp(0.5, 2.0);
+        let needs_resampler = sample_rate != out_rate || (clamped_speed - 1.0).abs() > 1e-4;
+        let resampler = if needs_resampler {
+            StereoResampler::new(sample_rate, out_rate, clamped_speed).ok()
         } else {
             None
         };
 
+        let rg_clamped = replay_gain_db.clamp(-12, 6);
+        let replay_gain_linear = db_to_linear(rg_clamped as f32);
+
         Ok(Self {
+            path: path.to_path_buf(),
             format,
             decoder,
             track_id,
@@ -263,8 +415,24 @@ impl ActiveDeck {
             resampler,
             pending_stereo: Vec::with_capacity(8192),
             pending_offset: 0,
+            pos_ms_f64: 0.0,
+            replay_gain_linear,
+            last_chunk_rms: 1.0,
+            quiet_outro_frames: 0,
             eof: false,
+            tail_flushed: false,
         })
+    }
+
+    fn set_playback_speed(&mut self, out_rate: u32, speed: f32) {
+        let clamped = speed.clamp(0.5, 2.0);
+        if let Some(res) = &mut self.resampler {
+            res.set_speed(clamped);
+        } else if (clamped - 1.0).abs() > 1e-4
+            && let Ok(res) = StereoResampler::new(self.sample_rate, out_rate, clamped)
+        {
+            self.resampler = Some(res);
+        }
     }
 
     fn seek_ms(&mut self, target_ms: u64) -> AudioResult<u64> {
@@ -282,6 +450,9 @@ impl ActiveDeck {
         self.pending_stereo.clear();
         self.pending_offset = 0;
         self.eof = false;
+        self.tail_flushed = false;
+        self.last_chunk_rms = 1.0;
+        self.quiet_outro_frames = 0;
         if let Some(res) = &mut self.resampler {
             res.reset();
         }
@@ -290,26 +461,137 @@ impl ActiveDeck {
             .and_then(|tb| tb.calc_time(seeked.actual_ts))
             .map(|t| t.as_millis().max(0) as u64)
             .unwrap_or(target_ms);
+        self.pos_ms_f64 = actual_ms as f64;
         Ok(actual_ms)
     }
 
-    /// Decode next chunk into stereo `f32` samples at hardware `out_rate`.
-    fn decode_next_chunk(&mut self, raw_buf: &mut Vec<f32>) -> Option<u64> {
-        if self.eof {
+    #[inline]
+    fn current_pos_ms(&self) -> u64 {
+        let raw = self.pos_ms_f64.max(0.0).round() as u64;
+        if self.duration_ms > 0 {
+            raw.min(self.duration_ms)
+        } else {
+            raw
+        }
+    }
+
+    #[inline]
+    fn remaining_ms(&self) -> u64 {
+        self.duration_ms.saturating_sub(self.current_pos_ms())
+    }
+
+    /// Pre-decode the initial chunk and optionally skip leading digital silence (`|sample| < 0.0025`,
+    /// up to `max_trim_secs` seconds) so `Deck B` enters with zero dead gap.
+    fn prime_first_chunk(
+        &mut self,
+        raw_buf: &mut Vec<f32>,
+        trim_leading_silence: bool,
+        max_trim_secs: f32,
+        out_rate: u32,
+        playback_speed: f32,
+    ) {
+        if !trim_leading_silence {
+            if self.pending_offset >= self.pending_stereo.len() {
+                self.decode_next_chunk(raw_buf);
+            }
+            return;
+        }
+
+        let max_trim_frames = ((out_rate.max(8_000) as f32) * max_trim_secs).round() as usize;
+        let step_ms =
+            (1_000.0 * f64::from(playback_speed.clamp(0.5, 2.0))) / f64::from(out_rate.max(8_000));
+        let mut trimmed = 0usize;
+
+        while trimmed < max_trim_frames {
+            if self.pending_offset + 1 >= self.pending_stereo.len()
+                && !self.decode_next_chunk(raw_buf)
+            {
+                break;
+            }
+            while self.pending_offset + 1 < self.pending_stereo.len() && trimmed < max_trim_frames {
+                let l = self.pending_stereo[self.pending_offset];
+                let r = self.pending_stereo[self.pending_offset + 1];
+                if l.abs() < 0.0025 && r.abs() < 0.0025 {
+                    self.pending_offset += 2;
+                    self.pos_ms_f64 += step_ms;
+                    trimmed += 1;
+                } else {
+                    // Reset quiet-outro counter after priming so intro level starts clean.
+                    self.quiet_outro_frames = 0;
+                    return;
+                }
+            }
+        }
+        self.quiet_outro_frames = 0;
+    }
+
+    #[inline]
+    fn next_stereo_frame(
+        &mut self,
+        raw_buf: &mut Vec<f32>,
+        out_rate: u32,
+        playback_speed: f32,
+        apply_replay_gain: bool,
+    ) -> Option<(f32, f32)> {
+        if self.pending_offset + 1 >= self.pending_stereo.len() && !self.decode_next_chunk(raw_buf)
+        {
             return None;
         }
+        if self.pending_offset + 1 >= self.pending_stereo.len() {
+            return None;
+        }
+        let mut l = self.pending_stereo[self.pending_offset];
+        let mut r = self.pending_stereo[self.pending_offset + 1];
+        self.pending_offset += 2;
+
+        let step_ms =
+            (1_000.0 * f64::from(playback_speed.clamp(0.5, 2.0))) / f64::from(out_rate.max(8_000));
+        self.pos_ms_f64 += step_ms;
+
+        if self.last_chunk_rms < 0.003 && l.abs() < 0.004 && r.abs() < 0.004 {
+            self.quiet_outro_frames = self.quiet_outro_frames.saturating_add(1);
+        } else {
+            self.quiet_outro_frames = 0;
+        }
+
+        if apply_replay_gain {
+            l *= self.replay_gain_linear;
+            r *= self.replay_gain_linear;
+        }
+        Some((l, r))
+    }
+
+    /// Decode next chunk into stereo `f32` samples at hardware `out_rate`.
+    /// Returns `true` if `pending_stereo` now contains unread frames.
+    fn decode_next_chunk(&mut self, raw_buf: &mut Vec<f32>) -> bool {
+        if self.eof {
+            if !self.tail_flushed {
+                self.tail_flushed = true;
+                if let Some(res) = &mut self.resampler {
+                    self.pending_stereo.clear();
+                    self.pending_offset = 0;
+                    res.flush_tail(&mut self.pending_stereo);
+                    if self.pending_stereo.len() >= 2 {
+                        self.last_chunk_rms = compute_rms(&self.pending_stereo);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         loop {
             let packet = match self.format.next_packet() {
                 Ok(Some(pkt)) => pkt,
                 Ok(None) => {
                     self.eof = true;
-                    return None;
+                    return self.decode_next_chunk(raw_buf);
                 }
                 Err(SymphoniaError::IoError(err))
                     if err.kind() == std::io::ErrorKind::UnexpectedEof =>
                 {
                     self.eof = true;
-                    return None;
+                    return self.decode_next_chunk(raw_buf);
                 }
                 Err(SymphoniaError::ResetRequired) => {
                     self.decoder.reset();
@@ -317,18 +599,13 @@ impl ActiveDeck {
                 }
                 Err(_) => {
                     self.eof = true;
-                    return None;
+                    return false;
                 }
             };
 
             if packet.track_id != self.track_id {
                 continue;
             }
-
-            let pos_ms = self
-                .time_base
-                .and_then(|tb| tb.calc_time(packet.pts))
-                .map(|t| t.as_millis().max(0) as u64);
 
             match self.decoder.decode(&packet) {
                 Ok(audio_slice) => {
@@ -371,18 +648,31 @@ impl ActiveDeck {
                             self.pending_stereo = stereo_in;
                         }
                     }
-                    if !self.pending_stereo.is_empty() {
-                        return pos_ms;
+                    if self.pending_stereo.len() >= 2 {
+                        self.last_chunk_rms = compute_rms(&self.pending_stereo);
+                        return true;
                     }
                 }
                 Err(SymphoniaError::DecodeError(_)) => continue,
                 Err(_) => {
                     self.eof = true;
-                    return None;
+                    return false;
                 }
             }
         }
     }
+}
+
+#[inline]
+fn compute_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut sum = 0.0_f32;
+    for &s in samples {
+        sum += s * s;
+    }
+    (sum / (samples.len() as f32)).sqrt()
 }
 
 struct StereoResampler {
@@ -392,24 +682,31 @@ struct StereoResampler {
 }
 
 impl StereoResampler {
-    fn new(in_rate: u32, out_rate: u32) -> AudioResult<Self> {
-        let ratio = f64::from(out_rate) / f64::from(in_rate.max(8_000));
+    fn new(in_rate: u32, out_rate: u32, playback_speed: f32) -> AudioResult<Self> {
+        let base_ratio = f64::from(out_rate.max(8_000)) / f64::from(in_rate.max(8_000));
         let chunk_frames = 512;
-        let inner = Async::<f32>::new_poly(
-            ratio,
-            1.1,
+        let mut inner = Async::<f32>::new_poly(
+            base_ratio,
+            2.2,
             PolynomialDegree::Cubic,
             chunk_frames,
             2,
             FixedAsync::Input,
         )
         .map_err(|e| AudioError::Decode(e.to_string()))?;
+        let rel = 1.0 / f64::from(playback_speed.clamp(0.5, 2.0));
+        let _ = inner.set_resample_ratio_relative(rel, false);
         let out_max = inner.output_frames_max() * 2 + 64;
         Ok(Self {
             inner,
             in_fifo: Vec::with_capacity(chunk_frames * 4),
             out_scratch: vec![0.0; out_max],
         })
+    }
+
+    fn set_speed(&mut self, playback_speed: f32) {
+        let rel = 1.0 / f64::from(playback_speed.clamp(0.5, 2.0));
+        let _ = self.inner.set_resample_ratio_relative(rel, true);
     }
 
     fn reset(&mut self) {
@@ -445,6 +742,45 @@ impl StereoResampler {
             self.in_fifo.drain(..needed_samples);
         }
     }
+
+    /// Flush remaining `< 512` frames at stream EOF so 0ms gapless album transitions lose zero tail samples.
+    fn flush_tail(&mut self, output: &mut Vec<f32>) {
+        let rem_frames = self.in_fifo.len() / 2;
+        if rem_frames == 0 {
+            return;
+        }
+        let needed_frames = self.inner.input_frames_next();
+        let needed_samples = needed_frames * 2;
+        if self.in_fifo.len() < needed_samples {
+            self.in_fifo.resize(needed_samples, 0.0);
+        }
+        let out_needed_frames = self.inner.output_frames_max();
+        if self.out_scratch.len() < out_needed_frames * 2 {
+            self.out_scratch.resize(out_needed_frames * 2, 0.0);
+        }
+        let indexing = Indexing::new().partial_len(rem_frames);
+        let in_adapter = InterleavedSlice::new(&self.in_fifo[..needed_samples], 2, needed_frames);
+        let out_adapter = InterleavedSlice::new_mut(
+            &mut self.out_scratch[..out_needed_frames * 2],
+            2,
+            out_needed_frames,
+        );
+        if let (Ok(in_buf), Ok(mut out_buf)) = (in_adapter, out_adapter)
+            && let Ok((_, frames_out)) =
+                self.inner
+                    .process_into_buffer(&in_buf, &mut out_buf, Some(&indexing))
+        {
+            let expected = ((rem_frames as f64) * self.inner.resample_ratio()).round() as usize;
+            let valid_frames = frames_out.min(expected.max(1));
+            output.extend_from_slice(&self.out_scratch[..valid_frames * 2]);
+        }
+        self.in_fifo.clear();
+    }
+}
+
+#[inline]
+fn ms_to_frames(ms: u32, sample_rate: u32) -> u64 {
+    (u64::from(ms) * u64::from(sample_rate.max(8_000))) / 1_000
 }
 
 fn build_codec_registry() -> CodecRegistry {
@@ -454,73 +790,291 @@ fn build_codec_registry() -> CodecRegistry {
     codecs
 }
 
+fn promote_deck_b_to_a(
+    deck_a: &mut Option<ActiveDeck>,
+    deck_b: &mut Option<ActiveDeck>,
+    crossfade_state: &mut Option<ActiveCrossfade>,
+    bass_swap: &mut BassSwapMixer,
+    telemetry: &AudioTelemetry,
+) -> bool {
+    let Some(next_deck) = deck_b.take() else {
+        return false;
+    };
+    *crossfade_state = None;
+    bass_swap.reset();
+    telemetry
+        .duration_ms
+        .store(next_deck.duration_ms, Ordering::Relaxed);
+    telemetry
+        .sample_rate
+        .store(next_deck.sample_rate, Ordering::Relaxed);
+    telemetry
+        .position_ms
+        .store(next_deck.current_pos_ms(), Ordering::Relaxed);
+    telemetry.is_playing.store(true, Ordering::Release);
+    telemetry.auto_transitioned.store(true, Ordering::Release);
+    telemetry.track_finished_seq.fetch_add(1, Ordering::AcqRel);
+    *deck_a = Some(next_deck);
+    true
+}
+
+struct DecodeRuntime {
+    codecs: CodecRegistry,
+    eq: StereoEqProcessor,
+    bass_swap: BassSwapMixer,
+    spectrum: SpectrumAnalyzer8,
+    dsp: PlaybackDspSettings,
+    deck_a: Option<ActiveDeck>,
+    deck_b: Option<ActiveDeck>,
+    deck_b_same_album: bool,
+    queued_next: Option<QueuedTrackSpec>,
+    crossfade_state: Option<ActiveCrossfade>,
+    micro_fade: MicroFade,
+    raw_scratch: Vec<f32>,
+}
+
+impl DecodeRuntime {
+    fn new(out_rate: u32, eq_config: &EqConfig) -> Self {
+        Self {
+            codecs: build_codec_registry(),
+            eq: StereoEqProcessor::new(out_rate, eq_config),
+            bass_swap: BassSwapMixer::new(out_rate),
+            spectrum: SpectrumAnalyzer8::new(out_rate),
+            dsp: PlaybackDspSettings::default(),
+            deck_a: None,
+            deck_b: None,
+            deck_b_same_album: false,
+            queued_next: None,
+            crossfade_state: None,
+            micro_fade: MicroFade::Steady(1.0),
+            raw_scratch: Vec::with_capacity(8192),
+        }
+    }
+
+    fn load_primary(
+        &mut self,
+        path: &Path,
+        replay_gain_db: i32,
+        out_rate: u32,
+        telemetry: &AudioTelemetry,
+    ) {
+        match ActiveDeck::open(
+            path,
+            out_rate,
+            self.dsp.playback_speed,
+            replay_gain_db,
+            &self.codecs,
+        ) {
+            Ok(mut deck) => {
+                if self.dsp.trim_silence {
+                    deck.prime_first_chunk(
+                        &mut self.raw_scratch,
+                        true,
+                        0.5,
+                        out_rate,
+                        self.dsp.playback_speed,
+                    );
+                }
+                telemetry.flush_ring.store(true, Ordering::Release);
+                telemetry.auto_transitioned.store(false, Ordering::Release);
+                telemetry
+                    .duration_ms
+                    .store(deck.duration_ms, Ordering::Relaxed);
+                telemetry
+                    .sample_rate
+                    .store(deck.sample_rate, Ordering::Relaxed);
+                telemetry
+                    .position_ms
+                    .store(deck.current_pos_ms(), Ordering::Relaxed);
+                telemetry.is_playing.store(true, Ordering::Release);
+                self.eq.reset();
+                self.bass_swap.reset();
+                self.crossfade_state = None;
+                self.deck_b = None;
+                self.micro_fade = if self.dsp.fade_in_play_ms > 0 {
+                    MicroFade::FadingIn {
+                        start_gain: 0.0,
+                        elapsed_frames: 0,
+                        total_frames: ms_to_frames(self.dsp.fade_in_play_ms, out_rate).max(1),
+                    }
+                } else {
+                    MicroFade::Steady(1.0)
+                };
+                self.deck_a = Some(deck);
+            }
+            Err(err) => {
+                eprintln!("ferric-audio open failed ({}): {err}", path.display());
+                telemetry.is_playing.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    fn set_queued_next(&mut self, path: Option<PathBuf>, same_album_consecutive: bool) {
+        match path {
+            Some(p) => {
+                if let Some(existing_b) = &self.deck_b
+                    && existing_b.path == p
+                {
+                    self.deck_b_same_album = same_album_consecutive;
+                    self.queued_next = None;
+                    return;
+                }
+                if self.crossfade_state.is_none() {
+                    self.deck_b = None;
+                }
+                self.queued_next = Some(QueuedTrackSpec {
+                    path: p,
+                    same_album_consecutive,
+                    replay_gain_db: 0,
+                });
+            }
+            None => {
+                self.queued_next = None;
+                if self.crossfade_state.is_none() {
+                    self.deck_b = None;
+                }
+            }
+        }
+    }
+
+    fn promote_deck_b(&mut self, telemetry: &AudioTelemetry) -> bool {
+        promote_deck_b_to_a(
+            &mut self.deck_a,
+            &mut self.deck_b,
+            &mut self.crossfade_state,
+            &mut self.bass_swap,
+            telemetry,
+        )
+    }
+}
+
 fn decode_loop(
     cmd_rx: Receiver<EngineCommand>,
     mut producer: rtrb::Producer<f32>,
     out_rate: u32,
     mut eq_config: EqConfig,
     telemetry: Arc<AudioTelemetry>,
+    headless: bool,
 ) {
-    let codecs = build_codec_registry();
-    let mut eq = StereoEqProcessor::new(out_rate, &eq_config);
-    let mut deck_a: Option<ActiveDeck> = None;
-    let mut queued_next_path: Option<PathBuf> = None;
+    let mut rt = DecodeRuntime::new(out_rate, &eq_config);
     let mut volume = 0.85_f32;
-    let mut crossfade_ms = 0_u32;
-    let mut raw_scratch = Vec::with_capacity(8192);
     let mut dsp_scratch = Vec::with_capacity(2048);
 
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 EngineCommand::LoadAndPlay(path) => {
-                    match ActiveDeck::open(&path, out_rate, &codecs) {
-                        Ok(deck) => {
-                            telemetry
-                                .duration_ms
-                                .store(deck.duration_ms, Ordering::Relaxed);
-                            telemetry
-                                .sample_rate
-                                .store(deck.sample_rate, Ordering::Relaxed);
-                            telemetry.position_ms.store(0, Ordering::Relaxed);
-                            telemetry.is_playing.store(true, Ordering::Relaxed);
-                            eq.reset();
-                            deck_a = Some(deck);
-                        }
-                        Err(err) => {
-                            eprintln!("ferric-audio open failed ({}): {err}", path.display());
-                            telemetry.is_playing.store(false, Ordering::Relaxed);
-                        }
-                    }
+                    rt.load_primary(&path, 0, out_rate, &telemetry);
                 }
-                EngineCommand::QueueNext(next) => {
-                    queued_next_path = next;
+                EngineCommand::LoadAndPlayTrack {
+                    path,
+                    replay_gain_db,
+                } => {
+                    rt.load_primary(&path, replay_gain_db, out_rate, &telemetry);
+                }
+                EngineCommand::QueueNext(path) => {
+                    rt.set_queued_next(path, false);
+                }
+                EngineCommand::QueueNextTrack {
+                    path,
+                    same_album_consecutive,
+                } => {
+                    rt.set_queued_next(path, same_album_consecutive);
                 }
                 EngineCommand::Play => {
-                    if deck_a.is_some() {
-                        telemetry.is_playing.store(true, Ordering::Relaxed);
+                    if rt.deck_a.is_some() {
+                        let start_gain = if telemetry.is_playing.load(Ordering::Relaxed) {
+                            rt.micro_fade.current_gain()
+                        } else {
+                            0.0
+                        };
+                        telemetry.is_playing.store(true, Ordering::Release);
+                        rt.micro_fade = if rt.dsp.fade_in_play_ms > 0 {
+                            MicroFade::FadingIn {
+                                start_gain,
+                                elapsed_frames: 0,
+                                total_frames: ms_to_frames(rt.dsp.fade_in_play_ms, out_rate).max(1),
+                            }
+                        } else {
+                            MicroFade::Steady(1.0)
+                        };
                     }
                 }
                 EngineCommand::Pause => {
-                    telemetry.is_playing.store(false, Ordering::Relaxed);
+                    if rt.deck_a.is_some() && telemetry.is_playing.load(Ordering::Relaxed) {
+                        if !matches!(rt.micro_fade, MicroFade::Pausing { .. }) {
+                            rt.micro_fade = MicroFade::Pausing {
+                                start_gain: rt.micro_fade.current_gain(),
+                                elapsed_frames: 0,
+                                total_frames: ms_to_frames(120, out_rate).max(1),
+                            };
+                        }
+                    } else {
+                        telemetry.is_playing.store(false, Ordering::Release);
+                        rt.micro_fade = MicroFade::Steady(0.0);
+                    }
                 }
                 EngineCommand::TogglePlayPause => {
-                    let cur = telemetry.is_playing.load(Ordering::Relaxed);
-                    if deck_a.is_some() {
-                        telemetry.is_playing.store(!cur, Ordering::Relaxed);
+                    if rt.deck_a.is_some() {
+                        let actively_playing = telemetry.is_playing.load(Ordering::Relaxed)
+                            && !matches!(rt.micro_fade, MicroFade::Pausing { .. });
+                        if actively_playing {
+                            rt.micro_fade = MicroFade::Pausing {
+                                start_gain: rt.micro_fade.current_gain(),
+                                elapsed_frames: 0,
+                                total_frames: ms_to_frames(120, out_rate).max(1),
+                            };
+                        } else {
+                            let start_gain = if telemetry.is_playing.load(Ordering::Relaxed) {
+                                rt.micro_fade.current_gain()
+                            } else {
+                                0.0
+                            };
+                            telemetry.is_playing.store(true, Ordering::Release);
+                            rt.micro_fade = if rt.dsp.fade_in_play_ms > 0 {
+                                MicroFade::FadingIn {
+                                    start_gain,
+                                    elapsed_frames: 0,
+                                    total_frames: ms_to_frames(rt.dsp.fade_in_play_ms, out_rate)
+                                        .max(1),
+                                }
+                            } else {
+                                MicroFade::Steady(1.0)
+                            };
+                        }
                     }
                 }
                 EngineCommand::Stop => {
-                    telemetry.is_playing.store(false, Ordering::Relaxed);
+                    telemetry.flush_ring.store(true, Ordering::Release);
+                    telemetry.is_playing.store(false, Ordering::Release);
+                    telemetry.auto_transitioned.store(false, Ordering::Release);
                     telemetry.position_ms.store(0, Ordering::Relaxed);
-                    deck_a = None;
+                    telemetry.store_spectrum([0; 8]);
+                    rt.deck_a = None;
+                    rt.deck_b = None;
+                    rt.crossfade_state = None;
+                    rt.micro_fade = MicroFade::Steady(0.0);
+                    rt.bass_swap.reset();
                 }
                 EngineCommand::SeekMs(ms) => {
-                    if let Some(deck) = &mut deck_a
+                    if let Some(deck) = &mut rt.deck_a
                         && let Ok(actual) = deck.seek_ms(ms)
                     {
+                        telemetry.flush_ring.store(true, Ordering::Release);
                         telemetry.position_ms.store(actual, Ordering::Relaxed);
-                        eq.reset();
+                        rt.eq.reset();
+                        if rt.crossfade_state.is_some() {
+                            rt.crossfade_state = None;
+                            rt.deck_b = None;
+                            rt.bass_swap.reset();
+                        }
+                        if rt.dsp.fade_in_play_ms > 0 {
+                            rt.micro_fade = MicroFade::FadingIn {
+                                start_gain: 0.0,
+                                elapsed_frames: 0,
+                                total_frames: ms_to_frames(rt.dsp.fade_in_play_ms, out_rate).max(1),
+                            };
+                        }
                     }
                 }
                 EngineCommand::SetVolume(v) => {
@@ -528,87 +1082,276 @@ fn decode_loop(
                 }
                 EngineCommand::SetEq(cfg) => {
                     eq_config = cfg;
-                    eq.apply_config(&eq_config);
+                    rt.eq.apply_config(&eq_config);
                 }
                 EngineCommand::SetCrossfadeMs(ms) => {
-                    crossfade_ms = ms.min(12_000);
+                    rt.dsp.crossfade_ms = ms.min(12_000);
+                }
+                EngineCommand::SetDspSettings(new_dsp) => {
+                    let sanitized = new_dsp.sanitized();
+                    let speed_changed =
+                        (sanitized.playback_speed - rt.dsp.playback_speed).abs() > 1e-4;
+                    rt.dsp = sanitized;
+                    if speed_changed {
+                        if let Some(da) = &mut rt.deck_a {
+                            da.set_playback_speed(out_rate, rt.dsp.playback_speed);
+                        }
+                        if let Some(db) = &mut rt.deck_b {
+                            db.set_playback_speed(out_rate, rt.dsp.playback_speed);
+                        }
+                    }
                 }
                 EngineCommand::Shutdown => return,
             }
         }
 
         let is_playing = telemetry.is_playing.load(Ordering::Relaxed);
-        if !is_playing || deck_a.is_none() {
+        if !is_playing || rt.deck_a.is_none() {
+            telemetry.store_spectrum(rt.spectrum.decay_idle());
             thread::sleep(Duration::from_millis(12));
             continue;
         }
 
-        let slots = producer.slots();
-        if slots < 512 {
-            thread::sleep(Duration::from_millis(4));
-            continue;
-        }
+        let max_frames = if headless {
+            512
+        } else {
+            let slots = producer.slots() & !1;
+            if slots < 512 {
+                thread::sleep(Duration::from_millis(3));
+                continue;
+            }
+            (slots / 2).min(1024)
+        };
 
-        let mut track_ended = false;
-        if let Some(deck) = &mut deck_a {
-            if deck.pending_offset >= deck.pending_stereo.len() {
-                if let Some(pos_ms) = deck.decode_next_chunk(&mut raw_scratch) {
-                    telemetry.position_ms.store(pos_ms, Ordering::Relaxed);
-                } else if deck.eof {
-                    track_ended = true;
+        // 1. Proactively pre-open and prime Deck B within max(eff_xfade_ms + 4000, 8000) ms of Deck A end.
+        if rt.deck_b.is_none()
+            && let Some(da) = &rt.deck_a
+            && let Some(spec) = &rt.queued_next
+        {
+            let eff_xfade_ms = if rt.dsp.gapless_album_lock && spec.same_album_consecutive {
+                0
+            } else {
+                rt.dsp.crossfade_ms
+            };
+            let preopen_window_ms = u64::from(eff_xfade_ms.saturating_add(4_000).max(8_000));
+            if (da.duration_ms == 0 || da.remaining_ms() <= preopen_window_ms)
+                && let Some(s) = rt.queued_next.take()
+            {
+                match ActiveDeck::open(
+                    &s.path,
+                    out_rate,
+                    rt.dsp.playback_speed,
+                    s.replay_gain_db,
+                    &rt.codecs,
+                ) {
+                    Ok(mut next_deck) => {
+                        let trim_lead = rt.dsp.trim_silence
+                            && !(rt.dsp.gapless_album_lock && s.same_album_consecutive);
+                        next_deck.prime_first_chunk(
+                            &mut rt.raw_scratch,
+                            trim_lead,
+                            4.0,
+                            out_rate,
+                            rt.dsp.playback_speed,
+                        );
+                        rt.deck_b_same_album = s.same_album_consecutive;
+                        rt.deck_b = Some(next_deck);
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "ferric-audio Deck B pre-open failed ({}): {err}",
+                            s.path.display()
+                        );
+                    }
                 }
             }
+        }
 
-            if !track_ended && deck.pending_offset < deck.pending_stereo.len() {
-                let avail = deck.pending_stereo.len() - deck.pending_offset;
-                let to_take = avail.min(slots & !1).min(2048);
-                dsp_scratch.clear();
-                dsp_scratch.extend_from_slice(
-                    &deck.pending_stereo[deck.pending_offset..deck.pending_offset + to_take],
-                );
-                deck.pending_offset += to_take;
+        // 2. Evaluate Smart Trailing-Silence Trigger + Crossfade Overlap Start.
+        if rt.crossfade_state.is_none()
+            && rt.deck_b.is_some()
+            && let Some(da) = &rt.deck_a
+        {
+            let album_locked = rt.dsp.gapless_album_lock && rt.deck_b_same_album;
+            let eff_xfade_ms = if album_locked { 0 } else { rt.dsp.crossfade_ms };
+            let rem_ms = da.remaining_ms();
+            let sustained_silence = da.quiet_outro_frames >= (out_rate as usize / 12).max(512)
+                && da.last_chunk_rms < 0.003;
 
-                // Subtle equal-power tail fade when crossfade is active near track end.
-                if crossfade_ms > 0 && deck.duration_ms > u64::from(crossfade_ms) {
-                    let pos = telemetry.position_ms.load(Ordering::Relaxed);
-                    let rem = deck.duration_ms.saturating_sub(pos);
-                    if rem < u64::from(crossfade_ms) {
-                        let prog = 1.0 - (rem as f32 / crossfade_ms as f32);
-                        let (ga, _) = equal_power_gains(prog);
-                        for s in &mut dsp_scratch {
-                            *s *= ga;
+            let time_trigger =
+                eff_xfade_ms > 0 && da.duration_ms > 0 && rem_ms <= u64::from(eff_xfade_ms);
+            let silence_trigger = !album_locked
+                && rt.dsp.trim_silence
+                && da.duration_ms > 0
+                && da.current_pos_ms() > 2_000
+                && rem_ms <= u64::from(eff_xfade_ms) + 4_500
+                && sustained_silence;
+
+            if time_trigger || silence_trigger {
+                let overlap_ms = if eff_xfade_ms > 0 { eff_xfade_ms } else { 180 };
+                rt.bass_swap.reset();
+                rt.crossfade_state = Some(ActiveCrossfade {
+                    elapsed_frames: 0,
+                    total_frames: ms_to_frames(overlap_ms, out_rate).max(1),
+                    curve: rt.dsp.fade_curve,
+                });
+            }
+        }
+
+        // 3. Render stereo frames seamlessly across Deck A / Deck B with zero gap.
+        dsp_scratch.clear();
+        let mut unqueued_track_ended = false;
+        let mut pause_completed = false;
+
+        for _ in 0..max_frames {
+            let (env_gain, finished_pause) = rt.micro_fade.step_frame();
+            if finished_pause {
+                pause_completed = true;
+                break;
+            }
+
+            let mixed_frame = if let Some(mut xfade) = rt.crossfade_state {
+                let sample_a = rt
+                    .deck_a
+                    .as_mut()
+                    .and_then(|da| {
+                        da.next_stereo_frame(
+                            &mut rt.raw_scratch,
+                            out_rate,
+                            rt.dsp.playback_speed,
+                            rt.dsp.replay_gain,
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0));
+
+                let sample_b = rt.deck_b.as_mut().and_then(|db| {
+                    db.next_stereo_frame(
+                        &mut rt.raw_scratch,
+                        out_rate,
+                        rt.dsp.playback_speed,
+                        rt.dsp.replay_gain,
+                    )
+                });
+
+                match sample_b {
+                    Some(sb) => {
+                        let progress = (xfade.elapsed_frames as f32
+                            / xfade.total_frames.max(1) as f32)
+                            .clamp(0.0, 1.0);
+                        let (ml, mr) = rt.bass_swap.mix_frame(sample_a, sb, progress, xfade.curve);
+                        xfade.elapsed_frames += 1;
+                        if xfade.elapsed_frames >= xfade.total_frames {
+                            rt.promote_deck_b(&telemetry);
+                        } else {
+                            rt.crossfade_state = Some(xfade);
+                        }
+                        Some((ml, mr))
+                    }
+                    None => {
+                        rt.crossfade_state = None;
+                        rt.deck_b = None;
+                        Some(sample_a)
+                    }
+                }
+            } else {
+                let primary = rt.deck_a.as_mut().and_then(|da| {
+                    da.next_stereo_frame(
+                        &mut rt.raw_scratch,
+                        out_rate,
+                        rt.dsp.playback_speed,
+                        rt.dsp.replay_gain,
+                    )
+                });
+
+                match primary {
+                    Some(frame) => Some(frame),
+                    None => {
+                        if rt.deck_b.is_none()
+                            && let Some(s) = rt.queued_next.take()
+                            && let Ok(mut next_deck) = ActiveDeck::open(
+                                &s.path,
+                                out_rate,
+                                rt.dsp.playback_speed,
+                                s.replay_gain_db,
+                                &rt.codecs,
+                            )
+                        {
+                            let trim_lead = rt.dsp.trim_silence
+                                && !(rt.dsp.gapless_album_lock && s.same_album_consecutive);
+                            next_deck.prime_first_chunk(
+                                &mut rt.raw_scratch,
+                                trim_lead,
+                                4.0,
+                                out_rate,
+                                rt.dsp.playback_speed,
+                            );
+                            rt.deck_b_same_album = s.same_album_consecutive;
+                            rt.deck_b = Some(next_deck);
+                        }
+
+                        if rt.promote_deck_b(&telemetry) {
+                            rt.deck_a.as_mut().and_then(|da| {
+                                da.next_stereo_frame(
+                                    &mut rt.raw_scratch,
+                                    out_rate,
+                                    rt.dsp.playback_speed,
+                                    rt.dsp.replay_gain,
+                                )
+                            })
+                        } else {
+                            unqueued_track_ended = true;
+                            None
                         }
                     }
                 }
+            };
 
-                eq.process_interleaved_stereo(&mut dsp_scratch, volume);
+            let Some((mut l, mut r)) = mixed_frame else {
+                break;
+            };
+            l *= env_gain;
+            r *= env_gain;
+            if rt.dsp.mono_audio {
+                let mono = 0.5 * (l + r);
+                l = mono;
+                r = mono;
+            }
+            dsp_scratch.push(l);
+            dsp_scratch.push(r);
+        }
+
+        if let Some(da) = &rt.deck_a {
+            telemetry
+                .position_ms
+                .store(da.current_pos_ms(), Ordering::Relaxed);
+        }
+
+        if !dsp_scratch.is_empty() {
+            rt.eq.process_interleaved_stereo(&mut dsp_scratch, volume);
+            telemetry.store_spectrum(rt.spectrum.analyze_interleaved(&dsp_scratch));
+            if !headless {
                 for &sample in &dsp_scratch {
                     if producer.push(sample).is_err() {
                         break;
                     }
                 }
+            } else {
+                thread::sleep(Duration::from_millis(8));
             }
         }
 
-        if track_ended {
-            // Gapless transition into pre-queued next track if available; otherwise signal UI queue.
-            if let Some(next_path) = queued_next_path.take()
-                && let Ok(next_deck) = ActiveDeck::open(&next_path, out_rate, &codecs)
-            {
-                telemetry
-                    .duration_ms
-                    .store(next_deck.duration_ms, Ordering::Relaxed);
-                telemetry
-                    .sample_rate
-                    .store(next_deck.sample_rate, Ordering::Relaxed);
-                telemetry.position_ms.store(0, Ordering::Relaxed);
-                deck_a = Some(next_deck);
-                telemetry.track_finished_seq.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            deck_a = None;
-            telemetry.is_playing.store(false, Ordering::Relaxed);
-            telemetry.track_finished_seq.fetch_add(1, Ordering::Relaxed);
+        if pause_completed {
+            telemetry.is_playing.store(false, Ordering::Release);
+            telemetry.store_spectrum([0; 8]);
+        }
+
+        if unqueued_track_ended {
+            rt.deck_a = None;
+            rt.crossfade_state = None;
+            telemetry.is_playing.store(false, Ordering::Release);
+            telemetry.auto_transitioned.store(false, Ordering::Release);
+            telemetry.store_spectrum([0; 8]);
+            telemetry.track_finished_seq.fetch_add(1, Ordering::AcqRel);
         }
     }
 }

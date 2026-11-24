@@ -87,6 +87,84 @@ pub struct Playlist {
     pub source: TrackSource,
     pub etag: Option<String>,
     pub track_count: usize,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FadeCurve {
+    #[default]
+    EqualPower,
+    SCurveVelvet,
+    BassSwapAutomix,
+}
+
+impl FadeCurve {
+    pub fn all() -> [Self; 3] {
+        [Self::EqualPower, Self::SCurveVelvet, Self::BassSwapAutomix]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::EqualPower => "Equal-Power",
+            Self::SCurveVelvet => "S-Curve Velvet",
+            Self::BassSwapAutomix => "Bass-Swap Automix",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::EqualPower => Self::SCurveVelvet,
+            Self::SCurveVelvet => Self::BassSwapAutomix,
+            Self::BassSwapAutomix => Self::EqualPower,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaybackDspSettings {
+    pub crossfade_ms: u32,
+    pub fade_in_play_ms: u32,
+    pub fade_curve: FadeCurve,
+    pub gapless_album_lock: bool,
+    pub trim_silence: bool,
+    pub replay_gain: bool,
+    pub mono_audio: bool,
+    pub playback_speed: f32,
+    pub sleep_timer_fade_out: bool,
+}
+
+impl Default for PlaybackDspSettings {
+    fn default() -> Self {
+        Self {
+            crossfade_ms: 6_000,
+            fade_in_play_ms: 240,
+            fade_curve: FadeCurve::BassSwapAutomix,
+            gapless_album_lock: true,
+            trim_silence: true,
+            replay_gain: true,
+            mono_audio: false,
+            playback_speed: 1.0,
+            sleep_timer_fade_out: true,
+        }
+    }
+}
+
+impl PlaybackDspSettings {
+    pub fn sanitized(&self) -> Self {
+        Self {
+            crossfade_ms: self.crossfade_ms.min(12_000),
+            fade_in_play_ms: self.fade_in_play_ms.min(2_000),
+            fade_curve: self.fade_curve,
+            gapless_album_lock: self.gapless_album_lock,
+            trim_silence: self.trim_silence,
+            replay_gain: self.replay_gain,
+            mono_audio: self.mono_audio,
+            playback_speed: self.playback_speed.clamp(0.5, 2.0),
+            sleep_timer_fade_out: self.sleep_timer_fade_out,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,14 +199,51 @@ pub enum AccountKind {
     YouTubeMusic,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AccountSettings {
+    #[serde(default)]
     pub spotify_client_id: String,
+    #[serde(default)]
     pub spotify_connected: bool,
+    #[serde(default)]
+    pub spotify_user_name: String,
+    #[serde(default)]
+    pub spotify_access_token: String,
+    #[serde(default)]
+    pub spotify_refresh_token: String,
+    #[serde(default)]
+    pub spotify_playlist_count: usize,
+    #[serde(default)]
+    pub spotify_liked_count: usize,
+    #[serde(default)]
     pub youtube_client_id: String,
+    #[serde(default)]
+    pub youtube_client_secret: String,
+    #[serde(default)]
     pub youtube_connected: bool,
+    #[serde(default)]
+    pub youtube_channel_name: String,
+    #[serde(default)]
+    pub youtube_access_token: String,
+    #[serde(default)]
+    pub youtube_refresh_token: String,
+    #[serde(default)]
+    pub youtube_playlist_count: usize,
+    #[serde(default = "default_true")]
     pub youtube_music_category_only: bool,
+    #[serde(default)]
     pub subsonic_url: String,
+    #[serde(default)]
+    pub subsonic_username: String,
+    #[serde(default)]
+    pub subsonic_password: String,
+    #[serde(default)]
+    pub subsonic_connected: bool,
 }
 
 impl Default for AccountSettings {
@@ -136,10 +251,23 @@ impl Default for AccountSettings {
         Self {
             spotify_client_id: String::new(),
             spotify_connected: false,
+            spotify_user_name: String::new(),
+            spotify_access_token: String::new(),
+            spotify_refresh_token: String::new(),
+            spotify_playlist_count: 0,
+            spotify_liked_count: 0,
             youtube_client_id: String::new(),
+            youtube_client_secret: String::new(),
             youtube_connected: false,
+            youtube_channel_name: String::new(),
+            youtube_access_token: String::new(),
+            youtube_refresh_token: String::new(),
+            youtube_playlist_count: 0,
             youtube_music_category_only: true,
             subsonic_url: String::new(),
+            subsonic_username: String::new(),
+            subsonic_password: String::new(),
+            subsonic_connected: false,
         }
     }
 }
@@ -155,6 +283,243 @@ impl Default for UpdateSettings {
             auto_check_on_startup: true,
         }
     }
+}
+
+fn default_volume() -> f32 {
+    0.85
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionResumeState {
+    pub last_track_id: Option<String>,
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    pub shuffle: bool,
+    pub repeat: RepeatMode,
+    pub total_tracks_played: u64,
+    pub total_listened_secs: u64,
+    pub recent_track_ids: Vec<String>,
+}
+
+impl Default for SessionResumeState {
+    fn default() -> Self {
+        Self {
+            last_track_id: None,
+            volume: 0.85,
+            shuffle: false,
+            repeat: RepeatMode::Off,
+            total_tracks_played: 0,
+            total_listened_secs: 0,
+            recent_track_ids: Vec::new(),
+        }
+    }
+}
+
+impl SessionResumeState {
+    pub fn record_play(&mut self, track_id: &str, duration_ms: u64) {
+        self.last_track_id = Some(track_id.to_string());
+        self.total_tracks_played = self.total_tracks_played.saturating_add(1);
+        self.total_listened_secs = self
+            .total_listened_secs
+            .saturating_add((duration_ms / 1_000).min(900));
+        self.recent_track_ids.retain(|id| id != track_id);
+        self.recent_track_ids.insert(0, track_id.to_string());
+        if self.recent_track_ids.len() > 12 {
+            self.recent_track_ids.truncate(12);
+        }
+    }
+}
+
+/// Parse an `.m3u` / `.m3u8` or Exportify `.csv` playlist file into a `Playlist` and `Vec<Track>`.
+pub fn parse_playlist_import_text(
+    file_stem: &str,
+    content: &str,
+    base_dir: Option<&std::path::Path>,
+) -> (Playlist, Vec<Track>) {
+    let name = if file_stem.trim().is_empty() {
+        "Imported Playlist".to_string()
+    } else {
+        file_stem.trim().to_string()
+    };
+    let pl_id = format!("imported:{}", name.to_ascii_lowercase().replace(' ', "_"));
+    let mut tracks = Vec::new();
+
+    let trimmed = content.trim_start_matches('\u{feff}');
+    let first_line = trimmed.lines().next().unwrap_or("");
+    if first_line.contains("Track Name") && first_line.contains(',') {
+        // Exportify / Spotify CSV format
+        let headers: Vec<&str> = split_csv_line(first_line);
+        let idx_uri = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("Track URI"));
+        let idx_title = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("Track Name"));
+        let idx_album = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("Album Name"));
+        let idx_artist = headers
+            .iter()
+            .position(|h| h.to_ascii_lowercase().starts_with("artist name"));
+        let idx_dur = headers
+            .iter()
+            .position(|h| h.to_ascii_lowercase().starts_with("duration"));
+        let idx_isrc = headers.iter().position(|h| h.eq_ignore_ascii_case("ISRC"));
+
+        for (line_idx, row) in trimmed.lines().skip(1).enumerate() {
+            if row.trim().is_empty() {
+                continue;
+            }
+            let cols = split_csv_line(row);
+            let title = idx_title
+                .and_then(|i| cols.get(i))
+                .copied()
+                .unwrap_or("")
+                .trim();
+            if title.is_empty() {
+                continue;
+            }
+            let artist = idx_artist
+                .and_then(|i| cols.get(i))
+                .copied()
+                .unwrap_or("Unknown Artist")
+                .replace(';', ", ");
+            let album = idx_album
+                .and_then(|i| cols.get(i))
+                .copied()
+                .unwrap_or("Imported")
+                .to_string();
+            let dur_ms = idx_dur
+                .and_then(|i| cols.get(i))
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let uri = idx_uri.and_then(|i| cols.get(i)).copied().unwrap_or("");
+            let isrc = idx_isrc
+                .and_then(|i| cols.get(i))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let id = if !uri.is_empty() {
+                uri.to_string()
+            } else {
+                format!("{pl_id}:{line_idx}")
+            };
+            tracks.push(Track {
+                id,
+                title: title.to_string(),
+                artist,
+                album,
+                duration_ms: dur_ms,
+                path: None,
+                source: TrackSource::Spotify,
+                codec: "SPOTIFY".to_string(),
+                sample_rate: 0,
+                bit_depth: 0,
+                bitrate_kbps: 0,
+                isrc,
+                spotify_id: uri.strip_prefix("spotify:track:").map(ToOwned::to_owned),
+                youtube_video_id: None,
+                replay_gain_db: 0,
+                liked: false,
+            });
+        }
+    } else {
+        // M3U / M3U8 format
+        let mut pending_meta: Option<(u64, String, String)> = None;
+        for (line_idx, raw_line) in trimmed.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.eq_ignore_ascii_case("#EXTM3U") {
+                continue;
+            }
+            if let Some(ext) = line.strip_prefix("#EXTINF:") {
+                let (dur_part, info_part) = ext.split_once(',').unwrap_or((ext, ""));
+                let secs = dur_part.trim().parse::<i64>().unwrap_or(0).max(0) as u64;
+                let (artist, title) = info_part
+                    .split_once(" - ")
+                    .map(|(a, t)| (a.trim().to_string(), t.trim().to_string()))
+                    .unwrap_or_else(|| {
+                        ("Unknown Artist".to_string(), info_part.trim().to_string())
+                    });
+                pending_meta = Some((secs * 1_000, artist, title));
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
+            let p = PathBuf::from(line);
+            let resolved = if p.is_absolute() {
+                p
+            } else if let Some(base) = base_dir {
+                base.join(&p)
+            } else {
+                p
+            };
+            let fallback_title = resolved
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Track")
+                .to_string();
+            let (dur_ms, artist, title) =
+                pending_meta
+                    .take()
+                    .unwrap_or((0, "Local File".to_string(), fallback_title));
+            let ext_upper = resolved
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("AUDIO")
+                .to_ascii_uppercase();
+            tracks.push(Track {
+                id: format!("local:{}", resolved.to_string_lossy()),
+                title: if title.is_empty() {
+                    format!("Track {}", line_idx + 1)
+                } else {
+                    title
+                },
+                artist,
+                album: name.clone(),
+                duration_ms: dur_ms,
+                path: Some(resolved),
+                source: TrackSource::Local,
+                codec: ext_upper,
+                sample_rate: 0,
+                bit_depth: 0,
+                bitrate_kbps: 0,
+                isrc: None,
+                spotify_id: None,
+                youtube_video_id: None,
+                replay_gain_db: 0,
+                liked: false,
+            });
+        }
+    }
+
+    let playlist = Playlist {
+        id: pl_id,
+        name,
+        source: TrackSource::Local,
+        etag: None,
+        track_count: tracks.len(),
+        description: "Imported playlist".to_string(),
+    };
+    (playlist, tracks)
+}
+
+fn split_csv_line(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'"' {
+            in_quotes = !in_quotes;
+        } else if b == b',' && !in_quotes {
+            let slice = line[start..i].trim().trim_matches('"');
+            out.push(slice);
+            start = i + 1;
+        }
+    }
+    out.push(line[start..].trim().trim_matches('"'));
+    out
 }
 
 /// Format milliseconds as `MM:SS` (or `H:MM:SS` if >= 1 hour).
@@ -179,5 +544,26 @@ mod tests {
         assert_eq!(format_duration_ms(0), "00:00");
         assert_eq!(format_duration_ms(134_000), "02:14");
         assert_eq!(format_duration_ms(3_723_000), "1:02:03");
+    }
+
+    #[test]
+    fn legacy_account_settings_json_deserializes_with_defaults() {
+        let legacy = r#"{"spotify_client_id":"abc","spotify_connected":true}"#;
+        let parsed: AccountSettings = serde_json::from_str(legacy).expect("deserialize legacy");
+        assert_eq!(parsed.spotify_client_id, "abc");
+        assert!(parsed.spotify_connected);
+        assert!(parsed.youtube_music_category_only);
+        assert!(!parsed.subsonic_connected);
+    }
+
+    #[test]
+    fn playback_dsp_defaults_enable_seamless_velvet_automix() {
+        let dsp = PlaybackDspSettings::default();
+        assert_eq!(dsp.crossfade_ms, 6_000);
+        assert_eq!(dsp.fade_in_play_ms, 240);
+        assert_eq!(dsp.fade_curve, FadeCurve::BassSwapAutomix);
+        assert!(dsp.gapless_album_lock);
+        assert!(dsp.trim_silence);
+        assert_eq!(FadeCurve::all().len(), 3);
     }
 }

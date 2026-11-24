@@ -836,7 +836,7 @@ impl App {
         for (idx, slider_id) in band_ids.iter().enumerate() {
             if let Some(band) = self.eq.bands.get(idx) {
                 self.ui
-                    .slider(*slider_id)
+                    .slider(slider_id)
                     .set_value(cx, f64::from(band.gain_db));
             }
         }
@@ -1443,7 +1443,7 @@ impl AppMain for App {
             self.apply_eq_live(cx);
         }
         for (idx, slider_id) in eq_band_slider_ids().iter().enumerate() {
-            if let Some(val) = self.ui.slider(*slider_id).slided(&actions)
+            if let Some(val) = self.ui.slider(slider_id).slided(&actions)
                 && let Some(band) = self.eq.bands.get_mut(idx)
             {
                 band.gain_db = val as f32;

@@ -157,7 +157,8 @@ function Add-ResourceDirectoryXml {
         [int]$Indent
     )
     $script:dirCounter++
-    $dirId = "MpDir_$($script:dirCounter)"
+    $myIdx = $script:dirCounter
+    $dirId = "MpDir_$myIdx"
     $script:dirIds[$RelPath] = $dirId
     $dirName = Split-Path -Leaf $FullDir
     $pad = ' ' * $Indent
@@ -171,9 +172,9 @@ function Add-ResourceDirectoryXml {
     $script:dirLines.Add("$pad</Directory>")
 
     # Component for this folder (files + HKCU KeyPath + RemoveFolder for ICE38/ICE64 compliance)
-    $compId = "MpComp_$($script:dirCounter)"
+    $compId = "MpComp_$myIdx"
     $guid = New-DeterministicGuid "dir:$RelPath"
-    $regName = "Dir_$($script:dirCounter)"
+    $regName = "Dir_$myIdx"
     $script:refLines.Add("      <ComponentRef Id=`"$compId`" />")
     $script:compLines.Add("    <DirectoryRef Id=`"$dirId`">")
     $script:compLines.Add("      <Component Id=`"$compId`" Guid=`"$guid`" Win64=`"yes`">")

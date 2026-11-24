@@ -1,4 +1,4 @@
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use std::sync::OnceLock;
 
 const NOISE_PATTERNS: &[&str] = &[
@@ -29,6 +29,7 @@ fn noise_matcher() -> &'static AhoCorasick {
     AC.get_or_init(|| {
         AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
+            .match_kind(MatchKind::LeftmostLongest)
             .build(NOISE_PATTERNS)
             .expect("valid static noise patterns")
     })

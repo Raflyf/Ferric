@@ -237,6 +237,12 @@ pub struct AccountSettings {
     #[serde(default = "default_true")]
     pub youtube_music_category_only: bool,
     #[serde(default)]
+    pub youtube_cookie: String,
+    #[serde(default)]
+    pub youtube_sapisid: String,
+    #[serde(default)]
+    pub youtube_visitor_data: String,
+    #[serde(default)]
     pub subsonic_url: String,
     #[serde(default)]
     pub subsonic_username: String,
@@ -264,6 +270,9 @@ impl Default for AccountSettings {
             youtube_refresh_token: String::new(),
             youtube_playlist_count: 0,
             youtube_music_category_only: true,
+            youtube_cookie: String::new(),
+            youtube_sapisid: String::new(),
+            youtube_visitor_data: String::new(),
             subsonic_url: String::new(),
             subsonic_username: String::new(),
             subsonic_password: String::new(),

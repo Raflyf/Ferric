@@ -142,12 +142,12 @@ live_design! {
         }
         <Label> {
             draw_text: { color: #F3EEE3, text_style: { font_size: 19.0 } }
-            text: "Mulai koleksi musik Anda"
+            text: "Discover Music is loading..."
         }
         <Label> {
             width: Fill,
             draw_text: { color: #9E988E, text_style: { font_size: 13.0 } }
-            text: "Pilih folder musik lokal (FLAC, MP3, Opus, WAV), import playlist Spotify / YouTube Music secara instan, atau putar lagu demo bawaan untuk mencoba transisi tanpa jeda (Smooth Fade-In)."
+            text: "Ferric automatically loads playable YouTube Music tracks with zero login. You can also search any song in the top bar, add local lossless folders (FLAC, MP3, Opus, WAV), or sign in with Google."
         }
         <View> {
             width: Fill,
@@ -155,12 +155,12 @@ live_design! {
             margin: { top: 8 }
             flow: Right,
             spacing: 10,
-            empty_add_folder_btn = <Button> {
+            empty_discover_btn = <Button> {
                 width: Fit, height: 38, padding: { left: 16, right: 18 }, spacing: 8,
-                text: "Add Music Folder"
+                text: "Load Discover Music"
                 icon_walk: { width: 15, height: Fit }
                 draw_icon: {
-                    svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z"
+                    svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z"
                     color: #080808
                     color_hover: #080808
                 }
@@ -176,12 +176,12 @@ live_design! {
                     }
                 }
             }
-            empty_spotify_btn = <Button> {
+            empty_add_folder_btn = <Button> {
                 width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
-                text: "Spotify Sync & Login"
+                text: "Add Music Folder"
                 icon_walk: { width: 15, height: Fit }
                 draw_icon: {
-                    svg_path: "M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14C0 17.31 2.69 20 6 20H19C21.76 20 24 17.76 24 15C24 12.36 21.95 10.22 19.35 10.04Z"
+                    svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z"
                     color: #D9541E
                     color_hover: #F3EEE3
                 }
@@ -199,10 +199,10 @@ live_design! {
             }
             empty_youtube_btn = <Button> {
                 width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
-                text: "YouTube Music Sync"
+                text: "Sign in with Google"
                 icon_walk: { width: 15, height: Fit }
                 draw_icon: {
-                    svg_path: "M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"
+                    svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z"
                     color: #D9541E
                     color_hover: #F3EEE3
                 }
@@ -220,7 +220,7 @@ live_design! {
             }
             empty_demo_btn = <Button> {
                 width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
-                text: "Play Demo Tracks"
+                text: "Play Offline Demo"
                 icon_walk: { width: 13, height: Fit }
                 draw_icon: {
                     svg_path: "M8 5V19L19 12L8 5Z"
@@ -259,8 +259,8 @@ live_design! {
 pub enum TrackListAction {
     PlayIndex(usize),
     ToggleLike(usize),
+    LoadDiscoverFeed,
     AddLocalFolder,
-    OpenSpotifyLogin,
     OpenYouTubeLogin,
     LoadDemoSuite,
     None,
@@ -287,12 +287,12 @@ impl Widget for TrackList {
         });
         let list = self.view.portal_list(id!(list));
         for (item_id, item) in list.items_with_actions(&actions) {
-            if item.button(id!(empty_add_folder_btn)).clicked(&actions) {
-                cx.widget_action(uid, &scope.path, TrackListAction::AddLocalFolder);
+            if item.button(id!(empty_discover_btn)).clicked(&actions) {
+                cx.widget_action(uid, &scope.path, TrackListAction::LoadDiscoverFeed);
                 continue;
             }
-            if item.button(id!(empty_spotify_btn)).clicked(&actions) {
-                cx.widget_action(uid, &scope.path, TrackListAction::OpenSpotifyLogin);
+            if item.button(id!(empty_add_folder_btn)).clicked(&actions) {
+                cx.widget_action(uid, &scope.path, TrackListAction::AddLocalFolder);
                 continue;
             }
             if item.button(id!(empty_youtube_btn)).clicked(&actions) {

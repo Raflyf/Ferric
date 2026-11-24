@@ -33,6 +33,35 @@ impl PlayQueue {
         self.tracks.is_empty()
     }
 
+    /// Update a queued track in-place after its online audio stream has been resolved and cached.
+    pub fn update_track_cached_stream(
+        &mut self,
+        track_id: &str,
+        path: std::path::PathBuf,
+        video_id: Option<String>,
+        codec: &str,
+        bitrate_kbps: u32,
+        duration_ms: u64,
+    ) {
+        for track in &mut self.tracks {
+            if track.id == track_id {
+                track.path = Some(path.clone());
+                if let Some(vid) = &video_id {
+                    track.youtube_video_id = Some(vid.clone());
+                }
+                if !codec.is_empty() {
+                    track.codec = codec.to_string();
+                }
+                if bitrate_kbps > 0 {
+                    track.bitrate_kbps = bitrate_kbps;
+                }
+                if duration_ms > 0 && track.duration_ms == 0 {
+                    track.duration_ms = duration_ms;
+                }
+            }
+        }
+    }
+
     pub fn current(&self) -> Option<&Track> {
         let pos = self.cursor?;
         let track_idx = *self.order.get(pos)?;

@@ -7,6 +7,7 @@ pub mod resolver;
 pub mod subsonic;
 pub mod updater;
 pub mod yt_cleaner;
+pub mod ytmusic;
 
 use thiserror::Error;
 

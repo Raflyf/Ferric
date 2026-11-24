@@ -1,46 +1,45 @@
+use crate::google_login::{GoogleLoginOutcome, launch_google_ytm_login_window};
 use crate::shell::{
-    copy_text_to_clipboard, launch_verified_installer, open_allowed_url, open_github_url,
-    open_track_video_clip, win32_close_active_window, win32_is_active_window_maximized,
-    win32_minimize_active_window, win32_toggle_maximize_active_window,
+    copy_text_to_clipboard, launch_verified_installer, open_github_url, open_track_video_clip,
+    win32_close_active_window, win32_is_active_window_maximized, win32_minimize_active_window,
+    win32_toggle_maximize_active_window,
 };
 use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::track_list::{TrackListAction, TrackListScope};
 use crate::widgets::*;
-use crate::{startup_load_demo, startup_page_override};
+use crate::{startup_load_demo, startup_page_override, startup_play_first};
 use ferric_audio::demo_synth::ensure_demo_tracks;
 use ferric_audio::engine::{AudioEngine, EngineCommand};
 use ferric_core::app_data_dir;
 use ferric_core::db::LibraryDb;
 use ferric_core::eq::EqConfig;
 use ferric_core::models::{
-    AccountKind, AccountSettings, FadeCurve, PlaybackDspSettings, Playlist, RepeatMode,
-    SessionResumeState, Track, TrackSource, UpdateSettings, format_duration_ms,
-    parse_playlist_import_text,
+    AccountSettings, FadeCurve, PlaybackDspSettings, Playlist, RepeatMode, SessionResumeState,
+    Track, TrackSource, UpdateSettings, format_duration_ms, parse_playlist_import_text,
 };
 use ferric_core::queue::PlayQueue;
 use ferric_core::theme::{LiquidGlassPreset, ThemeConfig, hex_to_rgba_f32};
 use ferric_providers::autoeq::search_autoeq_profiles;
 use ferric_providers::local_scanner::scan_local_folder;
 use ferric_providers::lyrics::{SyncedLyrics, fetch_best_free_lyrics};
-use ferric_providers::oauth::{
-    CloudSyncReport, DEFAULT_OAUTH_CALLBACK_PATH, DEFAULT_OAUTH_CALLBACK_PORT, OAuthTokens,
-    bind_loopback_callback, generate_pkce_pair, google_authorize_url, google_exchange_code,
-    spotify_authorize_url, spotify_exchange_code, sync_spotify_catalog, sync_youtube_catalog,
-};
 use ferric_providers::public_sync::{
     import_spotify_public_url, import_youtube_public_url, parse_spotify_target,
-    parse_youtube_target, search_youtube_public,
+    parse_youtube_target,
 };
 use ferric_providers::subsonic::{SubsonicCredentials, sync_subsonic_catalog};
 use ferric_providers::updater::{
     DownloadEvent, ReleaseInfo, check_latest_release, download_verified_installer,
     format_check_status, release_page_url,
 };
+use ferric_providers::ytmusic::{
+    CachedAudioStream, YtmAccountLibrary, YtmHomeFeed, YtmSession, fetch_account_library,
+    fetch_home_feed, resolve_and_cache_audio_stream, resolve_best_video_id_for_track,
+    search_music as ytm_search_music,
+};
 use ferric_sync::{
     ActiveSpeakerLease, LanDiscoveryBeacon, PairingPayload, QrMatrix, detect_local_lan_ip,
 };
 use makepad_widgets::*;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -403,7 +402,7 @@ live_design! {
                                 height: Fill,
                                 align: { x: 0.5, y: 0.5 }
                                 search_bar_wrap = <View> {
-                                    width: 470,
+                                    width: 520,
                                     height: 36,
                                     padding: { left: 12, right: 6 }
                                     flow: Right,
@@ -429,7 +428,7 @@ live_design! {
                                     search_input = <TextInput> {
                                         width: Fill,
                                         height: 30,
-                                        empty_text: "Search library or paste Spotify / YouTube link..."
+                                        empty_text: "Search YouTube Music, filter library, or paste Spotify link..."
                                         draw_bg: {
                                             fn pixel(self) -> vec4 {
                                                 return vec4(0.0, 0.0, 0.0, 0.0);
@@ -442,6 +441,12 @@ live_design! {
                                         }
                                         draw_cursor: { color: #D9541E }
                                     }
+                                    search_online_btn = <FerricBtn> {
+                                        height: 24,
+                                        padding: { left: 8, right: 8 }
+                                        text: "Online"
+                                        draw_text: { color: #D9541E, color_hover: #F3EEE3, text_style: { font_size: 10.5 } }
+                                    }
                                     cmdk_btn = <FerricBtn> {
                                         height: 24,
                                         padding: { left: 8, right: 8 }
@@ -451,7 +456,7 @@ live_design! {
                                 }
                             }
 
-                            // Right Quick Account Buttons & Custom Vector Window Controls
+                            // Right Quick Account Pill & Custom Vector Window Controls
                             <View> {
                                 width: Fit,
                                 height: Fill,
@@ -466,21 +471,12 @@ live_design! {
                                     text: "Update"
                                     draw_text: { text_style: { font_size: 11.0 } }
                                 }
-                                top_spotify_btn = <FerricBtn> {
+                                top_account_btn = <FerricBtn> {
                                     height: 30,
-                                    padding: { left: 10, right: 11 }
-                                    text: "Spotify"
+                                    padding: { left: 10, right: 12 }
+                                    text: "Guest · Sign in"
                                     draw_icon: {
-                                        svg_path: "M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14C0 17.31 2.69 20 6 20H19C21.76 20 24 17.76 24 15C24 12.36 21.95 10.22 19.35 10.04Z"
-                                        color: #D9541E
-                                    }
-                                }
-                                top_youtube_btn = <FerricBtn> {
-                                    height: 30,
-                                    padding: { left: 10, right: 11 }
-                                    text: "YouTube"
-                                    draw_icon: {
-                                        svg_path: "M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"
+                                        svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z"
                                         color: #D9541E
                                     }
                                 }
@@ -641,18 +637,18 @@ live_design! {
 
                                         <FerricCard> {
                                             width: Fill, flow: Down, spacing: 10,
-                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Local Lossless Library" }
-                                            <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Scan FLAC, WAV, MP3, Opus, and OGG folders directly with zero latency." }
+                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Instant Music (Guest Mode)" }
+                                            <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Play and search YouTube Music immediately without signing in, just like Sonora and Auralys." }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
-                                                home_add_folder_btn = <FerricAccentPill> {
+                                                home_discover_btn = <FerricAccentPill> {
                                                     height: 34,
-                                                    text: "Add Folder"
-                                                    draw_icon: { svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z" }
+                                                    text: "Refresh Discover"
+                                                    draw_icon: { svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z" }
                                                 }
                                                 home_demo_btn = <FerricBtn> {
                                                     height: 34,
-                                                    text: "Play Demo"
+                                                    text: "Offline Demo"
                                                     draw_icon: { svg_path: "M8 5V19L19 12L8 5Z", color: #D9541E }
                                                 }
                                             }
@@ -660,35 +656,53 @@ live_design! {
 
                                         <FerricCard> {
                                             width: Fill, flow: Down, spacing: 10,
-                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Spotify & YouTube Sync" }
-                                            <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Import any public Spotify or YouTube playlist instantly, or sign in via OAuth PKCE." }
+                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "1-Click Google Sign-In" }
+                                            <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Optional regular Google login to sync Liked Songs & Playlists. Zero API keys or developer setup." }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
-                                                home_spotify_btn = <FerricBtn> { height: 34, text: "Spotify Sync" }
-                                                home_youtube_btn = <FerricBtn> { height: 34, text: "YouTube Sync" }
+                                                home_google_btn = <FerricBtn> {
+                                                    height: 34,
+                                                    text: "Sign in with Google"
+                                                    draw_icon: { svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z", color: #D9541E }
+                                                }
+                                                home_accounts_btn = <FerricBtn> { height: 34, text: "Spotify Link" }
                                             }
                                         }
 
                                         <FerricCard> {
                                             width: Fill, flow: Down, spacing: 10,
-                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Seamless Fade-In Engine" }
+                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Local Lossless & Fade-In" }
                                             home_dsp_lbl = <Label> { width: Fill, draw_text: { color: #D9541E, text_style: { font_size: 12.5 } }, text: "6.0s Bass-Swap Automix · 240ms Play Fade-In" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
-                                                home_fade_btn = <FerricBtn> { height: 34, text: "Tune Fade-In" }
-                                                home_eq_btn = <FerricBtn> { height: 34, text: "10-Band EQ" }
+                                                home_add_folder_btn = <FerricBtn> { height: 34, text: "Add Folder" }
+                                                home_fade_btn = <FerricBtn> { height: 34, text: "Fade-In" }
+                                                home_eq_btn = <FerricBtn> { height: 34, text: "EQ" }
                                             }
                                         }
                                     }
 
-                                    // Quick Picks
+                                    // Discover & Quick Picks (Auto-Loaded Instant Playable Songs)
                                     <FerricCard> {
                                         flow: Down, spacing: 8,
-                                        <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }, text: "Quick Picks" }
-                                        recent_btn_0 = <FerricPlaylistBtn> { height: 38, text: "Click 'Play Demo' above to experience Seamless Fade-In right now" }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }, text: "Discover & Quick Picks" }
+                                            home_play_discover_btn = <FerricAccentPill> {
+                                                height: 30,
+                                                padding: { left: 12, right: 14 }
+                                                text: "Play All"
+                                                draw_icon: { svg_path: "M8 5V19L19 12L8 5Z" }
+                                            }
+                                        }
+                                        recent_btn_0 = <FerricPlaylistBtn> { height: 38, text: "Loading Discover Music from YouTube Music..." }
                                         recent_btn_1 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
                                         recent_btn_2 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
                                         recent_btn_3 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
+                                        recent_btn_4 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
+                                        recent_btn_5 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
+                                        recent_btn_6 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
+                                        recent_btn_7 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
                                     }
                                 }
 
@@ -751,10 +765,10 @@ live_design! {
                                                     text: "Add Folder"
                                                     draw_icon: { svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z", color: #D9541E }
                                                 }
-                                                demo_suite_btn = <FerricBtn> {
+                                                discover_refresh_btn = <FerricBtn> {
                                                     height: 36,
-                                                    text: "Play Demo"
-                                                    draw_icon: { svg_path: "M8 5V19L19 12L8 5Z", color: #D9541E }
+                                                    text: "Discover"
+                                                    draw_icon: { svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z", color: #D9541E }
                                                 }
                                             }
                                         }
@@ -1212,7 +1226,7 @@ live_design! {
                                     }
                                 }
 
-                                // PAGE 8: ACCOUNTS, INSTANT ZERO-KEY SYNC & OAUTH 2.0 PKCE LOGIN
+                                // PAGE 8: SIMPLE ACCOUNTS, GUEST MODE & INSTANT LINK IMPORT (SONORA / AURALYS PARITY)
                                 page_accounts = <ScrollYView> {
                                     visible: false,
                                     width: Fill,
@@ -1221,35 +1235,98 @@ live_design! {
                                     flow: Down,
                                     spacing: 14,
 
-                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 22.0 } }, text: "Spotify, YouTube Music & Cloud Accounts" }
+                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 22.0 } }, text: "Accounts & Instant Streaming" }
 
                                     oauth_status_lbl = <Label> {
                                         width: Fill,
                                         draw_text: { color: #D9541E, text_style: { font_size: 12.5 } }
-                                        text: "Ready: Paste any public Spotify/YouTube link for instant zero-key sync, or sign in via Official OAuth PKCE below."
+                                        text: "Guest Mode Active — Play and search YouTube Music right away without signing in, or connect Google in 1 click below."
                                     }
 
-                                    // TIER 1: INSTANT ZERO-KEY SPOTIFY & YOUTUBE IMPORT / SEARCH (WORKS IMMEDIATELY!)
+                                    // CARD 1: GUEST MODE (ACTIVE IMMEDIATELY WITHOUT ACCOUNT)
                                     <FerricCard> {
                                         flow: Down, spacing: 10,
-                                        <Label> {
-                                            draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
-                                            text: "Instant Sync — Spotify & YouTube Music (No API Key Required)"
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
+                                                text: "Guest Mode — Instant YouTube Music (No Login Required)"
+                                            }
+                                            <Label> {
+                                                draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }
+                                                text: "Active"
+                                            }
                                         }
                                         <Label> {
                                             width: Fill,
                                             draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }
-                                            text: "Paste any public Spotify playlist/album/track URL, YouTube/YouTube Music playlist URL, or type an artist/song name to search YouTube immediately."
+                                            text: "Just like Sonora and Auralys, Ferric automatically loads playable Quick Picks and supports global music search from the top search bar with zero login and zero API key."
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, spacing: 8,
+                                            guest_refresh_btn = <FerricAccentPill> {
+                                                height: 34,
+                                                text: "Refresh Discover Music"
+                                                draw_icon: { svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z" }
+                                            }
+                                            guest_go_library_btn = <FerricBtn> { height: 34, text: "Open Library" }
+                                        }
+                                    }
+
+                                    // CARD 2: YOUTUBE MUSIC 1-CLICK GOOGLE SIGN-IN (SONORA STYLE — ZERO CLIENT ID!)
+                                    <FerricCard> {
+                                        flow: Down, spacing: 10,
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
+                                                text: "YouTube Music — Sign in with Google (Optional)"
+                                            }
+                                            yt_state_lbl = <Label> {
+                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
+                                                text: "Guest Mode (Not signed in)"
+                                            }
+                                        }
+                                        <Label> {
+                                            width: Fill,
+                                            draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }
+                                            text: "Click 'Sign in with Google' to log into your normal Google account in a native window and sync your Liked Songs, Playlists, and personalized Home mix. No developer console or Client ID required."
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
+                                            yt_login_btn = <FerricAccentPill> {
+                                                height: 36,
+                                                text: "Sign in with Google"
+                                                draw_icon: { svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z" }
+                                            }
+                                            yt_sync_btn = <FerricBtn> { height: 36, text: "Sync My Library" }
+                                            yt_logout_btn = <FerricBtn> { height: 36, text: "Sign Out" }
+                                        }
+                                    }
+
+                                    // CARD 3: INSTANT SPOTIFY & YOUTUBE LINK IMPORT (AUTO-PLAYS VIA STREAM MATCHING)
+                                    <FerricCard> {
+                                        flow: Down, spacing: 10,
+                                        <Label> {
+                                            draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
+                                            text: "Spotify & YouTube Link Import (Zero API Key)"
+                                        }
+                                        <Label> {
+                                            width: Fill,
+                                            draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }
+                                            text: "Paste any public Spotify playlist/album/track link, YouTube playlist URL, or type a song/artist to search. Spotify tracks automatically stream via YouTube Music or your local lossless files."
                                         }
                                         quick_sync_input = <FerricInput> {
                                             empty_text: "https://open.spotify.com/playlist/... or https://music.youtube.com/playlist?list=... or song name"
                                         }
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, spacing: 8,
-                                            quick_spotify_btn = <FerricAccentPill> {
+                                            quick_spotify_btn = <FerricBtn> {
                                                 height: 34,
                                                 text: "Import Spotify Link"
-                                                draw_icon: { svg_path: "M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14C0 17.31 2.69 20 6 20H19C21.76 20 24 17.76 24 15C24 12.36 21.95 10.22 19.35 10.04Z" }
+                                                draw_icon: { svg_path: "M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14C0 17.31 2.69 20 6 20H19C21.76 20 24 17.76 24 15C24 12.36 21.95 10.22 19.35 10.04Z", color: #D9541E }
                                             }
                                             quick_youtube_btn = <FerricBtn> {
                                                 height: 34,
@@ -1258,79 +1335,13 @@ live_design! {
                                             }
                                             quick_yt_search_btn = <FerricBtn> {
                                                 height: 34,
-                                                text: "Search YouTube"
+                                                text: "Search Online"
                                                 draw_icon: { svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z", color: #D9541E }
                                             }
                                         }
                                     }
 
-                                    // TIER 2A: SPOTIFY OFFICIAL OAUTH 2.0 PKCE
-                                    <FerricCard> {
-                                        flow: Down, spacing: 10,
-                                        <View> {
-                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                            <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
-                                                text: "Spotify Account Sign-In (Private Playlists & Liked Songs — OAuth 2.0 PKCE)"
-                                            }
-                                            spotify_state_lbl = <Label> {
-                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                text: "Not signed in"
-                                            }
-                                        }
-                                        <Label> {
-                                            width: Fill,
-                                            draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                            text: "Add Redirect URI http://127.0.0.1:43824/callback in Spotify Developer Dashboard, paste Client ID (or set FERRIC_SPOTIFY_CLIENT_ID), then sign in via browser."
-                                        }
-                                        spotify_id_input = <FerricInput> {
-                                            empty_text: "Spotify Developer Client ID (optional if using Instant Link above)"
-                                        }
-                                        <View> {
-                                            width: Fill, height: Fit, flow: Right, spacing: 8,
-                                            spotify_login_btn = <FerricAccentPill> { height: 34, text: "Sign in with Spotify" }
-                                            spotify_sync_btn = <FerricBtn> { height: 34, text: "Sync Playlists" }
-                                            copy_redirect_btn = <FerricBtn> { height: 34, text: "Copy Redirect URI" }
-                                            open_spotify_dev_btn = <FerricBtn> { height: 34, text: "Spotify Portal" }
-                                            spotify_logout_btn = <FerricBtn> { height: 34, text: "Disconnect" }
-                                        }
-                                    }
-
-                                    // TIER 2B: YOUTUBE & YOUTUBE MUSIC OFFICIAL GOOGLE OAUTH 2.0 PKCE
-                                    <FerricCard> {
-                                        flow: Down, spacing: 10,
-                                        <View> {
-                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                            <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
-                                                text: "YouTube & YouTube Music Sign-In (Private Playlists — Google OAuth PKCE)"
-                                            }
-                                            yt_state_lbl = <Label> {
-                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                text: "Not signed in"
-                                            }
-                                        }
-                                        <View> {
-                                            width: Fill, height: Fit, flow: Right, spacing: 10,
-                                            yt_id_input = <FerricInput> { empty_text: "Google OAuth Client ID (.apps.googleusercontent.com)" }
-                                            yt_secret_input = <FerricInput> { empty_text: "Client Secret (optional for PKCE)" }
-                                        }
-                                        <View> {
-                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
-                                            yt_login_btn = <FerricAccentPill> { height: 34, text: "Sign in with Google" }
-                                            yt_sync_btn = <FerricBtn> { height: 34, text: "Sync YouTube" }
-                                            open_google_dev_btn = <FerricBtn> { height: 34, text: "Google Console" }
-                                            yt_logout_btn = <FerricBtn> { height: 34, text: "Disconnect" }
-                                            oauth_cancel_btn = <FerricBtn> { visible: false, height: 34, text: "Cancel Login" }
-                                            <View> { width: Fill, height: 1 }
-                                            <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Music Only" }
-                                            yt_cat_toggle = <FerricToggle> { is_on: true }
-                                        }
-                                    }
-
-                                    // TIER 3: OPENSUBSONIC / NAVIDROME & LOCAL LOSSLESS MATCHER
+                                    // CARD 4: OPENSUBSONIC / NAVIDROME & LOCAL LOSSLESS MATCHER
                                     <FerricCard> {
                                         flow: Down, spacing: 10,
                                         <Label> {
@@ -1721,21 +1732,36 @@ enum BgMessage {
         lrc_raw: String,
         parsed: SyncedLyrics,
     },
+    YtmHomeLoaded(Box<YtmHomeFeed>),
+    YtmHomeFailed(String),
+    YtmSearchCompleted {
+        query: String,
+        tracks: Vec<Track>,
+    },
+    YtmSearchFailed {
+        query: String,
+        error: String,
+    },
+    GoogleLoginResult(GoogleLoginOutcome),
+    YtmAccountSynced(Box<YtmAccountLibrary>),
+    YtmAccountSyncFailed(String),
+    StreamReady {
+        track_id: String,
+        video_id: String,
+        stream: CachedAudioStream,
+        auto_play: bool,
+    },
+    StreamFailed {
+        track_id: String,
+        error: String,
+        auto_play: bool,
+    },
     PublicSyncCompleted {
         provider: &'static str,
         payload: Box<(Playlist, Vec<Track>)>,
     },
     PublicSyncFailed {
         provider: &'static str,
-        error: String,
-    },
-    OAuthCompleted {
-        kind: AccountKind,
-        tokens: OAuthTokens,
-        report: Box<CloudSyncReport>,
-    },
-    OAuthFailed {
-        kind: AccountKind,
         error: String,
     },
     SubsonicSynced {
@@ -1789,7 +1815,13 @@ pub struct App {
     #[rust]
     update_cancel: Option<Arc<AtomicBool>>,
     #[rust]
-    oauth_cancel: Option<Arc<AtomicBool>>,
+    pending_stream_track_id: Option<String>,
+    #[rust]
+    prefetch_stream_track_id: Option<String>,
+    #[rust]
+    ytm_signed_out_recently: bool,
+    #[rust]
+    startup_auto_played: bool,
     #[rust]
     lease: Option<ActiveSpeakerLease>,
     #[rust]
@@ -1926,6 +1958,16 @@ impl App {
 
         if startup_load_demo() {
             self.load_and_play_demo_suite(cx);
+        } else {
+            self.spawn_ytm_home_fetch(cx);
+            if startup_play_first() && !self.filtered_tracks.is_empty() {
+                self.startup_auto_played = true;
+                if let Some(first) = self.filtered_tracks.first().cloned() {
+                    self.queue
+                        .set_tracks((*self.filtered_tracks).clone(), Some(0));
+                    self.play_track(cx, first);
+                }
+            }
         }
 
         if let Some(page_arg) = startup_page_override() {
@@ -2346,18 +2388,6 @@ impl App {
 
         // Accounts & Updates
         self.ui
-            .text_input(id!(spotify_id_input))
-            .set_text(cx, &self.accounts.spotify_client_id);
-        self.ui
-            .text_input(id!(yt_id_input))
-            .set_text(cx, &self.accounts.youtube_client_id);
-        self.ui
-            .text_input(id!(yt_secret_input))
-            .set_text(cx, &self.accounts.youtube_client_secret);
-        self.ui
-            .ferric_toggle(id!(yt_cat_toggle))
-            .set_active(cx, self.accounts.youtube_music_category_only);
-        self.ui
             .text_input(id!(sub_url_input))
             .set_text(cx, &self.accounts.subsonic_url);
         self.ui
@@ -2517,37 +2547,34 @@ impl App {
             ),
         );
 
-        let sp_ok = self.accounts.spotify_connected;
-        let yt_ok = self.accounts.youtube_connected;
-        self.ui.button(id!(top_spotify_btn)).apply_over(
-            cx,
-            live! { draw_bg: { active: (if sp_ok { 1.0 } else { 0.0 }) } },
-        );
-        self.ui.button(id!(top_youtube_btn)).apply_over(
+        let yt_ok = self.accounts.youtube_connected && !self.accounts.youtube_sapisid.is_empty();
+        self.ui.button(id!(top_account_btn)).apply_over(
             cx,
             live! { draw_bg: { active: (if yt_ok { 1.0 } else { 0.0 }) } },
         );
-
-        self.ui.label(id!(spotify_state_lbl)).set_text(
-            cx,
-            &if sp_ok {
-                format!(
-                    "Connected as {} ({} playlists)",
-                    self.accounts.spotify_user_name, self.accounts.spotify_playlist_count
-                )
+        let top_acct_label = if yt_ok {
+            let name = self.accounts.youtube_channel_name.trim();
+            if name.is_empty() {
+                "Google Account".to_string()
             } else {
-                "Not signed in".to_string()
-            },
-        );
+                name.to_string()
+            }
+        } else {
+            "Guest · Sign in".to_string()
+        };
+        self.ui
+            .button(id!(top_account_btn))
+            .set_text(cx, &top_acct_label);
+
         self.ui.label(id!(yt_state_lbl)).set_text(
             cx,
             &if yt_ok {
                 format!(
-                    "Connected as {} ({} playlists)",
+                    "Signed in as {} ({} playlists)",
                     self.accounts.youtube_channel_name, self.accounts.youtube_playlist_count
                 )
             } else {
-                "Not signed in".to_string()
+                "Guest Mode (Optional)".to_string()
             },
         );
 
@@ -2575,42 +2602,34 @@ impl App {
             }
         }
 
-        // Home Quick Picks
+        // Home Discover & Quick Picks (8 instant playable tracks)
         let rec_slots = [
             id!(recent_btn_0),
             id!(recent_btn_1),
             id!(recent_btn_2),
             id!(recent_btn_3),
+            id!(recent_btn_4),
+            id!(recent_btn_5),
+            id!(recent_btn_6),
+            id!(recent_btn_7),
         ];
-        let mut quick_tracks: Vec<&Track> = self
-            .session_state
-            .recent_track_ids
-            .iter()
-            .filter_map(|id| self.all_tracks.iter().find(|t| &t.id == id))
-            .take(4)
-            .collect();
-        if quick_tracks.is_empty() {
-            quick_tracks = self.all_tracks.iter().take(4).collect();
-        }
+        let quick_tracks = self.home_quick_picks();
         for (i, btn_id) in rec_slots.into_iter().enumerate() {
             if let Some(t) = quick_tracks.get(i) {
                 self.ui.button(btn_id).set_visible(cx, true);
-                self.ui.button(btn_id).set_text(
-                    cx,
-                    &format!(
-                        "{}. {} — {} ({})",
-                        i + 1,
-                        t.title,
-                        t.artist,
-                        format_duration_ms(t.duration_ms)
-                    ),
-                );
+                let dur = if t.duration_ms > 0 {
+                    format!(" ({})", format_duration_ms(t.duration_ms))
+                } else {
+                    String::new()
+                };
+                self.ui
+                    .button(btn_id)
+                    .set_text(cx, &format!("{}. {} — {}{}", i + 1, t.title, t.artist, dur));
             } else if i == 0 {
                 self.ui.button(btn_id).set_visible(cx, true);
-                self.ui.button(btn_id).set_text(
-                    cx,
-                    "Click 'Play Demo' above to experience Seamless Fade-In right now",
-                );
+                self.ui
+                    .button(btn_id)
+                    .set_text(cx, "Loading Discover Music from YouTube Music...");
             } else {
                 self.ui.button(btn_id).set_visible(cx, false);
             }
@@ -2637,6 +2656,42 @@ impl App {
         }
     }
 
+    fn home_quick_picks(&self) -> Vec<Track> {
+        let mut out: Vec<Track> = self
+            .session_state
+            .recent_track_ids
+            .iter()
+            .filter_map(|id| self.all_tracks.iter().find(|t| &t.id == id).cloned())
+            .take(8)
+            .collect();
+        if out.len() < 8 {
+            for t in &self.all_tracks {
+                if out.len() >= 8 {
+                    break;
+                }
+                if !out.iter().any(|existing| existing.id == t.id) {
+                    out.push(t.clone());
+                }
+            }
+        }
+        out
+    }
+
+    fn current_ytm_session(&self) -> YtmSession {
+        if self.accounts.youtube_connected
+            && !self.accounts.youtube_cookie.trim().is_empty()
+            && !self.accounts.youtube_sapisid.trim().is_empty()
+        {
+            YtmSession {
+                visitor_data: self.accounts.youtube_visitor_data.clone(),
+                cookie: self.accounts.youtube_cookie.clone(),
+                sapisid: self.accounts.youtube_sapisid.clone(),
+            }
+        } else {
+            YtmSession::guest(self.accounts.youtube_visitor_data.clone())
+        }
+    }
+
     fn sync_next_deck_to_engine(&self) {
         let Some(audio) = &self.audio else {
             return;
@@ -2647,6 +2702,7 @@ impl App {
             self.queue.peek_upcoming(1).into_iter().next()
         };
         if let Some(next_track) = next_opt {
+            let valid_path = next_track.path.as_ref().filter(|p| p.is_file()).cloned();
             let same_album = self.queue.current().is_some_and(|cur| {
                 !cur.album.is_empty()
                     && cur.album != "Unknown Album"
@@ -2654,7 +2710,7 @@ impl App {
                     && cur.id != next_track.id
             });
             audio.send(EngineCommand::QueueNextTrack {
-                path: next_track.path.clone(),
+                path: valid_path,
                 same_album_consecutive: same_album,
             });
         } else {
@@ -2665,27 +2721,122 @@ impl App {
         }
     }
 
-    fn play_track(&mut self, cx: &mut Cx, track: Track) {
-        let Some(path) = track.path.clone() else {
-            self.switch_main_page(cx, live_id!(page_accounts));
-            self.ui.label(id!(oauth_status_lbl)).set_text(
-                cx,
-                &format!(
-                    "'{}' is a cloud catalog entry. Add your local music folder and click 'Match Cloud Songs to Local Files', or open its official video clip in Now Playing.",
-                    track.title
-                ),
-            );
+    fn prefetch_next_online_track(&mut self) {
+        let Some(next_track) = self.queue.peek_upcoming(1).into_iter().next().cloned() else {
             return;
         };
-
-        if let Some(audio) = &self.audio {
-            audio.send(EngineCommand::LoadAndPlayTrack {
-                path,
-                replay_gain_db: track.replay_gain_db,
-            });
+        if next_track.path.as_ref().is_some_and(|p| p.is_file()) {
+            return;
         }
-        self.sync_next_deck_to_engine();
-        self.update_now_playing_metadata(cx, &track);
+        if self.prefetch_stream_track_id.as_deref() == Some(next_track.id.as_str())
+            || self.pending_stream_track_id.as_deref() == Some(next_track.id.as_str())
+        {
+            return;
+        }
+        if next_track.youtube_video_id.is_none()
+            && next_track.source != TrackSource::Spotify
+            && next_track.source != TrackSource::YouTubeMusic
+        {
+            return;
+        }
+        self.prefetch_stream_track_id = Some(next_track.id.clone());
+        self.spawn_stream_resolve(next_track, false);
+    }
+
+    fn spawn_stream_resolve(&self, track: Track, auto_play: bool) {
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        let session = self.current_ytm_session();
+        let cache_dir = app_data_dir().join("stream_cache");
+        let track_id = track.id.clone();
+        let artist = track.artist.clone();
+        let title = track.title.clone();
+        let existing_vid = track.youtube_video_id.clone();
+
+        thread::spawn(move || {
+            let outcome: Result<(String, CachedAudioStream), String> = (|| {
+                let vid = match existing_vid {
+                    Some(v) if !v.trim().is_empty() => v,
+                    _ => resolve_best_video_id_for_track(&session, &artist, &title)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| {
+                            format!("No matching YouTube Music stream found for '{title}'")
+                        })?,
+                };
+                let stream = resolve_and_cache_audio_stream(&vid, &session, &cache_dir)
+                    .map_err(|e| e.to_string())?;
+                Ok((vid, stream))
+            })();
+
+            match outcome {
+                Ok((video_id, stream)) => {
+                    let _ = tx.send(BgMessage::StreamReady {
+                        track_id,
+                        video_id,
+                        stream,
+                        auto_play,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(BgMessage::StreamFailed {
+                        track_id,
+                        error,
+                        auto_play,
+                    });
+                }
+            }
+        });
+    }
+
+    fn play_track(&mut self, cx: &mut Cx, track: Track) {
+        if let Some(path) = track.path.as_ref().filter(|p| p.is_file()).cloned() {
+            self.pending_stream_track_id = None;
+            if let Some(audio) = &self.audio {
+                audio.send(EngineCommand::LoadAndPlayTrack {
+                    path,
+                    replay_gain_db: track.replay_gain_db,
+                });
+            }
+            self.sync_next_deck_to_engine();
+            self.prefetch_next_online_track();
+            self.update_now_playing_metadata(cx, &track);
+            return;
+        }
+
+        if track.youtube_video_id.is_some()
+            || matches!(
+                track.source,
+                TrackSource::YouTubeMusic | TrackSource::Spotify
+            )
+        {
+            self.pending_stream_track_id = Some(track.id.clone());
+            self.ui.label(id!(np_title_lbl)).set_text(cx, &track.title);
+            self.ui
+                .label(id!(np_artist_lbl))
+                .set_text(cx, &format!("{} · Buffering stream...", track.artist));
+            self.ui
+                .label(id!(np_stage_title_lbl))
+                .set_text(cx, &track.title);
+            self.ui
+                .label(id!(np_stage_artist_lbl))
+                .set_text(cx, &format!("{} · Loading audio stream...", track.artist));
+            self.ui
+                .button(id!(codec_pill_btn))
+                .set_text(cx, "Buffering...");
+            self.ui.redraw(cx);
+            self.spawn_stream_resolve(track, true);
+            return;
+        }
+
+        self.switch_main_page(cx, live_id!(page_accounts));
+        self.ui.label(id!(oauth_status_lbl)).set_text(
+            cx,
+            &format!(
+                "'{}' has no local audio file. Add your local folder or search it on YouTube Music.",
+                track.title
+            ),
+        );
     }
 
     fn update_now_playing_metadata(&mut self, cx: &mut Cx, track: &Track) {
@@ -2866,6 +3017,96 @@ impl App {
         });
     }
 
+    fn spawn_ytm_home_fetch(&self, cx: &mut Cx) {
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        let session = self.current_ytm_session();
+        if self.all_tracks.is_empty() {
+            self.ui
+                .label(id!(library_sub_lbl))
+                .set_text(cx, "Loading Discover Music from YouTube Music...");
+        }
+        thread::spawn(move || match fetch_home_feed(&session) {
+            Ok(feed) => {
+                let _ = tx.send(BgMessage::YtmHomeLoaded(Box::new(feed)));
+            }
+            Err(err) => {
+                let _ = tx.send(BgMessage::YtmHomeFailed(err.to_string()));
+            }
+        });
+    }
+
+    fn spawn_ytm_search(&self, cx: &mut Cx, raw_query: String) {
+        let query = raw_query.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        let session = self.current_ytm_session();
+        self.ui
+            .label(id!(library_sub_lbl))
+            .set_text(cx, &format!("Searching YouTube Music for '{query}'..."));
+        self.ui
+            .label(id!(oauth_status_lbl))
+            .set_text(cx, &format!("Searching YouTube Music for '{query}'..."));
+
+        thread::spawn(move || match ytm_search_music(&session, &query, 25) {
+            Ok(tracks) => {
+                let _ = tx.send(BgMessage::YtmSearchCompleted { query, tracks });
+            }
+            Err(err) => {
+                let _ = tx.send(BgMessage::YtmSearchFailed {
+                    query,
+                    error: err.to_string(),
+                });
+            }
+        });
+    }
+
+    fn start_google_webview_login(&mut self, cx: &mut Cx) {
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.ui.label(id!(oauth_status_lbl)).set_text(
+            cx,
+            "Opening Google sign-in window... Sign in with your normal Google account and Ferric will connect automatically.",
+        );
+        let profile_dir = app_data_dir().join("webview2_profile");
+        let clear_cookies = self.ytm_signed_out_recently;
+        launch_google_ytm_login_window(profile_dir, clear_cookies, move |outcome| {
+            let _ = tx.send(BgMessage::GoogleLoginResult(outcome));
+        });
+    }
+
+    fn sync_ytm_signed_in_library(&self, cx: &mut Cx) {
+        let session = self.current_ytm_session();
+        if !session.is_signed_in() {
+            self.ui.label(id!(oauth_status_lbl)).set_text(
+                cx,
+                "Click 'Sign in with Google' first to sync your personal Liked Songs and Playlists.",
+            );
+            return;
+        }
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.ui.label(id!(oauth_status_lbl)).set_text(
+            cx,
+            "Syncing your Google / YouTube Music Liked Songs, Playlists, and Home mix...",
+        );
+        thread::spawn(move || match fetch_account_library(&session) {
+            Ok(lib) => {
+                let _ = tx.send(BgMessage::YtmAccountSynced(Box::new(lib)));
+            }
+            Err(err) => {
+                let _ = tx.send(BgMessage::YtmAccountSyncFailed(err.to_string()));
+            }
+        });
+    }
+
     fn start_public_sync(&self, cx: &mut Cx, mode: &'static str, raw_input: String) {
         let trimmed = raw_input.trim().to_string();
         if trimmed.is_empty() {
@@ -2875,28 +3116,21 @@ impl App {
             );
             return;
         }
+        if mode == "YouTube Search" {
+            self.spawn_ytm_search(cx, trimmed);
+            return;
+        }
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
         self.ui
             .label(id!(oauth_status_lbl))
-            .set_text(cx, &format!("Fetching {mode} metadata..."));
+            .set_text(cx, &format!("Importing {mode} link..."));
 
         thread::spawn(move || {
             let result = match mode {
                 "Spotify" => import_spotify_public_url(&trimmed),
-                "YouTube" => import_youtube_public_url(&trimmed),
-                _ => search_youtube_public(&trimmed, 25).map(|tracks| {
-                    let pl = Playlist {
-                        id: format!("yt:search:{}", trimmed.to_ascii_lowercase()),
-                        name: format!("YouTube: {trimmed}"),
-                        source: TrackSource::YouTubeMusic,
-                        etag: None,
-                        track_count: tracks.len(),
-                        description: "Instant YouTube Music Search".to_string(),
-                    };
-                    (pl, tracks)
-                }),
+                _ => import_youtube_public_url(&trimmed),
             };
             match result {
                 Ok(pair) => {
@@ -2908,193 +3142,6 @@ impl App {
                 Err(err) => {
                     let _ = tx.send(BgMessage::PublicSyncFailed {
                         provider: mode,
-                        error: err.to_string(),
-                    });
-                }
-            }
-        });
-    }
-
-    fn start_oauth_login(&mut self, cx: &mut Cx, kind: AccountKind) {
-        let mut spotify_id = self
-            .ui
-            .text_input(id!(spotify_id_input))
-            .text()
-            .trim()
-            .to_string();
-        if spotify_id.is_empty()
-            && let Ok(env_id) = std::env::var("FERRIC_SPOTIFY_CLIENT_ID")
-        {
-            spotify_id = env_id.trim().to_string();
-        }
-        let mut yt_id = self
-            .ui
-            .text_input(id!(yt_id_input))
-            .text()
-            .trim()
-            .to_string();
-        if yt_id.is_empty()
-            && let Ok(env_id) = std::env::var("FERRIC_GOOGLE_CLIENT_ID")
-        {
-            yt_id = env_id.trim().to_string();
-        }
-        let yt_secret = self
-            .ui
-            .text_input(id!(yt_secret_input))
-            .text()
-            .trim()
-            .to_string();
-
-        self.accounts.spotify_client_id = spotify_id.clone();
-        self.accounts.youtube_client_id = yt_id.clone();
-        self.accounts.youtube_client_secret = yt_secret.clone();
-        if let Some(db) = &self.db {
-            let _ = db.save_accounts(&self.accounts);
-        }
-
-        let client_id = match kind {
-            AccountKind::Spotify => spotify_id,
-            AccountKind::YouTubeMusic => yt_id,
-        };
-        if client_id.is_empty() {
-            self.ui.label(id!(oauth_status_lbl)).set_text(
-                cx,
-                "For private OAuth login, paste a free Developer Client ID (or use Instant Sync above with zero keys!).",
-            );
-            return;
-        }
-
-        if let Some(prev) = self.oauth_cancel.take() {
-            prev.store(true, Ordering::Relaxed);
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.oauth_cancel = Some(Arc::clone(&cancel));
-
-        let pkce = generate_pkce_pair();
-        let listener = match bind_loopback_callback(
-            DEFAULT_OAUTH_CALLBACK_PORT,
-            DEFAULT_OAUTH_CALLBACK_PATH,
-            &pkce.state,
-        ) {
-            Ok(l) => l,
-            Err(err) => {
-                self.ui
-                    .label(id!(oauth_status_lbl))
-                    .set_text(cx, &format!("Loopback listener error: {err}"));
-                return;
-            }
-        };
-
-        let redirect_uri = listener.redirect_uri.clone();
-        let auth_url = match kind {
-            AccountKind::Spotify => spotify_authorize_url(&client_id, &redirect_uri, &pkce),
-            AccountKind::YouTubeMusic => google_authorize_url(&client_id, &redirect_uri, &pkce),
-        };
-
-        if let Err(err) = open_allowed_url(&auth_url) {
-            self.ui
-                .label(id!(oauth_status_lbl))
-                .set_text(cx, &format!("Could not launch browser: {err}"));
-            return;
-        }
-
-        self.ui.button(id!(oauth_cancel_btn)).set_visible(cx, true);
-        self.ui.label(id!(oauth_status_lbl)).set_text(
-            cx,
-            &format!("Waiting for browser sign-in on {redirect_uri}..."),
-        );
-
-        let Some(tx) = self.bg_tx.clone() else {
-            return;
-        };
-        let music_only = self.accounts.youtube_music_category_only;
-        let verifier = pkce.verifier;
-
-        thread::spawn(move || {
-            let outcome: Result<(OAuthTokens, CloudSyncReport), String> = (|| {
-                let code = listener
-                    .wait_for_auth_code(&cancel, Duration::from_secs(180))
-                    .map_err(|e| e.to_string())?;
-                match kind {
-                    AccountKind::Spotify => {
-                        let tokens =
-                            spotify_exchange_code(&client_id, &code, &redirect_uri, &verifier)
-                                .map_err(|e| e.to_string())?;
-                        let report = sync_spotify_catalog(&tokens.access_token)
-                            .map_err(|e| e.to_string())?;
-                        Ok((tokens, report))
-                    }
-                    AccountKind::YouTubeMusic => {
-                        let sec = if yt_secret.is_empty() {
-                            None
-                        } else {
-                            Some(yt_secret.as_str())
-                        };
-                        let tokens =
-                            google_exchange_code(&client_id, sec, &code, &redirect_uri, &verifier)
-                                .map_err(|e| e.to_string())?;
-                        let report =
-                            sync_youtube_catalog(&tokens.access_token, music_only, &HashMap::new())
-                                .map_err(|e| e.to_string())?;
-                        Ok((tokens, report))
-                    }
-                }
-            })();
-
-            match outcome {
-                Ok((tokens, report)) => {
-                    let _ = tx.send(BgMessage::OAuthCompleted {
-                        kind,
-                        tokens,
-                        report: Box::new(report),
-                    });
-                }
-                Err(error) => {
-                    let _ = tx.send(BgMessage::OAuthFailed { kind, error });
-                }
-            }
-        });
-    }
-
-    fn sync_existing_cloud_account(&mut self, cx: &mut Cx, kind: AccountKind) {
-        let token = match kind {
-            AccountKind::Spotify => self.accounts.spotify_access_token.clone(),
-            AccountKind::YouTubeMusic => self.accounts.youtube_access_token.clone(),
-        };
-        if token.is_empty() {
-            self.start_oauth_login(cx, kind);
-            return;
-        }
-        let Some(tx) = self.bg_tx.clone() else {
-            return;
-        };
-        let music_only = self.accounts.youtube_music_category_only;
-        self.ui
-            .label(id!(oauth_status_lbl))
-            .set_text(cx, "Syncing cloud playlists and liked songs...");
-
-        thread::spawn(move || {
-            let res = match kind {
-                AccountKind::Spotify => sync_spotify_catalog(&token),
-                AccountKind::YouTubeMusic => {
-                    sync_youtube_catalog(&token, music_only, &HashMap::new())
-                }
-            };
-            match res {
-                Ok(report) => {
-                    let _ = tx.send(BgMessage::OAuthCompleted {
-                        kind,
-                        tokens: OAuthTokens {
-                            access_token: token,
-                            refresh_token: None,
-                            expires_in_secs: 3600,
-                        },
-                        report: Box::new(report),
-                    });
-                }
-                Err(err) => {
-                    let _ = tx.send(BgMessage::OAuthFailed {
-                        kind,
                         error: err.to_string(),
                     });
                 }
@@ -3241,6 +3288,240 @@ impl App {
                         }
                     }
                 }
+                BgMessage::YtmHomeLoaded(feed) => {
+                    let feed = *feed;
+                    let loaded_count = feed.tracks.len();
+                    if !feed.visitor_data.is_empty() {
+                        self.accounts.youtube_visitor_data = feed.visitor_data;
+                    }
+                    if let Some(db) = &mut self.db {
+                        let _ = db.save_accounts(&self.accounts);
+                        let _ = db.upsert_tracks(&feed.tracks);
+                        let ids: Vec<String> = feed.tracks.iter().map(|t| t.id.clone()).collect();
+                        if !ids.is_empty() {
+                            let _ = db.upsert_playlist(&feed.playlist, &ids);
+                        }
+                        let _ = db.match_cloud_tracks_to_local();
+                        self.all_tracks = db.list_tracks("").unwrap_or_default();
+                        self.playlists = db.list_playlists().unwrap_or_default();
+                    } else if !feed.tracks.is_empty() {
+                        for t in feed.tracks {
+                            if !self.all_tracks.iter().any(|x| x.id == t.id) {
+                                self.all_tracks.push(t);
+                            }
+                        }
+                    }
+                    self.rebuild_filtered_tracks(cx);
+                    if self.queue.is_empty() {
+                        self.queue.set_tracks((*self.filtered_tracks).clone(), None);
+                    }
+                    self.ui.label(id!(oauth_status_lbl)).set_text(
+                        cx,
+                        &format!(
+                            "Guest Mode Active — Loaded {loaded_count} instant playable YouTube Music tracks."
+                        ),
+                    );
+                    if startup_play_first()
+                        && !self.startup_auto_played
+                        && let Some(first) = self.filtered_tracks.first().cloned()
+                    {
+                        self.startup_auto_played = true;
+                        self.queue
+                            .set_tracks((*self.filtered_tracks).clone(), Some(0));
+                        self.play_track(cx, first);
+                    }
+                }
+                BgMessage::YtmHomeFailed(err) => {
+                    self.ui.label(id!(oauth_status_lbl)).set_text(
+                        cx,
+                        &format!("Discover feed could not refresh ({err}). Local library & Offline Demo remain ready."),
+                    );
+                }
+                BgMessage::YtmSearchCompleted { query, tracks } => {
+                    let found = tracks.len();
+                    let pl = Playlist {
+                        id: format!("ytm:search:{}", query.to_ascii_lowercase()),
+                        name: format!("Search: {query}"),
+                        source: TrackSource::YouTubeMusic,
+                        etag: None,
+                        track_count: found,
+                        description: "Live YouTube Music Search".to_string(),
+                    };
+                    if let Some(db) = &mut self.db {
+                        let _ = db.upsert_tracks(&tracks);
+                        let ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
+                        if !ids.is_empty() {
+                            let _ = db.upsert_playlist(&pl, &ids);
+                        }
+                        let _ = db.match_cloud_tracks_to_local();
+                        self.all_tracks = db.list_tracks("").unwrap_or_default();
+                        self.playlists = db.list_playlists().unwrap_or_default();
+                    } else {
+                        for t in tracks {
+                            if !self.all_tracks.iter().any(|x| x.id == t.id) {
+                                self.all_tracks.push(t);
+                            }
+                        }
+                    }
+                    self.search_query = query.clone();
+                    self.active_filter = LibraryFilter::All;
+                    self.switch_main_page(cx, live_id!(page_library));
+                    self.rebuild_filtered_tracks(cx);
+                    self.ui.label(id!(oauth_status_lbl)).set_text(
+                        cx,
+                        &format!("Found {found} playable YouTube Music tracks for '{query}'."),
+                    );
+                }
+                BgMessage::YtmSearchFailed { query, error } => {
+                    self.ui
+                        .label(id!(oauth_status_lbl))
+                        .set_text(cx, &format!("Online search for '{query}' failed: {error}"));
+                }
+                BgMessage::GoogleLoginResult(outcome) => match outcome {
+                    GoogleLoginOutcome::SignedIn { cookie, sapisid } => {
+                        self.ytm_signed_out_recently = false;
+                        self.accounts.youtube_connected = true;
+                        self.accounts.youtube_cookie = cookie;
+                        self.accounts.youtube_sapisid = sapisid;
+                        if self.accounts.youtube_channel_name.trim().is_empty() {
+                            self.accounts.youtube_channel_name = "Google Account".to_string();
+                        }
+                        if let Some(db) = &self.db {
+                            let _ = db.save_accounts(&self.accounts);
+                        }
+                        self.refresh_ui_labels(cx);
+                        self.sync_ytm_signed_in_library(cx);
+                    }
+                    GoogleLoginOutcome::Cancelled => {
+                        self.ui.label(id!(oauth_status_lbl)).set_text(
+                            cx,
+                            "Google sign-in closed. Guest Mode remains active with instant music.",
+                        );
+                    }
+                    GoogleLoginOutcome::Failed(err) => {
+                        self.ui
+                            .label(id!(oauth_status_lbl))
+                            .set_text(cx, &format!("Google sign-in error: {err}"));
+                    }
+                },
+                BgMessage::YtmAccountSynced(lib) => {
+                    let lib = *lib;
+                    self.accounts.youtube_connected = true;
+                    self.accounts.youtube_channel_name = lib.display_name.clone();
+                    if !lib.visitor_data.is_empty() {
+                        self.accounts.youtube_visitor_data = lib.visitor_data;
+                    }
+                    self.accounts.youtube_playlist_count = lib.playlists.len();
+                    let liked_n = lib.liked_tracks.len();
+                    let pl_n = lib.playlists.len();
+                    if let Some(db) = &mut self.db {
+                        let _ = db.save_accounts(&self.accounts);
+                        let _ = db.upsert_tracks(&lib.liked_tracks);
+                        let _ = db.upsert_tracks(&lib.home_tracks);
+                        for (pl, pl_tracks) in &lib.playlists {
+                            let _ = db.upsert_tracks(pl_tracks);
+                            let ids: Vec<String> = pl_tracks.iter().map(|t| t.id.clone()).collect();
+                            let _ = db.upsert_playlist(pl, &ids);
+                        }
+                        let _ = db.match_cloud_tracks_to_local();
+                        self.all_tracks = db.list_tracks("").unwrap_or_default();
+                        self.playlists = db.list_playlists().unwrap_or_default();
+                    }
+                    self.ui.label(id!(oauth_status_lbl)).set_text(
+                        cx,
+                        &format!(
+                            "Signed in as {} · Synced {liked_n} liked songs and {pl_n} playlists from YouTube Music.",
+                            lib.display_name
+                        ),
+                    );
+                    self.rebuild_filtered_tracks(cx);
+                }
+                BgMessage::YtmAccountSyncFailed(err) => {
+                    self.ui
+                        .label(id!(oauth_status_lbl))
+                        .set_text(cx, &format!("YouTube Music account sync failed: {err}"));
+                }
+                BgMessage::StreamReady {
+                    track_id,
+                    video_id,
+                    stream,
+                    auto_play,
+                } => {
+                    if self.prefetch_stream_track_id.as_deref() == Some(track_id.as_str()) {
+                        self.prefetch_stream_track_id = None;
+                    }
+                    let mut updated_track: Option<Track> = None;
+                    for t in &mut self.all_tracks {
+                        if t.id == track_id {
+                            t.path = Some(stream.path.clone());
+                            t.youtube_video_id = Some(video_id.clone());
+                            t.codec = stream.codec.clone();
+                            if stream.bitrate_kbps > 0 {
+                                t.bitrate_kbps = stream.bitrate_kbps;
+                            }
+                            if stream.duration_ms > 0 && t.duration_ms == 0 {
+                                t.duration_ms = stream.duration_ms;
+                            }
+                            updated_track = Some(t.clone());
+                            break;
+                        }
+                    }
+                    self.queue.update_track_cached_stream(
+                        &track_id,
+                        stream.path.clone(),
+                        Some(video_id),
+                        &stream.codec,
+                        stream.bitrate_kbps,
+                        stream.duration_ms,
+                    );
+                    if let Some(ref tr) = updated_track
+                        && let Some(db) = &mut self.db
+                    {
+                        let _ = db.upsert_tracks(std::slice::from_ref(tr));
+                    }
+                    self.rebuild_filtered_tracks(cx);
+
+                    if auto_play
+                        && self.pending_stream_track_id.as_deref() == Some(track_id.as_str())
+                    {
+                        self.pending_stream_track_id = None;
+                        let rg = updated_track.as_ref().map_or(0, |t| t.replay_gain_db);
+                        if let Some(audio) = &self.audio {
+                            audio.send(EngineCommand::LoadAndPlayTrack {
+                                path: stream.path,
+                                replay_gain_db: rg,
+                            });
+                        }
+                        self.sync_next_deck_to_engine();
+                        self.prefetch_next_online_track();
+                        if let Some(tr) = updated_track.or_else(|| self.queue.current().cloned()) {
+                            self.update_now_playing_metadata(cx, &tr);
+                        }
+                    } else {
+                        self.sync_next_deck_to_engine();
+                    }
+                }
+                BgMessage::StreamFailed {
+                    track_id,
+                    error,
+                    auto_play,
+                } => {
+                    if self.prefetch_stream_track_id.as_deref() == Some(track_id.as_str()) {
+                        self.prefetch_stream_track_id = None;
+                    }
+                    if auto_play
+                        && self.pending_stream_track_id.as_deref() == Some(track_id.as_str())
+                    {
+                        self.pending_stream_track_id = None;
+                        self.ui
+                            .label(id!(np_artist_lbl))
+                            .set_text(cx, "Stream unavailable — select another track");
+                        self.ui.button(id!(codec_pill_btn)).set_text(cx, "Offline");
+                        self.ui
+                            .label(id!(oauth_status_lbl))
+                            .set_text(cx, &format!("Audio stream failed: {error}"));
+                    }
+                }
                 BgMessage::PublicSyncCompleted { provider, payload } => {
                     let (playlist, tracks) = *payload;
                     let count = tracks.len();
@@ -3260,7 +3541,7 @@ impl App {
                     self.ui.label(id!(oauth_status_lbl)).set_text(
                         cx,
                         &format!(
-                            "{provider} Sync Complete: imported '{pl_name}' ({count} tracks, {matched} matched to local audio). Open Library to browse."
+                            "{provider} Sync Complete: imported '{pl_name}' ({count} tracks, {matched} local matched). Click any track in Library to stream immediately."
                         ),
                     );
                     self.rebuild_filtered_tracks(cx);
@@ -3269,69 +3550,6 @@ impl App {
                     self.ui
                         .label(id!(oauth_status_lbl))
                         .set_text(cx, &format!("{provider} import failed: {error}"));
-                }
-                BgMessage::OAuthCompleted {
-                    kind,
-                    tokens,
-                    report,
-                } => {
-                    self.ui.button(id!(oauth_cancel_btn)).set_visible(cx, false);
-                    match kind {
-                        AccountKind::Spotify => {
-                            self.accounts.spotify_connected = true;
-                            self.accounts.spotify_user_name = report.display_name.clone();
-                            self.accounts.spotify_access_token = tokens.access_token;
-                            if let Some(rt) = tokens.refresh_token {
-                                self.accounts.spotify_refresh_token = rt;
-                            }
-                            self.accounts.spotify_playlist_count = report.playlists.len();
-                            self.accounts.spotify_liked_count = report.liked_tracks.len();
-                        }
-                        AccountKind::YouTubeMusic => {
-                            self.accounts.youtube_connected = true;
-                            self.accounts.youtube_channel_name = report.display_name.clone();
-                            self.accounts.youtube_access_token = tokens.access_token;
-                            if let Some(rt) = tokens.refresh_token {
-                                self.accounts.youtube_refresh_token = rt;
-                            }
-                            self.accounts.youtube_playlist_count = report.playlists.len();
-                        }
-                    }
-                    let mut matched = 0usize;
-                    if let Some(db) = &mut self.db {
-                        let _ = db.save_accounts(&self.accounts);
-                        let _ = db.upsert_tracks(&report.liked_tracks);
-                        for bundle in &report.playlists {
-                            let _ = db.upsert_tracks(&bundle.tracks);
-                            let ids: Vec<String> =
-                                bundle.tracks.iter().map(|t| t.id.clone()).collect();
-                            let _ = db.upsert_playlist(&bundle.playlist, &ids);
-                        }
-                        matched = db.match_cloud_tracks_to_local().unwrap_or(0);
-                        self.all_tracks = db.list_tracks("").unwrap_or_default();
-                        self.playlists = db.list_playlists().unwrap_or_default();
-                    }
-                    self.ui.label(id!(oauth_status_lbl)).set_text(
-                        cx,
-                        &format!(
-                            "Signed in as {} · {} playlists & {} liked songs synced ({} matched to local audio)",
-                            report.display_name,
-                            report.playlists.len(),
-                            report.liked_tracks.len(),
-                            matched
-                        ),
-                    );
-                    self.rebuild_filtered_tracks(cx);
-                }
-                BgMessage::OAuthFailed { kind, error } => {
-                    self.ui.button(id!(oauth_cancel_btn)).set_visible(cx, false);
-                    let provider = match kind {
-                        AccountKind::Spotify => "Spotify",
-                        AccountKind::YouTubeMusic => "YouTube",
-                    };
-                    self.ui
-                        .label(id!(oauth_status_lbl))
-                        .set_text(cx, &format!("{provider} sign-in failed: {error}"));
                 }
                 BgMessage::SubsonicSynced { tracks, playlists } => {
                     self.accounts.subsonic_connected = true;
@@ -3517,6 +3735,7 @@ impl App {
                 } else if let Some(next) = self.queue.next_track().cloned() {
                     if snap.auto_transitioned {
                         self.sync_next_deck_to_engine();
+                        self.prefetch_next_online_track();
                         self.update_now_playing_metadata(cx, &next);
                     } else {
                         self.play_track(cx, next);
@@ -3639,12 +3858,32 @@ impl App {
             self.switch_main_page(cx, live_id!(page_appearance));
         }
         if self.ui.button(id!(nav_accounts)).clicked(actions)
-            || self.ui.button(id!(top_spotify_btn)).clicked(actions)
-            || self.ui.button(id!(top_youtube_btn)).clicked(actions)
-            || self.ui.button(id!(home_spotify_btn)).clicked(actions)
-            || self.ui.button(id!(home_youtube_btn)).clicked(actions)
+            || self.ui.button(id!(top_account_btn)).clicked(actions)
+            || self.ui.button(id!(home_accounts_btn)).clicked(actions)
         {
             self.switch_main_page(cx, live_id!(page_accounts));
+        }
+        if self.ui.button(id!(home_google_btn)).clicked(actions) {
+            self.switch_main_page(cx, live_id!(page_accounts));
+            self.start_google_webview_login(cx);
+        }
+        if self.ui.button(id!(home_discover_btn)).clicked(actions)
+            || self.ui.button(id!(discover_refresh_btn)).clicked(actions)
+            || self.ui.button(id!(guest_refresh_btn)).clicked(actions)
+        {
+            self.spawn_ytm_home_fetch(cx);
+        }
+        if self.ui.button(id!(guest_go_library_btn)).clicked(actions) {
+            self.switch_main_page(cx, live_id!(page_library));
+        }
+        if self.ui.button(id!(home_play_discover_btn)).clicked(actions) {
+            let picks = self.home_quick_picks();
+            if let Some(first) = picks.first().cloned() {
+                self.queue.set_tracks(picks, Some(0));
+                self.play_track(cx, first);
+            } else {
+                self.spawn_ytm_home_fetch(cx);
+            }
         }
         if self.ui.button(id!(cmdk_btn)).clicked(actions) {
             self.cmdk_open = true;
@@ -3728,6 +3967,14 @@ impl App {
             self.switch_main_page(cx, live_id!(page_library));
             self.rebuild_filtered_tracks(cx);
         }
+        if self.ui.button(id!(search_online_btn)).clicked(actions) {
+            let q = self.ui.text_input(id!(search_input)).text();
+            if !q.trim().is_empty() {
+                self.spawn_ytm_search(cx, q);
+            } else {
+                self.spawn_ytm_home_fetch(cx);
+            }
+        }
         if let Some((submitted, _)) = self.ui.text_input(id!(search_input)).returned(actions) {
             if parse_spotify_target(&submitted).is_some() {
                 self.switch_main_page(cx, live_id!(page_accounts));
@@ -3735,6 +3982,8 @@ impl App {
             } else if parse_youtube_target(&submitted).is_some() {
                 self.switch_main_page(cx, live_id!(page_accounts));
                 self.start_public_sync(cx, "YouTube", submitted);
+            } else if !submitted.trim().is_empty() {
+                self.spawn_ytm_search(cx, submitted);
             }
         }
 
@@ -3798,27 +4047,30 @@ impl App {
             }
             self.rebuild_filtered_tracks(cx);
         }
-        if self.ui.button(id!(demo_suite_btn)).clicked(actions)
-            || self.ui.button(id!(home_demo_btn)).clicked(actions)
-        {
+        if self.ui.button(id!(home_demo_btn)).clicked(actions) {
             self.load_and_play_demo_suite(cx);
         }
 
+        let quick_picks = self.home_quick_picks();
         for (i, btn_id) in [
             id!(recent_btn_0),
             id!(recent_btn_1),
             id!(recent_btn_2),
             id!(recent_btn_3),
+            id!(recent_btn_4),
+            id!(recent_btn_5),
+            id!(recent_btn_6),
+            id!(recent_btn_7),
         ]
         .into_iter()
         .enumerate()
         {
             if self.ui.button(btn_id).clicked(actions) {
-                if self.all_tracks.is_empty() {
-                    self.load_and_play_demo_suite(cx);
-                } else if let Some(track) = self.all_tracks.get(i).cloned() {
-                    self.queue.set_tracks(self.all_tracks.clone(), Some(i));
+                if let Some(track) = quick_picks.get(i).cloned() {
+                    self.queue.set_tracks(quick_picks.clone(), Some(i));
                     self.play_track(cx, track);
+                } else {
+                    self.spawn_ytm_home_fetch(cx);
                 }
             }
         }
@@ -3846,6 +4098,9 @@ impl App {
                         self.rebuild_filtered_tracks(cx);
                     }
                 }
+                TrackListAction::LoadDiscoverFeed => {
+                    self.spawn_ytm_home_fetch(cx);
+                }
                 TrackListAction::AddLocalFolder => {
                     if let Some(folder) = rfd::FileDialog::new()
                         .set_title("Select Local Music Folder")
@@ -3857,8 +4112,9 @@ impl App {
                         self.spawn_folder_scan(vec![folder]);
                     }
                 }
-                TrackListAction::OpenSpotifyLogin | TrackListAction::OpenYouTubeLogin => {
+                TrackListAction::OpenYouTubeLogin => {
                     self.switch_main_page(cx, live_id!(page_accounts));
+                    self.start_google_webview_login(cx);
                 }
                 TrackListAction::LoadDemoSuite => {
                     self.load_and_play_demo_suite(cx);
@@ -4056,7 +4312,7 @@ impl App {
             let _ = copy_text_to_clipboard(&full);
         }
 
-        // 5. INSTANT ZERO-KEY SYNC & OAUTH 2.0 PKCE ACCOUNTS
+        // 5. 1-CLICK GOOGLE SIGN-IN, INSTANT LINK IMPORT & SELF-HOSTED ACCOUNTS
         if self.ui.button(id!(quick_spotify_btn)).clicked(actions) {
             let input = self.ui.text_input(id!(quick_sync_input)).text();
             self.start_public_sync(cx, "Spotify", input);
@@ -4079,62 +4335,27 @@ impl App {
             };
             self.start_public_sync(cx, mode, submitted);
         }
-        if self.ui.button(id!(spotify_login_btn)).clicked(actions) {
-            self.start_oauth_login(cx, AccountKind::Spotify);
-        }
-        if self.ui.button(id!(spotify_sync_btn)).clicked(actions) {
-            self.sync_existing_cloud_account(cx, AccountKind::Spotify);
-        }
-        if self.ui.button(id!(spotify_logout_btn)).clicked(actions) {
-            self.accounts.spotify_connected = false;
-            self.accounts.spotify_access_token.clear();
-            self.accounts.spotify_refresh_token.clear();
-            if let Some(db) = &self.db {
-                let _ = db.save_accounts(&self.accounts);
-            }
-            self.refresh_ui_labels(cx);
-        }
         if self.ui.button(id!(yt_login_btn)).clicked(actions) {
-            self.start_oauth_login(cx, AccountKind::YouTubeMusic);
+            self.start_google_webview_login(cx);
         }
         if self.ui.button(id!(yt_sync_btn)).clicked(actions) {
-            self.sync_existing_cloud_account(cx, AccountKind::YouTubeMusic);
+            self.sync_ytm_signed_in_library(cx);
         }
         if self.ui.button(id!(yt_logout_btn)).clicked(actions) {
+            self.ytm_signed_out_recently = true;
             self.accounts.youtube_connected = false;
-            self.accounts.youtube_access_token.clear();
-            self.accounts.youtube_refresh_token.clear();
+            self.accounts.youtube_cookie.clear();
+            self.accounts.youtube_sapisid.clear();
+            self.accounts.youtube_channel_name.clear();
+            self.accounts.youtube_playlist_count = 0;
             if let Some(db) = &self.db {
                 let _ = db.save_accounts(&self.accounts);
             }
+            self.ui.label(id!(oauth_status_lbl)).set_text(
+                cx,
+                "Signed out of Google. Guest Mode remains active — you can still play and search music anytime.",
+            );
             self.refresh_ui_labels(cx);
-        }
-        if self.ui.button(id!(oauth_cancel_btn)).clicked(actions) {
-            if let Some(c) = self.oauth_cancel.take() {
-                c.store(true, Ordering::Relaxed);
-            }
-            self.ui.button(id!(oauth_cancel_btn)).set_visible(cx, false);
-            self.ui
-                .label(id!(oauth_status_lbl))
-                .set_text(cx, "Browser login cancelled.");
-        }
-        if self.ui.button(id!(copy_redirect_btn)).clicked(actions) {
-            let _ = copy_text_to_clipboard("http://127.0.0.1:43824/callback");
-            self.ui
-                .label(id!(oauth_status_lbl))
-                .set_text(cx, "Copied http://127.0.0.1:43824/callback to clipboard.");
-        }
-        if self.ui.button(id!(open_spotify_dev_btn)).clicked(actions) {
-            let _ = open_allowed_url("https://developer.spotify.com/dashboard");
-        }
-        if self.ui.button(id!(open_google_dev_btn)).clicked(actions) {
-            let _ = open_allowed_url("https://console.cloud.google.com/apis/credentials");
-        }
-        if let Some(cat_only) = self.ui.ferric_toggle(id!(yt_cat_toggle)).toggled(actions) {
-            self.accounts.youtube_music_category_only = cat_only;
-            if let Some(db) = &self.db {
-                let _ = db.save_accounts(&self.accounts);
-            }
         }
         if self.ui.button(id!(sub_sync_btn)).clicked(actions) {
             self.accounts.subsonic_url = self
@@ -4534,11 +4755,11 @@ impl AppMain for App {
             && dq.abs.y <= 52.0
         {
             let search_rect = self.ui.view(id!(search_bar_wrap)).area().rect(cx);
-            let sp_rect = self.ui.button(id!(top_spotify_btn)).area().rect(cx);
+            let acct_rect = self.ui.button(id!(top_account_btn)).area().rect(cx);
             let in_search = search_rect.size.x > 0.0
                 && dq.abs.x >= search_rect.pos.x - 6.0
                 && dq.abs.x <= search_rect.pos.x + search_rect.size.x + 6.0;
-            let in_right_btns = sp_rect.size.x > 0.0 && dq.abs.x >= sp_rect.pos.x - 8.0;
+            let in_right_btns = acct_rect.size.x > 0.0 && dq.abs.x >= acct_rect.pos.x - 8.0;
             if !in_search && !in_right_btns {
                 dq.response.set(WindowDragQueryResponse::Caption);
                 return;

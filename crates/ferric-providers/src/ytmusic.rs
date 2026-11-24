@@ -98,9 +98,9 @@ pub fn sha1_hex(data: &[u8]) -> String {
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut w = [0u32; 80];
-    for chunk in msg.chunks_exact(64) {
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+    for chunk in msg.as_chunks::<64>().0 {
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*word);
         }
         for i in 16..80 {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
@@ -638,36 +638,32 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
         let batch_end = (idx + STREAM_CONCURRENCY).min(ranges.len());
         let batch = &ranges[idx..batch_end];
         let results: Vec<ProviderResult<Vec<u8>>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|&(s, e)| {
-                    scope.spawn(move || {
-                        let agent = build_http_agent(25);
-                        let range_hdr = format!("bytes={s}-{e}");
-                        let resp = agent
-                            .get(url)
-                            .header("User-Agent", VISIONOS_UA)
-                            .header("Range", &range_hdr)
-                            .call()
-                            .map_err(|err| {
-                                ProviderError::Http(format!("Audio chunk failed: {err}"))
-                            })?;
-                        let st = resp.status().as_u16();
-                        if !(200..300).contains(&st) {
-                            return Err(ProviderError::Http(format!(
-                                "Audio chunk returned HTTP {st}"
-                            )));
-                        }
-                        resp.into_body()
-                            .into_with_config()
-                            .limit(4 * 1024 * 1024)
-                            .read_to_vec()
-                            .map_err(|err| {
-                                ProviderError::Http(format!("Audio chunk read failed: {err}"))
-                            })
-                    })
-                })
-                .collect();
+            let mut handles = Vec::with_capacity(batch.len());
+            for &(s, e) in batch {
+                handles.push(scope.spawn(move || {
+                    let agent = build_http_agent(25);
+                    let range_hdr = format!("bytes={s}-{e}");
+                    let resp = agent
+                        .get(url)
+                        .header("User-Agent", VISIONOS_UA)
+                        .header("Range", &range_hdr)
+                        .call()
+                        .map_err(|err| ProviderError::Http(format!("Audio chunk failed: {err}")))?;
+                    let st = resp.status().as_u16();
+                    if !(200..300).contains(&st) {
+                        return Err(ProviderError::Http(format!(
+                            "Audio chunk returned HTTP {st}"
+                        )));
+                    }
+                    resp.into_body()
+                        .into_with_config()
+                        .limit(4 * 1024 * 1024)
+                        .read_to_vec()
+                        .map_err(|err| {
+                            ProviderError::Http(format!("Audio chunk read failed: {err}"))
+                        })
+                }));
+            }
             handles
                 .into_iter()
                 .map(|h| {

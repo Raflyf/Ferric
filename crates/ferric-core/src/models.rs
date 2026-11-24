@@ -144,6 +144,19 @@ impl Default for AccountSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    pub auto_check_on_startup: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            auto_check_on_startup: true,
+        }
+    }
+}
+
 /// Format milliseconds as `MM:SS` (or `H:MM:SS` if >= 1 hour).
 pub fn format_duration_ms(ms: u64) -> String {
     let total_secs = ms / 1000;

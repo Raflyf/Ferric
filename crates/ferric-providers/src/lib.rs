@@ -1,6 +1,7 @@
 pub mod local_scanner;
 pub mod lyrics;
 pub mod resolver;
+pub mod updater;
 pub mod yt_cleaner;
 
 use thiserror::Error;

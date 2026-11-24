@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release-windows:
-    name: Build & Publish Windows Release
+    name: Build & Publish Windows MSI + Portable Release
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -30,10 +30,17 @@ jobs:
           MAKEPAD_PACKAGE_DIR: makepad
         run: cargo build --release -p ferric-desktop --locked
 
-      - name: Package release archive
+      - name: Build MSI installer & portable ZIP
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          & .\scripts\Installer.ps1
+          $msiName = "ferricsetup-$tag.msi"
+          $msiPath = Join-Path .\dist $msiName
+          if (-not (Test-Path -LiteralPath $msiPath -PathType Leaf)) {
+            throw "Expected MSI installer matching tag $tag at $msiPath"
+          }
+
           $stage = "dist/Ferric-$tag-windows-x86_64"
           New-Item -ItemType Directory -Force -Path "$stage/resources" | Out-Null
           New-Item -ItemType Directory -Force -Path "$stage/makepad/makepad_widgets/resources" | Out-Null
@@ -41,6 +48,7 @@ jobs:
           Copy-Item "target/release/ferric.exe" "$stage/ferric.exe"
           Copy-Item "README.md" "$stage/README.md"
           Copy-Item "LICENSE" "$stage/LICENSE"
+          Copy-Item "CHANGELOG.md" "$stage/CHANGELOG.md"
           Copy-Item "assets/brand/ferric.ico" "$stage/resources/ferric.ico"
           Copy-Item "assets/brand/ferric.png" "$stage/resources/ferric.png"
           Copy-Item "apps/ferric-desktop/resources/*" "$stage/makepad/ferric_desktop/resources/" -Force
@@ -55,15 +63,20 @@ jobs:
           }
           Copy-Item "$mwRes/*" "$stage/makepad/makepad_widgets/resources/" -Recurse -Force
 
-          $zipPath = "dist/Ferric-$tag-windows-x86_64.zip"
+          $zipName = "Ferric-$tag-windows-x86_64.zip"
+          $zipPath = "dist/$zipName"
           Compress-Archive -Path "$stage/*" -DestinationPath $zipPath -Force
-          $zipHash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
-          "$zipHash  Ferric-$tag-windows-x86_64.zip" | Set-Content -Path "dist/SHA256SUMS.txt" -Encoding UTF8
+
+          $msiHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sums = "$msiHash  $msiName`n$zipHash  $zipName`n"
+          [IO.File]::WriteAllText((Join-Path $PWD "dist\SHA256SUMS.txt"), $sums, [Text.Encoding]::ASCII)
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
+            dist/ferricsetup-${{ github.ref_name }}.msi
             dist/Ferric-${{ github.ref_name }}-windows-x86_64.zip
             dist/SHA256SUMS.txt

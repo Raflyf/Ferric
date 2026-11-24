@@ -1,6 +1,6 @@
 use crate::CoreResult;
 use crate::eq::EqConfig;
-use crate::models::{AccountSettings, Track, TrackSource};
+use crate::models::{AccountSettings, Track, TrackSource, UpdateSettings};
 use crate::theme::ThemeConfig;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -228,6 +228,14 @@ impl LibraryDb {
         Ok(self.get_setting("accounts")?.unwrap_or_default())
     }
 
+    pub fn save_update_settings(&self, settings: &UpdateSettings) -> CoreResult<()> {
+        self.set_setting("updates", settings)
+    }
+
+    pub fn load_update_settings(&self) -> CoreResult<UpdateSettings> {
+        Ok(self.get_setting("updates")?.unwrap_or_default())
+    }
+
     pub fn get_cached_lyrics(&self, track_key: &str) -> CoreResult<Option<String>> {
         let val = self
             .conn
@@ -308,5 +316,20 @@ mod tests {
         db.save_theme(&theme).expect("save theme");
         let loaded = db.load_theme().expect("load theme");
         assert!(loaded.material.liquid_glass);
+
+        assert!(
+            db.load_update_settings()
+                .expect("default updates")
+                .auto_check_on_startup
+        );
+        db.save_update_settings(&UpdateSettings {
+            auto_check_on_startup: false,
+        })
+        .expect("save updates");
+        assert!(
+            !db.load_update_settings()
+                .expect("loaded updates")
+                .auto_check_on_startup
+        );
     }
 }

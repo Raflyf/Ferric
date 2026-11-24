@@ -38,6 +38,7 @@ lofty = "0.25.5"
 walkdir = "2.5"
 aho-corasick = "1.1.5"
 ureq = { version = "3.5", features = ["json"] }
+sha2 = "0.10"
 postcard = { version = "1.2", features = ["use-std"] }
 makepad-widgets = "1.0.0"
 rfd = "0.18.0"

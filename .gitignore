@@ -9,3 +9,4 @@ Thumbs.db
 *.db-wal
 *.db-shm
 dist/
+scratch/

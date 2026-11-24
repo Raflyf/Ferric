@@ -1,21 +1,29 @@
+use crate::shell::{launch_verified_installer, open_github_url};
 use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::track_list::{TrackListAction, TrackListScope};
 use ferric_audio::engine::{AudioEngine, EngineCommand};
 use ferric_core::app_data_dir;
 use ferric_core::db::LibraryDb;
 use ferric_core::eq::EqConfig;
-use ferric_core::models::{AccountSettings, Track, format_duration_ms};
+use ferric_core::models::{AccountSettings, Track, UpdateSettings, format_duration_ms};
 use ferric_core::queue::PlayQueue;
 use ferric_core::theme::{LiquidGlassPreset, ThemeConfig, hex_to_rgba_f32};
 use ferric_providers::local_scanner::scan_local_folder;
 use ferric_providers::lyrics::{SyncedLyrics, fetch_lrclib_synced, read_local_sidecar_lrc};
+use ferric_providers::updater::{
+    DownloadEvent, ReleaseInfo, check_latest_release, download_verified_installer,
+    format_check_status, release_page_url,
+};
 use ferric_sync::{ActiveSpeakerLease, PairingPayload};
 use makepad_widgets::*;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BRAND_ICON_PNG: &[u8] = include_bytes!("../resources/ferric.png");
 
 live_design! {
@@ -289,10 +297,16 @@ live_design! {
 
                         add_folder_btn = <FerricPrimaryBtn> { text: "+ Add Folder" }
                         rescan_btn = <FerricGhostBtn> { text: "Rescan" }
+                        check_updates_top_btn = <FerricGhostBtn> { text: "Check Updates" }
                     }
 
-                    // 2. MAIN 3-PANE WORKSPACE
-                    workspace_row = <View> {
+                    // 2. MAIN 3-PANE WORKSPACE + FLOATING STARTUP UPDATE POPUP OVERLAY
+                    workspace_stage = <View> {
+                        width: Fill,
+                        height: Fill,
+                        flow: Overlay,
+
+                        workspace_row = <View> {
                         width: Fill,
                         height: Fill,
                         margin: { left: 10, right: 10, bottom: 8 }
@@ -498,8 +512,8 @@ live_design! {
                                     }
                                 }
 
-                                // --- VIEW 4: OPEN THEME STUDIO & ACCOUNTS (WITH LIQUID GLASS ON/OFF!) ---
-                                page_appearance = <View> {
+                                // --- VIEW 4: OPEN THEME STUDIO, ACCOUNTS & UPDATES ---
+                                page_appearance = <ScrollYView> {
                                     width: Fill,
                                     height: Fill,
                                     flow: Down,
@@ -586,6 +600,27 @@ live_design! {
                                         }
                                         yt_cat_cb = <FerricCheckBox> { text: "YouTube Music Category Filter (categoryId = 10 Music Only)" }
                                     }
+
+                                    // SOFTWARE UPDATES (GITHUB RELEASES · SHA-256 VERIFIED MSI)
+                                    <RoundedView> {
+                                        width: Fill, height: Fit, padding: 14, flow: Down, spacing: 10,
+                                        draw_bg: { color: #0B0B0B, border_radius: 12.0, border_size: 1.0, border_color: #222222 }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Software Updates (GitHub Releases · SHA-256 Verified MSI)" }
+                                                update_status_lbl = <Label> {
+                                                    width: Fill,
+                                                    draw_text: { color: #ABA59B, text_style: { font_size: 11.5 } }
+                                                    text: "Ferric v0.1.0 · Checks official GitHub releases; never downloads without your click."
+                                                }
+                                            }
+                                            check_updates_btn = <FerricPrimaryBtn> { text: "Check for Updates" }
+                                            open_releases_btn = <FerricGhostBtn> { text: "GitHub Releases" }
+                                        }
+                                        auto_update_cb = <FerricCheckBox> { text: "Check for updates automatically on startup (show update popup when a new version is out)" }
+                                    }
                                 }
                             }
                         }
@@ -631,6 +666,64 @@ live_design! {
                                     width: Fill,
                                     draw_text: { color: #ABA59B, text_style: { font_size: 12.5 } }
                                     text: ""
+                                }
+                            }
+                        }
+                        }
+
+                        // FLOATING UPDATE POPUP CARD (AUTO-SHOWN ON STARTUP / MANUAL CHECK WHEN NEWER VERSION EXISTS)
+                        update_popup_anchor = <View> {
+                            width: Fill,
+                            height: Fill,
+                            visible: false,
+                            align: { x: 1.0, y: 0.0 }
+                            padding: { top: 10, right: 20 }
+
+                            update_popup_card = <FerricGlassPanel> {
+                                width: 420,
+                                height: Fit,
+                                padding: 16,
+                                flow: Down,
+                                spacing: 10,
+                                draw_bg: { radius: 16.0 }
+
+                                <View> {
+                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                    <RoundedView> {
+                                        width: Fit, height: 22, padding: { left: 8, right: 8 }, align: { y: 0.5 },
+                                        draw_bg: { color: #2B1208, border_radius: 6.0, border_size: 1.0, border_color: #D9541E }
+                                        <Label> {
+                                            draw_text: { color: #D9541E, text_style: { font_size: 9.5 } }
+                                            text: "UPDATE AVAILABLE"
+                                        }
+                                    }
+                                    <View> { width: Fill, height: 1 }
+                                    update_popup_close_btn = <FerricGhostBtn> { height: 26, text: "Later" }
+                                }
+                                update_popup_title = <Label> {
+                                    width: Fill,
+                                    draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
+                                    text: "Ferric update is out"
+                                }
+                                update_popup_sub = <Label> {
+                                    width: Fill,
+                                    draw_text: { color: #ABA59B, text_style: { font_size: 12.0 } }
+                                    text: "Read what changed, or update now."
+                                }
+                                <View> {
+                                    width: Fill, height: Fit, flow: Right, spacing: 8, align: { y: 0.5 },
+                                    update_now_btn = <FerricPrimaryBtn> { text: "Update Now" }
+                                    update_whats_new_btn = <FerricGhostBtn> { text: "What's New" }
+                                }
+                                <View> { width: Fill, height: 1, show_bg: true, draw_bg: { color: #222222 } }
+                                <View> {
+                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                    update_disable_btn = <FerricGhostBtn> { height: 26, text: "Don't check on startup" }
+                                    <View> { width: Fill, height: 1 }
+                                    <Label> {
+                                        draw_text: { color: #888279, text_style: { font_size: 10.0 } }
+                                        text: "SHA-256 Verified MSI"
+                                    }
                                 }
                             }
                         }
@@ -714,7 +807,15 @@ app_main!(App);
 
 enum BgMessage {
     ScannedTracks(Vec<Track>),
-    LyricsLoaded { track_id: String, raw_lrc: String },
+    LyricsLoaded {
+        track_id: String,
+        raw_lrc: String,
+    },
+    UpdateCheckDone {
+        manual: bool,
+        result: Result<Option<ReleaseInfo>, String>,
+    },
+    UpdateDownload(DownloadEvent),
 }
 
 #[derive(Live, LiveHook)]
@@ -741,6 +842,18 @@ pub struct App {
     eq: EqConfig,
     #[rust]
     accounts: AccountSettings,
+    #[rust]
+    update_settings: UpdateSettings,
+    #[rust]
+    available_update: Option<ReleaseInfo>,
+    #[rust]
+    update_popup_visible: bool,
+    #[rust]
+    update_check_in_flight: bool,
+    #[rust]
+    update_download_in_flight: bool,
+    #[rust]
+    update_cancel: Option<Arc<AtomicBool>>,
     #[rust]
     lease: Option<ActiveSpeakerLease>,
     #[rust]
@@ -780,6 +893,7 @@ impl App {
             self.theme = store.load_theme().unwrap_or_default();
             self.eq = store.load_eq().unwrap_or_default();
             self.accounts = store.load_accounts().unwrap_or_default();
+            self.update_settings = store.load_update_settings().unwrap_or_default();
             self.all_tracks = store.list_tracks("").unwrap_or_default();
         }
         self.filtered_tracks = Rc::new(self.all_tracks.clone());
@@ -807,6 +921,11 @@ impl App {
         self.sync_controls_from_state(cx);
         self.apply_theme_live(cx);
         self.refresh_sidebars(cx);
+
+        // Automatic background update check on launch (displays Update Popup if newer release exists).
+        if self.update_settings.auto_check_on_startup {
+            self.spawn_update_check(cx, false);
+        }
     }
 
     fn sync_controls_from_state(&self, cx: &mut Cx) {
@@ -857,6 +976,9 @@ impl App {
         self.ui
             .check_box(id!(yt_cat_cb))
             .set_active(cx, self.accounts.youtube_music_category_only);
+        self.ui
+            .check_box(id!(auto_update_cb))
+            .set_active(cx, self.update_settings.auto_check_on_startup);
     }
 
     fn apply_theme_live(&self, cx: &mut Cx) {
@@ -884,6 +1006,7 @@ impl App {
             id!(center_panel),
             id!(right_panel),
             id!(player_dock),
+            id!(update_popup_card),
         ] {
             self.ui.view(panel_id).apply_over(
                 cx,
@@ -1162,8 +1285,108 @@ impl App {
         );
     }
 
+    fn spawn_update_check(&mut self, cx: &mut Cx, manual: bool) {
+        if self.update_check_in_flight {
+            return;
+        }
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.update_check_in_flight = true;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.update_cancel = Some(Arc::clone(&cancel));
+        if manual {
+            self.ui
+                .button(id!(check_updates_btn))
+                .set_text(cx, "Checking...");
+            self.ui
+                .button(id!(check_updates_top_btn))
+                .set_text(cx, "Checking...");
+            self.ui
+                .label(id!(update_status_lbl))
+                .set_text(cx, "Checking GitHub Releases for updates...");
+        }
+        thread::spawn(move || {
+            let result = check_latest_release(APP_VERSION, &cancel);
+            let _ = tx.send(BgMessage::UpdateCheckDone { manual, result });
+        });
+    }
+
+    fn show_update_popup(&mut self, cx: &mut Cx, info: &ReleaseInfo) {
+        self.update_popup_visible = true;
+        self.ui
+            .label(id!(update_popup_title))
+            .set_text(cx, &format!("Ferric {} is out", info.version));
+        self.ui
+            .label(id!(update_popup_sub))
+            .set_text(cx, &info.summary);
+        self.ui
+            .button(id!(update_now_btn))
+            .set_text(cx, "Update Now");
+        self.ui.view(id!(update_popup_anchor)).set_visible(cx, true);
+        self.ui.redraw(cx);
+    }
+
+    fn dismiss_update_popup(&mut self, cx: &mut Cx) {
+        if let Some(flag) = &self.update_cancel
+            && self.update_download_in_flight
+        {
+            flag.store(true, Ordering::Relaxed);
+            self.update_download_in_flight = false;
+        }
+        self.update_popup_visible = false;
+        self.ui
+            .view(id!(update_popup_anchor))
+            .set_visible(cx, false);
+        self.ui.redraw(cx);
+    }
+
+    fn start_update_download(&mut self, cx: &mut Cx) {
+        if self.update_download_in_flight {
+            return;
+        }
+        let Some(info) = self.available_update.clone() else {
+            return;
+        };
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.update_download_in_flight = true;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.update_cancel = Some(Arc::clone(&cancel));
+        let updates_dir = app_data_dir().join("updates");
+
+        self.ui
+            .button(id!(update_now_btn))
+            .set_text(cx, "Downloading...");
+        self.ui
+            .label(id!(update_popup_sub))
+            .set_text(cx, "Downloading verified MSI installer (0%)...");
+
+        thread::spawn(move || {
+            let progress_tx = tx.clone();
+            let res =
+                download_verified_installer(&info.tag, APP_VERSION, &updates_dir, &cancel, |pct| {
+                    let ev = if pct == Some(100) {
+                        DownloadEvent::Verifying
+                    } else {
+                        DownloadEvent::Progress(pct)
+                    };
+                    let _ = progress_tx.send(BgMessage::UpdateDownload(ev));
+                });
+            match res {
+                Ok(path) => {
+                    let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Ready(path)));
+                }
+                Err(err) => {
+                    let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Failed(err)));
+                }
+            }
+        });
+    }
+
     fn handle_tick(&mut self, cx: &mut Cx) {
-        // 1. Drain background scanner / lyrics results
+        // 1. Drain background scanner, lyrics, and updater results
         let mut incoming = Vec::new();
         if let Some(rx) = &self.bg_rx {
             while let Ok(msg) = rx.try_recv() {
@@ -1194,6 +1417,84 @@ impl App {
                         self.update_lyrics_display(cx, pos);
                     }
                 }
+                BgMessage::UpdateCheckDone { manual, result } => {
+                    self.update_check_in_flight = false;
+                    self.ui
+                        .button(id!(check_updates_btn))
+                        .set_text(cx, "Check for Updates");
+                    let status_text = format_check_status(&result, APP_VERSION);
+                    self.ui
+                        .label(id!(update_status_lbl))
+                        .set_text(cx, &status_text);
+                    match result {
+                        Ok(Some(info)) => {
+                            self.ui
+                                .button(id!(check_updates_top_btn))
+                                .set_text(cx, &format!("Update {}", info.tag));
+                            self.available_update = Some(info.clone());
+                            self.show_update_popup(cx, &info);
+                        }
+                        Ok(None) => {
+                            self.available_update = None;
+                            let top_label = if manual {
+                                format!("v{APP_VERSION} · Up to Date")
+                            } else {
+                                "Check Updates".to_string()
+                            };
+                            self.ui
+                                .button(id!(check_updates_top_btn))
+                                .set_text(cx, &top_label);
+                        }
+                        Err(_) => {
+                            self.ui
+                                .button(id!(check_updates_top_btn))
+                                .set_text(cx, "Check Updates");
+                            if manual {
+                                self.switch_page(cx, live_id!(page_appearance));
+                            }
+                        }
+                    }
+                }
+                BgMessage::UpdateDownload(event) => match event {
+                    DownloadEvent::Progress(pct) => {
+                        let msg = match pct {
+                            Some(p) => format!("Downloading update installer ({p}%)..."),
+                            None => "Downloading update installer...".to_string(),
+                        };
+                        self.ui.label(id!(update_popup_sub)).set_text(cx, &msg);
+                        self.ui
+                            .button(id!(update_now_btn))
+                            .set_text(cx, "Downloading...");
+                    }
+                    DownloadEvent::Verifying => {
+                        self.ui
+                            .button(id!(update_now_btn))
+                            .set_text(cx, "Verifying...");
+                        self.ui
+                            .label(id!(update_popup_sub))
+                            .set_text(cx, "Verifying installer SHA-256 checksum...");
+                    }
+                    DownloadEvent::Ready(msi_path) => {
+                        self.update_download_in_flight = false;
+                        match launch_verified_installer(&msi_path) {
+                            Ok(()) => {
+                                self.dismiss_update_popup(cx);
+                                cx.quit();
+                            }
+                            Err(err) => {
+                                self.ui.button(id!(update_now_btn)).set_text(cx, "Retry");
+                                self.ui.label(id!(update_popup_sub)).set_text(cx, &err);
+                                self.ui.label(id!(update_status_lbl)).set_text(cx, &err);
+                            }
+                        }
+                    }
+                    DownloadEvent::Failed(err) => {
+                        self.update_download_in_flight = false;
+                        self.ui.button(id!(update_now_btn)).set_text(cx, "Retry");
+                        self.ui.label(id!(update_popup_sub)).set_text(cx, &err);
+                        self.ui.label(id!(update_status_lbl)).set_text(cx, &err);
+                    }
+                },
             }
         }
 
@@ -1288,12 +1589,13 @@ impl AppMain for App {
             self.handle_tick(cx);
         }
 
-        if let Event::KeyDown(ke) = event
-            && ke.modifiers.control
-            && ke.key_code == KeyCode::KeyK
-        {
-            self.switch_page(cx, live_id!(page_library));
-            self.ui.text_input(id!(search_input)).set_key_focus(cx);
+        if let Event::KeyDown(ke) = event {
+            if ke.modifiers.control && ke.key_code == KeyCode::KeyK {
+                self.switch_page(cx, live_id!(page_library));
+                self.ui.text_input(id!(search_input)).set_key_focus(cx);
+            } else if ke.key_code == KeyCode::Escape && self.update_popup_visible {
+                self.dismiss_update_popup(cx);
+            }
         }
 
         let props = TrackListScope {
@@ -1605,6 +1907,50 @@ impl AppMain for App {
             if let Some(db) = &self.db {
                 let _ = db.save_accounts(&self.accounts);
             }
+        }
+
+        // Software Updates: Manual Check, Startup Preference & Floating Update Popup Actions
+        if self.ui.button(id!(check_updates_top_btn)).clicked(&actions) {
+            if let Some(info) = self.available_update.clone() {
+                self.show_update_popup(cx, &info);
+            } else {
+                self.spawn_update_check(cx, true);
+            }
+        }
+        if self.ui.button(id!(check_updates_btn)).clicked(&actions) {
+            self.spawn_update_check(cx, true);
+        }
+        if self.ui.button(id!(open_releases_btn)).clicked(&actions) {
+            let tag = self.available_update.as_ref().map(|u| u.tag.as_str());
+            let _ = open_github_url(&release_page_url(tag));
+        }
+        if let Some(auto_chk) = self.ui.check_box(id!(auto_update_cb)).changed(&actions) {
+            self.update_settings.auto_check_on_startup = auto_chk;
+            if let Some(db) = &self.db {
+                let _ = db.save_update_settings(&self.update_settings);
+            }
+        }
+        if self.ui.button(id!(update_now_btn)).clicked(&actions) {
+            self.start_update_download(cx);
+        }
+        if self.ui.button(id!(update_whats_new_btn)).clicked(&actions) {
+            let tag = self.available_update.as_ref().map(|u| u.tag.as_str());
+            let _ = open_github_url(&release_page_url(tag));
+        }
+        if self
+            .ui
+            .button(id!(update_popup_close_btn))
+            .clicked(&actions)
+        {
+            self.dismiss_update_popup(cx);
+        }
+        if self.ui.button(id!(update_disable_btn)).clicked(&actions) {
+            self.update_settings.auto_check_on_startup = false;
+            self.ui.check_box(id!(auto_update_cb)).set_active(cx, false);
+            if let Some(db) = &self.db {
+                let _ = db.save_update_settings(&self.update_settings);
+            }
+            self.dismiss_update_popup(cx);
         }
     }
 }

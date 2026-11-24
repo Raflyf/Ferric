@@ -26,6 +26,8 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build release binary
+        env:
+          MAKEPAD_PACKAGE_DIR: makepad
         run: cargo build --release -p ferric-desktop --locked
 
       - name: Package release archive
@@ -34,11 +36,24 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $stage = "dist/Ferric-$tag-windows-x86_64"
           New-Item -ItemType Directory -Force -Path "$stage/resources" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$stage/makepad/makepad_widgets/resources" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$stage/makepad/ferric_desktop/resources" | Out-Null
           Copy-Item "target/release/ferric.exe" "$stage/ferric.exe"
           Copy-Item "README.md" "$stage/README.md"
           Copy-Item "LICENSE" "$stage/LICENSE"
           Copy-Item "assets/brand/ferric.ico" "$stage/resources/ferric.ico"
           Copy-Item "assets/brand/ferric.png" "$stage/resources/ferric.png"
+          Copy-Item "apps/ferric-desktop/resources/*" "$stage/makepad/ferric_desktop/resources/" -Force
+
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
+          $mwRes = Get-ChildItem (Join-Path $cargoHome "registry/src") -Recurse -Directory -Filter "makepad-widgets-*" |
+            ForEach-Object { Join-Path $_.FullName "resources" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+          if (-not $mwRes) {
+            throw "Failed to locate makepad-widgets resources directory under $cargoHome"
+          }
+          Copy-Item "$mwRes/*" "$stage/makepad/makepad_widgets/resources/" -Recurse -Force
 
           $zipPath = "dist/Ferric-$tag-windows-x86_64.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $zipPath -Force

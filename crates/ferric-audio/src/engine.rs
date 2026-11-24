@@ -102,7 +102,7 @@ impl AudioEngine {
 
         let stream = device
             .build_output_stream(
-                &stream_cfg,
+                stream_cfg,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     if !playing_flag.is_playing.load(Ordering::Relaxed) {
                         data.fill(0.0);
@@ -208,10 +208,7 @@ impl ActiveDeck {
             .probe(
                 &hint,
                 mss,
-                FormatOptions {
-                    enable_gapless: true,
-                    ..Default::default()
-                },
+                FormatOptions::default(),
                 MetadataOptions::default(),
             )
             .map_err(|e| AudioError::Decode(e.to_string()))?;

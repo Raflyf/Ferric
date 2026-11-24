@@ -78,7 +78,7 @@ pub fn read_track_metadata(path: &Path) -> Option<Track> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Local Library".to_string());
         let isrc = tag
-            .and_then(|t| t.get_string(&ItemKey::Isrc))
+            .and_then(|t| t.get_string(ItemKey::Isrc))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 

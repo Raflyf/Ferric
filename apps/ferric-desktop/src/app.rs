@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+const BRAND_ICON_PNG: &[u8] = include_bytes!("../resources/ferric.png");
+
 live_design! {
     use link::theme::*;
     use link::shaders::*;
@@ -248,7 +250,6 @@ live_design! {
                             width: 30,
                             height: 30,
                             fit: Smallest,
-                            source: dep("crate://self/resources/ferric.png")
                         }
                         <Label> {
                             draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
@@ -796,6 +797,11 @@ impl App {
 
         // Adaptive 4 Hz progress & background polling timer (PRD: zero 60fps idle drain).
         self.tick_timer = cx.start_interval(0.25);
+
+        let _ = self
+            .ui
+            .image(id!(brand_icon))
+            .load_png_from_data(cx, BRAND_ICON_PNG);
 
         self.sync_controls_from_state(cx);
         self.apply_theme_live(cx);

@@ -16,7 +16,6 @@ live_design! {
         spacing: 12,
         show_bg: true,
         cursor: Hand,
-        event_key: true,
 
         draw_bg: {
             instance active: 0.0

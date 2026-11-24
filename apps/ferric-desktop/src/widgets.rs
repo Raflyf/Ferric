@@ -692,13 +692,11 @@ impl Widget for FerricBarSlider {
                 let v = self.update_from_abs(cx, fe.abs.x);
                 cx.widget_action(uid, &scope.path, FerricSliderAction::Changed(v));
             }
-            Hit::FingerUp(fe) => {
-                if self.dragging {
-                    self.dragging = false;
-                    self.draw_bg.drag = 0.0;
-                    let v = self.update_from_abs(cx, fe.abs.x);
-                    cx.widget_action(uid, &scope.path, FerricSliderAction::Released(v));
-                }
+            Hit::FingerUp(fe) if self.dragging => {
+                self.dragging = false;
+                self.draw_bg.drag = 0.0;
+                let v = self.update_from_abs(cx, fe.abs.x);
+                cx.widget_action(uid, &scope.path, FerricSliderAction::Released(v));
             }
             _ => {}
         }
@@ -796,13 +794,11 @@ impl Widget for FerricVertSlider {
                 let v = self.update_from_abs(cx, fe.abs.y);
                 cx.widget_action(uid, &scope.path, FerricSliderAction::Changed(v));
             }
-            Hit::FingerUp(fe) => {
-                if self.dragging {
-                    self.dragging = false;
-                    self.draw_bg.drag = 0.0;
-                    let v = self.update_from_abs(cx, fe.abs.y);
-                    cx.widget_action(uid, &scope.path, FerricSliderAction::Released(v));
-                }
+            Hit::FingerUp(fe) if self.dragging => {
+                self.dragging = false;
+                self.draw_bg.drag = 0.0;
+                let v = self.update_from_abs(cx, fe.abs.y);
+                cx.widget_action(uid, &scope.path, FerricSliderAction::Released(v));
             }
             _ => {}
         }

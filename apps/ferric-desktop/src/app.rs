@@ -2943,11 +2943,15 @@ impl App {
                     );
                     self.rebuild_filtered_tracks(cx);
                 }
-                BgMessage::OAuthFailed { error, .. } => {
+                BgMessage::OAuthFailed { kind, error } => {
                     self.ui.button(id!(oauth_cancel_btn)).set_visible(cx, false);
+                    let provider = match kind {
+                        AccountKind::Spotify => "Spotify",
+                        AccountKind::YouTubeMusic => "YouTube",
+                    };
                     self.ui
                         .label(id!(oauth_status_lbl))
-                        .set_text(cx, &format!("Sign-in failed: {error}"));
+                        .set_text(cx, &format!("{provider} sign-in failed: {error}"));
                 }
                 BgMessage::SubsonicSynced { tracks, playlists } => {
                     self.accounts.subsonic_connected = true;

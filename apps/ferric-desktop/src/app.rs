@@ -2749,10 +2749,10 @@ impl App {
         };
         let session = self.current_ytm_session();
         let cache_dir = app_data_dir().join("stream_cache");
-        let track_id = track.id.clone();
-        let artist = track.artist.clone();
-        let title = track.title.clone();
-        let existing_vid = track.youtube_video_id.clone();
+        let track_id = track.id;
+        let artist = track.artist;
+        let title = track.title;
+        let existing_vid = track.youtube_video_id;
 
         thread::spawn(move || {
             let outcome: Result<(String, CachedAudioStream), String> = (|| {

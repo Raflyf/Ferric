@@ -91,14 +91,14 @@ impl AudioResolver for LocalIndexResolver<'_> {
                     confidence: 1.0,
                 }));
             }
-            if let (Some(a), Some(b)) = (&track.isrc, &query.isrc) {
-                if a.eq_ignore_ascii_case(b) {
-                    return Ok(Some(ResolvedStream {
-                        provider_id: self.id(),
-                        locator: StreamLocator::LocalPath(path.clone()),
-                        confidence: 0.99,
-                    }));
-                }
+            if let (Some(a), Some(b)) = (&track.isrc, &query.isrc)
+                && a.eq_ignore_ascii_case(b)
+            {
+                return Ok(Some(ResolvedStream {
+                    provider_id: self.id(),
+                    locator: StreamLocator::LocalPath(path.clone()),
+                    confidence: 0.99,
+                }));
             }
             if track.title.eq_ignore_ascii_case(&query.title)
                 && track.artist.eq_ignore_ascii_case(&query.artist)

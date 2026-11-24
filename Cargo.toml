@@ -12,8 +12,6 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/Raflyf/Ferric"
-authors = ["Rafly <rafly@livelydesk.dev>"]
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

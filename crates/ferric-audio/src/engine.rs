@@ -439,12 +439,11 @@ impl StereoResampler {
                 2,
                 out_needed_frames,
             );
-            if let (Ok(in_buf), Ok(mut out_buf)) = (in_adapter, out_adapter) {
-                if let Ok((_, frames_out)) =
+            if let (Ok(in_buf), Ok(mut out_buf)) = (in_adapter, out_adapter)
+                && let Ok((_, frames_out)) =
                     self.inner.process_into_buffer(&in_buf, &mut out_buf, None)
-                {
-                    output.extend_from_slice(&self.out_scratch[..frames_out * 2]);
-                }
+            {
+                output.extend_from_slice(&self.out_scratch[..frames_out * 2]);
             }
             self.in_fifo.drain(..needed_samples);
         }
@@ -520,11 +519,11 @@ fn decode_loop(
                     deck_a = None;
                 }
                 EngineCommand::SeekMs(ms) => {
-                    if let Some(deck) = &mut deck_a {
-                        if let Ok(actual) = deck.seek_ms(ms) {
-                            telemetry.position_ms.store(actual, Ordering::Relaxed);
-                            eq.reset();
-                        }
+                    if let Some(deck) = &mut deck_a
+                        && let Ok(actual) = deck.seek_ms(ms)
+                    {
+                        telemetry.position_ms.store(actual, Ordering::Relaxed);
+                        eq.reset();
                     }
                 }
                 EngineCommand::SetVolume(v) => {
@@ -596,19 +595,19 @@ fn decode_loop(
 
         if track_ended {
             // Gapless transition into pre-queued next track if available; otherwise signal UI queue.
-            if let Some(next_path) = queued_next_path.take() {
-                if let Ok(next_deck) = ActiveDeck::open(&next_path, out_rate, &codecs) {
-                    telemetry
-                        .duration_ms
-                        .store(next_deck.duration_ms, Ordering::Relaxed);
-                    telemetry
-                        .sample_rate
-                        .store(next_deck.sample_rate, Ordering::Relaxed);
-                    telemetry.position_ms.store(0, Ordering::Relaxed);
-                    deck_a = Some(next_deck);
-                    telemetry.track_finished_seq.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
+            if let Some(next_path) = queued_next_path.take()
+                && let Ok(next_deck) = ActiveDeck::open(&next_path, out_rate, &codecs)
+            {
+                telemetry
+                    .duration_ms
+                    .store(next_deck.duration_ms, Ordering::Relaxed);
+                telemetry
+                    .sample_rate
+                    .store(next_deck.sample_rate, Ordering::Relaxed);
+                telemetry.position_ms.store(0, Ordering::Relaxed);
+                deck_a = Some(next_deck);
+                telemetry.track_finished_seq.fetch_add(1, Ordering::Relaxed);
+                continue;
             }
             deck_a = None;
             telemetry.is_playing.store(false, Ordering::Relaxed);

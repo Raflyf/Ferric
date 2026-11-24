@@ -89,8 +89,9 @@ pub struct Playlist {
     pub track_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
+    #[default]
     Off,
     All,
     One,

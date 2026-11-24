@@ -165,10 +165,11 @@ impl Widget for TrackList {
         });
         let list = self.view.portal_list(id!(list));
         for (item_id, item) in list.items_with_actions(&actions) {
-            if let Some(fe) = item.as_view().finger_up(&actions) {
-                if fe.is_over && fe.was_tap() {
-                    cx.widget_action(uid, &scope.path, TrackListAction::PlayIndex(item_id));
-                }
+            if let Some(fe) = item.as_view().finger_up(&actions)
+                && fe.is_over
+                && fe.was_tap()
+            {
+                cx.widget_action(uid, &scope.path, TrackListAction::PlayIndex(item_id));
             }
         }
     }

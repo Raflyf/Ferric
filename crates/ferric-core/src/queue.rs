@@ -11,12 +11,6 @@ pub struct PlayQueue {
     pub repeat: RepeatMode,
 }
 
-impl Default for RepeatMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
-
 impl PlayQueue {
     pub fn new() -> Self {
         Self::default()
@@ -161,13 +155,12 @@ impl PlayQueue {
         // Single-pass artist-spacing refinement to minimize consecutive same-artist clusters.
         for i in 1..pool.len() {
             let prev_artist = &self.tracks[pool[i - 1]].artist;
-            if &self.tracks[pool[i]].artist == prev_artist {
-                if let Some(swap_rel) = pool[i + 1..]
+            if &self.tracks[pool[i]].artist == prev_artist
+                && let Some(swap_rel) = pool[i + 1..]
                     .iter()
                     .position(|&cand| &self.tracks[cand].artist != prev_artist)
-                {
-                    pool.swap(i, i + 1 + swap_rel);
-                }
+            {
+                pool.swap(i, i + 1 + swap_rel);
             }
         }
 

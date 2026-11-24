@@ -151,12 +151,14 @@ impl ThemeConfig {
     }
 
     pub fn smoked_copper_glass() -> Self {
-        let mut cfg = Self::default();
-        cfg.name = "Ferric Liquid Glass".to_string();
-        cfg.corner_radius_px = 18.0;
-        cfg.material
-            .apply_preset(LiquidGlassPreset::PrismaticLiquid);
-        cfg
+        let mut material = LiquidGlassConfig::default();
+        material.apply_preset(LiquidGlassPreset::PrismaticLiquid);
+        Self {
+            name: "Ferric Liquid Glass".to_string(),
+            corner_radius_px: 18.0,
+            material,
+            ..Self::default()
+        }
     }
 
     pub fn text_contrast_ratio(&self) -> f64 {

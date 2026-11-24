@@ -4,7 +4,7 @@ use ferric_audio::engine::{AudioEngine, EngineCommand};
 use ferric_core::app_data_dir;
 use ferric_core::db::LibraryDb;
 use ferric_core::eq::EqConfig;
-use ferric_core::models::{AccountSettings, RepeatMode, Track, format_duration_ms};
+use ferric_core::models::{AccountSettings, Track, format_duration_ms};
 use ferric_core::queue::PlayQueue;
 use ferric_core::theme::{LiquidGlassPreset, ThemeConfig, hex_to_rgba_f32};
 use ferric_providers::local_scanner::scan_local_folder;
@@ -93,7 +93,7 @@ live_design! {
                     + vec3(0.96, 0.94, 0.90) * (fresnel + spec_tl + diag * 0.055)
                     + vec3(0.92, 0.60, 0.42) * spec_br;
 
-                sdf.fill(vec4(clamp(rgb, vec3(0.0), vec3(1.0)), 1.0));
+                sdf.fill(vec4(clamp(rgb, 0.0, 1.0), 1.0));
                 return sdf.result;
             }
         }
@@ -988,16 +988,16 @@ impl App {
     }
 
     fn play_track(&mut self, cx: &mut Cx, track: Track) {
-        if let Some(path) = &track.path {
-            if let Some(audio) = &self.audio {
-                audio.send(EngineCommand::LoadAndPlay(path.clone()));
-                let next_path = self
-                    .queue
-                    .peek_upcoming(1)
-                    .first()
-                    .and_then(|t| t.path.clone());
-                audio.send(EngineCommand::QueueNext(next_path));
-            }
+        if let Some(path) = &track.path
+            && let Some(audio) = &self.audio
+        {
+            audio.send(EngineCommand::LoadAndPlay(path.clone()));
+            let next_path = self
+                .queue
+                .peek_upcoming(1)
+                .first()
+                .and_then(|t| t.path.clone());
+            audio.send(EngineCommand::QueueNext(next_path));
         }
         self.ui.label(id!(np_title_lbl)).set_text(cx, &track.title);
         self.ui
@@ -1028,21 +1028,21 @@ impl App {
         self.ui.label(id!(lyric_next_lbl)).set_text(cx, "");
 
         // 1. Check local sidecar `.lrc` first (0 network)
-        if let Some(path) = &track.path {
-            if let Some(lrc) = read_local_sidecar_lrc(path) {
-                self.synced_lyrics = SyncedLyrics::parse_lrc(&lrc);
-                self.update_lyrics_display(cx, 0);
-                return;
-            }
+        if let Some(path) = &track.path
+            && let Some(lrc) = read_local_sidecar_lrc(path)
+        {
+            self.synced_lyrics = SyncedLyrics::parse_lrc(&lrc);
+            self.update_lyrics_display(cx, 0);
+            return;
         }
 
         // 2. Check SQLite lyrics cache
-        if let Some(db) = &self.db {
-            if let Ok(Some(cached)) = db.get_cached_lyrics(&track.id) {
-                self.synced_lyrics = SyncedLyrics::parse_lrc(&cached);
-                self.update_lyrics_display(cx, 0);
-                return;
-            }
+        if let Some(db) = &self.db
+            && let Ok(Some(cached)) = db.get_cached_lyrics(&track.id)
+        {
+            self.synced_lyrics = SyncedLyrics::parse_lrc(&cached);
+            self.update_lyrics_display(cx, 0);
+            return;
         }
 
         // 3. Fetch asynchronously from open LRCLIB database on a detached worker thread
@@ -1091,12 +1091,12 @@ impl App {
     }
 
     fn apply_search_filter(&mut self, cx: &mut Cx) {
-        if let Some(db) = &self.db {
-            if let Ok(rows) = db.list_tracks(&self.search_query) {
-                self.filtered_tracks = rows;
-                self.ui.redraw(cx);
-                return;
-            }
+        if let Some(db) = &self.db
+            && let Ok(rows) = db.list_tracks(&self.search_query)
+        {
+            self.filtered_tracks = rows;
+            self.ui.redraw(cx);
+            return;
         }
         let q = self.search_query.trim().to_ascii_lowercase();
         if q.is_empty() {
@@ -1280,11 +1280,12 @@ impl AppMain for App {
             self.handle_tick(cx);
         }
 
-        if let Event::KeyDown(ke) = event {
-            if ke.modifiers.control && ke.key_code == KeyCode::KeyK {
-                self.switch_page(cx, live_id!(page_library));
-                self.ui.text_input(id!(search_input)).set_key_focus(cx);
-            }
+        if let Event::KeyDown(ke) = event
+            && ke.modifiers.control
+            && ke.key_code == KeyCode::KeyK
+        {
+            self.switch_page(cx, live_id!(page_library));
+            self.ui.text_input(id!(search_input)).set_key_focus(cx);
         }
 
         let active_id = self.queue.current().map(|t| t.id.as_str());
@@ -1313,25 +1314,22 @@ impl AppMain for App {
         }
 
         // Top Bar: Add Folder & Rescan & Search
-        if self.ui.button(id!(add_folder_btn)).clicked(&actions) {
-            if let Some(folder) = rfd::FileDialog::new()
+        if self.ui.button(id!(add_folder_btn)).clicked(&actions)
+            && let Some(folder) = rfd::FileDialog::new()
                 .set_title("Select Local Music Folder")
                 .pick_folder()
-            {
-                if let Some(db) = &self.db {
-                    let _ = db.add_music_folder(&folder);
-                }
-                self.spawn_folder_scan(vec![folder]);
-            }
-        }
-        if self.ui.button(id!(rescan_btn)).clicked(&actions) {
+        {
             if let Some(db) = &self.db {
-                if let Ok(folders) = db.list_music_folders() {
-                    if !folders.is_empty() {
-                        self.spawn_folder_scan(folders);
-                    }
-                }
+                let _ = db.add_music_folder(&folder);
             }
+            self.spawn_folder_scan(vec![folder]);
+        }
+        if self.ui.button(id!(rescan_btn)).clicked(&actions)
+            && let Some(db) = &self.db
+            && let Ok(folders) = db.list_music_folders()
+            && !folders.is_empty()
+        {
+            self.spawn_folder_scan(folders);
         }
         if let Some(query) = self.ui.text_input(id!(search_input)).changed(&actions) {
             self.search_query = query;
@@ -1340,54 +1338,54 @@ impl AppMain for App {
 
         // Library track clicks & hero buttons
         for action in &actions {
-            if let TrackListAction::PlayIndex(filtered_idx) = action.cast() {
-                if let Some(clicked) = self.filtered_tracks.get(filtered_idx).cloned() {
-                    self.queue
-                        .set_tracks(self.filtered_tracks.clone(), Some(filtered_idx));
-                    self.play_track(cx, clicked);
-                }
+            if let TrackListAction::PlayIndex(filtered_idx) = action.cast()
+                && let Some(clicked) = self.filtered_tracks.get(filtered_idx).cloned()
+            {
+                self.queue
+                    .set_tracks(self.filtered_tracks.clone(), Some(filtered_idx));
+                self.play_track(cx, clicked);
             }
         }
-        if self.ui.button(id!(play_all_btn)).clicked(&actions) {
-            if let Some(first) = self.filtered_tracks.first().cloned() {
-                self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
+        if self.ui.button(id!(play_all_btn)).clicked(&actions)
+            && let Some(first) = self.filtered_tracks.first().cloned()
+        {
+            self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
+            self.play_track(cx, first);
+        }
+        if self.ui.button(id!(hero_shuffle_btn)).clicked(&actions)
+            && !self.filtered_tracks.is_empty()
+        {
+            self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
+            self.queue.set_shuffle(true);
+            self.ui.button(id!(shuffle_btn)).set_text(cx, "Shuffle: On");
+            if let Some(first) = self.queue.current().cloned() {
                 self.play_track(cx, first);
-            }
-        }
-        if self.ui.button(id!(hero_shuffle_btn)).clicked(&actions) {
-            if !self.filtered_tracks.is_empty() {
-                self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
-                self.queue.set_shuffle(true);
-                self.ui.button(id!(shuffle_btn)).set_text(cx, "Shuffle: On");
-                if let Some(first) = self.queue.current().cloned() {
-                    self.play_track(cx, first);
-                }
             }
         }
 
         // Bottom Player Transport Controls
-        if self.ui.button(id!(play_pause_btn)).clicked(&actions) {
-            if let Some(audio) = &self.audio {
-                let snap = audio.telemetry();
-                if !snap.is_playing && self.queue.current().is_none() {
-                    if let Some(first) = self.filtered_tracks.first().cloned() {
-                        self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
-                        self.play_track(cx, first);
-                    }
-                } else {
-                    audio.send(EngineCommand::TogglePlayPause);
+        if self.ui.button(id!(play_pause_btn)).clicked(&actions)
+            && let Some(audio) = &self.audio
+        {
+            let snap = audio.telemetry();
+            if !snap.is_playing && self.queue.current().is_none() {
+                if let Some(first) = self.filtered_tracks.first().cloned() {
+                    self.queue.set_tracks(self.filtered_tracks.clone(), Some(0));
+                    self.play_track(cx, first);
                 }
+            } else {
+                audio.send(EngineCommand::TogglePlayPause);
             }
         }
-        if self.ui.button(id!(next_btn)).clicked(&actions) {
-            if let Some(next) = self.queue.next_track().cloned() {
-                self.play_track(cx, next);
-            }
+        if self.ui.button(id!(next_btn)).clicked(&actions)
+            && let Some(next) = self.queue.next_track().cloned()
+        {
+            self.play_track(cx, next);
         }
-        if self.ui.button(id!(prev_btn)).clicked(&actions) {
-            if let Some(prev) = self.queue.prev_track().cloned() {
-                self.play_track(cx, prev);
-            }
+        if self.ui.button(id!(prev_btn)).clicked(&actions)
+            && let Some(prev) = self.queue.prev_track().cloned()
+        {
+            self.play_track(cx, prev);
         }
         if self.ui.button(id!(shuffle_btn)).clicked(&actions) {
             let next_state = !self.queue.shuffle;
@@ -1408,19 +1406,19 @@ impl AppMain for App {
                 .button(id!(repeat_btn))
                 .set_text(cx, self.queue.repeat.label());
         }
-        if let Some(pos_ratio) = self.ui.slider(id!(seek_slider)).end_slide(&actions) {
-            if let Some(audio) = &self.audio {
-                let dur = audio.telemetry().duration_ms;
-                if dur > 0 {
-                    let target_ms = (pos_ratio.clamp(0.0, 1.0) * dur as f64) as u64;
-                    audio.send(EngineCommand::SeekMs(target_ms));
-                }
+        if let Some(pos_ratio) = self.ui.slider(id!(seek_slider)).end_slide(&actions)
+            && let Some(audio) = &self.audio
+        {
+            let dur = audio.telemetry().duration_ms;
+            if dur > 0 {
+                let target_ms = (pos_ratio.clamp(0.0, 1.0) * dur as f64) as u64;
+                audio.send(EngineCommand::SeekMs(target_ms));
             }
         }
-        if let Some(vol) = self.ui.slider(id!(vol_slider)).slided(&actions) {
-            if let Some(audio) = &self.audio {
-                audio.send(EngineCommand::SetVolume(vol as f32));
-            }
+        if let Some(vol) = self.ui.slider(id!(vol_slider)).slided(&actions)
+            && let Some(audio) = &self.audio
+        {
+            audio.send(EngineCommand::SetVolume(vol as f32));
         }
 
         // Equalizer APO Controls
@@ -1434,12 +1432,12 @@ impl AppMain for App {
             self.apply_eq_live(cx);
         }
         for (idx, slider_id) in eq_band_slider_ids().iter().enumerate() {
-            if let Some(val) = self.ui.slider(*slider_id).slided(&actions) {
-                if let Some(band) = self.eq.bands.get_mut(idx) {
-                    band.gain_db = val as f32;
-                    self.eq.preset_name = "Custom".to_string();
-                    self.apply_eq_live(cx);
-                }
+            if let Some(val) = self.ui.slider(*slider_id).slided(&actions)
+                && let Some(band) = self.eq.bands.get_mut(idx)
+            {
+                band.gain_db = val as f32;
+                self.eq.preset_name = "Custom".to_string();
+                self.apply_eq_live(cx);
             }
         }
         for (btn_id, preset_name) in [
@@ -1455,28 +1453,24 @@ impl AppMain for App {
                 self.apply_eq_live(cx);
             }
         }
-        if self.ui.button(id!(eq_import_btn)).clicked(&actions) {
-            if let Some(file) = rfd::FileDialog::new()
+        if self.ui.button(id!(eq_import_btn)).clicked(&actions)
+            && let Some(file) = rfd::FileDialog::new()
                 .add_filter("Equalizer APO", &["txt"])
                 .pick_file()
-            {
-                if let Ok(raw) = std::fs::read_to_string(file) {
-                    if let Ok(parsed) = EqConfig::from_equalizer_apo(&raw) {
-                        self.eq = parsed;
-                        self.sync_controls_from_state(cx);
-                        self.apply_eq_live(cx);
-                    }
-                }
-            }
+            && let Ok(raw) = std::fs::read_to_string(file)
+            && let Ok(parsed) = EqConfig::from_equalizer_apo(&raw)
+        {
+            self.eq = parsed;
+            self.sync_controls_from_state(cx);
+            self.apply_eq_live(cx);
         }
-        if self.ui.button(id!(eq_export_btn)).clicked(&actions) {
-            if let Some(file) = rfd::FileDialog::new()
+        if self.ui.button(id!(eq_export_btn)).clicked(&actions)
+            && let Some(file) = rfd::FileDialog::new()
                 .set_file_name("ferric-eq-apo.txt")
                 .add_filter("Equalizer APO", &["txt"])
                 .save_file()
-            {
-                let _ = std::fs::write(file, self.eq.to_equalizer_apo());
-            }
+        {
+            let _ = std::fs::write(file, self.eq.to_equalizer_apo());
         }
 
         // Ferric Connect Pairing URI Generator
@@ -1557,26 +1551,23 @@ impl AppMain for App {
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
-        if self.ui.button(id!(theme_export_btn)).clicked(&actions) {
-            if let Some(file) = rfd::FileDialog::new()
+        if self.ui.button(id!(theme_export_btn)).clicked(&actions)
+            && let Some(file) = rfd::FileDialog::new()
                 .set_file_name("custom.ferric-theme.json")
                 .add_filter("Ferric Theme JSON", &["json"])
                 .save_file()
-            {
-                let _ = self.theme.export_to_file(&file);
-            }
+        {
+            let _ = self.theme.export_to_file(&file);
         }
-        if self.ui.button(id!(theme_import_btn)).clicked(&actions) {
-            if let Some(file) = rfd::FileDialog::new()
+        if self.ui.button(id!(theme_import_btn)).clicked(&actions)
+            && let Some(file) = rfd::FileDialog::new()
                 .add_filter("Ferric Theme JSON", &["json"])
                 .pick_file()
-            {
-                if let Ok(loaded) = ThemeConfig::import_from_file(&file) {
-                    self.theme = loaded;
-                    self.sync_controls_from_state(cx);
-                    self.apply_theme_live(cx);
-                }
-            }
+            && let Ok(loaded) = ThemeConfig::import_from_file(&file)
+        {
+            self.theme = loaded;
+            self.sync_controls_from_state(cx);
+            self.apply_theme_live(cx);
         }
 
         // Accounts OAuth PKCE Client ID Persistence
@@ -1604,9 +1595,6 @@ impl AppMain for App {
                 let _ = db.save_accounts(&self.accounts);
             }
         }
-
-        // Unused import guard for RepeatMode enum methods
-        let _ = RepeatMode::Off;
     }
 }
 

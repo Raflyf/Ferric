@@ -1,12 +1,12 @@
 use crate::shell::{
     copy_text_to_clipboard, launch_verified_installer, open_allowed_url, open_github_url,
-    open_track_video_clip, win32_is_active_window_maximized, win32_minimize_active_window,
-    win32_toggle_maximize_active_window,
+    open_track_video_clip, win32_close_active_window, win32_is_active_window_maximized,
+    win32_minimize_active_window, win32_toggle_maximize_active_window,
 };
 use crate::smtc::{SmtcBridge, SmtcCommand};
-use crate::startup_page_override;
 use crate::track_list::{TrackListAction, TrackListScope};
 use crate::widgets::*;
+use crate::{startup_load_demo, startup_page_override};
 use ferric_audio::demo_synth::ensure_demo_tracks;
 use ferric_audio::engine::{AudioEngine, EngineCommand};
 use ferric_core::app_data_dir;
@@ -26,6 +26,10 @@ use ferric_providers::oauth::{
     CloudSyncReport, DEFAULT_OAUTH_CALLBACK_PATH, DEFAULT_OAUTH_CALLBACK_PORT, OAuthTokens,
     bind_loopback_callback, generate_pkce_pair, google_authorize_url, google_exchange_code,
     spotify_authorize_url, spotify_exchange_code, sync_spotify_catalog, sync_youtube_catalog,
+};
+use ferric_providers::public_sync::{
+    import_spotify_public_url, import_youtube_public_url, parse_spotify_target,
+    parse_youtube_target, search_youtube_public,
 };
 use ferric_providers::subsonic::{SubsonicCredentials, sync_subsonic_catalog};
 use ferric_providers::updater::{
@@ -55,37 +59,34 @@ live_design! {
     use crate::widgets::*;
     use crate::track_list::TrackList;
 
-    // Clean AMOLED / Optical Liquid Glass Surface
+    // Pure OLED Flat Surface (default) transforming into Snell Refractive Liquid Glass when toggled ON
     FerricSurface = <View> {
         show_bg: true,
         draw_bg: {
-            uniform base_col: #0B0B0B
-            uniform border_col: #1E1E1E
+            uniform base_col: #060606
+            uniform border_col: #1A1A1A
             uniform accent_col: #D9541E
             uniform glass_enabled: 0.0
             uniform glass_ior: 1.48
             uniform glass_disp: 0.42
             uniform glass_rim: 0.78
             uniform glass_scrim: 0.28
-            uniform radius: 14.0
+            uniform radius: 0.0
 
             fn pixel(self) -> vec4 {
+                if (self.glass_enabled < 0.5) {
+                    return self.base_col;
+                }
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                let r = min(self.radius, min(self.rect_size.x, self.rect_size.y) * 0.25);
+                let r = min(max(self.radius, 12.0) * 0.5, min(self.rect_size.x, self.rect_size.y) * 0.18);
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, r);
-
-                if self.glass_enabled < 0.5 {
-                    sdf.fill_keep(self.base_col);
-                    sdf.stroke(self.border_col, 1.0);
-                    return sdf.result;
-                }
 
                 let center = self.rect_size * 0.5;
                 let rel = p - center;
-                let half_b = max(center - vec2(r + 1.0, r + 1.0), vec2(1.0, 1.0));
+                let half_b = max(center - vec2(r * 2.0 + 1.0, r * 2.0 + 1.0), vec2(1.0, 1.0));
                 let q = abs(rel) - half_b;
-                let sd = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+                let sd = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r * 2.0;
                 let depth = max(-sd, 0.0);
                 let edge_t = clamp(1.0 - depth / 24.0, 0.0, 1.0);
                 let slope = edge_t * edge_t * (2.2 - 0.8 * edge_t);
@@ -116,38 +117,62 @@ live_design! {
         }
     }
 
-    FerricCard = <RoundedView> {
+    FerricDividerH = <SolidView> {
+        width: Fill,
+        height: 1,
+        draw_bg: { color: #1A1A1A }
+    }
+
+    FerricDividerV = <SolidView> {
+        width: 1,
+        height: Fill,
+        draw_bg: { color: #1A1A1A }
+    }
+
+    FerricCard = <View> {
         width: Fill,
         height: Fit,
         padding: 20,
+        show_bg: true,
         draw_bg: {
-            color: #101010,
-            border_radius: 12.0,
-            border_size: 1.0,
-            border_color: #202020
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
+                sdf.fill_keep(#0B0B0B);
+                sdf.stroke(#1F1F1F, 1.0);
+                return sdf.result;
+            }
         }
     }
 
+    // Sidebar Navigation Item with Real Crisp GPU SVG Vector Icon
     FerricNavItem = <Button> {
         width: Fill,
-        height: 40,
-        padding: { left: 14, right: 14 }
+        height: 38,
+        padding: { left: 12, right: 12 }
+        spacing: 11,
         align: { x: 0.0, y: 0.5 }
+        icon_walk: { width: 15, height: Fit }
+        draw_icon: {
+            color: #888279,
+            color_hover: #F3EEE3,
+            color_down: #D9541E
+        }
         draw_text: {
             color: #9E988E,
             color_hover: #F3EEE3,
             color_down: #F3EEE3,
-            text_style: { font_size: 13.5 }
+            text_style: { font_size: 13.0 }
         }
         draw_bg: {
             instance active: 0.0
             instance hover: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 9.0);
-                let col = mix(mix(vec4(0.0,0.0,0.0,0.0), #151515, self.hover), #1C100A, self.active);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0);
+                let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), #141414, self.hover), #1A0E08, self.active);
                 sdf.fill_keep(col);
-                sdf.stroke(mix(vec4(0.0,0.0,0.0,0.0), #D9541E, self.active * 0.65), 1.0);
+                sdf.stroke(mix(vec4(0.0, 0.0, 0.0, 0.0), #D9541E, self.active * 0.65), 1.0);
                 return sdf.result;
             }
         }
@@ -155,8 +180,9 @@ live_design! {
 
     FerricPlaylistBtn = <Button> {
         width: Fill,
-        height: 34,
+        height: 32,
         padding: { left: 12, right: 10 }
+        spacing: 8,
         align: { x: 0.0, y: 0.5 }
         draw_text: {
             color: #9E988E,
@@ -168,23 +194,31 @@ live_design! {
             instance hover: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 7.0);
-                let col = mix(mix(vec4(0.0,0.0,0.0,0.0), #141414, self.hover), #181818, self.active);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 3.5);
+                let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), #141414, self.hover), #191919, self.active);
                 sdf.fill(col);
                 return sdf.result;
             }
         }
     }
 
+    // Primary Copper Stadium Pill CTA (true stadium radius = (h - 1) * 0.25 in Makepad SDF)
     FerricAccentPill = <Button> {
         width: Fit,
-        height: 38,
-        padding: { left: 20, right: 20 }
+        height: 36,
+        padding: { left: 16, right: 18 }
+        spacing: 8,
         align: { x: 0.5, y: 0.5 }
+        icon_walk: { width: 14, height: Fit }
+        draw_icon: {
+            color: #080808,
+            color_hover: #080808,
+            color_down: #080808
+        }
         draw_text: {
-            color: #000000,
-            color_hover: #000000,
-            color_down: #000000,
+            color: #080808,
+            color_hover: #080808,
+            color_down: #080808,
             text_style: { font_size: 12.5 }
         }
         draw_bg: {
@@ -192,7 +226,7 @@ live_design! {
             instance down: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = (self.rect_size.y - 1.0) * 0.5;
+                let r = (self.rect_size.y - 1.0) * 0.25;
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
                 let c = mix(mix(#D9541E, #EB652E, self.hover), #B84214, self.down);
                 sdf.fill(c);
@@ -201,13 +235,21 @@ live_design! {
         }
     }
 
-    FerricSoftPill = <Button> {
+    // Crisp FigCraft 8px Rounded-Rect Button (NO pointy football pills!)
+    FerricBtn = <Button> {
         width: Fit,
         height: 34,
-        padding: { left: 15, right: 15 }
+        padding: { left: 13, right: 14 }
+        spacing: 7,
         align: { x: 0.5, y: 0.5 }
+        icon_walk: { width: 14, height: Fit }
+        draw_icon: {
+            color: #ABA59B,
+            color_hover: #F3EEE3,
+            color_down: #D9541E
+        }
         draw_text: {
-            color: #F3EEE3,
+            color: #E7E1D6,
             color_hover: #FFFFFF,
             color_down: #D9541E,
             text_style: { font_size: 12.0 }
@@ -217,38 +259,40 @@ live_design! {
             instance hover: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = (self.rect_size.y - 1.0) * 0.5;
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                let bg = mix(mix(#141414, #1E1E1E, self.hover), #221109, self.active);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
+                let bg = mix(mix(#111111, #1B1B1B, self.hover), #1F1009, self.active);
                 sdf.fill_keep(bg);
-                let border = mix(#282828, #D9541E, self.active);
+                let border = mix(#262626, #D9541E, self.active);
                 sdf.stroke(border, 1.0);
                 return sdf.result;
             }
         }
     }
 
-    FerricPlayCircleBtn = <Button> {
-        width: 42,
-        height: 42,
+    // Pure Centered Vector SVG Icon Button (for Bottom Player Bar & Transport)
+    FerricIconBtn = <Button> {
+        width: 34,
+        height: 34,
         padding: 0,
+        spacing: 0,
         align: { x: 0.5, y: 0.5 }
-        text: "Play"
-        draw_text: {
-            color: #000000,
-            color_hover: #000000,
-            text_style: { font_size: 11.0 }
+        text: ""
+        label_walk: { width: 0, height: 0 }
+        icon_walk: { width: 16, height: Fit }
+        draw_icon: {
+            color: #9E988E,
+            color_hover: #F3EEE3,
+            color_down: #D9541E
         }
         draw_bg: {
+            instance active: 0.0
             instance hover: 0.0
-            instance down: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let c = self.rect_size * 0.5;
-                let r = min(c.x, c.y) - 1.0;
-                sdf.circle(c.x, c.y, r);
-                let fill = mix(mix(#D9541E, #ED6832, self.hover), #BA4314, self.down);
-                sdf.fill(fill);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0);
+                let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), #171717, self.hover), #201008, self.active);
+                sdf.fill_keep(bg);
+                sdf.stroke(mix(vec4(0.0, 0.0, 0.0, 0.0), #D9541E, self.active * 0.55), 1.0);
                 return sdf.result;
             }
         }
@@ -259,15 +303,23 @@ live_design! {
         height: 36,
         draw_bg: {
             color: #090909,
+            color_empty: #090909,
+            color_hover: #0D0D0D,
             color_focus: #0F0F0F,
-            border_radius: 9.0,
+            border_radius: 4.0,
             border_size: 1.0,
             border_color_1: #262626,
-            border_color_1_focus: #D9541E
+            border_color_2: #262626,
+            border_color_1_empty: #262626,
+            border_color_2_empty: #262626,
+            border_color_1_hover: #383838,
+            border_color_2_hover: #383838,
+            border_color_1_focus: #D9541E,
+            border_color_2_focus: #D9541E
         }
         draw_text: {
             color: #F3EEE3,
-            color_empty: #77726A,
+            color_empty: #6F6A62,
             text_style: { font_size: 12.5 }
         }
         draw_cursor: { color: #D9541E }
@@ -276,9 +328,13 @@ live_design! {
     App = {{App}} {
         ui: <Root> {
             main_window = <Window> {
-                window: { title: "Ferric", inner_size: vec2(1240, 760) }
+                window: { title: "Ferric", inner_size: vec2(1280, 780) }
                 pass: { clear_color: #000000 }
-                caption_bar = { visible: false }
+                caption_bar = {
+                    visible: false,
+                    height: 0,
+                    caption_label = { label = { text: "Ferric" } }
+                }
 
                 body = <View> {
                     width: Fill,
@@ -290,7 +346,7 @@ live_design! {
                         uniform glass_bg: 0.0
                         uniform accent_col: #D9541E
                         fn pixel(self) -> vec4 {
-                            if self.glass_bg < 0.5 {
+                            if (self.glass_bg < 0.5) {
                                 return self.canvas_col;
                             }
                             let d1 = length(self.pos - vec2(0.16, 0.18));
@@ -309,158 +365,268 @@ live_design! {
                         height: Fill,
                         flow: Down,
 
-                        // 1. UNIFIED FRAMELESS TOP BAR (Spotify / Sonora Clean Header)
+                        // 1. UNIFIED FRAMELESS TOP BAR (Zero duplicate Makepad titlebar!)
                         top_bar = <FerricSurface> {
                             width: Fill,
                             height: 52,
-                            margin: { left: 8, right: 8, top: 8, bottom: 4 }
-                            padding: { left: 16, right: 10 }
+                            padding: { left: 16, right: 8 }
                             flow: Right,
                             align: { y: 0.5 }
                             spacing: 12,
-                            draw_bg: { base_col: #0A0A0A, radius: 12.0 }
+                            draw_bg: { base_col: #050505, radius: 0.0 }
 
-                            brand_icon = <Image> {
-                                width: 26,
-                                height: 26,
-                                fit: Smallest,
+                            // Brand Anchor
+                            <View> {
+                                width: 212,
+                                height: Fill,
+                                flow: Right,
+                                align: { y: 0.5 }
+                                spacing: 10,
+                                brand_icon = <Image> {
+                                    width: 24,
+                                    height: 24,
+                                    fit: Smallest
+                                }
+                                <Label> {
+                                    draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
+                                    text: "Ferric"
+                                }
+                                <Label> {
+                                    draw_text: { color: #66615A, text_style: { font_size: 11.0 } }
+                                    text: "v0.1.0"
+                                }
                             }
-                            <Label> {
-                                draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
-                                text: "Ferric"
+
+                            // Centered Search Box (with Crisp SVG Search Icon + Ctrl+K Trigger)
+                            <View> {
+                                width: Fill,
+                                height: Fill,
+                                align: { x: 0.5, y: 0.5 }
+                                search_bar_wrap = <View> {
+                                    width: 440,
+                                    height: 36,
+                                    padding: { left: 12, right: 6 }
+                                    flow: Right,
+                                    align: { y: 0.5 }
+                                    spacing: 8,
+                                    show_bg: true,
+                                    draw_bg: {
+                                        fn pixel(self) -> vec4 {
+                                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
+                                            sdf.fill_keep(#0E0E0E);
+                                            sdf.stroke(#242424, 1.0);
+                                            return sdf.result;
+                                        }
+                                    }
+                                    <Icon> {
+                                        icon_walk: { width: 14, height: Fit }
+                                        draw_icon: {
+                                            svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
+                                            color: #7A756D
+                                        }
+                                    }
+                                    search_input = <TextInput> {
+                                        width: Fill,
+                                        height: 30,
+                                        empty_text: "Search songs, artists, or paste Spotify/YouTube link..."
+                                        draw_bg: {
+                                            fn pixel(self) -> vec4 {
+                                                return vec4(0.0, 0.0, 0.0, 0.0);
+                                            }
+                                        }
+                                        draw_text: {
+                                            color: #F3EEE3,
+                                            color_empty: #6F6A62,
+                                            text_style: { font_size: 12.5 }
+                                        }
+                                        draw_cursor: { color: #D9541E }
+                                    }
+                                    cmdk_btn = <FerricBtn> {
+                                        height: 24,
+                                        padding: { left: 8, right: 8 }
+                                        text: "Ctrl+K"
+                                        draw_text: { color: #888279, color_hover: #F3EEE3, text_style: { font_size: 10.5 } }
+                                    }
+                                }
                             }
 
-                            <View> { width: Fill, height: 1 }
-
-                            search_bar_wrap = <View> {
-                                width: 390,
-                                height: 36,
+                            // Right Quick Account Buttons & Custom Vector Window Controls
+                            <View> {
+                                width: Fit,
+                                height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
                                 spacing: 6,
-                                search_input = <FerricInput> {
-                                    width: Fill,
-                                    height: 36,
-                                    empty_text: "What do you want to play? (Ctrl+K)"
-                                    draw_bg: { border_radius: 18.0 }
+
+                                update_badge_btn = <FerricAccentPill> {
+                                    visible: false,
+                                    height: 28,
+                                    padding: { left: 10, right: 10 }
+                                    text: "Update"
+                                    draw_text: { text_style: { font_size: 11.0 } }
                                 }
-                                cmdk_btn = <FerricSoftPill> {
-                                    height: 32,
-                                    padding: { left: 11, right: 11 }
-                                    text: "Ctrl+K"
+                                top_spotify_btn = <FerricBtn> {
+                                    height: 30,
+                                    padding: { left: 10, right: 11 }
+                                    text: "Spotify"
+                                    draw_icon: {
+                                        svg_path: "M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14C0 17.31 2.69 20 6 20H19C21.76 20 24 17.76 24 15C24 12.36 21.95 10.22 19.35 10.04Z"
+                                        color: #D9541E
+                                    }
                                 }
+                                top_youtube_btn = <FerricBtn> {
+                                    height: 30,
+                                    padding: { left: 10, right: 11 }
+                                    text: "YouTube"
+                                    draw_icon: {
+                                        svg_path: "M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"
+                                        color: #D9541E
+                                    }
+                                }
+                                <SolidView> { width: 1, height: 18, margin: { left: 4, right: 4 }, draw_bg: { color: #242424 } }
+                                win_mini_btn = <FerricWinBtn> { width: 34, height: 30, draw_bg: { kind: 3.0 } }
+                                win_min_btn = <FerricWinBtn> { width: 36, height: 30, draw_bg: { kind: 0.0 } }
+                                win_max_btn = <FerricWinBtn> { width: 36, height: 30, draw_bg: { kind: 1.0 } }
+                                win_close_btn = <FerricWinBtn> { width: 38, height: 30, draw_bg: { kind: 2.0 } }
                             }
-
-                            <View> { width: Fill, height: 1 }
-
-                            accounts_top_btn = <FerricSoftPill> {
-                                height: 32,
-                                text: "Sign In"
-                            }
-                            settings_top_btn = <FerricSoftPill> {
-                                height: 32,
-                                text: "Settings"
-                            }
-                            update_badge_btn = <FerricAccentPill> {
-                                visible: false,
-                                height: 30,
-                                padding: { left: 12, right: 12 }
-                                text: "Update Ready"
-                            }
-
-                            // Crisp Window Controls: Mini-Player, Minimize, Maximize/Restore, Exit
-                            win_mini_btn = <FerricWinBtn> { draw_bg: { kind: 3.0 } }
-                            win_min_btn = <FerricWinBtn> { draw_bg: { kind: 0.0 } }
-                            win_max_btn = <FerricWinBtn> { draw_bg: { kind: 1.0 } }
-                            win_close_btn = <FerricWinBtn> { draw_bg: { kind: 2.0 } }
                         }
 
-                        // 2. WORKSPACE MIDDLE (Sidebar + Main Stage + Collapsible Right Drawer)
+                        <FerricDividerH> {}
+
+                        // 2. WORKSPACE ROW (Calm Sidebar + Spacious Direct Center Stage + Optional Drawer)
                         workspace_row = <View> {
                             width: Fill,
                             height: Fill,
-                            margin: { left: 8, right: 8, top: 4, bottom: 4 }
                             flow: Right,
-                            spacing: 8,
 
-                            // LEFT SIDEBAR (Clean & Calm like Spotify / Sonora)
+                            // LEFT SIDEBAR (228px, FigCraft D1 Proportions, Real SVG Icons)
                             left_sidebar = <FerricSurface> {
-                                width: 224,
+                                width: 228,
                                 height: Fill,
-                                padding: 14,
+                                padding: { left: 12, right: 12, top: 14, bottom: 12 }
                                 flow: Down,
-                                spacing: 6,
-                                draw_bg: { base_col: #0A0A0A, radius: 14.0 }
+                                spacing: 3,
+                                draw_bg: { base_col: #070707, radius: 0.0 }
 
-                                nav_home = <FerricNavItem> { text: "Home" }
-                                nav_search = <FerricNavItem> { text: "Search" }
-                                nav_library = <FerricNavItem> { text: "Your Library", draw_bg: { active: 1.0 } }
-                                nav_now_playing = <FerricNavItem> { text: "Now Playing" }
+                                nav_home = <FerricNavItem> {
+                                    text: "Home"
+                                    draw_icon: { svg_path: "M10 20V14H14V20H19V12H22L12 3L2 12H5V20H10Z" }
+                                }
+                                nav_library = <FerricNavItem> {
+                                    text: "Library"
+                                    draw_bg: { active: 1.0 }
+                                    draw_icon: {
+                                        svg_path: "M4 4H6.5V20H4V4ZM9.5 4H12V20H9.5V4ZM14.5 4.6L16.9 4L20.5 19.4L18.1 20L14.5 4.6Z"
+                                        color: #D9541E
+                                    }
+                                    draw_text: { color: #F3EEE3 }
+                                }
+                                nav_now_playing = <FerricNavItem> {
+                                    text: "Now Playing"
+                                    draw_icon: { svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z" }
+                                }
 
-                                <RoundedView> {
-                                    width: Fill, height: 1,
-                                    margin: { top: 8, bottom: 6 }
-                                    draw_bg: { color: #1D1D1D }
+                                <Label> {
+                                    margin: { left: 10, top: 14, bottom: 4 }
+                                    draw_text: { color: #66615A, text_style: { font_size: 10.0 } }
+                                    text: "STUDIO & SOUND"
+                                }
+                                nav_fade = <FerricNavItem> {
+                                    text: "Fade-In & Audio"
+                                    draw_icon: { svg_path: "M3 10H5V14H3V10ZM7 6H9V18H7V6ZM11 2H13V22H11V2ZM15 6H17V18H15V6ZM19 10H21V14H19V10Z" }
+                                }
+                                nav_eq = <FerricNavItem> {
+                                    text: "Equalizer"
+                                    draw_icon: { svg_path: "M5 4H7V11H9V13H3V11H5V4ZM5 15H7V20H5V15ZM11 4H13V7H15V9H9V7H11V4ZM11 11H13V20H11V11ZM17 4H19V14H21V16H15V14H17V4ZM17 18H19V20H17V18Z" }
+                                }
+                                nav_connect = <FerricNavItem> {
+                                    text: "Ferric Connect"
+                                    draw_icon: { svg_path: "M4 6H20V4H4C2.9 4 2 4.9 2 6V17H0V20H14V17H4V6ZM23 8H17C16.45 8 16 8.45 16 9V19C16 19.55 16.45 20 17 20H23C23.55 20 24 19.55 24 19V9C24 8.45 23.55 8 23 8ZM22 17H18V10H22V17Z" }
+                                }
+                                nav_appearance = <FerricNavItem> {
+                                    text: "Appearance"
+                                    draw_icon: { svg_path: "M12 2L2 9L12 16L22 9L12 2ZM12 18.54L4.62 12.81L3 14.07L12 21.07L21 14.07L19.37 12.8L12 18.54Z" }
+                                }
+                                nav_accounts = <FerricNavItem> {
+                                    text: "Accounts & Login"
+                                    draw_icon: { svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z" }
                                 }
 
                                 <View> {
-                                    width: Fill, height: Fit,
+                                    width: Fill, height: Fit, margin: { left: 10, right: 2, top: 14, bottom: 4 }
                                     flow: Right, align: { y: 0.5 }
                                     <Label> {
                                         width: Fill,
-                                        draw_text: { color: #888279, text_style: { font_size: 11.0 } }
-                                        text: "Playlists"
+                                        draw_text: { color: #66615A, text_style: { font_size: 10.0 } }
+                                        text: "PLAYLISTS"
                                     }
-                                    sidebar_import_btn = <FerricSoftPill> {
-                                        height: 26,
-                                        padding: { left: 10, right: 10 }
-                                        text: "+ Import"
+                                    sidebar_import_btn = <FerricBtn> {
+                                        height: 24,
+                                        padding: { left: 8, right: 8 }
+                                        text: "Import"
+                                        icon_walk: { width: 12, height: Fit }
+                                        draw_icon: { svg_path: "M19 9H15V3H9V9H5L12 16L19 9ZM5 18V20H19V18H5Z" }
+                                        draw_text: { text_style: { font_size: 10.5 } }
                                     }
                                 }
 
                                 pl_all_btn = <FerricPlaylistBtn> { text: "All Songs", draw_bg: { active: 1.0 } }
-                                pl_liked_btn = <FerricPlaylistBtn> { text: "Saved Songs" }
+                                pl_liked_btn = <FerricPlaylistBtn> { text: "Liked Songs" }
                                 pl_local_btn = <FerricPlaylistBtn> { text: "Local Lossless" }
-                                pl_slot_0 = <FerricPlaylistBtn> { visible: false, text: "Playlist 1" }
-                                pl_slot_1 = <FerricPlaylistBtn> { visible: false, text: "Playlist 2" }
-                                pl_slot_2 = <FerricPlaylistBtn> { visible: false, text: "Playlist 3" }
-                                pl_slot_3 = <FerricPlaylistBtn> { visible: false, text: "Playlist 4" }
-                                pl_slot_4 = <FerricPlaylistBtn> { visible: false, text: "Playlist 5" }
+                                pl_slot_0 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                pl_slot_1 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                pl_slot_2 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                pl_slot_3 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                pl_slot_4 = <FerricPlaylistBtn> { visible: false, text: "" }
 
                                 <View> { width: Fill, height: Fill }
 
-                                sidebar_add_folder_btn = <FerricSoftPill> {
+                                sidebar_add_folder_btn = <FerricBtn> {
                                     width: Fill,
                                     height: 36,
-                                    text: "+ Add Music Folder"
+                                    text: "Add Music Folder"
+                                    draw_icon: {
+                                        svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z"
+                                        color: #D9541E
+                                    }
                                 }
                             }
 
-                            // CENTER MAIN STAGE (Wide & Breathable)
+                            <FerricDividerV> {}
+
+                            // CENTER STAGE (Clean, Direct-Access Pages)
                             center_stage = <FerricSurface> {
                                 width: Fill,
                                 height: Fill,
                                 flow: Overlay,
-                                draw_bg: { base_col: #0B0B0B, radius: 14.0 }
+                                draw_bg: { base_col: #000000, radius: 0.0 }
 
-                                // PAGE A: HOME (Quick Picks, Seamless Mix, Listening Capsule)
+                                // PAGE 1: HOME
                                 page_home = <ScrollYView> {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: 28,
+                                    padding: { left: 32, right: 32, top: 28, bottom: 24 }
                                     flow: Down,
-                                    spacing: 22,
+                                    spacing: 18,
 
                                     <View> {
-                                        width: Fill, height: Fit, flow: Down, spacing: 6,
-                                        <Label> {
-                                            draw_text: { color: #F3EEE3, text_style: { font_size: 26.0 } }
-                                            text: "Welcome back"
+                                        width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Down, spacing: 4,
+                                            <Label> {
+                                                draw_text: { color: #F3EEE3, text_style: { font_size: 26.0 } }
+                                                text: "Welcome to Ferric"
+                                            }
+                                            home_sub_lbl = <Label> {
+                                                draw_text: { color: #9E988E, text_style: { font_size: 13.0 } }
+                                                text: "Bit-perfect local audio, seamless dual-deck fade-in, Spotify & YouTube sync."
+                                            }
                                         }
-                                        home_sub_lbl = <Label> {
-                                            draw_text: { color: #9E988E, text_style: { font_size: 13.0 } }
-                                            text: "Seamless gapless playback and 6.0s Bass-Swap Automix ready."
+                                        stats_capsule_lbl = <Label> {
+                                            draw_text: { color: #888279, text_style: { font_size: 12.0 } }
+                                            text: "0 songs played · 0 min listened"
                                         }
                                     }
 
@@ -470,91 +636,67 @@ live_design! {
 
                                         <FerricCard> {
                                             width: Fill, flow: Down, spacing: 10,
-                                            <Label> {
-                                                draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
-                                                text: "Local Music"
-                                            }
-                                            <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                text: "Play FLAC, Opus, MP3, AAC, ALAC, and WAV directly from your folders."
-                                            }
+                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Local Lossless Library" }
+                                            <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Scan FLAC, WAV, MP3, Opus, and OGG folders directly with zero latency." }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
-                                                home_add_folder_btn = <FerricAccentPill> { height: 34, text: "Add Folder" }
-                                                home_demo_btn = <FerricSoftPill> { height: 34, text: "Play Demo" }
+                                                home_add_folder_btn = <FerricAccentPill> {
+                                                    height: 34,
+                                                    text: "Add Folder"
+                                                    draw_icon: { svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z" }
+                                                }
+                                                home_demo_btn = <FerricBtn> {
+                                                    height: 34,
+                                                    text: "Play Demo"
+                                                    draw_icon: { svg_path: "M8 5V19L19 12L8 5Z", color: #D9541E }
+                                                }
                                             }
                                         }
 
                                         <FerricCard> {
                                             width: Fill, flow: Down, spacing: 10,
-                                            <Label> {
-                                                draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
-                                                text: "Spotify & YouTube"
-                                            }
-                                            <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                text: "Sync your playlists and liked songs via official OAuth 2.0 PKCE."
-                                            }
+                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Spotify & YouTube Sync" }
+                                            <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Import any public Spotify or YouTube playlist instantly, or sign in via OAuth PKCE." }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
-                                                home_spotify_btn = <FerricSoftPill> { height: 34, text: "Spotify" }
-                                                home_youtube_btn = <FerricSoftPill> { height: 34, text: "YouTube" }
+                                                home_spotify_btn = <FerricBtn> { height: 34, text: "Spotify Sync" }
+                                                home_youtube_btn = <FerricBtn> { height: 34, text: "YouTube Sync" }
                                             }
                                         }
 
                                         <FerricCard> {
                                             width: Fill, flow: Down, spacing: 10,
-                                            <Label> {
-                                                draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
-                                                text: "Seamless Fade-In & EQ"
-                                            }
-                                            home_dsp_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                text: "6.0s Bass-Swap Crossfade · 240ms Play Fade-In · Gapless On"
-                                            }
+                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Seamless Fade-In Engine" }
+                                            home_dsp_lbl = <Label> { width: Fill, draw_text: { color: #D9541E, text_style: { font_size: 12.5 } }, text: "6.0s Bass-Swap Automix · 240ms Play Fade-In" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
-                                                home_fade_btn = <FerricSoftPill> { height: 34, text: "Fade-In Settings" }
-                                                home_eq_btn = <FerricSoftPill> { height: 34, text: "Equalizer" }
+                                                home_fade_btn = <FerricBtn> { height: 34, text: "Tune Fade-In" }
+                                                home_eq_btn = <FerricBtn> { height: 34, text: "10-Band EQ" }
                                             }
                                         }
                                     }
 
-                                    // Recently Played / Quick Picks
+                                    // Quick Picks
                                     <FerricCard> {
-                                        width: Fill, flow: Down, spacing: 10,
-                                        <View> {
-                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                            <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
-                                                text: "Quick Picks"
-                                            }
-                                            stats_capsule_lbl = <Label> {
-                                                draw_text: { color: #888279, text_style: { font_size: 12.0 } }
-                                                text: "0 songs played · 0 min listened"
-                                            }
-                                        }
-                                        recent_btn_0 = <FerricPlaylistBtn> { height: 38, text: "1. Click 'Play Demo' or 'Add Folder' to populate Quick Picks" }
+                                        flow: Down, spacing: 8,
+                                        <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }, text: "Quick Picks" }
+                                        recent_btn_0 = <FerricPlaylistBtn> { height: 38, text: "Click 'Play Demo' above to experience Seamless Fade-In right now" }
                                         recent_btn_1 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
                                         recent_btn_2 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
                                         recent_btn_3 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
                                     }
                                 }
 
-                                // PAGE B: YOUR LIBRARY & SEARCH (Clean Spotify / Sonora Playlist View)
+                                // PAGE 2: LIBRARY (Default Clean View Matching FigCraft D1)
                                 page_library = <View> {
                                     visible: true,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 26, right: 26, top: 22, bottom: 14 }
+                                    padding: { left: 28, right: 28, top: 22, bottom: 12 }
                                     flow: Down,
-                                    spacing: 16,
+                                    spacing: 14,
 
-                                    // Hero Header
+                                    // Compact Editorial Hero
                                     <View> {
                                         width: Fill,
                                         height: Fit,
@@ -563,9 +705,9 @@ live_design! {
                                         spacing: 20,
 
                                         hero_art = <FerricArtTile> {
-                                            width: 104,
-                                            height: 104,
-                                            draw_bg: { variant: 0.0, radius: 12.0 }
+                                            width: 102,
+                                            height: 102,
+                                            draw_bg: { variant: 1.0, radius: 12.0 }
                                         }
 
                                         <View> {
@@ -573,13 +715,14 @@ live_design! {
                                             height: Fit,
                                             flow: Down,
                                             spacing: 6,
+
                                             hero_title_lbl = <Label> {
                                                 draw_text: { color: #F3EEE3, text_style: { font_size: 26.0 } }
                                                 text: "Your Library"
                                             }
                                             library_sub_lbl = <Label> {
                                                 draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }
-                                                text: "0 songs · Seamless Fade-In & Gapless active"
+                                                text: "0 songs · 0 min · 6.0s Bass-Swap Automix"
                                             }
                                             <View> {
                                                 width: Fill,
@@ -587,461 +730,395 @@ live_design! {
                                                 margin: { top: 6 }
                                                 flow: Right,
                                                 align: { y: 0.5 }
-                                                spacing: 10,
-                                                play_all_btn = <FerricAccentPill> { text: "Play" }
-                                                hero_shuffle_btn = <FerricSoftPill> { height: 38, text: "Shuffle" }
-                                                add_folder_btn = <FerricSoftPill> { height: 38, text: "+ Add Folder" }
-                                                demo_suite_btn = <FerricSoftPill> { height: 38, text: "Load Demo Songs" }
+                                                spacing: 8,
+
+                                                play_all_btn = <FerricAccentPill> {
+                                                    text: "Play All"
+                                                    draw_icon: { svg_path: "M8 5V19L19 12L8 5Z" }
+                                                }
+                                                hero_shuffle_btn = <FerricBtn> {
+                                                    height: 36,
+                                                    text: "Shuffle"
+                                                    draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z" }
+                                                }
+                                                add_folder_btn = <FerricBtn> {
+                                                    height: 36,
+                                                    text: "Add Folder"
+                                                    draw_icon: { svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z", color: #D9541E }
+                                                }
+                                                demo_suite_btn = <FerricBtn> {
+                                                    height: 36,
+                                                    text: "Play Demo"
+                                                    draw_icon: { svg_path: "M8 5V19L19 12L8 5Z", color: #D9541E }
+                                                }
                                             }
                                         }
                                     }
 
-                                    // Filter Chips + Sort Row
+                                    // Source Filter Bar + Sort
                                     <View> {
                                         width: Fill,
                                         height: Fit,
                                         flow: Right,
                                         align: { y: 0.5 }
                                         spacing: 8,
-                                        flt_all_btn = <FerricSoftPill> { height: 30, text: "All", draw_bg: { active: 1.0 } }
-                                        flt_liked_btn = <FerricSoftPill> { height: 30, text: "Saved" }
-                                        flt_local_btn = <FerricSoftPill> { height: 30, text: "Local" }
-                                        flt_spotify_btn = <FerricSoftPill> { height: 30, text: "Spotify" }
-                                        flt_youtube_btn = <FerricSoftPill> { height: 30, text: "YouTube" }
+
+                                        flt_all_btn = <FerricBtn> { height: 30, text: "All", draw_bg: { active: 1.0 } }
+                                        flt_liked_btn = <FerricBtn> { height: 30, text: "Liked" }
+                                        flt_local_btn = <FerricBtn> { height: 30, text: "Local" }
+                                        flt_spotify_btn = <FerricBtn> { height: 30, text: "Spotify" }
+                                        flt_youtube_btn = <FerricBtn> { height: 30, text: "YouTube" }
                                         <View> { width: Fill, height: 1 }
-                                        sort_cycle_btn = <FerricSoftPill> { height: 30, text: "Sort: Artist" }
+                                        sort_cycle_btn = <FerricBtn> { height: 30, text: "Sort: Artist" }
                                     }
 
-                                    // Clean Table Column Headers
+                                    // Crisp Table Column Header
                                     <View> {
                                         width: Fill,
-                                        height: 24,
+                                        height: 28,
                                         padding: { left: 16, right: 18 }
                                         flow: Right,
                                         align: { y: 0.5 }
                                         spacing: 14,
-                                        <Label> { width: 26, draw_text: { color: #78736B, text_style: { font_size: 11.0 } }, text: "#" }
+                                        show_bg: true,
+                                        draw_bg: {
+                                            fn pixel(self) -> vec4 {
+                                                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                                sdf.rect(0.0, self.rect_size.y - 1.0, self.rect_size.x, 1.0);
+                                                sdf.fill(#1E1E1E);
+                                                return sdf.result;
+                                            }
+                                        }
+                                        <Label> { width: 26, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "#" }
                                         <View> { width: 40, height: 1 }
-                                        <Label> { width: Fill, draw_text: { color: #78736B, text_style: { font_size: 11.0 } }, text: "Title" }
-                                        <Label> { width: 210, draw_text: { color: #78736B, text_style: { font_size: 11.0 } }, text: "Album" }
-                                        <View> { width: 54, height: 1 }
-                                        <Label> { width: 52, align: { x: 1.0 }, draw_text: { color: #78736B, text_style: { font_size: 11.0 } }, text: "Time" }
+                                        <Label> { width: Fill, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Title" }
+                                        <Label> { width: 220, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Album" }
+                                        <View> { width: 34, height: 1 }
+                                        <Label> { width: 60, align: { x: 1.0 }, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Time" }
                                     }
 
                                     track_list = <TrackList> {}
                                 }
 
-                                // PAGE C: NOW PLAYING & SYNCED LYRICS (Card / Motion Canvas / Lyrics / Video Clip)
+                                // PAGE 3: NOW PLAYING & FREE SYNCED LYRICS
                                 page_now_playing = <View> {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: 26,
+                                    padding: { left: 28, right: 28, top: 22, bottom: 20 }
                                     flow: Down,
-                                    spacing: 18,
+                                    spacing: 16,
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
                                         <Label> {
                                             width: Fill,
-                                            draw_text: { color: #F3EEE3, text_style: { font_size: 20.0 } }
-                                            text: "Now Playing"
+                                            draw_text: { color: #F3EEE3, text_style: { font_size: 22.0 } }
+                                            text: "Now Playing & Synced Lyrics"
                                         }
-                                        np_mode_canvas_btn = <FerricSoftPill> { height: 32, text: "Motion Canvas", draw_bg: { active: 1.0 } }
-                                        np_mode_card_btn = <FerricSoftPill> { height: 32, text: "Cover Card" }
-                                        np_watch_video_btn = <FerricSoftPill> { height: 32, text: "Watch Video Clip" }
+                                        np_mode_canvas_btn = <FerricBtn> { height: 32, text: "Motion Canvas", draw_bg: { active: 1.0 } }
+                                        np_mode_card_btn = <FerricBtn> { height: 32, text: "Cover Card" }
+                                        np_watch_video_btn = <FerricAccentPill> {
+                                            height: 32,
+                                            text: "Watch Video Clip"
+                                            draw_icon: { svg_path: "M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z" }
+                                        }
                                     }
 
                                     <View> {
-                                        width: Fill, height: Fill, flow: Right, spacing: 22,
+                                        width: Fill, height: Fill, flow: Right, spacing: 20,
 
-                                        // Left Stage: Motion Canvas / Cover Card + Signal Path
-                                        <View> {
-                                            width: 340, height: Fill, flow: Down, spacing: 14,
-                                            np_canvas = <FerricNowPlayingCanvas> {
-                                                width: Fill,
-                                                height: 270,
-                                            }
+                                        // Left: Animated Motion Canvas + Signal Path
+                                        <FerricCard> {
+                                            width: 350,
+                                            height: Fill,
+                                            flow: Down,
+                                            spacing: 12,
+
+                                            np_canvas = <FerricNowPlayingCanvas> { height: 280 }
+
                                             np_stage_title_lbl = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #F3EEE3, text_style: { font_size: 19.0 } }
-                                                text: "No track playing"
+                                                text: "No Track Playing"
                                             }
                                             np_stage_artist_lbl = <Label> {
                                                 width: Fill,
-                                                draw_text: { color: #9E988E, text_style: { font_size: 13.5 } }
-                                                text: "Select any song or play demo tracks"
+                                                draw_text: { color: #9E988E, text_style: { font_size: 13.0 } }
+                                                text: "Pick a song from Library or click Play Demo"
                                             }
+                                            <View> { width: Fill, height: Fill }
                                             signal_path_lbl = <Label> {
                                                 width: Fill,
-                                                draw_text: { color: #888279, text_style: { font_size: 11.5 } }
-                                                text: "Signal Path: 6.0s Bass-Swap Automix · DirectForm1 EQ · WASAPI"
+                                                draw_text: { color: #D9541E, text_style: { font_size: 11.5 } }
+                                                text: "Signal Path: Ready · 6.0s Bass-Swap Automix · 10-Band EQ -> WASAPI"
                                             }
                                         }
 
-                                        // Right Stage: Synced Karaoke Lyrics (Free Multi-Provider)
+                                        // Right: Karaoke Synced Lyrics (LRCLIB + Lyrics.ovh)
                                         <FerricCard> {
-                                            width: Fill, height: Fill, padding: 24, flow: Down, spacing: 14,
+                                            width: Fill,
+                                            height: Fill,
+                                            flow: Down,
+                                            spacing: 12,
+
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
                                                 lyrics_source_lbl = <Label> {
                                                     width: Fill,
-                                                    draw_text: { color: #888279, text_style: { font_size: 11.5 } }
-                                                    text: "Lyrics · Automatic Free API (LRCLIB + Lyrics.ovh)"
+                                                    draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
+                                                    text: "Synced Lyrics · LRCLIB & Lyrics.ovh (Free)"
                                                 }
-                                                lyr_minus_btn = <FerricSoftPill> { height: 28, padding: { left: 10, right: 10 }, text: "-0.5s" }
-                                                lyr_plus_btn = <FerricSoftPill> { height: 28, padding: { left: 10, right: 10 }, text: "+0.5s" }
-                                                lyr_copy_btn = <FerricSoftPill> { height: 28, padding: { left: 10, right: 10 }, text: "Copy" }
+                                                lyr_minus_btn = <FerricBtn> { height: 28, text: "-0.5s" }
+                                                lyr_plus_btn = <FerricBtn> { height: 28, text: "+0.5s" }
+                                                lyr_copy_btn = <FerricBtn> { height: 28, text: "Copy" }
                                             }
 
                                             <View> { width: Fill, height: Fill }
-                                            lyric_prev2_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #59554F, text_style: { font_size: 14.0 } }
-                                                text: ""
-                                            }
-                                            lyric_prev_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #888279, text_style: { font_size: 15.5 } }
-                                                text: ""
-                                            }
-                                            lyric_active_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #D9541E, text_style: { font_size: 21.0 } }
-                                                text: "Lyrics appear automatically when a song plays."
-                                            }
-                                            lyric_next_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #9E988E, text_style: { font_size: 15.5 } }
-                                                text: ""
-                                            }
-                                            lyric_next2_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #59554F, text_style: { font_size: 14.0 } }
-                                                text: ""
-                                            }
+                                            lyric_prev2_lbl = <Label> { width: Fill, draw_text: { color: #59554F, text_style: { font_size: 14.0 } }, text: "" }
+                                            lyric_prev_lbl = <Label> { width: Fill, draw_text: { color: #888279, text_style: { font_size: 15.5 } }, text: "" }
+                                            lyric_active_lbl = <Label> { width: Fill, draw_text: { color: #D9541E, text_style: { font_size: 21.0 } }, text: "Lyrics load automatically when a track plays." }
+                                            lyric_next_lbl = <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 15.5 } }, text: "" }
+                                            lyric_next2_lbl = <Label> { width: Fill, draw_text: { color: #59554F, text_style: { font_size: 14.0 } }, text: "" }
                                             <View> { width: Fill, height: Fill }
                                         }
                                     }
                                 }
 
-                                // PAGE D: SETTINGS (4 Clean, Uncluttered Tabs)
-                                page_settings = <View> {
+                                // PAGE 4: SEAMLESS FADE-IN & AUTOMIX STUDIO (Sonora + Spotify Parity)
+                                page_fade = <ScrollYView> {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 26, right: 26, top: 20, bottom: 16 }
+                                    padding: { left: 32, right: 32, top: 24, bottom: 24 }
                                     flow: Down,
                                     spacing: 16,
 
-                                    // Settings Header + 4 Tab Pills
                                     <View> {
-                                        width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 10,
-                                        <Label> {
-                                            draw_text: { color: #F3EEE3, text_style: { font_size: 22.0 } }
-                                            text: "Settings"
-                                        }
-                                        <View> { width: 14, height: 1 }
-                                        tab_accounts_btn = <FerricSoftPill> { height: 34, text: "Accounts & Sign In", draw_bg: { active: 1.0 } }
-                                        tab_playback_btn = <FerricSoftPill> { height: 34, text: "Playback & Fade-In" }
-                                        tab_eq_btn = <FerricSoftPill> { height: 34, text: "Equalizer & AutoEq" }
-                                        tab_appearance_btn = <FerricSoftPill> { height: 34, text: "Appearance & Updates" }
+                                        width: Fill, height: Fit, flow: Down, spacing: 4,
+                                        <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 22.0 } }, text: "Seamless Fade-In & Automix (Tanpa Jeda)" }
+                                        <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Dual-deck engine pre-buffers Deck B ahead of time and blends songs smoothly with zero dead air." }
                                     }
 
-                                    // TAB 1: ACCOUNTS & SIGN IN (Spotify, YouTube Music, Subsonic, Folders)
-                                    subpage_accounts = <ScrollYView> {
-                                        visible: true,
-                                        width: Fill,
-                                        height: Fill,
-                                        flow: Down,
-                                        spacing: 14,
-
-                                        oauth_status_lbl = <Label> {
-                                            width: Fill,
-                                            draw_text: { color: #D9541E, text_style: { font_size: 12.5 } }
-                                            text: "Redirect URI for Spotify & Google OAuth: http://127.0.0.1:43824/callback"
+                                    <FerricCard> {
+                                        flow: Down, spacing: 14,
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Crossfade Overlap Between Songs" }
+                                            xfade_val_lbl = <Label> { width: 72, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }, text: "6.0 s" }
+                                        }
+                                        xfade_slider = <FerricBarSlider> { min: 0.0, max: 12.0, value: 6.0 }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, spacing: 8,
+                                            xf_0_btn = <FerricBtn> { height: 30, text: "0s Pure Gapless" }
+                                            xf_3_btn = <FerricBtn> { height: 30, text: "3s Subtle" }
+                                            xf_6_btn = <FerricBtn> { height: 30, text: "6s Automix" }
+                                            xf_10_btn = <FerricBtn> { height: 30, text: "10s Long Mix" }
                                         }
 
-                                        // Spotify Official Login Card
-                                        <FerricCard> {
-                                            flow: Down, spacing: 10,
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                                <Label> {
-                                                    width: Fill,
-                                                    draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
-                                                    text: "Spotify Account (Official OAuth 2.0 PKCE)"
-                                                }
-                                                spotify_state_lbl = <Label> {
-                                                    draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                    text: "Not signed in"
-                                                }
-                                            }
-                                            <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                text: "1. Create a free app at developer.spotify.com/dashboard and add Redirect URI http://127.0.0.1:43824/callback. 2. Paste your Client ID below and click Sign in with Spotify."
-                                            }
-                                            spotify_id_input = <FerricInput> {
-                                                empty_text: "Paste Spotify Client ID..."
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                spotify_login_btn = <FerricAccentPill> { height: 34, text: "Sign in with Spotify" }
-                                                spotify_sync_btn = <FerricSoftPill> { height: 34, text: "Sync Playlists" }
-                                                copy_redirect_btn = <FerricSoftPill> { height: 34, text: "Copy Redirect URI" }
-                                                open_spotify_dev_btn = <FerricSoftPill> { height: 34, text: "Spotify Portal" }
-                                                spotify_logout_btn = <FerricSoftPill> { height: 34, text: "Disconnect" }
-                                            }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } margin: { top: 4 }
+                                            <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Smooth Fade-In on Play / Resume / Seek" }
+                                            fadein_val_lbl = <Label> { width: 72, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }, text: "240 ms" }
                                         }
+                                        fadein_slider = <FerricBarSlider> { min: 0.0, max: 1500.0, value: 240.0 }
 
-                                        // YouTube & YouTube Music Official Login Card
-                                        <FerricCard> {
-                                            flow: Down, spacing: 10,
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                                <Label> {
-                                                    width: Fill,
-                                                    draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
-                                                    text: "YouTube & YouTube Music (Google OAuth 2.0 PKCE)"
-                                                }
-                                                yt_state_lbl = <Label> {
-                                                    draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                    text: "Not signed in"
-                                                }
-                                            }
-                                            <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
-                                                text: "Create a Desktop OAuth Client in Google Cloud Console (YouTube Data API v3 enabled), paste Client ID (and optional Client Secret), then sign in via browser."
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 10,
-                                                yt_id_input = <FerricInput> { empty_text: "Google OAuth Client ID (.apps.googleusercontent.com)" }
-                                                yt_secret_input = <FerricInput> { empty_text: "Client Secret (optional for PKCE)" }
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 10,
-                                                yt_login_btn = <FerricAccentPill> { height: 34, text: "Sign in with Google" }
-                                                yt_sync_btn = <FerricSoftPill> { height: 34, text: "Sync YouTube" }
-                                                open_google_dev_btn = <FerricSoftPill> { height: 34, text: "Google Console" }
-                                                yt_logout_btn = <FerricSoftPill> { height: 34, text: "Disconnect" }
-                                                oauth_cancel_btn = <FerricSoftPill> { visible: false, height: 34, text: "Cancel Login" }
-                                                <View> { width: Fill, height: 1 }
-                                                <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Music Only" }
-                                                yt_cat_toggle = <FerricToggle> { is_on: true }
-                                            }
-                                        }
-
-                                        // OpenSubsonic / Navidrome + Local Matcher Card
-                                        <FerricCard> {
-                                            flow: Down, spacing: 10,
-                                            <Label> {
-                                                draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
-                                                text: "Self-Hosted Server (OpenSubsonic / Navidrome) & Local Matcher"
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 10,
-                                                sub_url_input = <FerricInput> { empty_text: "https://music.example.com" }
-                                                sub_user_input = <FerricInput> { empty_text: "Username" }
-                                                sub_pass_input = <FerricInput> { empty_text: "Password" }
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                sub_sync_btn = <FerricSoftPill> { height: 34, text: "Connect Subsonic" }
-                                                match_local_btn = <FerricSoftPill> { height: 34, text: "Match Cloud Songs to Local Files" }
-                                                rescan_btn = <FerricSoftPill> { height: 34, text: "Rescan Local Folders" }
-                                            }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8, margin: { top: 4 }
+                                            <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Mix Curve Style" }
+                                            curve_bass_btn = <FerricBtn> { height: 30, text: "Bass-Swap Automix", draw_bg: { active: 1.0 } }
+                                            curve_eqp_btn = <FerricBtn> { height: 30, text: "Equal-Power" }
+                                            curve_velvet_btn = <FerricBtn> { height: 30, text: "S-Curve Velvet" }
                                         }
                                     }
 
-                                    // TAB 2: PLAYBACK & SEAMLESS FADE-IN (Spotify Playback Style)
-                                    subpage_playback = <ScrollYView> {
-                                        visible: false,
-                                        width: Fill,
-                                        height: Fill,
-                                        flow: Down,
-                                        spacing: 14,
+                                    <FerricCard> {
+                                        flow: Down, spacing: 14,
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Gapless Album Lock" }
+                                                <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Keep 0ms sample-exact transitions when playing consecutive tracks from the same album." }
+                                            }
+                                            gapless_lock_toggle = <FerricToggle> { is_on: true }
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Skip Intro & Outro Silence" }
+                                                <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Trim dead silence at track boundaries so the next song fades in immediately." }
+                                            }
+                                            trim_silence_toggle = <FerricToggle> { is_on: true }
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Normalize Volume (ReplayGain)" }
+                                                <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Keep consistent perceived loudness across all tracks." }
+                                            }
+                                            replay_gain_toggle = <FerricToggle> { is_on: true }
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Mono Audio" }
+                                                <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Sum left and right channels equally to both speakers." }
+                                            }
+                                            mono_toggle = <FerricToggle> { is_on: false }
+                                        }
+                                    }
+
+                                    <FerricCard> {
+                                        flow: Down, spacing: 12,
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
+                                            <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Playback Speed" }
+                                            spd_075_btn = <FerricBtn> { height: 30, text: "0.75x" }
+                                            spd_100_btn = <FerricBtn> { height: 30, text: "1.0x Normal", draw_bg: { active: 1.0 } }
+                                            spd_125_btn = <FerricBtn> { height: 30, text: "1.25x" }
+                                            spd_150_btn = <FerricBtn> { height: 30, text: "1.5x" }
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
+                                            sleep_status_lbl = <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Sleep Timer: Off" }
+                                            slp_off_btn = <FerricBtn> { height: 30, text: "Off", draw_bg: { active: 1.0 } }
+                                            slp_15_btn = <FerricBtn> { height: 30, text: "15m" }
+                                            slp_30_btn = <FerricBtn> { height: 30, text: "30m" }
+                                            slp_60_btn = <FerricBtn> { height: 30, text: "60m" }
+                                            slp_eot_btn = <FerricBtn> { height: 30, text: "End of Song" }
+                                        }
+                                    }
+                                }
+
+                                // PAGE 5: 10-BAND PARAMETRIC EQUALIZER & AUTOEQ (FigCraft D2 Studio)
+                                page_eq = <ScrollYView> {
+                                    visible: false,
+                                    width: Fill,
+                                    height: Fill,
+                                    padding: { left: 32, right: 32, top: 24, bottom: 24 }
+                                    flow: Down,
+                                    spacing: 14,
+
+                                    <FerricCard> {
+                                        flow: Down, spacing: 14,
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 10,
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 20.0 } }, text: "10-Band Parametric Equalizer & AutoEq" }
+                                                eq_status_lbl = <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Preset: Flat · Double-click any fader to reset" }
+                                            }
+                                            eq_import_btn = <FerricBtn> { height: 32, text: "Import APO" }
+                                            eq_export_btn = <FerricBtn> { height: 32, text: "Export APO" }
+                                            eq_enable_toggle = <FerricToggle> { is_on: true }
+                                        }
+
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
+                                            autoeq_input = <FerricInput> {
+                                                width: 248, height: 32,
+                                                empty_text: "Search 24 AutoEq headphone profiles..."
+                                            }
+                                            autoeq_apply_btn = <FerricAccentPill> { height: 32, padding: { left: 14, right: 14 }, text: "Apply Best Match" }
+                                            eq_pre_flat = <FerricBtn> { height: 32, text: "Flat" }
+                                            eq_pre_copper = <FerricBtn> { height: 32, text: "Warm Copper" }
+                                            eq_pre_bass = <FerricBtn> { height: 32, text: "Deep Bass" }
+                                            eq_pre_vocal = <FerricBtn> { height: 32, text: "Vocal" }
+                                        }
+
+                                        eq_graph = <FerricEqGraph> {}
+
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 12,
+                                            <Label> { width: 82, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Preamp" }
+                                            eq_preamp_slider = <FerricBarSlider> { min: -12.0, max: 12.0, value: 0.0 }
+                                            eq_preamp_lbl = <Label> { width: 80, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.5 } }, text: "+0.0 dB" }
+                                        }
+
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, spacing: 6, margin: { top: 4 }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v0 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b0 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "32" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v1 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b1 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "64" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v2 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b2 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "125" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v3 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b3 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "250" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v4 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b4 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "500" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v5 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b5 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "1k" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v6 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b6 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "2k" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v7 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b7 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "4k" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v8 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b8 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "8k" } }
+                                            <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v9 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 11.0 } }, text: "+0.0" } eq_b9 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 11.0 } }, text: "16k" } }
+                                        }
+                                    }
+                                }
+
+                                // PAGE 6: FERRIC CONNECT HUB (FigCraft D2 Dedicated QR + LAN P2P)
+                                page_connect = <ScrollYView> {
+                                    visible: false,
+                                    width: Fill,
+                                    height: Fill,
+                                    padding: { left: 32, right: 32, top: 24, bottom: 24 }
+                                    flow: Down,
+                                    spacing: 16,
+
+                                    <View> {
+                                        width: Fill, height: Fit, flow: Down, spacing: 4,
+                                        <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 22.0 } }, text: "Ferric Connect (LAN & P2P Handoff)" }
+                                        <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Pair Ferric Android over local Wi-Fi with zero cloud servers. Single active speaker lease prevents audio overlap." }
+                                    }
+
+                                    <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 16,
 
                                         <FerricCard> {
-                                            flow: Down, spacing: 14,
-                                            <Label> {
-                                                draw_text: { color: #F3EEE3, text_style: { font_size: 16.5 } }
-                                                text: "Seamless Fade-In & Automix (Tanpa Jeda)"
+                                            width: 300, flow: Down, align: { x: 0.5 }, spacing: 12,
+                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.0 } }, text: "Scan Pairing QR Code" }
+                                            connect_qr_view = <FerricQrView> { width: 184, height: 184 }
+                                            connect_lan_ip_lbl = <Label> {
+                                                width: Fill, align: { x: 0.5 },
+                                                draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }
+                                                text: "LAN: 127.0.0.1:43821"
                                             }
+                                            <View> {
+                                                width: Fit, height: Fit, flow: Right, spacing: 8,
+                                                connect_gen_pair_btn = <FerricAccentPill> { height: 32, text: "New QR" }
+                                                connect_copy_pair_btn = <FerricBtn> { height: 32, text: "Copy Link" }
+                                            }
+                                        }
+
+                                        <FerricCard> {
+                                            width: Fill, flow: Down, spacing: 10,
+                                            <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Active Speaker & Discovered LAN Devices" }
                                             <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }
+                                                text: "Active Speaker: Desktop-PC (WASAPI Exclusive-Ready · UDP Port 43821)"
+                                            }
+                                            connect_peers_lbl = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }
-                                                text: "Dual-deck engine pre-buffers the next song ahead of time and blends songs smoothly with zero silence."
-                                            }
-
-                                            // Crossfade Duration Slider
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                                <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Crossfade Overlap Between Songs" }
-                                                xfade_val_lbl = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }, text: "6.0 s" }
-                                            }
-                                            xfade_slider = <FerricBarSlider> { min: 0.0, max: 12.0, value: 6.0 }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                xf_0_btn = <FerricSoftPill> { height: 30, text: "0s (Pure Gapless)" }
-                                                xf_3_btn = <FerricSoftPill> { height: 30, text: "3s Subtle" }
-                                                xf_6_btn = <FerricSoftPill> { height: 30, text: "6s Automix" }
-                                                xf_10_btn = <FerricSoftPill> { height: 30, text: "10s Long Mix" }
-                                            }
-
-                                            // Play / Resume / Seek Velvet Fade-In Slider
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } margin: { top: 4 }
-                                                <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Smooth Fade-In on Play / Resume / Seek" }
-                                                fadein_val_lbl = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }, text: "240 ms" }
-                                            }
-                                            fadein_slider = <FerricBarSlider> { min: 0.0, max: 1500.0, value: 240.0 }
-
-                                            // Fade Curve Selector
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8, margin: { top: 4 }
-                                                <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Mix Curve Style" }
-                                                curve_bass_btn = <FerricSoftPill> { height: 30, text: "Bass-Swap Automix", draw_bg: { active: 1.0 } }
-                                                curve_eqp_btn = <FerricSoftPill> { height: 30, text: "Equal-Power" }
-                                                curve_velvet_btn = <FerricSoftPill> { height: 30, text: "S-Curve Velvet" }
-                                            }
-                                        }
-
-                                        // Clean Spotify-style Toggle Rows
-                                        <FerricCard> {
-                                            flow: Down, spacing: 14,
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                                <View> {
-                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
-                                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Gapless Album Lock" }
-                                                    <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Keep 0ms sample-exact transitions when playing consecutive songs from the same album." }
-                                                }
-                                                gapless_lock_toggle = <FerricToggle> { is_on: true }
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                                <View> {
-                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
-                                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Skip Intro & Outro Silence" }
-                                                    <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Automatically skip dead silence at song edges so the next song fades in immediately." }
-                                                }
-                                                trim_silence_toggle = <FerricToggle> { is_on: true }
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                                <View> {
-                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
-                                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Normalize Volume (ReplayGain)" }
-                                                    <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Set the same comfortable loudness level across all tracks." }
-                                                }
-                                                replay_gain_toggle = <FerricToggle> { is_on: true }
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
-                                                <View> {
-                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
-                                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Mono Audio" }
-                                                    <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Makes the left and right speakers play the exact same audio." }
-                                                }
-                                                mono_toggle = <FerricToggle> { is_on: false }
-                                            }
-                                        }
-
-                                        // Playback Speed & Sleep Timer Card
-                                        <FerricCard> {
-                                            flow: Down, spacing: 12,
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
-                                                <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Playback Speed" }
-                                                spd_075_btn = <FerricSoftPill> { height: 30, text: "0.75x" }
-                                                spd_100_btn = <FerricSoftPill> { height: 30, text: "1.0x Normal", draw_bg: { active: 1.0 } }
-                                                spd_125_btn = <FerricSoftPill> { height: 30, text: "1.25x" }
-                                                spd_150_btn = <FerricSoftPill> { height: 30, text: "1.5x" }
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
-                                                sleep_status_lbl = <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Sleep Timer: Off" }
-                                                slp_off_btn = <FerricSoftPill> { height: 30, text: "Off", draw_bg: { active: 1.0 } }
-                                                slp_15_btn = <FerricSoftPill> { height: 30, text: "15m" }
-                                                slp_30_btn = <FerricSoftPill> { height: 30, text: "30m" }
-                                                slp_60_btn = <FerricSoftPill> { height: 30, text: "60m" }
-                                                slp_eot_btn = <FerricSoftPill> { height: 30, text: "End of Song" }
+                                                text: "Broadcasting LAN discovery beacon on local Wi-Fi... Waiting for Ferric mobile peers."
                                             }
                                         }
                                     }
+                                }
 
-                                    // TAB 3: EQUALIZER & AUTOEQ (FigCraft D2 Studio)
-                                    subpage_eq = <ScrollYView> {
-                                        visible: false,
-                                        width: Fill,
-                                        height: Fill,
-                                        flow: Down,
-                                        spacing: 14,
+                                // PAGE 7: APPEARANCE (LIQUID GLASS) & UPDATES (FigCraft D3 / LG2)
+                                page_appearance = <ScrollYView> {
+                                    visible: false,
+                                    width: Fill,
+                                    height: Fill,
+                                    padding: { left: 32, right: 32, top: 24, bottom: 24 }
+                                    flow: Down,
+                                    spacing: 14,
 
-                                        <FerricCard> {
-                                            flow: Down, spacing: 12,
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 10,
-                                                <View> {
-                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
-                                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 16.5 } }, text: "10-Band Parametric Equalizer & AutoEq" }
-                                                    eq_status_lbl = <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Preset: Flat · Double-click any fader to reset" }
-                                                }
-                                                eq_import_btn = <FerricSoftPill> { height: 32, text: "Import APO" }
-                                                eq_export_btn = <FerricSoftPill> { height: 32, text: "Export APO" }
-                                                eq_enable_toggle = <FerricToggle> { is_on: true }
-                                            }
+                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 22.0 } }, text: "Open Theme Studio, Liquid Glass & Updates" }
 
-                                            // AutoEq Headphone Search + Quick Presets
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
-                                                autoeq_input = <FerricInput> {
-                                                    width: 240, height: 32,
-                                                    empty_text: "Search 24 AutoEq headphones..."
-                                                }
-                                                autoeq_apply_btn = <FerricAccentPill> { height: 32, padding: { left: 14, right: 14 }, text: "Apply Best Match" }
-                                                eq_pre_flat = <FerricSoftPill> { height: 32, text: "Flat" }
-                                                eq_pre_copper = <FerricSoftPill> { height: 32, text: "Warm Copper" }
-                                                eq_pre_bass = <FerricSoftPill> { height: 32, text: "Deep Bass" }
-                                                eq_pre_vocal = <FerricSoftPill> { height: 32, text: "Vocal" }
-                                            }
-
-                                            eq_graph = <FerricEqGraph> {}
-
-                                            // Preamp Row
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 12,
-                                                <Label> { width: 90, draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Preamp" }
-                                                eq_preamp_slider = <FerricBarSlider> { min: -12.0, max: 12.0, value: 0.0 }
-                                                eq_preamp_lbl = <Label> { width: 64, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "0.0 dB" }
-                                            }
-
-                                            // 10 Vertical Octave Faders
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 6, margin: { top: 4 }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v0 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b0 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "32" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v1 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b1 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "64" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v2 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b2 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "125" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v3 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b3 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "250" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v4 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b4 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "500" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v5 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b5 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "1k" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v6 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b6 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "2k" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v7 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b7 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "4k" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v8 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b8 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "8k" } }
-                                                <View> { width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4, eq_v9 = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 10.5 } }, text: "0.0" } eq_b9 = <FerricVertSlider> {} <Label> { draw_text: { color: #888279, text_style: { font_size: 10.5 } }, text: "16k" } }
-                                            }
-                                        }
-                                    }
-
-                                    // TAB 4: APPEARANCE (LIQUID GLASS) & UPDATES
-                                    subpage_appearance = <ScrollYView> {
-                                        visible: false,
-                                        width: Fill,
-                                        height: Fill,
-                                        flow: Right,
-                                        spacing: 16,
+                                    <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 18,
 
                                         // Left Column: Theme, Liquid Glass Controls & Software Updates
                                         <View> {
@@ -1053,7 +1130,7 @@ live_design! {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                                     <View> {
                                                         width: Fill, height: Fit, flow: Down, spacing: 2,
-                                                        <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }, text: "Liquid Glass Theme (All UI Surfaces)" }
+                                                        <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Liquid Glass Theme (All UI Surfaces)" }
                                                         <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Curved Snell bevel refraction, chromatic edge dispersion & specular rim." }
                                                     }
                                                     liquid_glass_toggle = <FerricToggle> { is_on: false }
@@ -1061,40 +1138,40 @@ live_design! {
 
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                    lg_pre_crystal = <FerricSoftPill> { height: 30, text: "Crystal Pure" }
-                                                    lg_pre_prism = <FerricSoftPill> { height: 30, text: "Prismatic Liquid" }
-                                                    lg_pre_copper = <FerricSoftPill> { height: 30, text: "Smoked Copper" }
-                                                    lg_pre_frost = <FerricSoftPill> { height: 30, text: "Ultra Frosted" }
+                                                    lg_pre_crystal = <FerricBtn> { height: 30, text: "Crystal Pure" }
+                                                    lg_pre_prism = <FerricBtn> { height: 30, text: "Prismatic Liquid" }
+                                                    lg_pre_copper = <FerricBtn> { height: 30, text: "Smoked Copper" }
+                                                    lg_pre_frost = <FerricBtn> { height: 30, text: "Ultra Frosted" }
                                                 }
 
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                                     <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Refraction Index (IOR)" }
-                                                    lg_ior_lbl = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "1.48" }
+                                                    lg_ior_lbl = <Label> { width: 64, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "1.48" }
                                                 }
                                                 lg_ior_slider = <FerricBarSlider> { min: 1.05, max: 1.85, value: 1.48 }
 
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                                     <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Chromatic Edge Dispersion" }
-                                                    lg_disp_lbl = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "42%" }
+                                                    lg_disp_lbl = <Label> { width: 64, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "42%" }
                                                 }
                                                 lg_disp_slider = <FerricBarSlider> { min: 0.0, max: 1.0, value: 0.42 }
 
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                                     <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Specular Rim & Corner Radius" }
-                                                    lg_rim_lbl = <Label> { draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "78% · 14px" }
+                                                    lg_rim_lbl = <Label> { width: 100, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "78% · 14px" }
                                                 }
                                                 lg_rim_slider = <FerricBarSlider> { min: 0.0, max: 1.0, value: 0.78 }
                                                 lg_rad_slider = <FerricBarSlider> { min: 4.0, max: 28.0, value: 14.0 }
 
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
-                                                    pal_amoled_btn = <FerricSoftPill> { height: 32, text: "AMOLED Dark" }
-                                                    pal_cream_btn = <FerricSoftPill> { height: 32, text: "Cream Light" }
-                                                    theme_import_btn = <FerricSoftPill> { height: 32, text: "Import JSON" }
-                                                    theme_export_btn = <FerricSoftPill> { height: 32, text: "Export JSON" }
+                                                    pal_amoled_btn = <FerricBtn> { height: 32, text: "AMOLED Dark" }
+                                                    pal_cream_btn = <FerricBtn> { height: 32, text: "Cream Light" }
+                                                    theme_import_btn = <FerricBtn> { height: 32, text: "Import JSON" }
+                                                    theme_export_btn = <FerricBtn> { height: 32, text: "Export JSON" }
                                                 }
                                             }
 
@@ -1106,21 +1183,21 @@ live_design! {
                                                     <View> {
                                                         width: Fill, height: Fit, flow: Down, spacing: 2,
                                                         <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Software Updates" }
-                                                        update_status_lbl = <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Current version: v0.1.0" }
+                                                        update_status_lbl = <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Current version: v0.1.0 · Auto-check on startup enabled" }
                                                     }
                                                     auto_update_toggle = <FerricToggle> { is_on: true }
                                                 }
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, spacing: 8,
                                                     check_updates_btn = <FerricAccentPill> { height: 34, text: "Check for Updates" }
-                                                    open_releases_btn = <FerricSoftPill> { height: 34, text: "GitHub Releases" }
+                                                    open_releases_btn = <FerricBtn> { height: 34, text: "GitHub Releases" }
                                                 }
                                             }
                                         }
 
                                         // Right Column: Live Optical Refractive Mini-Player Preview (LG2)
                                         <View> {
-                                            width: 340, height: Fit, flow: Down, spacing: 8,
+                                            width: 344, height: Fit, flow: Down, spacing: 8,
                                             <Label> {
                                                 draw_text: { color: #888279, text_style: { font_size: 11.0 } }
                                                 text: "LIVE OPTICAL PREVIEW · FLOATING MINI-PLAYER"
@@ -1129,9 +1206,149 @@ live_design! {
                                         }
                                     }
                                 }
+
+                                // PAGE 8: ACCOUNTS, INSTANT ZERO-KEY SYNC & OAUTH 2.0 PKCE LOGIN
+                                page_accounts = <ScrollYView> {
+                                    visible: false,
+                                    width: Fill,
+                                    height: Fill,
+                                    padding: { left: 32, right: 32, top: 24, bottom: 24 }
+                                    flow: Down,
+                                    spacing: 14,
+
+                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 22.0 } }, text: "Spotify, YouTube Music & Cloud Accounts" }
+
+                                    oauth_status_lbl = <Label> {
+                                        width: Fill,
+                                        draw_text: { color: #D9541E, text_style: { font_size: 12.5 } }
+                                        text: "Ready: Paste any public Spotify/YouTube link for instant zero-key sync, or sign in via Official OAuth PKCE below."
+                                    }
+
+                                    // TIER 1: INSTANT ZERO-KEY SPOTIFY & YOUTUBE IMPORT / SEARCH (WORKS IMMEDIATELY!)
+                                    <FerricCard> {
+                                        flow: Down, spacing: 10,
+                                        <Label> {
+                                            draw_text: { color: #F3EEE3, text_style: { font_size: 16.0 } }
+                                            text: "Instant Sync — Spotify & YouTube Music (No API Key Required)"
+                                        }
+                                        <Label> {
+                                            width: Fill,
+                                            draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }
+                                            text: "Paste any public Spotify playlist/album/track URL, YouTube/YouTube Music playlist URL, or type an artist/song name to search YouTube immediately."
+                                        }
+                                        quick_sync_input = <FerricInput> {
+                                            empty_text: "https://open.spotify.com/playlist/... or https://music.youtube.com/playlist?list=... or song name"
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, spacing: 8,
+                                            quick_spotify_btn = <FerricAccentPill> {
+                                                height: 34,
+                                                text: "Import Spotify Link"
+                                                draw_icon: { svg_path: "M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14C0 17.31 2.69 20 6 20H19C21.76 20 24 17.76 24 15C24 12.36 21.95 10.22 19.35 10.04Z" }
+                                            }
+                                            quick_youtube_btn = <FerricBtn> {
+                                                height: 34,
+                                                text: "Import YouTube Link"
+                                                draw_icon: { svg_path: "M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z", color: #D9541E }
+                                            }
+                                            quick_yt_search_btn = <FerricBtn> {
+                                                height: 34,
+                                                text: "Search YouTube"
+                                                draw_icon: { svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z", color: #D9541E }
+                                            }
+                                        }
+                                    }
+
+                                    // TIER 2A: SPOTIFY OFFICIAL OAUTH 2.0 PKCE
+                                    <FerricCard> {
+                                        flow: Down, spacing: 10,
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
+                                                text: "Spotify Account Sign-In (Private Playlists & Liked Songs — OAuth 2.0 PKCE)"
+                                            }
+                                            spotify_state_lbl = <Label> {
+                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
+                                                text: "Not signed in"
+                                            }
+                                        }
+                                        <Label> {
+                                            width: Fill,
+                                            draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
+                                            text: "Add Redirect URI http://127.0.0.1:43824/callback in Spotify Developer Dashboard, paste Client ID (or set FERRIC_SPOTIFY_CLIENT_ID), then sign in via browser."
+                                        }
+                                        spotify_id_input = <FerricInput> {
+                                            empty_text: "Spotify Developer Client ID (optional if using Instant Link above)"
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, spacing: 8,
+                                            spotify_login_btn = <FerricAccentPill> { height: 34, text: "Sign in with Spotify" }
+                                            spotify_sync_btn = <FerricBtn> { height: 34, text: "Sync Playlists" }
+                                            copy_redirect_btn = <FerricBtn> { height: 34, text: "Copy Redirect URI" }
+                                            open_spotify_dev_btn = <FerricBtn> { height: 34, text: "Spotify Portal" }
+                                            spotify_logout_btn = <FerricBtn> { height: 34, text: "Disconnect" }
+                                        }
+                                    }
+
+                                    // TIER 2B: YOUTUBE & YOUTUBE MUSIC OFFICIAL GOOGLE OAUTH 2.0 PKCE
+                                    <FerricCard> {
+                                        flow: Down, spacing: 10,
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                            <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
+                                                text: "YouTube & YouTube Music Sign-In (Private Playlists — Google OAuth PKCE)"
+                                            }
+                                            yt_state_lbl = <Label> {
+                                                draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }
+                                                text: "Not signed in"
+                                            }
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, spacing: 10,
+                                            yt_id_input = <FerricInput> { empty_text: "Google OAuth Client ID (.apps.googleusercontent.com)" }
+                                            yt_secret_input = <FerricInput> { empty_text: "Client Secret (optional for PKCE)" }
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
+                                            yt_login_btn = <FerricAccentPill> { height: 34, text: "Sign in with Google" }
+                                            yt_sync_btn = <FerricBtn> { height: 34, text: "Sync YouTube" }
+                                            open_google_dev_btn = <FerricBtn> { height: 34, text: "Google Console" }
+                                            yt_logout_btn = <FerricBtn> { height: 34, text: "Disconnect" }
+                                            oauth_cancel_btn = <FerricBtn> { visible: false, height: 34, text: "Cancel Login" }
+                                            <View> { width: Fill, height: 1 }
+                                            <Label> { draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Music Only" }
+                                            yt_cat_toggle = <FerricToggle> { is_on: true }
+                                        }
+                                    }
+
+                                    // TIER 3: OPENSUBSONIC / NAVIDROME & LOCAL LOSSLESS MATCHER
+                                    <FerricCard> {
+                                        flow: Down, spacing: 10,
+                                        <Label> {
+                                            draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }
+                                            text: "Self-Hosted Server (OpenSubsonic / Navidrome) & Local Matcher"
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, spacing: 10,
+                                            sub_url_input = <FerricInput> { empty_text: "https://music.example.com" }
+                                            sub_user_input = <FerricInput> { empty_text: "Username" }
+                                            sub_pass_input = <FerricInput> { empty_text: "Password" }
+                                        }
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, spacing: 8,
+                                            sub_sync_btn = <FerricBtn> { height: 34, text: "Connect Subsonic" }
+                                            match_local_btn = <FerricBtn> { height: 34, text: "Match Cloud Songs to Local Files" }
+                                            rescan_btn = <FerricBtn> { height: 34, text: "Rescan Local Folders" }
+                                        }
+                                    }
+                                }
                             }
 
-                            // COLLAPSIBLE RIGHT DRAWER (Hidden by default so main stage stays spacious!)
+                            // OPTIONAL COLLAPSIBLE RIGHT DRAWER (Up Next Queue + Quick Connect)
                             right_drawer = <FerricSurface> {
                                 visible: false,
                                 width: 288,
@@ -1139,49 +1356,39 @@ live_design! {
                                 padding: 16,
                                 flow: Down,
                                 spacing: 12,
-                                draw_bg: { base_col: #0A0A0A, radius: 14.0 }
+                                draw_bg: { base_col: #070707, radius: 0.0 }
 
                                 <View> {
                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 6,
-                                    drawer_queue_tab = <FerricSoftPill> { height: 30, text: "Queue", draw_bg: { active: 1.0 } }
-                                    drawer_connect_tab = <FerricSoftPill> { height: 30, text: "Connect" }
+                                    drawer_queue_tab = <FerricBtn> { height: 30, text: "Queue", draw_bg: { active: 1.0 } }
+                                    drawer_connect_tab = <FerricBtn> { height: 30, text: "Connect" }
                                     <View> { width: Fill, height: 1 }
-                                    drawer_close_btn = <FerricSoftPill> { height: 28, padding: { left: 10, right: 10 }, text: "Close" }
+                                    drawer_close_btn = <FerricBtn> { height: 28, padding: { left: 10, right: 10 }, text: "Close" }
                                 }
 
-                                // Drawer View 1: Up Next Queue
                                 drawer_queue_view = <View> {
                                     visible: true,
                                     width: Fill, height: Fill, flow: Down, spacing: 8,
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                         <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 14.5 } }, text: "Up Next" }
-                                        clear_queue_btn = <FerricSoftPill> { height: 26, padding: { left: 10, right: 10 }, text: "Clear" }
+                                        clear_queue_btn = <FerricBtn> { height: 26, padding: { left: 10, right: 10 }, text: "Clear" }
                                     }
                                     queue_sub_lbl = <Label> {
                                         draw_text: { color: #888279, text_style: { font_size: 11.5 } }
                                         text: "Gapless Deck B pre-buffered"
                                     }
-                                    q_slot_0 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
-                                    q_slot_1 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
-                                    q_slot_2 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
-                                    q_slot_3 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
-                                    q_slot_4 = <FerricPlaylistBtn> { visible: false, height: 38, text: "" }
+                                    q_slot_0 = <FerricPlaylistBtn> { visible: false, height: 36, text: "" }
+                                    q_slot_1 = <FerricPlaylistBtn> { visible: false, height: 36, text: "" }
+                                    q_slot_2 = <FerricPlaylistBtn> { visible: false, height: 36, text: "" }
+                                    q_slot_3 = <FerricPlaylistBtn> { visible: false, height: 36, text: "" }
+                                    q_slot_4 = <FerricPlaylistBtn> { visible: false, height: 36, text: "" }
                                 }
 
-                                // Drawer View 2: Ferric Connect QR & LAN Peers
                                 drawer_connect_view = <View> {
                                     visible: false,
                                     width: Fill, height: Fill, flow: Down, spacing: 10,
-                                    <Label> {
-                                        draw_text: { color: #F3EEE3, text_style: { font_size: 14.5 } }
-                                        text: "Ferric Connect (LAN & P2P)"
-                                    }
-                                    <Label> {
-                                        width: Fill,
-                                        draw_text: { color: #9E988E, text_style: { font_size: 11.5 } }
-                                        text: "Scan QR from Ferric Android for remote speaker handoff."
-                                    }
+                                    <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 14.5 } }, text: "Ferric Connect" }
                                     <View> {
                                         width: Fill, height: Fit, align: { x: 0.5 }, margin: { top: 4, bottom: 4 }
                                         qr_view = <FerricQrView> { width: 148, height: 148 }
@@ -1189,12 +1396,12 @@ live_design! {
                                     lan_ip_lbl = <Label> {
                                         width: Fill,
                                         draw_text: { color: #D9541E, text_style: { font_size: 11.5 } }
-                                        text: "LAN: 127.0.0.1:43821 · Desktop-PC Active"
+                                        text: "LAN: 127.0.0.1:43821"
                                     }
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 6,
-                                        gen_pair_btn = <FerricSoftPill> { height: 30, text: "New QR" }
-                                        copy_pair_btn = <FerricSoftPill> { height: 30, text: "Copy Link" }
+                                        gen_pair_btn = <FerricBtn> { height: 30, text: "New QR" }
+                                        copy_pair_btn = <FerricBtn> { height: 30, text: "Copy Link" }
                                     }
                                     peers_lbl = <Label> {
                                         width: Fill,
@@ -1205,20 +1412,21 @@ live_design! {
                             }
                         }
 
-                        // 3. BOTTOM PLAYER BAR (Spacious & Familiar like Spotify / Sonora)
+                        <FerricDividerH> {}
+
+                        // 3. DOCKED BOTTOM PLAYER BAR (100% Crisp Vector SVG Icons — FigCraft D1 Parity)
                         bottom_bar = <FerricSurface> {
                             width: Fill,
                             height: 82,
-                            margin: { left: 8, right: 8, top: 4, bottom: 8 }
-                            padding: { left: 16, right: 16 }
+                            padding: { left: 18, right: 18 }
                             flow: Right,
                             align: { y: 0.5 }
                             spacing: 18,
-                            draw_bg: { base_col: #0A0A0A, radius: 14.0 }
+                            draw_bg: { base_col: #060606, radius: 0.0 }
 
-                            // Left: Cover Art + Song Title / Artist + Save
+                            // Left: Cover Art + Song Title / Artist + Vector Heart Icon
                             <View> {
-                                width: 268,
+                                width: 274,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
@@ -1245,14 +1453,17 @@ live_design! {
                                         text: "Ferric Hi-Fi Player"
                                     }
                                 }
-                                np_like_btn = <FerricSoftPill> {
-                                    height: 28,
-                                    padding: { left: 10, right: 10 }
-                                    text: "Save"
+                                np_like_btn = <FerricIconBtn> {
+                                    width: 32, height: 32,
+                                    icon_walk: { width: 15, height: Fit }
+                                    draw_icon: {
+                                        svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
+                                        color: #6B665E
+                                    }
                                 }
                             }
 
-                            // Center: Transport Controls + Clean Seekbar
+                            // Center: 5 Pure Vector Transport Controls + Working Copper Seekbar
                             <View> {
                                 width: Fill,
                                 height: Fill,
@@ -1266,11 +1477,23 @@ live_design! {
                                     flow: Right,
                                     align: { y: 0.5 }
                                     spacing: 10,
-                                    shuffle_btn = <FerricSoftPill> { height: 30, padding: { left: 12, right: 12 }, text: "Shuffle" }
-                                    prev_btn = <FerricSoftPill> { height: 32, padding: { left: 13, right: 13 }, text: "Prev" }
-                                    play_pause_btn = <FerricPlayCircleBtn> {}
-                                    next_btn = <FerricSoftPill> { height: 32, padding: { left: 13, right: 13 }, text: "Next" }
-                                    repeat_btn = <FerricSoftPill> { height: 30, padding: { left: 12, right: 12 }, text: "Repeat" }
+                                    shuffle_btn = <FerricIconBtn> {
+                                        icon_walk: { width: 15, height: Fit }
+                                        draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z" }
+                                    }
+                                    prev_btn = <FerricIconBtn> {
+                                        icon_walk: { width: 17, height: Fit }
+                                        draw_icon: { svg_path: "M6 6H8.5V18H6V6ZM10 12L18.5 18V6L10 12Z" }
+                                    }
+                                    play_pause_btn = <FerricPlayBtn> { width: 40, height: 40 }
+                                    next_btn = <FerricIconBtn> {
+                                        icon_walk: { width: 17, height: Fit }
+                                        draw_icon: { svg_path: "M5.5 18L14 12L5.5 6V18ZM15.5 6V18H18V6H15.5Z" }
+                                    }
+                                    repeat_btn = <FerricIconBtn> {
+                                        icon_walk: { width: 15, height: Fit }
+                                        draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z" }
+                                    }
                                 }
 
                                 <View> {
@@ -1286,7 +1509,7 @@ live_design! {
                                     }
                                     seek_slider = <FerricBarSlider> { min: 0.0, max: 1.0, value: 0.0 }
                                     dur_btn = <Button> {
-                                        width: 50,
+                                        width: 52,
                                         height: 20,
                                         padding: 0,
                                         align: { x: 1.0, y: 0.5 }
@@ -1297,35 +1520,47 @@ live_design! {
                                 }
                             }
 
-                            // Right: Lyrics, Queue, Connect & Clean Volume Bar
+                            // Right: Codec Tag + Crisp Vector Icon Actions (Lyrics, Queue, EQ, Connect, Volume)
                             <View> {
-                                width: 280,
+                                width: 326,
                                 height: Fill,
                                 flow: Right,
                                 align: { x: 1.0, y: 0.5 }
-                                spacing: 8,
-                                codec_pill_btn = <FerricSoftPill> {
-                                    height: 28,
-                                    padding: { left: 10, right: 10 }
+                                spacing: 5,
+
+                                codec_pill_btn = <FerricBtn> {
+                                    height: 26,
+                                    padding: { left: 9, right: 9 }
                                     text: "Lossless"
+                                    draw_text: { color: #D9541E, color_hover: #F3EEE3, text_style: { font_size: 10.5 } }
                                 }
-                                bar_lyrics_btn = <FerricSoftPill> {
-                                    height: 30,
-                                    padding: { left: 11, right: 11 }
-                                    text: "Lyrics"
+                                bar_lyrics_btn = <FerricIconBtn> {
+                                    width: 30, height: 30,
+                                    icon_walk: { width: 15, height: Fit }
+                                    draw_icon: { svg_path: "M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2C10.34 2 9 3.34 9 5V11C9 12.66 10.34 14 12 14ZM17 11C17 13.76 14.76 16 12 16C9.24 16 7 13.76 7 11H5C5 14.53 7.61 17.43 11 17.92V21H13V17.92C16.39 17.43 19 14.53 19 11H17Z" }
                                 }
-                                bar_queue_btn = <FerricSoftPill> {
-                                    height: 30,
-                                    padding: { left: 11, right: 11 }
-                                    text: "Queue"
+                                bar_queue_btn = <FerricIconBtn> {
+                                    width: 30, height: 30,
+                                    icon_walk: { width: 15, height: Fit }
+                                    draw_icon: { svg_path: "M3 6H15V8H3V6ZM3 10H15V12H3V10ZM3 14H11V16H3V14ZM15 13V19L20 16L15 13Z" }
                                 }
-                                bar_connect_btn = <FerricSoftPill> {
-                                    height: 30,
-                                    padding: { left: 11, right: 11 }
-                                    text: "Devices"
+                                bar_eq_btn = <FerricIconBtn> {
+                                    width: 30, height: 30,
+                                    icon_walk: { width: 15, height: Fit }
+                                    draw_icon: { svg_path: "M5 4H7V11H9V13H3V11H5V4ZM5 15H7V20H5V15ZM11 4H13V7H15V9H9V7H11V4ZM11 11H13V20H11V11ZM17 4H19V14H21V16H15V14H17V4ZM17 18H19V20H17V18Z" }
+                                }
+                                bar_connect_btn = <FerricIconBtn> {
+                                    width: 30, height: 30,
+                                    icon_walk: { width: 15, height: Fit }
+                                    draw_icon: { svg_path: "M4 6H20V4H4C2.9 4 2 4.9 2 6V17H0V20H14V17H4V6ZM23 8H17C16.45 8 16 8.45 16 9V19C16 19.55 16.45 20 17 20H23C23.55 20 24 19.55 24 19V9C24 8.45 23.55 8 23 8ZM22 17H18V10H22V17Z" }
+                                }
+                                vol_mute_btn = <FerricIconBtn> {
+                                    width: 30, height: 30,
+                                    icon_walk: { width: 15, height: Fit }
+                                    draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" }
                                 }
                                 vol_slider = <FerricBarSlider> {
-                                    width: 78,
+                                    width: 82,
                                     min: 0.0,
                                     max: 1.0,
                                     value: 0.85
@@ -1339,29 +1574,46 @@ live_design! {
                         visible: false,
                         width: Fill,
                         height: Fill,
-                        align: { x: 0.5, y: 0.18 }
+                        align: { x: 0.5, y: 0.16 }
                         show_bg: true,
                         draw_bg: { fn pixel(self) -> vec4 { return vec4(0.0, 0.0, 0.0, 0.72); } }
 
-                        <FerricSurface> {
+                        <FerricCard> {
                             width: 520,
                             height: Fit,
                             padding: 20,
                             flow: Down,
-                            spacing: 10,
-                            draw_bg: { base_col: #0E0E0E, border_col: #D9541E, radius: 14.0 }
+                            spacing: 8,
 
                             <View> {
-                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
+                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 } margin: { bottom: 4 }
                                 <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 15.5 } }, text: "Command Palette" }
-                                cmdk_close_btn = <FerricSoftPill> { height: 28, text: "Esc" }
+                                cmdk_close_btn = <FerricBtn> { height: 28, text: "Esc" }
                             }
-                            cmd_demo_btn = <FerricNavItem> { text: "Play Seamless Demo Suite (Test 6s Fade-In & Gapless)" }
-                            cmd_glass_btn = <FerricNavItem> { text: "Toggle Liquid Glass Theme On / Off" }
-                            cmd_fade_btn = <FerricNavItem> { text: "Open Playback & Seamless Fade-In Settings" }
-                            cmd_eq_btn = <FerricNavItem> { text: "Open 10-Band Parametric Equalizer & AutoEq" }
-                            cmd_accounts_btn = <FerricNavItem> { text: "Sign in to Spotify or YouTube Music (OAuth PKCE)" }
-                            cmd_sleep30_btn = <FerricNavItem> { text: "Start 30-Minute Sleep Timer (Smooth Fade-Out)" }
+                            cmd_demo_btn = <FerricNavItem> {
+                                text: "Play Seamless Demo Suite (Test 6s Fade-In & Gapless)"
+                                draw_icon: { svg_path: "M8 5V19L19 12L8 5Z", color: #D9541E }
+                            }
+                            cmd_glass_btn = <FerricNavItem> {
+                                text: "Toggle Liquid Glass Theme On / Off"
+                                draw_icon: { svg_path: "M12 2L2 9L12 16L22 9L12 2ZM12 18.54L4.62 12.81L3 14.07L12 21.07L21 14.07L19.37 12.8L12 18.54Z" }
+                            }
+                            cmd_fade_btn = <FerricNavItem> {
+                                text: "Open Seamless Fade-In & Automix Studio"
+                                draw_icon: { svg_path: "M3 10H5V14H3V10ZM7 6H9V18H7V6ZM11 2H13V22H11V2ZM15 6H17V18H15V6ZM19 10H21V14H19V10Z" }
+                            }
+                            cmd_eq_btn = <FerricNavItem> {
+                                text: "Open 10-Band Parametric Equalizer & AutoEq"
+                                draw_icon: { svg_path: "M5 4H7V11H9V13H3V11H5V4ZM5 15H7V20H5V15ZM11 4H13V7H15V9H9V7H11V4ZM11 11H13V20H11V11ZM17 4H19V14H21V16H15V14H17V4ZM17 18H19V20H17V18Z" }
+                            }
+                            cmd_accounts_btn = <FerricNavItem> {
+                                text: "Import Spotify / YouTube Music or Sign In"
+                                draw_icon: { svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z" }
+                            }
+                            cmd_sleep30_btn = <FerricNavItem> {
+                                text: "Start 30-Minute Sleep Timer (Smooth Fade-Out)"
+                                draw_icon: { svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z" }
+                            }
                         }
                     }
 
@@ -1374,13 +1626,12 @@ live_design! {
                         show_bg: true,
                         draw_bg: { fn pixel(self) -> vec4 { return vec4(0.0, 0.0, 0.0, 0.76); } }
 
-                        <FerricSurface> {
+                        <FerricCard> {
                             width: 460,
                             height: Fit,
                             padding: 24,
                             flow: Down,
                             spacing: 12,
-                            draw_bg: { base_col: #0E0E0E, border_col: #D9541E, radius: 16.0 }
 
                             update_popup_title = <Label> {
                                 draw_text: { color: #F3EEE3, text_style: { font_size: 18.0 } }
@@ -1399,8 +1650,8 @@ live_design! {
                             <View> {
                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 6 }
                                 update_now_btn = <FerricAccentPill> { height: 36, text: "Update Now" }
-                                update_whats_new_btn = <FerricSoftPill> { height: 36, text: "Release Notes" }
-                                update_popup_close_btn = <FerricSoftPill> { height: 36, text: "Later" }
+                                update_whats_new_btn = <FerricBtn> { height: 36, text: "Release Notes" }
+                                update_popup_close_btn = <FerricBtn> { height: 36, text: "Later" }
                             }
                         }
                     }
@@ -1464,6 +1715,14 @@ enum BgMessage {
         track_id: String,
         lrc_raw: String,
         parsed: SyncedLyrics,
+    },
+    PublicSyncCompleted {
+        provider: &'static str,
+        payload: Box<(Playlist, Vec<Track>)>,
+    },
+    PublicSyncFailed {
+        provider: &'static str,
+        error: String,
     },
     OAuthCompleted {
         kind: AccountKind,
@@ -1549,7 +1808,11 @@ pub struct App {
     #[rust]
     sort_field: SortField,
     #[rust]
+    active_page: LiveId,
+    #[rust]
     show_remaining_time: bool,
+    #[rust]
+    pre_mute_volume: f32,
     #[rust]
     compact_mini_mode: bool,
     #[rust]
@@ -1583,12 +1846,20 @@ impl LiveRegister for App {
 }
 
 impl App {
+    fn hide_native_makepad_caption(&self, cx: &mut Cx) {
+        self.ui.view(id!(caption_bar)).set_visible(cx, false);
+        self.ui.view(id!(windows_buttons)).set_visible(cx, false);
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized {
             return;
         }
         self.initialized = true;
         self.np_canvas_animated = true;
+        self.active_page = live_id!(page_library);
+        self.pre_mute_volume = 0.85;
+        self.hide_native_makepad_caption(cx);
 
         let db_path = app_data_dir().join("ferric.db");
         let db = LibraryDb::open(&db_path)
@@ -1638,6 +1909,10 @@ impl App {
         self.refresh_ui_labels(cx);
         self.tick_timer = cx.start_interval(0.10);
 
+        if startup_load_demo() {
+            self.load_and_play_demo_suite(cx);
+        }
+
         if let Some(page_arg) = startup_page_override() {
             self.apply_startup_page_override(cx, page_arg);
         } else if self.update_settings.auto_check_on_startup {
@@ -1650,76 +1925,52 @@ impl App {
             "home" => self.switch_main_page(cx, live_id!(page_home)),
             "library" => self.switch_main_page(cx, live_id!(page_library)),
             "now" | "lyrics" => self.switch_main_page(cx, live_id!(page_now_playing)),
-            "accounts" => {
-                self.switch_main_page(cx, live_id!(page_settings));
-                self.switch_settings_tab(cx, live_id!(subpage_accounts));
-            }
-            "fade" | "playback" => {
-                self.switch_main_page(cx, live_id!(page_settings));
-                self.switch_settings_tab(cx, live_id!(subpage_playback));
-            }
-            "eq" => {
-                self.switch_main_page(cx, live_id!(page_settings));
-                self.switch_settings_tab(cx, live_id!(subpage_eq));
-            }
-            "appearance" => {
-                self.switch_main_page(cx, live_id!(page_settings));
-                self.switch_settings_tab(cx, live_id!(subpage_appearance));
-            }
+            "fade" | "playback" => self.switch_main_page(cx, live_id!(page_fade)),
+            "eq" => self.switch_main_page(cx, live_id!(page_eq)),
+            "connect" => self.switch_main_page(cx, live_id!(page_connect)),
+            "appearance" => self.switch_main_page(cx, live_id!(page_appearance)),
+            "accounts" => self.switch_main_page(cx, live_id!(page_accounts)),
             "glass" => {
                 self.theme.material.liquid_glass = true;
                 self.sync_controls_from_state(cx);
                 self.apply_theme_live(cx);
-                self.switch_main_page(cx, live_id!(page_settings));
-                self.switch_settings_tab(cx, live_id!(subpage_appearance));
-            }
-            "connect" => {
-                self.open_right_drawer(cx, true);
+                self.switch_main_page(cx, live_id!(page_appearance));
             }
             "cmdk" => {
                 self.cmdk_open = true;
                 self.ui.view(id!(cmdk_modal)).set_visible(cx, true);
+                self.ui.redraw(cx);
             }
             _ => {}
         }
     }
 
     fn switch_main_page(&mut self, cx: &mut Cx, target: LiveId) {
+        self.active_page = target;
+        let copper = vec4(0.851, 0.329, 0.118, 1.0);
+        let cream = vec4(0.953, 0.933, 0.890, 1.0);
+        let muted = vec4(0.620, 0.596, 0.557, 1.0);
+        let icon_muted = vec4(0.533, 0.510, 0.475, 1.0);
+
         for (pid, nav_id) in [
             (live_id!(page_home), id!(nav_home)),
             (live_id!(page_library), id!(nav_library)),
             (live_id!(page_now_playing), id!(nav_now_playing)),
+            (live_id!(page_fade), id!(nav_fade)),
+            (live_id!(page_eq), id!(nav_eq)),
+            (live_id!(page_connect), id!(nav_connect)),
+            (live_id!(page_appearance), id!(nav_appearance)),
+            (live_id!(page_accounts), id!(nav_accounts)),
         ] {
             let active = pid == target;
             self.ui.view(&[pid]).set_visible(cx, active);
             self.ui.button(nav_id).apply_over(
                 cx,
-                live! { draw_bg: { active: (if active { 1.0 } else { 0.0 }) } },
-            );
-        }
-        let is_settings = target == live_id!(page_settings);
-        self.ui
-            .view(id!(page_settings))
-            .set_visible(cx, is_settings);
-        self.ui.button(id!(settings_top_btn)).apply_over(
-            cx,
-            live! { draw_bg: { active: (if is_settings { 1.0 } else { 0.0 }) } },
-        );
-        self.ui.redraw(cx);
-    }
-
-    fn switch_settings_tab(&mut self, cx: &mut Cx, sub_target: LiveId) {
-        for (sid, btn_id) in [
-            (live_id!(subpage_accounts), id!(tab_accounts_btn)),
-            (live_id!(subpage_playback), id!(tab_playback_btn)),
-            (live_id!(subpage_eq), id!(tab_eq_btn)),
-            (live_id!(subpage_appearance), id!(tab_appearance_btn)),
-        ] {
-            let active = sid == sub_target;
-            self.ui.view(&[sid]).set_visible(cx, active);
-            self.ui.button(btn_id).apply_over(
-                cx,
-                live! { draw_bg: { active: (if active { 1.0 } else { 0.0 }) } },
+                live! {
+                    draw_bg: { active: (if active { 1.0 } else { 0.0 }) }
+                    draw_icon: { color: (if active { copper } else { icon_muted }) }
+                    draw_text: { color: (if active { cream } else { muted }) }
+                },
             );
         }
         self.ui.redraw(cx);
@@ -1750,9 +2001,9 @@ impl App {
         let show_full = !self.compact_mini_mode;
         self.ui.view(id!(workspace_row)).set_visible(cx, show_full);
         let new_size = if self.compact_mini_mode {
-            dvec2(460.0, 152.0)
+            dvec2(480.0, 148.0)
         } else {
-            dvec2(1240.0, 760.0)
+            dvec2(1280.0, 780.0)
         };
         self.ui.window(id!(main_window)).resize(cx, new_size);
         self.ui.redraw(cx);
@@ -1770,12 +2021,16 @@ impl App {
         if let Ok(qr) = QrMatrix::encode(&self.pairing_uri) {
             self.ui
                 .ferric_qr_view(id!(qr_view))
+                .set_matrix(cx, qr.size, qr.modules.clone());
+            self.ui
+                .ferric_qr_view(id!(connect_qr_view))
                 .set_matrix(cx, qr.size, qr.modules);
         }
-        self.ui.label(id!(lan_ip_lbl)).set_text(
-            cx,
-            &format!("LAN: {}:43821 · Desktop-PC Active", self.lan_ip),
-        );
+        let lan_txt = format!("LAN: {}:43821 · Desktop-PC Active", self.lan_ip);
+        self.ui.label(id!(lan_ip_lbl)).set_text(cx, &lan_txt);
+        self.ui
+            .label(id!(connect_lan_ip_lbl))
+            .set_text(cx, &lan_txt);
     }
 
     fn rebuild_filtered_tracks(&mut self, cx: &mut Cx) {
@@ -1852,7 +2107,6 @@ impl App {
 
         self.filtered_tracks = Rc::new(list);
 
-        // Update filter chip highlights
         for (btn, active) in [
             (
                 id!(flt_all_btn),
@@ -1895,7 +2149,7 @@ impl App {
 
         let hero_title = match self.active_filter {
             LibraryFilter::All => "Your Library".to_string(),
-            LibraryFilter::Liked => "Saved Songs".to_string(),
+            LibraryFilter::Liked => "Liked Songs".to_string(),
             LibraryFilter::Local => "Local Lossless".to_string(),
             LibraryFilter::Spotify => "Spotify Synced".to_string(),
             LibraryFilter::YouTube => "YouTube Music".to_string(),
@@ -1913,7 +2167,10 @@ impl App {
     }
 
     fn sync_controls_from_state(&self, cx: &mut Cx) {
-        // Playback & Seamless Fade-In
+        let copper = vec4(0.851, 0.329, 0.118, 1.0);
+        let muted = vec4(0.620, 0.596, 0.557, 1.0);
+
+        // Seamless Fade-In & Automix
         self.ui
             .ferric_bar_slider(id!(xfade_slider))
             .set_value(cx, f64::from(self.dsp.crossfade_ms) / 1_000.0);
@@ -1966,7 +2223,7 @@ impl App {
             );
         }
 
-        // Equalizer
+        // 10-Band Parametric Equalizer
         self.ui
             .ferric_toggle(id!(eq_enable_toggle))
             .set_active(cx, self.eq.enabled);
@@ -2035,25 +2292,35 @@ impl App {
             ),
         );
 
-        // Volume & Transport
+        // Volume & Transport Icon States
         self.ui
             .ferric_bar_slider(id!(vol_slider))
             .set_value(cx, f64::from(self.session_state.volume));
-        self.ui.button(id!(shuffle_btn)).apply_over(
+        self.ui.button(id!(vol_mute_btn)).apply_over(
             cx,
-            live! { draw_bg: { active: (if self.queue.shuffle { 1.0 } else { 0.0 }) } },
-        );
-        self.ui.button(id!(repeat_btn)).set_text(
-            cx,
-            match self.queue.repeat {
-                RepeatMode::Off => "Repeat",
-                RepeatMode::All => "Repeat All",
-                RepeatMode::One => "Repeat 1",
+            live! {
+                draw_icon: { color: (if self.session_state.volume < 0.01 { copper } else { muted }) }
             },
         );
+        self.ui.button(id!(shuffle_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (if self.queue.shuffle { 1.0 } else { 0.0 }) }
+                draw_icon: { color: (if self.queue.shuffle { copper } else { muted }) }
+            },
+        );
+        let rep_active = self.queue.repeat != RepeatMode::Off;
+        let rep_col = match self.queue.repeat {
+            RepeatMode::Off => muted,
+            RepeatMode::All => copper,
+            RepeatMode::One => vec4(0.953, 0.720, 0.350, 1.0),
+        };
         self.ui.button(id!(repeat_btn)).apply_over(
             cx,
-            live! { draw_bg: { active: (if self.queue.repeat != RepeatMode::Off { 1.0 } else { 0.0 }) } },
+            live! {
+                draw_bg: { active: (if rep_active { 1.0 } else { 0.0 }) }
+                draw_icon: { color: (rep_col) }
+            },
         );
 
         // Accounts & Updates
@@ -2087,7 +2354,11 @@ impl App {
         let surface = rgba_vec4(&self.theme.surface_hex);
         let border = rgba_vec4(&self.theme.border_hex);
         let accent = rgba_vec4(&self.theme.accent_hex);
-        let rad = self.theme.corner_radius_px;
+        let rad = if g.liquid_glass {
+            self.theme.corner_radius_px.max(12.0)
+        } else {
+            0.0
+        };
 
         self.ui.view(id!(body)).apply_over(
             cx,
@@ -2100,18 +2371,20 @@ impl App {
             },
         );
 
-        for panel_id in [
-            id!(top_bar),
-            id!(left_sidebar),
-            id!(center_stage),
-            id!(right_drawer),
-            id!(bottom_bar),
-        ] {
+        let panel_defs = [
+            (id!(top_bar), vec4(0.024, 0.024, 0.024, 1.0)),
+            (id!(left_sidebar), vec4(0.031, 0.031, 0.031, 1.0)),
+            (id!(center_stage), canvas),
+            (id!(right_drawer), vec4(0.031, 0.031, 0.031, 1.0)),
+            (id!(bottom_bar), vec4(0.027, 0.027, 0.027, 1.0)),
+        ];
+        for (panel_id, flat_col) in panel_defs {
+            let chosen_base = if g.liquid_glass { surface } else { flat_col };
             self.ui.view(panel_id).apply_over(
                 cx,
                 live! {
                     draw_bg: {
-                        base_col: (surface),
+                        base_col: (chosen_base),
                         border_col: (border),
                         accent_col: (accent),
                         glass_enabled: (glass_f),
@@ -2134,7 +2407,7 @@ impl App {
                     blur_amt: (g.frost_blur_px / 28.0),
                     rim_amt: (g.specular_rim),
                     scrim_amt: (g.scrim_alpha),
-                    radius_px: (rad.max(16.0)),
+                    radius_px: (self.theme.corner_radius_px.max(16.0)),
                     glass_on: (glass_f)
                 }
             },
@@ -2223,21 +2496,15 @@ impl App {
             ),
         );
 
-        // Top-bar account pill & Settings account badges
         let sp_ok = self.accounts.spotify_connected;
         let yt_ok = self.accounts.youtube_connected;
-        let top_acc_txt = match (sp_ok, yt_ok) {
-            (true, true) => "Spotify · YouTube",
-            (true, false) => "Spotify Connected",
-            (false, true) => "YouTube Connected",
-            (false, false) => "Sign In",
-        };
-        self.ui
-            .button(id!(accounts_top_btn))
-            .set_text(cx, top_acc_txt);
-        self.ui.button(id!(accounts_top_btn)).apply_over(
+        self.ui.button(id!(top_spotify_btn)).apply_over(
             cx,
-            live! { draw_bg: { active: (if sp_ok || yt_ok { 1.0 } else { 0.0 }) } },
+            live! { draw_bg: { active: (if sp_ok { 1.0 } else { 0.0 }) } },
+        );
+        self.ui.button(id!(top_youtube_btn)).apply_over(
+            cx,
+            live! { draw_bg: { active: (if yt_ok { 1.0 } else { 0.0 }) } },
         );
 
         self.ui.label(id!(spotify_state_lbl)).set_text(
@@ -2263,7 +2530,7 @@ impl App {
             },
         );
 
-        // Sidebar playlists (up to 5 dynamic slots)
+        // Dynamic Sidebar Playlists
         let pl_slots = [
             id!(pl_slot_0),
             id!(pl_slot_1),
@@ -2321,14 +2588,14 @@ impl App {
                 self.ui.button(btn_id).set_visible(cx, true);
                 self.ui.button(btn_id).set_text(
                     cx,
-                    "Click 'Play Demo' above to try Seamless Fade-In right now",
+                    "Click 'Play Demo' above to experience Seamless Fade-In right now",
                 );
             } else {
                 self.ui.button(btn_id).set_visible(cx, false);
             }
         }
 
-        // Queue Drawer slots
+        // Queue Drawer Slots
         let q_slots = [
             id!(q_slot_0),
             id!(q_slot_1),
@@ -2349,7 +2616,6 @@ impl App {
         }
     }
 
-    /// Pre-queue Deck B in `ferric-audio` so gapless / crossfade overlap triggers with 0 ms delay.
     fn sync_next_deck_to_engine(&self) {
         let Some(audio) = &self.audio else {
             return;
@@ -2380,13 +2646,11 @@ impl App {
 
     fn play_track(&mut self, cx: &mut Cx, track: Track) {
         let Some(path) = track.path.clone() else {
-            // Cloud metadata track without a matched local file yet: guide user cleanly
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_accounts));
+            self.switch_main_page(cx, live_id!(page_accounts));
             self.ui.label(id!(oauth_status_lbl)).set_text(
                 cx,
                 &format!(
-                    "'{}' is a cloud metadata entry. Add your local music folder and click 'Match Cloud Songs to Local Files' to link audio.",
+                    "'{}' is a cloud catalog entry. Add your local music folder and click 'Match Cloud Songs to Local Files', or open its official video clip in Now Playing.",
                     track.title
                 ),
             );
@@ -2426,10 +2690,17 @@ impl App {
         self.ui
             .button(id!(codec_pill_btn))
             .set_text(cx, &track.quality_badge());
+        let like_col = if track.liked {
+            vec4(0.851, 0.329, 0.118, 1.0)
+        } else {
+            vec4(0.420, 0.400, 0.369, 1.0)
+        };
         self.ui
             .button(id!(np_like_btn))
-            .set_text(cx, if track.liked { "Saved" } else { "Save" });
-        self.ui.button(id!(play_pause_btn)).set_text(cx, "Pause");
+            .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+        self.ui
+            .ferric_play_btn(id!(play_pause_btn))
+            .set_playing(cx, true);
         self.ui.label(id!(signal_path_lbl)).set_text(
             cx,
             &format!(
@@ -2574,19 +2845,78 @@ impl App {
         });
     }
 
+    fn start_public_sync(&self, cx: &mut Cx, mode: &'static str, raw_input: String) {
+        let trimmed = raw_input.trim().to_string();
+        if trimmed.is_empty() {
+            self.ui.label(id!(oauth_status_lbl)).set_text(
+                cx,
+                "Paste a public Spotify or YouTube URL (or type a song/artist name) first.",
+            );
+            return;
+        }
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.ui
+            .label(id!(oauth_status_lbl))
+            .set_text(cx, &format!("Fetching {mode} metadata..."));
+
+        thread::spawn(move || {
+            let result = match mode {
+                "Spotify" => import_spotify_public_url(&trimmed),
+                "YouTube" => import_youtube_public_url(&trimmed),
+                _ => search_youtube_public(&trimmed, 25).map(|tracks| {
+                    let pl = Playlist {
+                        id: format!("yt:search:{}", trimmed.to_ascii_lowercase()),
+                        name: format!("YouTube: {trimmed}"),
+                        source: TrackSource::YouTubeMusic,
+                        etag: None,
+                        track_count: tracks.len(),
+                        description: "Instant YouTube Music Search".to_string(),
+                    };
+                    (pl, tracks)
+                }),
+            };
+            match result {
+                Ok(pair) => {
+                    let _ = tx.send(BgMessage::PublicSyncCompleted {
+                        provider: mode,
+                        payload: Box::new(pair),
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(BgMessage::PublicSyncFailed {
+                        provider: mode,
+                        error: err.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
     fn start_oauth_login(&mut self, cx: &mut Cx, kind: AccountKind) {
-        let spotify_id = self
+        let mut spotify_id = self
             .ui
             .text_input(id!(spotify_id_input))
             .text()
             .trim()
             .to_string();
-        let yt_id = self
+        if spotify_id.is_empty()
+            && let Ok(env_id) = std::env::var("FERRIC_SPOTIFY_CLIENT_ID")
+        {
+            spotify_id = env_id.trim().to_string();
+        }
+        let mut yt_id = self
             .ui
             .text_input(id!(yt_id_input))
             .text()
             .trim()
             .to_string();
+        if yt_id.is_empty()
+            && let Ok(env_id) = std::env::var("FERRIC_GOOGLE_CLIENT_ID")
+        {
+            yt_id = env_id.trim().to_string();
+        }
         let yt_secret = self
             .ui
             .text_input(id!(yt_secret_input))
@@ -2608,7 +2938,7 @@ impl App {
         if client_id.is_empty() {
             self.ui.label(id!(oauth_status_lbl)).set_text(
                 cx,
-                "Please paste your OAuth Client ID first, then click Sign In.",
+                "For private OAuth login, paste a free Developer Client ID (or use Instant Sync above with zero keys!).",
             );
             return;
         }
@@ -2890,6 +3220,35 @@ impl App {
                         }
                     }
                 }
+                BgMessage::PublicSyncCompleted { provider, payload } => {
+                    let (playlist, tracks) = *payload;
+                    let count = tracks.len();
+                    let pl_name = playlist.name.clone();
+                    let mut matched = 0usize;
+                    if let Some(db) = &mut self.db {
+                        let _ = db.upsert_tracks(&tracks);
+                        let ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
+                        let _ = db.upsert_playlist(&playlist, &ids);
+                        matched = db.match_cloud_tracks_to_local().unwrap_or(0);
+                        self.all_tracks = db.list_tracks("").unwrap_or_default();
+                        self.playlists = db.list_playlists().unwrap_or_default();
+                    } else {
+                        self.all_tracks.extend(tracks);
+                        self.playlists.push(playlist);
+                    }
+                    self.ui.label(id!(oauth_status_lbl)).set_text(
+                        cx,
+                        &format!(
+                            "{provider} Sync Complete: imported '{pl_name}' ({count} tracks, {matched} matched to local audio). Open Library to browse."
+                        ),
+                    );
+                    self.rebuild_filtered_tracks(cx);
+                }
+                BgMessage::PublicSyncFailed { provider, error } => {
+                    self.ui
+                        .label(id!(oauth_status_lbl))
+                        .set_text(cx, &format!("{provider} import failed: {error}"));
+                }
                 BgMessage::OAuthCompleted {
                     kind,
                     tokens,
@@ -3011,6 +3370,7 @@ impl App {
                     DownloadEvent::Ready(msi_path) => {
                         self.update_download_in_flight = false;
                         if launch_verified_installer(&msi_path).is_ok() {
+                            win32_close_active_window();
                             cx.quit();
                         }
                     }
@@ -3064,7 +3424,7 @@ impl App {
             }
         }
 
-        // 3. Sleep Timer Countdown Check
+        // 3. Sleep Timer Countdown
         if let SleepTimerMode::Deadline(deadline) = self.sleep_timer {
             let now = Instant::now();
             if now >= deadline {
@@ -3084,8 +3444,8 @@ impl App {
             }
         }
 
-        // 4. Periodic LAN UDP Discovery Beacon (every 3 seconds when Connect drawer is open)
-        if self.right_drawer_open {
+        // 4. Periodic LAN UDP Discovery Beacon (Connect page or drawer open)
+        if self.right_drawer_open || self.active_page == live_id!(page_connect) {
             let should_ping = self
                 .last_lan_broadcast
                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(3));
@@ -3102,23 +3462,22 @@ impl App {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     let peers = beacon.poll_peers(now_ms);
-                    if peers.is_empty() {
-                        self.ui
-                            .label(id!(peers_lbl))
-                            .set_text(cx, "Listening for Ferric devices on local Wi-Fi...");
+                    let txt = if peers.is_empty() {
+                        "Listening for Ferric devices on local Wi-Fi...".to_string()
                     } else {
-                        let txt = peers
+                        peers
                             .iter()
                             .map(|p| format!("- {} ({})", p.device_name, p.addr))
                             .collect::<Vec<_>>()
-                            .join("\n");
-                        self.ui.label(id!(peers_lbl)).set_text(cx, &txt);
-                    }
+                            .join("\n")
+                    };
+                    self.ui.label(id!(peers_lbl)).set_text(cx, &txt);
+                    self.ui.label(id!(connect_peers_lbl)).set_text(cx, &txt);
                 }
             }
         }
 
-        // 5. Sync Window Maximize Glyph
+        // 5. Sync Window Maximize / Restore Glyph
         self.ui
             .ferric_win_btn(id!(win_max_btn))
             .set_maximized(cx, win32_is_active_window_maximized());
@@ -3136,15 +3495,15 @@ impl App {
                         .set_text(cx, "Sleep Timer: Stopped at end of song");
                 } else if let Some(next) = self.queue.next_track().cloned() {
                     if snap.auto_transitioned {
-                        // Deck B was ALREADY promoted gaplessly/crossfaded to Deck A!
-                        // Update UI & pre-queue the next Deck B WITHOUT interrupting audio!
                         self.sync_next_deck_to_engine();
                         self.update_now_playing_metadata(cx, &next);
                     } else {
                         self.play_track(cx, next);
                     }
                 } else {
-                    self.ui.button(id!(play_pause_btn)).set_text(cx, "Play");
+                    self.ui
+                        .ferric_play_btn(id!(play_pause_btn))
+                        .set_playing(cx, false);
                 }
             }
 
@@ -3169,8 +3528,8 @@ impl App {
             }
 
             self.ui
-                .button(id!(play_pause_btn))
-                .set_text(cx, if snap.is_playing { "Pause" } else { "Play" });
+                .ferric_play_btn(id!(play_pause_btn))
+                .set_playing(cx, snap.is_playing);
 
             if snap.is_playing {
                 self.canvas_phase = (self.canvas_phase + 0.09) % 628.0;
@@ -3201,201 +3560,117 @@ impl App {
             }
         }
     }
-}
 
-impl AppMain for App {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.ensure_initialized(cx);
-
-        // Native Windows 11 Titlebar Drag & Aero Snap on empty regions of our unified `top_bar`
-        if let Event::WindowDragQuery(dq) = event
-            && dq.abs.y >= 8.0
-            && dq.abs.y <= 56.0
-        {
-            let search_rect = self.ui.view(id!(search_bar_wrap)).area().rect(cx);
-            let acc_rect = self.ui.button(id!(accounts_top_btn)).area().rect(cx);
-            let in_search = dq.abs.x >= search_rect.pos.x - 6.0
-                && dq.abs.x <= search_rect.pos.x + search_rect.size.x + 6.0;
-            let in_right_btns = acc_rect.size.x > 0.0 && dq.abs.x >= acc_rect.pos.x - 8.0;
-            if !in_search && !in_right_btns {
-                dq.response.set(WindowDragQueryResponse::Caption);
-                return;
-            }
-        }
-
-        if self.tick_timer.is_event(event).is_some() {
-            self.handle_tick(cx);
-        }
-
-        // Global Desktop Keyboard Shortcuts (Sonora / Spotify parity)
-        if let Event::KeyDown(ke) = event {
-            if ke.modifiers.control && ke.key_code == KeyCode::KeyK {
-                self.cmdk_open = !self.cmdk_open;
-                self.ui
-                    .view(id!(cmdk_modal))
-                    .set_visible(cx, self.cmdk_open);
-                self.ui.redraw(cx);
-                return;
-            }
-            if ke.modifiers.control && ke.key_code == KeyCode::KeyE {
-                self.switch_main_page(cx, live_id!(page_settings));
-                self.switch_settings_tab(cx, live_id!(subpage_eq));
-                return;
-            }
-            if ke.modifiers.control && ke.key_code == KeyCode::KeyL {
-                self.switch_main_page(cx, live_id!(page_now_playing));
-                return;
-            }
-            if ke.modifiers.control && ke.key_code == KeyCode::KeyM {
-                self.toggle_compact_mini_mode(cx);
-                return;
-            }
-            if ke.key_code == KeyCode::Escape {
-                if self.cmdk_open {
-                    self.cmdk_open = false;
-                    self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
-                    self.ui.redraw(cx);
-                } else if self.update_popup_visible {
-                    self.dismiss_update_popup(cx);
-                } else if self.right_drawer_open {
-                    self.right_drawer_open = false;
-                    self.ui.view(id!(right_drawer)).set_visible(cx, false);
-                    self.ui.redraw(cx);
-                }
-            }
-        }
-
-        let snap_opt = self.audio.as_ref().map(|a| a.telemetry());
-        let avg_lvl = snap_opt.map_or(0.5_f32, |s| {
-            ((s.spectrum_bins[0] + s.spectrum_bins[1]) as f32 / 2_000.0).clamp(0.1, 1.0)
-        });
-        let props = TrackListScope {
-            tracks: Rc::clone(&self.filtered_tracks),
-            active_track_id: self.queue.current().map(|t| t.id.clone()),
-            is_playing: snap_opt.is_some_and(|s| s.is_playing),
-            audio_level: avg_lvl,
-        };
-        let actions = {
-            let mut scope = Scope::with_props(&props);
-            cx.capture_actions(|cx| {
-                self.ui.handle_event(cx, event, &mut scope);
-            })
-        };
-
-        // 1. WINDOW CONTROLS (Minimize, Maximize/Restore, Exit, Mini-Player)
-        if self.ui.ferric_win_btn(id!(win_min_btn)).clicked(&actions) {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        // 1. WINDOW CONTROLS (Minimize, Maximize/Restore, Close, Mini-Player)
+        if self.ui.ferric_win_btn(id!(win_min_btn)).clicked(actions) {
             win32_minimize_active_window();
+            return;
         }
-        if self.ui.ferric_win_btn(id!(win_max_btn)).clicked(&actions) {
+        if self.ui.ferric_win_btn(id!(win_max_btn)).clicked(actions) {
             let is_max = win32_toggle_maximize_active_window();
             self.ui
                 .ferric_win_btn(id!(win_max_btn))
                 .set_maximized(cx, is_max);
+            return;
         }
-        if self.ui.ferric_win_btn(id!(win_close_btn)).clicked(&actions) {
+        if self.ui.ferric_win_btn(id!(win_close_btn)).clicked(actions) {
+            win32_close_active_window();
             cx.quit();
             return;
         }
-        if self.ui.ferric_win_btn(id!(win_mini_btn)).clicked(&actions) {
+        if self.ui.ferric_win_btn(id!(win_mini_btn)).clicked(actions) {
             self.toggle_compact_mini_mode(cx);
+            return;
         }
 
-        // 2. PRIMARY NAVIGATION & TOP BAR
-        if self.ui.button(id!(nav_home)).clicked(&actions) {
+        // 2. DIRECT-ACCESS NAVIGATION
+        if self.ui.button(id!(nav_home)).clicked(actions) {
             self.switch_main_page(cx, live_id!(page_home));
         }
-        if self.ui.button(id!(nav_search)).clicked(&actions) {
-            self.switch_main_page(cx, live_id!(page_library));
-            self.ui.text_input(id!(search_input)).set_key_focus(cx);
-        }
-        if self.ui.button(id!(nav_library)).clicked(&actions) {
+        if self.ui.button(id!(nav_library)).clicked(actions) {
             self.switch_main_page(cx, live_id!(page_library));
         }
-        if self.ui.button(id!(nav_now_playing)).clicked(&actions)
-            || self.ui.button(id!(bar_lyrics_btn)).clicked(&actions)
-            || self.ui.button(id!(codec_pill_btn)).clicked(&actions)
-            || self.ui.view(id!(np_art_tile)).finger_up(&actions).is_some()
+        if self.ui.button(id!(nav_now_playing)).clicked(actions)
+            || self.ui.button(id!(bar_lyrics_btn)).clicked(actions)
+            || self.ui.button(id!(codec_pill_btn)).clicked(actions)
+            || self.ui.view(id!(np_art_tile)).finger_up(actions).is_some()
         {
             self.switch_main_page(cx, live_id!(page_now_playing));
         }
-        if self.ui.button(id!(accounts_top_btn)).clicked(&actions) {
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_accounts));
+        if self.ui.button(id!(nav_fade)).clicked(actions)
+            || self.ui.button(id!(home_fade_btn)).clicked(actions)
+        {
+            self.switch_main_page(cx, live_id!(page_fade));
         }
-        if self.ui.button(id!(settings_top_btn)).clicked(&actions) {
-            self.switch_main_page(cx, live_id!(page_settings));
+        if self.ui.button(id!(nav_eq)).clicked(actions)
+            || self.ui.button(id!(home_eq_btn)).clicked(actions)
+            || self.ui.button(id!(bar_eq_btn)).clicked(actions)
+        {
+            self.switch_main_page(cx, live_id!(page_eq));
         }
-        if self.ui.button(id!(cmdk_btn)).clicked(&actions) {
+        if self.ui.button(id!(nav_connect)).clicked(actions) {
+            self.switch_main_page(cx, live_id!(page_connect));
+        }
+        if self.ui.button(id!(nav_appearance)).clicked(actions) {
+            self.switch_main_page(cx, live_id!(page_appearance));
+        }
+        if self.ui.button(id!(nav_accounts)).clicked(actions)
+            || self.ui.button(id!(top_spotify_btn)).clicked(actions)
+            || self.ui.button(id!(top_youtube_btn)).clicked(actions)
+            || self.ui.button(id!(home_spotify_btn)).clicked(actions)
+            || self.ui.button(id!(home_youtube_btn)).clicked(actions)
+        {
+            self.switch_main_page(cx, live_id!(page_accounts));
+        }
+        if self.ui.button(id!(cmdk_btn)).clicked(actions) {
             self.cmdk_open = true;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, true);
             self.ui.redraw(cx);
         }
-        if self.ui.button(id!(cmdk_close_btn)).clicked(&actions) {
+        if self.ui.button(id!(cmdk_close_btn)).clicked(actions) {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
 
-        // Settings Sub-Tabs
-        if self.ui.button(id!(tab_accounts_btn)).clicked(&actions) {
-            self.switch_settings_tab(cx, live_id!(subpage_accounts));
-        }
-        if self.ui.button(id!(tab_playback_btn)).clicked(&actions)
-            || self.ui.button(id!(home_fade_btn)).clicked(&actions)
-        {
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_playback));
-        }
-        if self.ui.button(id!(tab_eq_btn)).clicked(&actions)
-            || self.ui.button(id!(home_eq_btn)).clicked(&actions)
-        {
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_eq));
-        }
-        if self.ui.button(id!(tab_appearance_btn)).clicked(&actions) {
-            self.switch_settings_tab(cx, live_id!(subpage_appearance));
-        }
-
         // Command Palette Quick Actions
-        if self.ui.button(id!(cmd_demo_btn)).clicked(&actions) {
+        if self.ui.button(id!(cmd_demo_btn)).clicked(actions) {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
             self.load_and_play_demo_suite(cx);
         }
-        if self.ui.button(id!(cmd_glass_btn)).clicked(&actions) {
+        if self.ui.button(id!(cmd_glass_btn)).clicked(actions) {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
             self.theme.material.liquid_glass = !self.theme.material.liquid_glass;
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
-        if self.ui.button(id!(cmd_fade_btn)).clicked(&actions) {
+        if self.ui.button(id!(cmd_fade_btn)).clicked(actions) {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_playback));
+            self.switch_main_page(cx, live_id!(page_fade));
         }
-        if self.ui.button(id!(cmd_eq_btn)).clicked(&actions) {
+        if self.ui.button(id!(cmd_eq_btn)).clicked(actions) {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_eq));
+            self.switch_main_page(cx, live_id!(page_eq));
         }
-        if self.ui.button(id!(cmd_accounts_btn)).clicked(&actions) {
+        if self.ui.button(id!(cmd_accounts_btn)).clicked(actions) {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_accounts));
+            self.switch_main_page(cx, live_id!(page_accounts));
         }
-        if self.ui.button(id!(cmd_sleep30_btn)).clicked(&actions) {
+        if self.ui.button(id!(cmd_sleep30_btn)).clicked(actions) {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
             self.sleep_timer =
                 SleepTimerMode::Deadline(Instant::now() + Duration::from_secs(30 * 60));
         }
 
-        // Right Collapsible Drawer (Queue & Connect)
-        if self.ui.button(id!(bar_queue_btn)).clicked(&actions) {
+        // Right Drawer (Queue & Quick Connect)
+        if self.ui.button(id!(bar_queue_btn)).clicked(actions) {
             if self.right_drawer_open {
                 self.right_drawer_open = false;
                 self.ui.view(id!(right_drawer)).set_visible(cx, false);
@@ -3404,32 +3679,42 @@ impl AppMain for App {
                 self.open_right_drawer(cx, false);
             }
         }
-        if self.ui.button(id!(bar_connect_btn)).clicked(&actions) {
+        if self.ui.button(id!(bar_connect_btn)).clicked(actions) {
             self.open_right_drawer(cx, true);
         }
-        if self.ui.button(id!(drawer_queue_tab)).clicked(&actions) {
+        if self.ui.button(id!(drawer_queue_tab)).clicked(actions) {
             self.open_right_drawer(cx, false);
         }
-        if self.ui.button(id!(drawer_connect_tab)).clicked(&actions) {
+        if self.ui.button(id!(drawer_connect_tab)).clicked(actions) {
             self.open_right_drawer(cx, true);
         }
-        if self.ui.button(id!(drawer_close_btn)).clicked(&actions) {
+        if self.ui.button(id!(drawer_close_btn)).clicked(actions) {
             self.right_drawer_open = false;
             self.ui.view(id!(right_drawer)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
-        if self.ui.button(id!(clear_queue_btn)).clicked(&actions) {
+        if self.ui.button(id!(clear_queue_btn)).clicked(actions) {
             self.queue.set_tracks(Vec::new(), None);
             self.sync_next_deck_to_engine();
             self.refresh_ui_labels(cx);
         }
 
-        // 3. LIBRARY, FILTERS, SORT, PLAYLISTS & TRACK ACTIONS
-        if let Some(query) = self.ui.text_input(id!(search_input)).changed(&actions) {
+        // 3. SEARCH, LIBRARY FILTERS, PLAYLISTS & TRACK ACTIONS
+        if let Some(query) = self.ui.text_input(id!(search_input)).changed(actions) {
             self.search_query = query;
             self.switch_main_page(cx, live_id!(page_library));
             self.rebuild_filtered_tracks(cx);
         }
+        if let Some((submitted, _)) = self.ui.text_input(id!(search_input)).returned(actions) {
+            if parse_spotify_target(&submitted).is_some() {
+                self.switch_main_page(cx, live_id!(page_accounts));
+                self.start_public_sync(cx, "Spotify", submitted);
+            } else if parse_youtube_target(&submitted).is_some() {
+                self.switch_main_page(cx, live_id!(page_accounts));
+                self.start_public_sync(cx, "YouTube", submitted);
+            }
+        }
+
         for (btn, flt) in [
             (id!(flt_all_btn), LibraryFilter::All),
             (id!(pl_all_btn), LibraryFilter::All),
@@ -3445,24 +3730,20 @@ impl AppMain for App {
             (id!(pl_slot_3), LibraryFilter::Playlist(3)),
             (id!(pl_slot_4), LibraryFilter::Playlist(4)),
         ] {
-            if self.ui.button(btn).clicked(&actions) {
+            if self.ui.button(btn).clicked(actions) {
                 self.active_filter = flt;
                 self.switch_main_page(cx, live_id!(page_library));
                 self.rebuild_filtered_tracks(cx);
             }
         }
-        if self.ui.button(id!(sort_cycle_btn)).clicked(&actions) {
+        if self.ui.button(id!(sort_cycle_btn)).clicked(actions) {
             self.sort_field = self.sort_field.next();
             self.rebuild_filtered_tracks(cx);
         }
 
-        // Add Folder / Import M3U-CSV / Demo Suite
-        if (self.ui.button(id!(add_folder_btn)).clicked(&actions)
-            || self
-                .ui
-                .button(id!(sidebar_add_folder_btn))
-                .clicked(&actions)
-            || self.ui.button(id!(home_add_folder_btn)).clicked(&actions))
+        if (self.ui.button(id!(add_folder_btn)).clicked(actions)
+            || self.ui.button(id!(sidebar_add_folder_btn)).clicked(actions)
+            || self.ui.button(id!(home_add_folder_btn)).clicked(actions))
             && let Some(folder) = rfd::FileDialog::new()
                 .set_title("Select Local Music Folder")
                 .pick_folder()
@@ -3472,7 +3753,7 @@ impl AppMain for App {
             }
             self.spawn_folder_scan(vec![folder]);
         }
-        if self.ui.button(id!(sidebar_import_btn)).clicked(&actions)
+        if self.ui.button(id!(sidebar_import_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()
                 .set_title("Import Playlist (.m3u, .m3u8, .csv)")
                 .add_filter("Playlist Files", &["m3u", "m3u8", "csv"])
@@ -3494,23 +3775,12 @@ impl AppMain for App {
             }
             self.rebuild_filtered_tracks(cx);
         }
-        if self.ui.button(id!(demo_suite_btn)).clicked(&actions)
-            || self.ui.button(id!(home_demo_btn)).clicked(&actions)
+        if self.ui.button(id!(demo_suite_btn)).clicked(actions)
+            || self.ui.button(id!(home_demo_btn)).clicked(actions)
         {
             self.load_and_play_demo_suite(cx);
         }
-        if self.ui.button(id!(home_spotify_btn)).clicked(&actions) {
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_accounts));
-            self.ui.text_input(id!(spotify_id_input)).set_key_focus(cx);
-        }
-        if self.ui.button(id!(home_youtube_btn)).clicked(&actions) {
-            self.switch_main_page(cx, live_id!(page_settings));
-            self.switch_settings_tab(cx, live_id!(subpage_accounts));
-            self.ui.text_input(id!(yt_id_input)).set_key_focus(cx);
-        }
 
-        // Home Quick Pick clicks
         for (i, btn_id) in [
             id!(recent_btn_0),
             id!(recent_btn_1),
@@ -3520,7 +3790,7 @@ impl AppMain for App {
         .into_iter()
         .enumerate()
         {
-            if self.ui.button(btn_id).clicked(&actions) {
+            if self.ui.button(btn_id).clicked(actions) {
                 if self.all_tracks.is_empty() {
                     self.load_and_play_demo_suite(cx);
                 } else if let Some(track) = self.all_tracks.get(i).cloned() {
@@ -3531,7 +3801,7 @@ impl AppMain for App {
         }
 
         // TrackList Actions
-        for action in &actions {
+        for action in actions {
             match action.cast() {
                 TrackListAction::PlayIndex(filtered_idx) => {
                     if let Some(clicked) = self.filtered_tracks.get(filtered_idx).cloned() {
@@ -3564,13 +3834,8 @@ impl AppMain for App {
                         self.spawn_folder_scan(vec![folder]);
                     }
                 }
-                TrackListAction::OpenSpotifyLogin => {
-                    self.switch_main_page(cx, live_id!(page_settings));
-                    self.switch_settings_tab(cx, live_id!(subpage_accounts));
-                }
-                TrackListAction::OpenYouTubeLogin => {
-                    self.switch_main_page(cx, live_id!(page_settings));
-                    self.switch_settings_tab(cx, live_id!(subpage_accounts));
+                TrackListAction::OpenSpotifyLogin | TrackListAction::OpenYouTubeLogin => {
+                    self.switch_main_page(cx, live_id!(page_accounts));
                 }
                 TrackListAction::LoadDemoSuite => {
                     self.load_and_play_demo_suite(cx);
@@ -3579,7 +3844,7 @@ impl AppMain for App {
             }
         }
 
-        if self.ui.button(id!(play_all_btn)).clicked(&actions) {
+        if self.ui.button(id!(play_all_btn)).clicked(actions) {
             if self.filtered_tracks.is_empty() {
                 self.load_and_play_demo_suite(cx);
             } else if let Some(first) = self.filtered_tracks.first().cloned() {
@@ -3588,7 +3853,7 @@ impl AppMain for App {
                 self.play_track(cx, first);
             }
         }
-        if self.ui.button(id!(hero_shuffle_btn)).clicked(&actions)
+        if self.ui.button(id!(hero_shuffle_btn)).clicked(actions)
             && !self.filtered_tracks.is_empty()
         {
             self.queue
@@ -3601,8 +3866,11 @@ impl AppMain for App {
             }
         }
 
-        // 4. BOTTOM TRANSPORT, SEEK, VOLUME & NOW PLAYING CONTROLS
-        if self.ui.button(id!(play_pause_btn)).clicked(&actions)
+        // 4. TRANSPORT, SEEK, VOLUME & NOW PLAYING CONTROLS
+        if self
+            .ui
+            .ferric_play_btn(id!(play_pause_btn))
+            .clicked(actions)
             && let Some(audio) = &self.audio
         {
             let snap = audio.telemetry();
@@ -3618,17 +3886,17 @@ impl AppMain for App {
                 audio.send(EngineCommand::TogglePlayPause);
             }
         }
-        if self.ui.button(id!(next_btn)).clicked(&actions)
+        if self.ui.button(id!(next_btn)).clicked(actions)
             && let Some(next) = self.queue.next_track().cloned()
         {
             self.play_track(cx, next);
         }
-        if self.ui.button(id!(prev_btn)).clicked(&actions)
+        if self.ui.button(id!(prev_btn)).clicked(actions)
             && let Some(prev) = self.queue.prev_track().cloned()
         {
             self.play_track(cx, prev);
         }
-        if self.ui.button(id!(shuffle_btn)).clicked(&actions) {
+        if self.ui.button(id!(shuffle_btn)).clicked(actions) {
             let next_shuf = !self.queue.shuffle;
             self.queue.set_shuffle(next_shuf);
             self.session_state.shuffle = next_shuf;
@@ -3639,7 +3907,7 @@ impl AppMain for App {
             self.sync_controls_from_state(cx);
             self.refresh_ui_labels(cx);
         }
-        if self.ui.button(id!(repeat_btn)).clicked(&actions) {
+        if self.ui.button(id!(repeat_btn)).clicked(actions) {
             self.queue.repeat = self.queue.repeat.next();
             self.session_state.repeat = self.queue.repeat;
             if let Some(db) = &self.db {
@@ -3648,10 +3916,10 @@ impl AppMain for App {
             self.sync_next_deck_to_engine();
             self.sync_controls_from_state(cx);
         }
-        if self.ui.button(id!(dur_btn)).clicked(&actions) {
+        if self.ui.button(id!(dur_btn)).clicked(actions) {
             self.show_remaining_time = !self.show_remaining_time;
         }
-        if self.ui.button(id!(np_like_btn)).clicked(&actions)
+        if self.ui.button(id!(np_like_btn)).clicked(actions)
             && let Some(cur) = self.queue.current().cloned()
         {
             let next_liked = !cur.liked;
@@ -3661,15 +3929,20 @@ impl AppMain for App {
             if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == cur.id) {
                 t.liked = next_liked;
             }
+            let like_col = if next_liked {
+                vec4(0.851, 0.329, 0.118, 1.0)
+            } else {
+                vec4(0.420, 0.400, 0.369, 1.0)
+            };
             self.ui
                 .button(id!(np_like_btn))
-                .set_text(cx, if next_liked { "Saved" } else { "Save" });
+                .apply_over(cx, live! { draw_icon: { color: (like_col) } });
             self.rebuild_filtered_tracks(cx);
         }
         if let Some(pos_ratio) = self
             .ui
             .ferric_bar_slider(id!(seek_slider))
-            .released(&actions)
+            .released(actions)
             && let Some(audio) = &self.audio
         {
             let dur = audio.telemetry().duration_ms;
@@ -3677,18 +3950,37 @@ impl AppMain for App {
                 audio.send(EngineCommand::SeekMs((pos_ratio * dur as f64) as u64));
             }
         }
-        if let Some(vol) = self.ui.ferric_bar_slider(id!(vol_slider)).changed(&actions) {
+        if let Some(vol) = self.ui.ferric_bar_slider(id!(vol_slider)).changed(actions) {
             self.session_state.volume = vol as f32;
+            if self.session_state.volume > 0.02 {
+                self.pre_mute_volume = self.session_state.volume;
+            }
             if let Some(audio) = &self.audio {
                 audio.send(EngineCommand::SetVolume(vol as f32));
             }
             if let Some(db) = &self.db {
                 let _ = db.save_session_state(&self.session_state);
             }
+            self.sync_controls_from_state(cx);
+        }
+        if self.ui.button(id!(vol_mute_btn)).clicked(actions) {
+            if self.session_state.volume > 0.01 {
+                self.pre_mute_volume = self.session_state.volume;
+                self.session_state.volume = 0.0;
+            } else {
+                self.session_state.volume = self.pre_mute_volume.max(0.5);
+            }
+            if let Some(audio) = &self.audio {
+                audio.send(EngineCommand::SetVolume(self.session_state.volume));
+            }
+            if let Some(db) = &self.db {
+                let _ = db.save_session_state(&self.session_state);
+            }
+            self.sync_controls_from_state(cx);
         }
 
         // Now Playing Modes & Lyrics Sync Offset
-        if self.ui.button(id!(np_mode_canvas_btn)).clicked(&actions) {
+        if self.ui.button(id!(np_mode_canvas_btn)).clicked(actions) {
             self.np_canvas_animated = true;
             self.ui
                 .button(id!(np_mode_canvas_btn))
@@ -3700,7 +3992,7 @@ impl AppMain for App {
                 .view(id!(np_canvas))
                 .apply_over(cx, live! { draw_bg: { mode: 1.0 } });
         }
-        if self.ui.button(id!(np_mode_card_btn)).clicked(&actions) {
+        if self.ui.button(id!(np_mode_card_btn)).clicked(actions) {
             self.np_canvas_animated = false;
             self.ui
                 .button(id!(np_mode_canvas_btn))
@@ -3712,7 +4004,7 @@ impl AppMain for App {
                 .view(id!(np_canvas))
                 .apply_over(cx, live! { draw_bg: { mode: 0.0 } });
         }
-        if self.ui.button(id!(np_watch_video_btn)).clicked(&actions)
+        if self.ui.button(id!(np_watch_video_btn)).clicked(actions)
             && let Some(cur) = self.queue.current()
         {
             let _ = open_track_video_clip(
@@ -3722,13 +4014,13 @@ impl AppMain for App {
                 &cur.title,
             );
         }
-        if self.ui.button(id!(lyr_minus_btn)).clicked(&actions) {
+        if self.ui.button(id!(lyr_minus_btn)).clicked(actions) {
             self.lyrics_offset_ms -= 500;
         }
-        if self.ui.button(id!(lyr_plus_btn)).clicked(&actions) {
+        if self.ui.button(id!(lyr_plus_btn)).clicked(actions) {
             self.lyrics_offset_ms += 500;
         }
-        if self.ui.button(id!(lyr_copy_btn)).clicked(&actions)
+        if self.ui.button(id!(lyr_copy_btn)).clicked(actions)
             && !self.synced_lyrics.lines.is_empty()
         {
             let full = self
@@ -3741,14 +4033,36 @@ impl AppMain for App {
             let _ = copy_text_to_clipboard(&full);
         }
 
-        // 5. ACCOUNTS & OAUTH PKCE LOGIN ACTIONS
-        if self.ui.button(id!(spotify_login_btn)).clicked(&actions) {
+        // 5. INSTANT ZERO-KEY SYNC & OAUTH 2.0 PKCE ACCOUNTS
+        if self.ui.button(id!(quick_spotify_btn)).clicked(actions) {
+            let input = self.ui.text_input(id!(quick_sync_input)).text();
+            self.start_public_sync(cx, "Spotify", input);
+        }
+        if self.ui.button(id!(quick_youtube_btn)).clicked(actions) {
+            let input = self.ui.text_input(id!(quick_sync_input)).text();
+            self.start_public_sync(cx, "YouTube", input);
+        }
+        if self.ui.button(id!(quick_yt_search_btn)).clicked(actions) {
+            let input = self.ui.text_input(id!(quick_sync_input)).text();
+            self.start_public_sync(cx, "YouTube Search", input);
+        }
+        if let Some((submitted, _)) = self.ui.text_input(id!(quick_sync_input)).returned(actions) {
+            let mode = if parse_spotify_target(&submitted).is_some() {
+                "Spotify"
+            } else if parse_youtube_target(&submitted).is_some() {
+                "YouTube"
+            } else {
+                "YouTube Search"
+            };
+            self.start_public_sync(cx, mode, submitted);
+        }
+        if self.ui.button(id!(spotify_login_btn)).clicked(actions) {
             self.start_oauth_login(cx, AccountKind::Spotify);
         }
-        if self.ui.button(id!(spotify_sync_btn)).clicked(&actions) {
+        if self.ui.button(id!(spotify_sync_btn)).clicked(actions) {
             self.sync_existing_cloud_account(cx, AccountKind::Spotify);
         }
-        if self.ui.button(id!(spotify_logout_btn)).clicked(&actions) {
+        if self.ui.button(id!(spotify_logout_btn)).clicked(actions) {
             self.accounts.spotify_connected = false;
             self.accounts.spotify_access_token.clear();
             self.accounts.spotify_refresh_token.clear();
@@ -3757,13 +4071,13 @@ impl AppMain for App {
             }
             self.refresh_ui_labels(cx);
         }
-        if self.ui.button(id!(yt_login_btn)).clicked(&actions) {
+        if self.ui.button(id!(yt_login_btn)).clicked(actions) {
             self.start_oauth_login(cx, AccountKind::YouTubeMusic);
         }
-        if self.ui.button(id!(yt_sync_btn)).clicked(&actions) {
+        if self.ui.button(id!(yt_sync_btn)).clicked(actions) {
             self.sync_existing_cloud_account(cx, AccountKind::YouTubeMusic);
         }
-        if self.ui.button(id!(yt_logout_btn)).clicked(&actions) {
+        if self.ui.button(id!(yt_logout_btn)).clicked(actions) {
             self.accounts.youtube_connected = false;
             self.accounts.youtube_access_token.clear();
             self.accounts.youtube_refresh_token.clear();
@@ -3772,7 +4086,7 @@ impl AppMain for App {
             }
             self.refresh_ui_labels(cx);
         }
-        if self.ui.button(id!(oauth_cancel_btn)).clicked(&actions) {
+        if self.ui.button(id!(oauth_cancel_btn)).clicked(actions) {
             if let Some(c) = self.oauth_cancel.take() {
                 c.store(true, Ordering::Relaxed);
             }
@@ -3781,25 +4095,25 @@ impl AppMain for App {
                 .label(id!(oauth_status_lbl))
                 .set_text(cx, "Browser login cancelled.");
         }
-        if self.ui.button(id!(copy_redirect_btn)).clicked(&actions) {
+        if self.ui.button(id!(copy_redirect_btn)).clicked(actions) {
             let _ = copy_text_to_clipboard("http://127.0.0.1:43824/callback");
             self.ui
                 .label(id!(oauth_status_lbl))
                 .set_text(cx, "Copied http://127.0.0.1:43824/callback to clipboard.");
         }
-        if self.ui.button(id!(open_spotify_dev_btn)).clicked(&actions) {
+        if self.ui.button(id!(open_spotify_dev_btn)).clicked(actions) {
             let _ = open_allowed_url("https://developer.spotify.com/dashboard");
         }
-        if self.ui.button(id!(open_google_dev_btn)).clicked(&actions) {
+        if self.ui.button(id!(open_google_dev_btn)).clicked(actions) {
             let _ = open_allowed_url("https://console.cloud.google.com/apis/credentials");
         }
-        if let Some(cat_only) = self.ui.ferric_toggle(id!(yt_cat_toggle)).toggled(&actions) {
+        if let Some(cat_only) = self.ui.ferric_toggle(id!(yt_cat_toggle)).toggled(actions) {
             self.accounts.youtube_music_category_only = cat_only;
             if let Some(db) = &self.db {
                 let _ = db.save_accounts(&self.accounts);
             }
         }
-        if self.ui.button(id!(sub_sync_btn)).clicked(&actions) {
+        if self.ui.button(id!(sub_sync_btn)).clicked(actions) {
             self.accounts.subsonic_url = self
                 .ui
                 .text_input(id!(sub_url_input))
@@ -3841,7 +4155,7 @@ impl AppMain for App {
                 });
             }
         }
-        if self.ui.button(id!(match_local_btn)).clicked(&actions)
+        if self.ui.button(id!(match_local_btn)).clicked(actions)
             && let Some(db) = &mut self.db
         {
             let matched = db.match_cloud_tracks_to_local().unwrap_or(0);
@@ -3852,7 +4166,7 @@ impl AppMain for App {
                 &format!("Matched {matched} cloud songs to local lossless files."),
             );
         }
-        if self.ui.button(id!(rescan_btn)).clicked(&actions)
+        if self.ui.button(id!(rescan_btn)).clicked(actions)
             && let Some(db) = &self.db
             && let Ok(folders) = db.list_music_folders()
             && !folders.is_empty()
@@ -3860,11 +4174,11 @@ impl AppMain for App {
             self.spawn_folder_scan(folders);
         }
 
-        // 6. PLAYBACK & SEAMLESS FADE-IN SETTINGS
+        // 6. SEAMLESS FADE-IN & AUTOMIX SETTINGS
         if let Some(sec) = self
             .ui
             .ferric_bar_slider(id!(xfade_slider))
-            .changed(&actions)
+            .changed(actions)
         {
             self.dsp.crossfade_ms = (sec * 1_000.0).round() as u32;
             self.ui
@@ -3878,7 +4192,7 @@ impl AppMain for App {
             (id!(xf_6_btn), 6_000_u32),
             (id!(xf_10_btn), 10_000_u32),
         ] {
-            if self.ui.button(btn).clicked(&actions) {
+            if self.ui.button(btn).clicked(actions) {
                 self.dsp.crossfade_ms = ms;
                 self.sync_controls_from_state(cx);
                 self.apply_dsp_live(cx);
@@ -3887,7 +4201,7 @@ impl AppMain for App {
         if let Some(ms) = self
             .ui
             .ferric_bar_slider(id!(fadein_slider))
-            .changed(&actions)
+            .changed(actions)
         {
             self.dsp.fade_in_play_ms = ms.round() as u32;
             self.ui
@@ -3900,7 +4214,7 @@ impl AppMain for App {
             (id!(curve_eqp_btn), FadeCurve::EqualPower),
             (id!(curve_velvet_btn), FadeCurve::SCurveVelvet),
         ] {
-            if self.ui.button(btn).clicked(&actions) {
+            if self.ui.button(btn).clicked(actions) {
                 self.dsp.fade_curve = curve;
                 self.sync_controls_from_state(cx);
                 self.apply_dsp_live(cx);
@@ -3909,7 +4223,7 @@ impl AppMain for App {
         if let Some(on) = self
             .ui
             .ferric_toggle(id!(gapless_lock_toggle))
-            .toggled(&actions)
+            .toggled(actions)
         {
             self.dsp.gapless_album_lock = on;
             self.apply_dsp_live(cx);
@@ -3917,7 +4231,7 @@ impl AppMain for App {
         if let Some(on) = self
             .ui
             .ferric_toggle(id!(trim_silence_toggle))
-            .toggled(&actions)
+            .toggled(actions)
         {
             self.dsp.trim_silence = on;
             self.apply_dsp_live(cx);
@@ -3925,12 +4239,12 @@ impl AppMain for App {
         if let Some(on) = self
             .ui
             .ferric_toggle(id!(replay_gain_toggle))
-            .toggled(&actions)
+            .toggled(actions)
         {
             self.dsp.replay_gain = on;
             self.apply_dsp_live(cx);
         }
-        if let Some(on) = self.ui.ferric_toggle(id!(mono_toggle)).toggled(&actions) {
+        if let Some(on) = self.ui.ferric_toggle(id!(mono_toggle)).toggled(actions) {
             self.dsp.mono_audio = on;
             self.apply_dsp_live(cx);
         }
@@ -3940,7 +4254,7 @@ impl AppMain for App {
             (id!(spd_125_btn), 1.25_f32),
             (id!(spd_150_btn), 1.5_f32),
         ] {
-            if self.ui.button(btn).clicked(&actions) {
+            if self.ui.button(btn).clicked(actions) {
                 self.dsp.playback_speed = spd;
                 self.sync_controls_from_state(cx);
                 self.apply_dsp_live(cx);
@@ -3952,7 +4266,7 @@ impl AppMain for App {
             (id!(slp_30_btn), Some(30_u64)),
             (id!(slp_60_btn), Some(60_u64)),
         ] {
-            if self.ui.button(btn).clicked(&actions) {
+            if self.ui.button(btn).clicked(actions) {
                 self.sleep_timer = match mins_opt {
                     Some(m) => {
                         SleepTimerMode::Deadline(Instant::now() + Duration::from_secs(m * 60))
@@ -3966,7 +4280,7 @@ impl AppMain for App {
                 }
             }
         }
-        if self.ui.button(id!(slp_eot_btn)).clicked(&actions) {
+        if self.ui.button(id!(slp_eot_btn)).clicked(actions) {
             self.sleep_timer = SleepTimerMode::EndOfTrack;
             self.ui
                 .label(id!(sleep_status_lbl))
@@ -3977,7 +4291,7 @@ impl AppMain for App {
         if let Some(on) = self
             .ui
             .ferric_toggle(id!(eq_enable_toggle))
-            .toggled(&actions)
+            .toggled(actions)
         {
             self.eq.enabled = on;
             self.apply_eq_live(cx);
@@ -3985,7 +4299,7 @@ impl AppMain for App {
         if let Some(pre) = self
             .ui
             .ferric_bar_slider(id!(eq_preamp_slider))
-            .changed(&actions)
+            .changed(actions)
         {
             self.eq.preamp_db = pre as f32;
             self.ui
@@ -3994,7 +4308,7 @@ impl AppMain for App {
             self.apply_eq_live(cx);
         }
         for (idx, (slider_id, val_id)) in eq_band_ids().into_iter().enumerate() {
-            if let Some(val) = self.ui.ferric_vert_slider(slider_id).changed(&actions)
+            if let Some(val) = self.ui.ferric_vert_slider(slider_id).changed(actions)
                 && let Some(band) = self.eq.bands.get_mut(idx)
             {
                 band.gain_db = val as f32;
@@ -4003,7 +4317,7 @@ impl AppMain for App {
                 self.apply_eq_live(cx);
             }
         }
-        if self.ui.button(id!(autoeq_apply_btn)).clicked(&actions) {
+        if self.ui.button(id!(autoeq_apply_btn)).clicked(actions) {
             let q = self.ui.text_input(id!(autoeq_input)).text();
             let hits = search_autoeq_profiles(&q);
             if let Some(best) = hits.first() {
@@ -4018,13 +4332,13 @@ impl AppMain for App {
             (id!(eq_pre_bass), "Deep Bass"),
             (id!(eq_pre_vocal), "Vocal Clarity"),
         ] {
-            if self.ui.button(btn).clicked(&actions) {
+            if self.ui.button(btn).clicked(actions) {
                 self.eq = EqConfig::preset(preset);
                 self.sync_controls_from_state(cx);
                 self.apply_eq_live(cx);
             }
         }
-        if self.ui.button(id!(eq_import_btn)).clicked(&actions)
+        if self.ui.button(id!(eq_import_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()
                 .add_filter("Equalizer APO", &["txt"])
                 .pick_file()
@@ -4035,7 +4349,7 @@ impl AppMain for App {
             self.sync_controls_from_state(cx);
             self.apply_eq_live(cx);
         }
-        if self.ui.button(id!(eq_export_btn)).clicked(&actions)
+        if self.ui.button(id!(eq_export_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()
                 .set_file_name("ferric-eq-apo.txt")
                 .add_filter("Equalizer APO", &["txt"])
@@ -4044,17 +4358,21 @@ impl AppMain for App {
             let _ = std::fs::write(file, self.eq.to_equalizer_apo());
         }
 
-        // 8. CONNECT QR & APPEARANCE / LIQUID GLASS / UPDATES
-        if self.ui.button(id!(gen_pair_btn)).clicked(&actions) {
+        // 8. CONNECT QR, APPEARANCE / LIQUID GLASS & UPDATES
+        if self.ui.button(id!(gen_pair_btn)).clicked(actions)
+            || self.ui.button(id!(connect_gen_pair_btn)).clicked(actions)
+        {
             self.regenerate_pairing_qr(cx);
         }
-        if self.ui.button(id!(copy_pair_btn)).clicked(&actions) {
+        if self.ui.button(id!(copy_pair_btn)).clicked(actions)
+            || self.ui.button(id!(connect_copy_pair_btn)).clicked(actions)
+        {
             let _ = copy_text_to_clipboard(&self.pairing_uri);
         }
         if let Some(enabled) = self
             .ui
             .ferric_toggle(id!(liquid_glass_toggle))
-            .toggled(&actions)
+            .toggled(actions)
         {
             self.theme.material.liquid_glass = enabled;
             if enabled && self.theme.corner_radius_px < 14.0 {
@@ -4066,7 +4384,7 @@ impl AppMain for App {
         if let Some(v) = self
             .ui
             .ferric_bar_slider(id!(lg_ior_slider))
-            .changed(&actions)
+            .changed(actions)
         {
             self.theme.material.ior = v as f32;
             self.sync_controls_from_state(cx);
@@ -4075,7 +4393,7 @@ impl AppMain for App {
         if let Some(v) = self
             .ui
             .ferric_bar_slider(id!(lg_disp_slider))
-            .changed(&actions)
+            .changed(actions)
         {
             self.theme.material.dispersion = v as f32;
             self.sync_controls_from_state(cx);
@@ -4084,7 +4402,7 @@ impl AppMain for App {
         if let Some(v) = self
             .ui
             .ferric_bar_slider(id!(lg_rim_slider))
-            .changed(&actions)
+            .changed(actions)
         {
             self.theme.material.specular_rim = v as f32;
             self.sync_controls_from_state(cx);
@@ -4093,7 +4411,7 @@ impl AppMain for App {
         if let Some(v) = self
             .ui
             .ferric_bar_slider(id!(lg_rad_slider))
-            .changed(&actions)
+            .changed(actions)
         {
             self.theme.corner_radius_px = v as f32;
             self.sync_controls_from_state(cx);
@@ -4105,23 +4423,23 @@ impl AppMain for App {
             (id!(lg_pre_copper), LiquidGlassPreset::SmokedCopper),
             (id!(lg_pre_frost), LiquidGlassPreset::UltraFrosted),
         ] {
-            if self.ui.button(btn).clicked(&actions) {
+            if self.ui.button(btn).clicked(actions) {
                 self.theme.material.apply_preset(preset);
                 self.sync_controls_from_state(cx);
                 self.apply_theme_live(cx);
             }
         }
-        if self.ui.button(id!(pal_amoled_btn)).clicked(&actions) {
+        if self.ui.button(id!(pal_amoled_btn)).clicked(actions) {
             self.theme = ThemeConfig::default();
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
-        if self.ui.button(id!(pal_cream_btn)).clicked(&actions) {
+        if self.ui.button(id!(pal_cream_btn)).clicked(actions) {
             self.theme = ThemeConfig::cream_light();
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
-        if self.ui.button(id!(theme_export_btn)).clicked(&actions)
+        if self.ui.button(id!(theme_export_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()
                 .set_file_name("custom.ferric-theme.json")
                 .add_filter("Ferric Theme JSON", &["json"])
@@ -4129,7 +4447,7 @@ impl AppMain for App {
         {
             let _ = self.theme.export_to_file(&file);
         }
-        if self.ui.button(id!(theme_import_btn)).clicked(&actions)
+        if self.ui.button(id!(theme_import_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()
                 .add_filter("Ferric Theme JSON", &["json"])
                 .pick_file()
@@ -4141,16 +4459,16 @@ impl AppMain for App {
         }
 
         // Software Updates
-        if self.ui.button(id!(update_badge_btn)).clicked(&actions)
+        if self.ui.button(id!(update_badge_btn)).clicked(actions)
             && let Some(info) = self.available_update.clone()
         {
             self.show_update_popup(cx, &info);
         }
-        if self.ui.button(id!(check_updates_btn)).clicked(&actions) {
+        if self.ui.button(id!(check_updates_btn)).clicked(actions) {
             self.spawn_update_check(cx, true);
         }
-        if self.ui.button(id!(open_releases_btn)).clicked(&actions)
-            || self.ui.button(id!(update_whats_new_btn)).clicked(&actions)
+        if self.ui.button(id!(open_releases_btn)).clicked(actions)
+            || self.ui.button(id!(update_whats_new_btn)).clicked(actions)
         {
             let tag = self.available_update.as_ref().map(|u| u.tag.as_str());
             let _ = open_github_url(&release_page_url(tag));
@@ -4158,22 +4476,105 @@ impl AppMain for App {
         if let Some(auto_chk) = self
             .ui
             .ferric_toggle(id!(auto_update_toggle))
-            .toggled(&actions)
+            .toggled(actions)
         {
             self.update_settings.auto_check_on_startup = auto_chk;
             if let Some(db) = &self.db {
                 let _ = db.save_update_settings(&self.update_settings);
             }
         }
-        if self.ui.button(id!(update_now_btn)).clicked(&actions) {
+        if self.ui.button(id!(update_now_btn)).clicked(actions) {
             self.start_update_download(cx);
         }
-        if self
-            .ui
-            .button(id!(update_popup_close_btn))
-            .clicked(&actions)
-        {
+        if self.ui.button(id!(update_popup_close_btn)).clicked(actions) {
             self.dismiss_update_popup(cx);
+        }
+    }
+}
+
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.ensure_initialized(cx);
+
+        if matches!(event, Event::WindowGeomChange(_)) {
+            self.hide_native_makepad_caption(cx);
+        }
+
+        // Native Windows 11 Frameless Drag & Aero Snap on empty regions of our unified `top_bar`
+        if let Event::WindowDragQuery(dq) = event
+            && dq.abs.y >= 0.0
+            && dq.abs.y <= 52.0
+        {
+            let search_rect = self.ui.view(id!(search_bar_wrap)).area().rect(cx);
+            let sp_rect = self.ui.button(id!(top_spotify_btn)).area().rect(cx);
+            let in_search = search_rect.size.x > 0.0
+                && dq.abs.x >= search_rect.pos.x - 6.0
+                && dq.abs.x <= search_rect.pos.x + search_rect.size.x + 6.0;
+            let in_right_btns = sp_rect.size.x > 0.0 && dq.abs.x >= sp_rect.pos.x - 8.0;
+            if !in_search && !in_right_btns {
+                dq.response.set(WindowDragQueryResponse::Caption);
+                return;
+            }
+        }
+
+        if self.tick_timer.is_event(event).is_some() {
+            self.handle_tick(cx);
+        }
+
+        // Global Keyboard Shortcuts (Sonora / Spotify Parity)
+        if let Event::KeyDown(ke) = event {
+            if ke.modifiers.control && ke.key_code == KeyCode::KeyK {
+                self.cmdk_open = !self.cmdk_open;
+                self.ui
+                    .view(id!(cmdk_modal))
+                    .set_visible(cx, self.cmdk_open);
+                self.ui.redraw(cx);
+                return;
+            }
+            if ke.modifiers.control && ke.key_code == KeyCode::KeyE {
+                self.switch_main_page(cx, live_id!(page_eq));
+                return;
+            }
+            if ke.modifiers.control && ke.key_code == KeyCode::KeyL {
+                self.switch_main_page(cx, live_id!(page_now_playing));
+                return;
+            }
+            if ke.modifiers.control && ke.key_code == KeyCode::KeyM {
+                self.toggle_compact_mini_mode(cx);
+                return;
+            }
+            if ke.key_code == KeyCode::Escape {
+                if self.cmdk_open {
+                    self.cmdk_open = false;
+                    self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
+                    self.ui.redraw(cx);
+                } else if self.update_popup_visible {
+                    self.dismiss_update_popup(cx);
+                } else if self.right_drawer_open {
+                    self.right_drawer_open = false;
+                    self.ui.view(id!(right_drawer)).set_visible(cx, false);
+                    self.ui.redraw(cx);
+                }
+            }
+        }
+
+        let snap_opt = self.audio.as_ref().map(|a| a.telemetry());
+        let avg_lvl = snap_opt.map_or(0.5_f32, |s| {
+            ((s.spectrum_bins[0] + s.spectrum_bins[1]) as f32 / 2_000.0).clamp(0.1, 1.0)
+        });
+        let props = TrackListScope {
+            tracks: Rc::clone(&self.filtered_tracks),
+            active_track_id: self.queue.current().map(|t| t.id.clone()),
+            is_playing: snap_opt.is_some_and(|s| s.is_playing),
+            audio_level: avg_lvl,
+        };
+        {
+            let mut scope = Scope::with_props(&props);
+            self.ui.handle_event(cx, event, &mut scope);
+        }
+
+        if let Event::Actions(actions) = event {
+            self.handle_actions(cx, actions);
         }
     }
 }
@@ -4197,5 +4598,3 @@ fn rgba_vec4(hex: &str) -> Vec4 {
     let [r, g, b, a] = hex_to_rgba_f32(hex, 1.0);
     vec4(r, g, b, a)
 }
-
-app_main!(App);

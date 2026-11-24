@@ -5,6 +5,46 @@ live_design! {
     use link::shaders::*;
     use link::widgets::*;
 
+    pub DrawFerricSlider = {{DrawFerricSlider}} {}
+    pub DrawFerricToggle = {{DrawFerricToggle}} {}
+    pub DrawFerricWinBtn = {{DrawFerricWinBtn}} {}
+    pub DrawFerricPlayBtn = {{DrawFerricPlayBtn}} {}
+    pub DrawFerricEqGraph = {{DrawFerricEqGraph}} {}
+
+    pub FerricPlayBtn = {{FerricPlayBtn}} {
+        width: 42,
+        height: 42,
+        draw_bg: {
+            uniform accent_col: #D9541E
+            uniform accent_hover: #EC6630
+            uniform glyph_col: #080808
+
+            fn pixel(self) -> vec4 {
+                let p = self.pos * self.rect_size;
+                let sdf = Sdf2d::viewport(p);
+                let c = self.rect_size * 0.5;
+                let r = min(c.x, c.y) - 1.0;
+                sdf.circle(c.x, c.y, r);
+                sdf.fill(mix(self.accent_col, self.accent_hover, self.hover));
+
+                if (self.playing > 0.5) {
+                    // Crisp dual vertical Pause bars
+                    sdf.box(c.x - 5.5, c.y - 6.5, 3.8, 13.0, 0.7);
+                    sdf.box(c.x + 1.7, c.y - 6.5, 3.8, 13.0, 0.7);
+                    sdf.fill(self.glyph_col);
+                } else {
+                    // Crisp optically-centered Play triangle
+                    sdf.move_to(c.x - 4.2, c.y - 6.8);
+                    sdf.line_to(c.x + 6.8, c.y);
+                    sdf.line_to(c.x - 4.2, c.y + 6.8);
+                    sdf.close_path();
+                    sdf.fill(self.glyph_col);
+                }
+                return sdf.result;
+            }
+        }
+    }
+
     pub FerricBarSlider = {{FerricBarSlider}} {
         width: Fill,
         height: 22,
@@ -23,18 +63,18 @@ live_design! {
                 let tx = pad + usable * t;
 
                 // Track background
-                sdf.box(pad, cy - 1.75, usable, 3.5, 1.75);
+                sdf.box(pad, cy - 1.75, usable, 3.5, 0.85);
                 sdf.fill(self.track_col);
 
                 // Active Burnt Orange fill
-                if tx > pad + 0.5 {
-                    sdf.box(pad, cy - 1.75, tx - pad, 3.5, 1.75);
+                if (tx > pad + 0.5) {
+                    sdf.box(pad, cy - 1.75, tx - pad, 3.5, 0.85);
                     sdf.fill(self.fill_col);
                 }
 
                 // Subtle copper halo on hover / drag
                 let active_amt = max(self.hover, self.drag);
-                if active_amt > 0.01 {
+                if (active_amt > 0.01) {
                     sdf.circle(tx, cy, 9.5);
                     sdf.fill(vec4(self.fill_col.xyz, 0.22 * active_amt));
                 }
@@ -75,16 +115,16 @@ live_design! {
                 sdf.fill(#2B2B2B);
 
                 // Vertical background rail
-                sdf.box(cx - 1.75, pad, 3.5, usable, 1.75);
+                sdf.box(cx - 1.75, pad, 3.5, usable, 0.85);
                 sdf.fill(self.track_col);
 
                 // Bottom-up Burnt Orange bar matching FigCraft D2
                 let bar_h = max((self.rect_size.y - pad) - ty, 1.0);
-                sdf.box(cx - 1.75, ty, 3.5, bar_h, 1.75);
+                sdf.box(cx - 1.75, ty, 3.5, bar_h, 0.85);
                 sdf.fill(self.fill_col);
 
                 let active_amt = max(self.hover, self.drag);
-                if active_amt > 0.01 {
+                if (active_amt > 0.01) {
                     sdf.circle(cx, ty, 9.5);
                     sdf.fill(vec4(self.fill_col.xyz, 0.24 * active_amt));
                 }
@@ -111,15 +151,15 @@ live_design! {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
                 let h = self.rect_size.y;
-                let r = (h - 2.0) * 0.5;
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, h - 2.0, r);
+                let box_r = (h - 2.0) * 0.25;
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, h - 2.0, box_r);
                 let bg = mix(self.off_col, self.on_col, self.active);
                 sdf.fill_keep(bg);
                 let bcol = mix(self.border_col, self.on_col, self.active);
                 sdf.stroke(bcol, 1.0);
 
                 let kx = mix(h * 0.5, self.rect_size.x - h * 0.5, self.active);
-                let kr = r - 3.0 + self.hover * 0.6;
+                let kr = (h - 2.0) * 0.5 - 3.0 + self.hover * 0.6;
                 sdf.circle(kx, h * 0.5, kr);
                 sdf.fill(self.knob_col);
                 return sdf.result;
@@ -140,8 +180,8 @@ live_design! {
                 let c = self.rect_size * 0.5;
 
                 // Hover pill background (crimson for Close, subtle charcoal for Min/Max/Mini)
-                if self.hover > 0.01 {
-                    sdf.box(2.0, 2.0, self.rect_size.x - 4.0, self.rect_size.y - 4.0, 6.0);
+                if (self.hover > 0.01) {
+                    sdf.box(2.0, 2.0, self.rect_size.x - 4.0, self.rect_size.y - 4.0, 3.5);
                     if self.kind > 1.5 && self.kind < 2.5 {
                         sdf.fill(vec4(0.78, 0.20, 0.16, 0.92 * self.hover));
                     } else {
@@ -200,7 +240,7 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                let r = min(self.radius, min(self.rect_size.x, self.rect_size.y) * 0.22);
+                let r = min(self.radius * 0.5, min(self.rect_size.x, self.rect_size.y) * 0.14);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
 
                 let uv = self.pos;
@@ -296,7 +336,7 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 12.0);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
                 sdf.fill_keep(self.bg_col);
                 sdf.stroke(self.border_col, 1.0);
 
@@ -311,13 +351,16 @@ live_design! {
                 // Horizontal dB gridlines (+12, +6, 0, -6, -12 dB)
                 for i in 0..5 {
                     let gy = top + h * (float(i) / 4.0);
-                    if p.x >= left && p.x <= right && abs(p.y - gy) < 0.6 {
-                        let grid_c = if i == 2 { vec3(0.20, 0.20, 0.20) } else { vec3(0.11, 0.11, 0.11) };
-                        return vec4(grid_c, 1.0);
+                    if (p.x >= left && p.x <= right && abs(p.y - gy) < 0.6) {
+                        if (i == 2) {
+                            return vec4(0.20, 0.20, 0.20, 1.0);
+                        } else {
+                            return vec4(0.11, 0.11, 0.11, 1.0);
+                        }
                     }
                 }
 
-                if p.x >= left && p.x <= right {
+                if (p.x >= left && p.x <= right) {
                     let xn = (p.x - left) / w;
                     let db = self.sample_curve_db(xn);
                     let cy = mid_y - (db / 14.0) * (h * 0.5);
@@ -326,7 +369,7 @@ live_design! {
                     // Subtle warm copper fill between curve and 0 dB axis
                     let between = (p.y >= min(cy, mid_y)) && (p.y <= max(cy, mid_y));
                     let mut rgb = self.bg_col.xyz;
-                    if between {
+                    if (between) {
                         let fade = 1.0 - clamp(abs(p.y - cy) / (h * 0.55), 0.0, 1.0);
                         rgb += self.accent.xyz * (0.13 * fade * max(self.enabled, 0.25));
                     }
@@ -396,7 +439,7 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 16.0);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
 
                 let uv = self.pos;
                 let c = self.rect_size * 0.5;
@@ -435,7 +478,7 @@ live_design! {
                 // Bottom 16-bar mirrored audio spectrum visualizer
                 let margin_x = self.rect_size.x * 0.14;
                 let span_x = max(self.rect_size.x - margin_x * 2.0, 20.0);
-                if p.x >= margin_x && p.x <= self.rect_size.x - margin_x {
+                if (p.x >= margin_x && p.x <= (self.rect_size.x - margin_x)) {
                     let norm_x = (p.x - margin_x) / span_x;
                     let slot = floor(norm_x * 16.0);
                     let cell_x = fract(norm_x * 16.0);
@@ -443,7 +486,7 @@ live_design! {
                     let bv = clamp(self.bin_val(min(sym_idx, 7.0)), 0.06, 1.0);
                     let bar_h = self.rect_size.y * 0.34 * bv;
                     let base_y = self.rect_size.y - 18.0;
-                    if cell_x > 0.18 && cell_x < 0.82 && p.y <= base_y && p.y >= base_y - bar_h {
+                    if (cell_x > 0.18 && cell_x < 0.82 && p.y <= base_y && p.y >= (base_y - bar_h)) {
                         let t_bar = (base_y - p.y) / max(bar_h, 1.0);
                         rgb = mix(self.accent.xyz, vec3(0.96, 0.93, 0.88), t_bar * 0.55);
                     }
@@ -509,7 +552,7 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 16.0);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
                 sdf.fill_keep(#050506);
                 sdf.stroke(#1D1D1D, 1.0);
 
@@ -594,9 +637,13 @@ live_design! {
 
                     // Seekbar inside mini-player
                     let sy = card_sz.y - 62.0;
-                    if local_p.x >= 20.0 && local_p.x <= card_sz.x - 20.0 && abs(local_p.y - sy) < 1.8 {
+                    if (local_p.x >= 20.0 && local_p.x <= (card_sz.x - 20.0) && abs(local_p.y - sy) < 1.8) {
                         let prog_x = 20.0 + (card_sz.x - 40.0) * 0.42;
-                        col = if local_p.x <= prog_x { vec3(0.96, 0.94, 0.90) } else { vec3(0.35, 0.35, 0.38) };
+                        if (local_p.x <= prog_x) {
+                            col = vec3(0.96, 0.94, 0.90);
+                        } else {
+                            col = vec3(0.35, 0.35, 0.38);
+                        }
                     }
                     if length(local_p - vec2(20.0 + (card_sz.x - 40.0) * 0.42, sy)) < 5.0 {
                         col = vec3(0.98, 0.96, 0.92);
@@ -973,6 +1020,77 @@ impl FerricWinBtnRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.is_maximized = if maximized { 1.0 } else { 0.0 };
             inner.draw_bg.redraw(cx);
+        }
+    }
+}
+
+#[derive(Clone, Debug, DefaultNone)]
+pub enum FerricPlayBtnAction {
+    Clicked,
+    None,
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawFerricPlayBtn {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live(0.0_f32)]
+    playing: f32,
+    #[live(0.0_f32)]
+    hover: f32,
+}
+
+#[derive(Live, LiveHook, Widget)]
+pub struct FerricPlayBtn {
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawFerricPlayBtn,
+}
+
+impl Widget for FerricPlayBtn {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.draw_bg.hover = 1.0;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                self.draw_bg.hover = 0.0;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerUp(fe) if fe.is_over => {
+                cx.widget_action(uid, &scope.path, FerricPlayBtnAction::Clicked);
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let _ = self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+}
+
+impl FerricPlayBtnRef {
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).cast(),
+            FerricPlayBtnAction::Clicked
+        )
+    }
+
+    pub fn set_playing(&self, cx: &mut Cx, playing: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let next = if playing { 1.0 } else { 0.0 };
+            if (inner.draw_bg.playing - next).abs() > 0.1 {
+                inner.draw_bg.playing = next;
+                inner.draw_bg.redraw(cx);
+            }
         }
     }
 }

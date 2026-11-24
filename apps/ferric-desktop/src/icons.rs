@@ -1,0 +1,73 @@
+#![allow(dead_code)]
+//! Crisp, self-contained 24x24 vector SVG icon paths (`M/L/H/V/C/Z`, zero external files)
+//! rasterized natively on GPU via Makepad's `CxIconAtlas`.
+
+pub const ICON_HOME: &str = "M10 20V14H14V20H19V12H22L12 3L2 12H5V20H10Z";
+pub const ICON_SEARCH: &str = "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z";
+pub const ICON_LIBRARY: &str =
+    "M4 4H6.5V20H4V4ZM9.5 4H12V20H9.5V4ZM14.5 4.6L16.9 4L20.5 19.4L18.1 20L14.5 4.6Z";
+pub const ICON_NOW_PLAYING: &str = "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z";
+pub const ICON_FADE_IN: &str =
+    "M3 10H5V14H3V10ZM7 6H9V18H7V6ZM11 2H13V22H11V2ZM15 6H17V18H15V6ZM19 10H21V14H19V10Z";
+pub const ICON_EQUALIZER: &str = "M5 4H7V11H9V13H3V11H5V4ZM5 15H7V20H5V15ZM11 4H13V7H15V9H9V7H11V4ZM11 11H13V20H11V11ZM17 4H19V14H21V16H15V14H17V4ZM17 18H19V20H17V18Z";
+pub const ICON_CONNECT: &str = "M4 6H20V4H4C2.9 4 2 4.9 2 6V17H0V20H14V17H4V6ZM23 8H17C16.45 8 16 8.45 16 9V19C16 19.55 16.45 20 17 20H23C23.55 20 24 19.55 24 19V9C24 8.45 23.55 8 23 8ZM22 17H18V10H22V17Z";
+pub const ICON_APPEARANCE: &str =
+    "M12 2L2 9L12 16L22 9L12 2ZM12 18.54L4.62 12.81L3 14.07L12 21.07L21 14.07L19.37 12.8L12 18.54Z";
+pub const ICON_ACCOUNTS: &str = "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z";
+pub const ICON_PLAY: &str = "M8 5V19L19 12L8 5Z";
+pub const ICON_PREV: &str = "M6 6H8.5V18H6V6ZM10 12L18.5 18V6L10 12Z";
+pub const ICON_NEXT: &str = "M5.5 18L14 12L5.5 6V18ZM15.5 6V18H18V6H15.5Z";
+pub const ICON_SHUFFLE: &str = "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z";
+pub const ICON_REPEAT: &str =
+    "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z";
+pub const ICON_HEART: &str = "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z";
+pub const ICON_LYRICS: &str = "M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2C10.34 2 9 3.34 9 5V11C9 12.66 10.34 14 12 14ZM17 11C17 13.76 14.76 16 12 16C9.24 16 7 13.76 7 11H5C5 14.53 7.61 17.43 11 17.92V21H13V17.92C16.39 17.43 19 14.53 19 11H17Z";
+pub const ICON_QUEUE: &str =
+    "M3 6H15V8H3V6ZM3 10H15V12H3V10ZM3 14H11V16H3V14ZM15 13V19L20 16L15 13Z";
+pub const ICON_VOLUME: &str = "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z";
+pub const ICON_FOLDER_PLUS: &str = "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z";
+pub const ICON_IMPORT: &str = "M19 9H15V3H9V9H5L12 16L19 9ZM5 18V20H19V18H5Z";
+pub const ICON_VIDEO: &str = "M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z";
+pub const ICON_CLOUD: &str = "M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14C0 17.31 2.69 20 6 20H19C21.76 20 24 17.76 24 15C24 12.36 21.95 10.22 19.35 10.04Z";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_widgets::makepad_draw::icon_atlas::parse_svg_path;
+
+    #[test]
+    fn all_embedded_svg_icon_paths_parse_cleanly() {
+        let all = [
+            ("home", ICON_HOME),
+            ("search", ICON_SEARCH),
+            ("library", ICON_LIBRARY),
+            ("now_playing", ICON_NOW_PLAYING),
+            ("fade_in", ICON_FADE_IN),
+            ("equalizer", ICON_EQUALIZER),
+            ("connect", ICON_CONNECT),
+            ("appearance", ICON_APPEARANCE),
+            ("accounts", ICON_ACCOUNTS),
+            ("play", ICON_PLAY),
+            ("prev", ICON_PREV),
+            ("next", ICON_NEXT),
+            ("shuffle", ICON_SHUFFLE),
+            ("repeat", ICON_REPEAT),
+            ("heart", ICON_HEART),
+            ("lyrics", ICON_LYRICS),
+            ("queue", ICON_QUEUE),
+            ("volume", ICON_VOLUME),
+            ("folder_plus", ICON_FOLDER_PLUS),
+            ("import", ICON_IMPORT),
+            ("video", ICON_VIDEO),
+            ("cloud", ICON_CLOUD),
+        ];
+        for (name, path) in all {
+            let parsed = parse_svg_path(path.as_bytes())
+                .unwrap_or_else(|e| panic!("SVG icon '{name}' failed to parse: {e}"));
+            assert!(
+                !parsed.is_empty(),
+                "SVG icon '{name}' parsed to empty command list"
+            );
+        }
+    }
+}

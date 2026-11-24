@@ -2,6 +2,7 @@ pub mod autoeq;
 pub mod local_scanner;
 pub mod lyrics;
 pub mod oauth;
+pub mod public_sync;
 pub mod resolver;
 pub mod subsonic;
 pub mod updater;

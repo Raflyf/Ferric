@@ -209,6 +209,20 @@ pub fn win32_is_active_window_maximized() -> bool {
 }
 
 #[cfg(target_os = "windows")]
+pub fn win32_close_active_window() {
+    const WM_CLOSE: u32 = 0x0010;
+    if let Some(hwnd) = active_process_hwnd() {
+        // SAFETY: Valid HWND owned by the current process.
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn win32_close_active_window() {}
+
+#[cfg(target_os = "windows")]
 const SW_SHOWNORMAL: i32 = 1;
 #[cfg(target_os = "windows")]
 const SW_MAXIMIZE: i32 = 3;
@@ -218,18 +232,46 @@ const SW_MINIMIZE: i32 = 6;
 const SW_RESTORE: i32 = 9;
 
 #[cfg(target_os = "windows")]
+type EnumWindowsProc = unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32;
+
+#[cfg(target_os = "windows")]
 #[link(name = "user32")]
 unsafe extern "system" {
     fn GetActiveWindow() -> *mut std::ffi::c_void;
     fn GetForegroundWindow() -> *mut std::ffi::c_void;
     fn GetWindowThreadProcessId(hwnd: *mut std::ffi::c_void, lpdw_process_id: *mut u32) -> u32;
+    fn EnumWindows(lp_enum_func: EnumWindowsProc, l_param: isize) -> i32;
+    fn IsWindowVisible(hwnd: *mut std::ffi::c_void) -> i32;
+    fn IsIconic(hwnd: *mut std::ffi::c_void) -> i32;
     fn ShowWindow(hwnd: *mut std::ffi::c_void, n_cmd_show: i32) -> i32;
     fn IsZoomed(hwnd: *mut std::ffi::c_void) -> i32;
+    fn PostMessageW(hwnd: *mut std::ffi::c_void, msg: u32, w_param: usize, l_param: isize) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn enum_proc_find_own_hwnd(
+    hwnd: *mut std::ffi::c_void,
+    l_param: isize,
+) -> i32 {
+    // SAFETY: `l_param` points to a stack-owned `*mut c_void` slot for the duration of `EnumWindows`.
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 && IsIconic(hwnd) == 0 {
+            return 1;
+        }
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == std::process::id() {
+            let out_slot = l_param as *mut *mut std::ffi::c_void;
+            *out_slot = hwnd;
+            return 0;
+        }
+        1
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn active_process_hwnd() -> Option<*mut std::ffi::c_void> {
-    // SAFETY: Win32 thread/process queries on opaque window handles.
+    // SAFETY: Win32 thread/process queries and synchronous EnumWindows scan on opaque window handles.
     unsafe {
         let active = GetActiveWindow();
         if !active.is_null() {
@@ -243,7 +285,10 @@ fn active_process_hwnd() -> Option<*mut std::ffi::c_void> {
                 return Some(fg);
             }
         }
-        None
+        let mut found: *mut std::ffi::c_void = std::ptr::null_mut();
+        let slot_ptr = (&raw mut found) as isize;
+        let _ = EnumWindows(enum_proc_find_own_hwnd, slot_ptr);
+        if !found.is_null() { Some(found) } else { None }
     }
 }
 

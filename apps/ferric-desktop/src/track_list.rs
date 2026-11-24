@@ -10,8 +10,8 @@ live_design! {
 
     TrackRow = <View> {
         width: Fill,
-        height: 58,
-        padding: { left: 16, right: 18, top: 7, bottom: 7 }
+        height: 56,
+        padding: { left: 16, right: 18, top: 6, bottom: 6 }
         margin: { bottom: 2 }
         flow: Right,
         align: { y: 0.5 }
@@ -28,7 +28,7 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, self.radius);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, self.radius * 0.5);
                 let bg = mix(self.base_col, self.active_col, self.active);
                 sdf.fill_keep(bg);
                 let border = mix(vec4(0.0, 0.0, 0.0, 0.0), self.active_border, self.active * 0.55);
@@ -49,14 +49,14 @@ live_design! {
         art_tile = <FerricArtTile> {
             width: 40,
             height: 40,
-            draw_bg: { radius: 6.0 }
+            draw_bg: { radius: 8.0 }
         }
 
         info_col = <View> {
             width: Fill,
             height: Fit,
             flow: Down,
-            spacing: 3,
+            spacing: 2,
             title_lbl = <Label> {
                 width: Fill,
                 draw_text: {
@@ -76,7 +76,7 @@ live_design! {
         }
 
         album_lbl = <Label> {
-            width: 210,
+            width: 220,
             draw_text: {
                 color: #9E988E,
                 text_style: { font_size: 12.0 }
@@ -85,29 +85,33 @@ live_design! {
         }
 
         like_btn = <Button> {
-            width: 54,
-            height: 28,
-            padding: { left: 8, right: 8 }
+            width: 34,
+            height: 30,
+            padding: 0,
+            spacing: 0,
             align: { x: 0.5, y: 0.5 }
-            text: "Save"
-            draw_text: {
-                color: #888279,
-                color_hover: #F3EEE3,
-                text_style: { font_size: 11.0 }
+            text: ""
+            label_walk: { width: 0, height: 0 }
+            icon_walk: { width: 15, height: Fit }
+            draw_icon: {
+                svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
+                color: #5A5650
+                color_hover: #F3EEE3
+                color_down: #D9541E
             }
             draw_bg: {
                 instance hover: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 14.0);
-                    sdf.fill(vec4(0.14, 0.14, 0.14, 0.75 * self.hover));
+                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0);
+                    sdf.fill(vec4(0.14, 0.14, 0.14, 0.80 * self.hover));
                     return sdf.result;
                 }
             }
         }
 
         dur_lbl = <Label> {
-            width: 52,
+            width: 60,
             align: { x: 1.0, y: 0.5 }
             draw_text: {
                 color: #9E988E,
@@ -119,8 +123,8 @@ live_design! {
 
     EmptyLibraryState = <View> {
         width: Fill,
-        height: 240,
-        padding: { left: 28, right: 28, top: 28, bottom: 28 }
+        height: 236,
+        padding: { left: 28, right: 28, top: 26, bottom: 26 }
         margin: { top: 8 }
         flow: Down,
         align: { x: 0.0, y: 0.5 }
@@ -129,20 +133,20 @@ live_design! {
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 14.0);
-                sdf.fill_keep(#0B0B0B);
-                sdf.stroke(#1F1F1F, 1.0);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 6.0);
+                sdf.fill_keep(#0A0A0A);
+                sdf.stroke(#1E1E1E, 1.0);
                 return sdf.result;
             }
         }
         <Label> {
-            draw_text: { color: #F3EEE3, text_style: { font_size: 20.0 } }
+            draw_text: { color: #F3EEE3, text_style: { font_size: 19.0 } }
             text: "Mulai koleksi musik Anda"
         }
         <Label> {
             width: Fill,
             draw_text: { color: #9E988E, text_style: { font_size: 13.0 } }
-            text: "Pilih folder musik lokal (FLAC, MP3, Opus, WAV), hubungkan akun Spotify atau YouTube Music, atau putar lagu demo bawaan untuk mencoba transisi tanpa jeda (Smooth Fade-In)."
+            text: "Pilih folder musik lokal (FLAC, MP3, Opus, WAV), import playlist Spotify / YouTube Music secara instan, atau putar lagu demo bawaan untuk mencoba transisi tanpa jeda (Smooth Fade-In)."
         }
         <View> {
             width: Fill,
@@ -151,59 +155,84 @@ live_design! {
             flow: Right,
             spacing: 10,
             empty_add_folder_btn = <Button> {
-                width: Fit, height: 38, padding: { left: 18, right: 18 }
+                width: Fit, height: 38, padding: { left: 16, right: 18 }, spacing: 8,
                 text: "Add Music Folder"
-                draw_text: { color: #000000, color_hover: #000000, text_style: { font_size: 12.5 } }
+                icon_walk: { width: 15, height: Fit }
+                draw_icon: {
+                    svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z"
+                    color: #080808
+                    color_hover: #080808
+                }
+                draw_text: { color: #080808, color_hover: #080808, text_style: { font_size: 12.5 } }
                 draw_bg: {
                     instance hover: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 19.0);
+                        let r = (self.rect_size.y - 1.0) * 0.25;
+                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
                         sdf.fill(mix(#D9541E, #EB642C, self.hover));
                         return sdf.result;
                     }
                 }
             }
             empty_spotify_btn = <Button> {
-                width: Fit, height: 38, padding: { left: 18, right: 18 }
-                text: "Sign in with Spotify"
+                width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
+                text: "Spotify Sync & Login"
+                icon_walk: { width: 15, height: Fit }
+                draw_icon: {
+                    svg_path: "M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14C0 17.31 2.69 20 6 20H19C21.76 20 24 17.76 24 15C24 12.36 21.95 10.22 19.35 10.04Z"
+                    color: #D9541E
+                    color_hover: #F3EEE3
+                }
                 draw_text: { color: #F3EEE3, color_hover: #FFFFFF, text_style: { font_size: 12.5 } }
                 draw_bg: {
                     instance hover: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 19.0);
-                        sdf.fill_keep(mix(#141414, #1E1E1E, self.hover));
-                        sdf.stroke(#2C2C2C, 1.0);
+                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
+                        sdf.fill_keep(mix(#121212, #1C1C1C, self.hover));
+                        sdf.stroke(#2A2A2A, 1.0);
                         return sdf.result;
                     }
                 }
             }
             empty_youtube_btn = <Button> {
-                width: Fit, height: 38, padding: { left: 18, right: 18 }
-                text: "Sign in with YouTube"
+                width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
+                text: "YouTube Music Sync"
+                icon_walk: { width: 15, height: Fit }
+                draw_icon: {
+                    svg_path: "M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"
+                    color: #D9541E
+                    color_hover: #F3EEE3
+                }
                 draw_text: { color: #F3EEE3, color_hover: #FFFFFF, text_style: { font_size: 12.5 } }
                 draw_bg: {
                     instance hover: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 19.0);
-                        sdf.fill_keep(mix(#141414, #1E1E1E, self.hover));
-                        sdf.stroke(#2C2C2C, 1.0);
+                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
+                        sdf.fill_keep(mix(#121212, #1C1C1C, self.hover));
+                        sdf.stroke(#2A2A2A, 1.0);
                         return sdf.result;
                     }
                 }
             }
             empty_demo_btn = <Button> {
-                width: Fit, height: 38, padding: { left: 18, right: 18 }
+                width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
                 text: "Play Demo Tracks"
+                icon_walk: { width: 13, height: Fit }
+                draw_icon: {
+                    svg_path: "M8 5V19L19 12L8 5Z"
+                    color: #D9541E
+                    color_hover: #F3EEE3
+                }
                 draw_text: { color: #D9541E, color_hover: #F3EEE3, text_style: { font_size: 12.5 } }
                 draw_bg: {
                     instance hover: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 19.0);
-                        sdf.fill_keep(mix(#160C07, #24120A, self.hover));
+                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
+                        sdf.fill_keep(mix(#150B06, #231109, self.hover));
                         sdf.stroke(#D9541E, 1.0);
                         return sdf.result;
                     }
@@ -332,7 +361,7 @@ impl Widget for TrackList {
                         let like_col = if track.liked {
                             vec4(0.851, 0.329, 0.118, 1.0)
                         } else {
-                            vec4(0.533, 0.510, 0.475, 1.0)
+                            vec4(0.353, 0.337, 0.314, 1.0)
                         };
                         let art_var = if item_id % 2 == 0 { 0.0 } else { 1.0 };
                         let art_play = if is_active && is_playing { 1.0 } else { 0.0 };
@@ -343,7 +372,7 @@ impl Widget for TrackList {
                                 draw_bg: { active: (if is_active { 1.0 } else { 0.0 }) }
                                 idx_lbl = { draw_text: { color: (idx_col) } }
                                 title_lbl = { draw_text: { color: (title_col) } }
-                                like_btn = { draw_text: { color: (like_col) } }
+                                like_btn = { draw_icon: { color: (like_col) } }
                                 art_tile = {
                                     draw_bg: {
                                         variant: (art_var),
@@ -367,8 +396,6 @@ impl Widget for TrackList {
                         row.label(id!(title_lbl)).set_text(cx, &track.title);
                         row.label(id!(artist_lbl)).set_text(cx, &artist_sub);
                         row.label(id!(album_lbl)).set_text(cx, &track.album);
-                        row.button(id!(like_btn))
-                            .set_text(cx, if track.liked { "Saved" } else { "Save" });
                         row.label(id!(dur_lbl))
                             .set_text(cx, &format_duration_ms(track.duration_ms));
                         row.draw_all(cx, scope);

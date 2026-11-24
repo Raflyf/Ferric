@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod icons;
 mod shell;
 mod smtc;
 mod theme;
@@ -10,6 +11,7 @@ mod widgets;
 use std::sync::OnceLock;
 
 static STARTUP_PAGE_OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
+static STARTUP_LOAD_DEMO: OnceLock<bool> = OnceLock::new();
 
 pub fn startup_page_override() -> Option<&'static str> {
     STARTUP_PAGE_OVERRIDE
@@ -28,8 +30,13 @@ pub fn startup_page_override() -> Option<&'static str> {
         .as_deref()
 }
 
+pub fn startup_load_demo() -> bool {
+    *STARTUP_LOAD_DEMO.get_or_init(|| std::env::args().skip(1).any(|a| a == "--demo"))
+}
+
 fn main() {
     let _ = startup_page_override();
+    let _ = startup_load_demo();
     // Anchor working directory to the executable folder so portable Makepad
     // font/icon resources under `makepad/` resolve even from shortcuts.
     if let Ok(exe_path) = std::env::current_exe()

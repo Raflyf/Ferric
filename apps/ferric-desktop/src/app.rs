@@ -52,7 +52,7 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                let r = min(self.radius, min(self.rect_size.x, self.rect_size.y) * 0.48);
+                let r = min(self.radius, min(self.rect_size.x, self.rect_size.y) * 0.25);
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, r);
 
                 if self.glass_enabled < 0.5 {
@@ -140,20 +140,20 @@ live_design! {
 
     FerricPrimaryBtn = <Button> {
         width: Fit,
-        height: 36,
-        padding: { left: 16, right: 16 }
+        height: 34,
+        padding: { left: 14, right: 14 }
         draw_text: {
             color: #000000,
             color_hover: #000000,
             color_down: #000000,
-            text_style: { font_size: 12.5 }
+            text_style: { font_size: 12.0 }
         }
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 18.0);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
                 let base = mix(#D9541E, #EB6730, self.hover);
                 sdf.fill_keep(mix(base, #B94213, self.down));
                 sdf.stroke(vec4(1.0, 0.94, 0.82, 0.35), 1.0);
@@ -218,8 +218,17 @@ live_design! {
     App = {{App}} {
         ui: <Root> {
             main_window = <Window> {
-                window: { title: "Ferric — Native Rust Hi-Fi Music Player (v0.1.0)", inner_size: vec2(1380, 860) }
+                window: { title: "Ferric — Native Rust Hi-Fi Music Player (v0.1.0)", inner_size: vec2(1140, 660) }
                 pass: { clear_color: #000000 }
+                caption_bar = {
+                    draw_bg: { color: #000000 }
+                    caption_label = {
+                        label = {
+                            text: "Ferric — Native Rust Hi-Fi Music Player"
+                            draw_text: { color: #888279, text_style: { font_size: 11.0 } }
+                        }
+                    }
+                }
                 body = <View> {
                     width: Fill,
                     height: Fill,
@@ -315,9 +324,9 @@ live_design! {
 
                         // LEFT SIDEBAR NAVIGATION
                         sidebar_panel = <FerricGlassPanel> {
-                            width: 224,
+                            width: 196,
                             height: Fill,
-                            padding: 12,
+                            padding: 10,
                             flow: Down,
                             spacing: 6,
 
@@ -627,11 +636,11 @@ live_design! {
 
                         // RIGHT SIDEBAR: UP NEXT + SYNCED LYRICS
                         right_panel = <FerricGlassPanel> {
-                            width: 288,
+                            width: 244,
                             height: Fill,
-                            padding: 14,
+                            padding: 12,
                             flow: Down,
-                            spacing: 12,
+                            spacing: 10,
 
                             <Label> { draw_text: { color: #F3EEE3, text_style: { font_size: 14.5 } }, text: "Up Next" }
                             up_next_lbl = <Label> {
@@ -732,17 +741,17 @@ live_design! {
                     // 3. FLOATING BOTTOM PLAYER DOCK
                     player_dock = <FerricGlassPanel> {
                         width: Fill,
-                        height: 82,
-                        margin: { left: 10, right: 10, bottom: 10 }
-                        padding: { left: 16, right: 16 }
+                        height: 76,
+                        margin: { left: 10, right: 10, bottom: 8 }
+                        padding: { left: 14, right: 14 }
                         flow: Right,
                         align: { y: 0.5 }
-                        spacing: 16,
-                        draw_bg: { radius: 18.0 }
+                        spacing: 12,
+                        draw_bg: { radius: 14.0 }
 
                         // Left: Active Track Metadata
                         <View> {
-                            width: 260,
+                            width: 210,
                             height: Fit,
                             flow: Down,
                             spacing: 3,
@@ -873,6 +882,8 @@ pub struct App {
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
+        crate::theme::live_design(cx);
+        cx.link(live_id!(theme), live_id!(ferric_theme));
         crate::track_list::live_design(cx);
     }
 }

@@ -3,6 +3,7 @@
 mod app;
 mod shell;
 mod smtc;
+mod theme;
 mod track_list;
 
 fn main() {

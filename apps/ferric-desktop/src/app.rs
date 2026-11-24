@@ -4598,3 +4598,5 @@ fn rgba_vec4(hex: &str) -> Vec4 {
     let [r, g, b, a] = hex_to_rgba_f32(hex, 1.0);
     vec4(r, g, b, a)
 }
+
+app_main!(App);

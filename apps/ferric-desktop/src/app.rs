@@ -1615,7 +1615,7 @@ impl App {
         audio.send(EngineCommand::SetVolume(self.session_state.volume));
         self.audio = Some(audio);
 
-        self.smtc = Some(SmtcBridge::new());
+        self.smtc = Some(SmtcBridge::try_init());
         let dev_id = format!("ferric-pc-{:08x}", fastrand::u32(..));
         self.lease = Some(ActiveSpeakerLease::new(dev_id.clone(), "Desktop-PC"));
         self.lan_ip = detect_local_lan_ip();
@@ -1978,7 +1978,7 @@ impl App {
             .set_text(cx, &format!("{:+.1} dB", self.eq.preamp_db));
 
         let mut gains = [0.0_f32; 10];
-        for (idx, (slider_id, val_id)) in eq_band_ids().iter().enumerate() {
+        for (idx, (slider_id, val_id)) in eq_band_ids().into_iter().enumerate() {
             if let Some(band) = self.eq.bands.get(idx) {
                 gains[idx] = band.gain_db;
                 self.ui
@@ -2083,10 +2083,10 @@ impl App {
     fn apply_theme_live(&self, cx: &mut Cx) {
         let g = &self.theme.material;
         let glass_f = if g.liquid_glass { 1.0_f32 } else { 0.0_f32 };
-        let canvas = rgba_vec4(&self.theme.tokens.canvas_hex);
-        let surface = rgba_vec4(&self.theme.tokens.surface_hex);
-        let border = rgba_vec4(&self.theme.tokens.border_hex);
-        let accent = rgba_vec4(&self.theme.tokens.accent_hex);
+        let canvas = rgba_vec4(&self.theme.canvas_hex);
+        let surface = rgba_vec4(&self.theme.surface_hex);
+        let border = rgba_vec4(&self.theme.border_hex);
+        let accent = rgba_vec4(&self.theme.accent_hex);
         let rad = self.theme.corner_radius_px;
 
         self.ui.view(id!(body)).apply_over(
@@ -2118,7 +2118,7 @@ impl App {
                         glass_ior: (g.ior),
                         glass_disp: (g.dispersion),
                         glass_rim: (g.specular_rim),
-                        glass_scrim: (g.scrim_opacity),
+                        glass_scrim: (g.scrim_alpha),
                         radius: (rad)
                     }
                 },
@@ -2131,9 +2131,9 @@ impl App {
                 draw_bg: {
                     ior: (g.ior),
                     dispersion: (g.dispersion),
-                    blur_amt: (g.blur_px / 28.0),
+                    blur_amt: (g.frost_blur_px / 28.0),
                     rim_amt: (g.specular_rim),
-                    scrim_amt: (g.scrim_opacity),
+                    scrim_amt: (g.scrim_alpha),
                     radius_px: (rad.max(16.0)),
                     glass_on: (glass_f)
                 }
@@ -2271,7 +2271,7 @@ impl App {
             id!(pl_slot_3),
             id!(pl_slot_4),
         ];
-        for (i, slot) in pl_slots.iter().enumerate() {
+        for (i, slot) in pl_slots.into_iter().enumerate() {
             if let Some(pl) = self.playlists.get(i) {
                 self.ui.button(slot).set_visible(cx, true);
                 self.ui
@@ -2304,7 +2304,7 @@ impl App {
         if quick_tracks.is_empty() {
             quick_tracks = self.all_tracks.iter().take(4).collect();
         }
-        for (i, btn_id) in rec_slots.iter().enumerate() {
+        for (i, btn_id) in rec_slots.into_iter().enumerate() {
             if let Some(t) = quick_tracks.get(i) {
                 self.ui.button(btn_id).set_visible(cx, true);
                 self.ui.button(btn_id).set_text(
@@ -2337,7 +2337,7 @@ impl App {
             id!(q_slot_4),
         ];
         let upcoming = self.queue.peek_upcoming(5);
-        for (i, slot) in q_slots.iter().enumerate() {
+        for (i, slot) in q_slots.into_iter().enumerate() {
             if let Some(t) = upcoming.get(i) {
                 self.ui.button(slot).set_visible(cx, true);
                 self.ui
@@ -2567,9 +2567,8 @@ impl App {
         thread::spawn(move || {
             let mut gathered = Vec::new();
             for folder in folders {
-                if let Ok(mut found) = scan_local_folder(&folder) {
-                    gathered.append(&mut found);
-                }
+                let mut found = scan_local_folder(&folder);
+                gathered.append(&mut found);
             }
             let _ = tx.send(BgMessage::ScanCompleted(gathered));
         });
@@ -2762,7 +2761,8 @@ impl App {
                 .set_text(cx, "Checking GitHub Releases for updates...");
         }
         thread::spawn(move || {
-            let result = check_latest_release(APP_VERSION);
+            let cancel = AtomicBool::new(false);
+            let result = check_latest_release(APP_VERSION, &cancel);
             let _ = tx.send(BgMessage::UpdateChecked { manual, result });
         });
     }
@@ -2780,10 +2780,9 @@ impl App {
                 info.tag
             ),
         );
-        let summary: String = info.notes.lines().take(5).collect::<Vec<_>>().join("\n");
         self.ui
             .label(id!(update_popup_notes))
-            .set_text(cx, &summary);
+            .set_text(cx, &info.summary);
         self.ui.redraw(cx);
     }
 
@@ -2816,14 +2815,25 @@ impl App {
 
         let dest_dir = std::env::temp_dir().join("ferric-updates");
         thread::spawn(move || {
-            let (ev_tx, ev_rx) = mpsc::channel();
-            let handle = thread::spawn(move || {
-                download_verified_installer(&info, &dest_dir, &cancel, &ev_tx);
-            });
-            while let Ok(ev) = ev_rx.recv() {
-                let _ = tx.send(BgMessage::UpdateDownload(ev));
+            let progress_tx = tx.clone();
+            let res = download_verified_installer(
+                &info.tag,
+                APP_VERSION,
+                &dest_dir,
+                &cancel,
+                move |pct| {
+                    let _ =
+                        progress_tx.send(BgMessage::UpdateDownload(DownloadEvent::Progress(pct)));
+                },
+            );
+            match res {
+                Ok(path) => {
+                    let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Ready(path)));
+                }
+                Err(err) => {
+                    let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Failed(err)));
+                }
             }
-            let _ = handle.join();
         });
     }
 
@@ -2968,7 +2978,7 @@ impl App {
                         .set_text(cx, &format!("Subsonic error: {err}"));
                 }
                 BgMessage::UpdateChecked { manual, result } => {
-                    let status = format_check_status(APP_VERSION, &result);
+                    let status = format_check_status(&result, APP_VERSION);
                     self.ui.label(id!(update_status_lbl)).set_text(cx, &status);
                     if let Ok(Some(info)) = result {
                         self.available_update = Some(info.clone());
@@ -2982,18 +2992,12 @@ impl App {
                     }
                 }
                 BgMessage::UpdateDownload(ev) => match ev {
-                    DownloadEvent::Progress {
-                        downloaded_bytes,
-                        total_bytes,
-                    } => {
-                        let pct = if total_bytes > 0 {
-                            (downloaded_bytes * 100) / total_bytes
-                        } else {
-                            0
+                    DownloadEvent::Progress(pct_opt) => {
+                        let txt = match pct_opt {
+                            Some(pct) => format!("Downloading {pct}%"),
+                            None => "Downloading...".to_string(),
                         };
-                        self.ui
-                            .button(id!(update_now_btn))
-                            .set_text(cx, &format!("Downloading {pct}%"));
+                        self.ui.button(id!(update_now_btn)).set_text(cx, &txt);
                     }
                     DownloadEvent::Verifying => {
                         self.ui
@@ -3276,7 +3280,6 @@ impl AppMain for App {
 
         // 1. WINDOW CONTROLS (Minimize, Maximize/Restore, Exit, Mini-Player)
         if self.ui.ferric_win_btn(id!(win_min_btn)).clicked(&actions) {
-            self.ui.window(id!(main_window)).minimize(cx);
             win32_minimize_active_window();
         }
         if self.ui.ferric_win_btn(id!(win_max_btn)).clicked(&actions) {
@@ -3510,7 +3513,7 @@ impl AppMain for App {
             id!(recent_btn_2),
             id!(recent_btn_3),
         ]
-        .iter()
+        .into_iter()
         .enumerate()
         {
             if self.ui.button(btn_id).clicked(&actions) {
@@ -3986,7 +3989,7 @@ impl AppMain for App {
                 .set_text(cx, &format!("{pre:+.1} dB"));
             self.apply_eq_live(cx);
         }
-        for (idx, (slider_id, val_id)) in eq_band_ids().iter().enumerate() {
+        for (idx, (slider_id, val_id)) in eq_band_ids().into_iter().enumerate() {
             if let Some(val) = self.ui.ferric_vert_slider(slider_id).changed(&actions)
                 && let Some(band) = self.eq.bands.get_mut(idx)
             {

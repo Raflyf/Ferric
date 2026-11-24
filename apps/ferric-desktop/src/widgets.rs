@@ -631,11 +631,11 @@ pub enum FerricSliderAction {
 pub struct DrawFerricSlider {
     #[deref]
     draw_super: DrawQuad,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     norm_val: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     hover: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     drag: f32,
 }
 
@@ -845,9 +845,9 @@ pub enum FerricToggleAction {
 pub struct DrawFerricToggle {
     #[deref]
     draw_super: DrawQuad,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     active: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     hover: f32,
 }
 
@@ -920,11 +920,11 @@ pub enum FerricWinBtnAction {
 pub struct DrawFerricWinBtn {
     #[deref]
     draw_super: DrawQuad,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     kind: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     is_maximized: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     hover: f32,
 }
 
@@ -986,29 +986,29 @@ impl FerricWinBtnRef {
 pub struct DrawFerricEqGraph {
     #[deref]
     draw_super: DrawQuad,
-    #[live(1.0)]
+    #[live(1.0_f32)]
     enabled: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     preamp: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g0: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g1: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g2: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g3: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g4: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g5: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g6: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g7: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g8: f32,
-    #[live(0.0)]
+    #[live(0.0_f32)]
     g9: f32,
 }
 

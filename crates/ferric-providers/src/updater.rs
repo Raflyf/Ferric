@@ -243,7 +243,10 @@ pub fn format_check_status(
     current_version: &str,
 ) -> String {
     match result {
-        Ok(Some(info)) => format!("Update available: {} (current v{current_version})", info.tag),
+        Ok(Some(info)) => format!(
+            "Update available: {} (current v{current_version})",
+            info.tag
+        ),
         Ok(None) => format!("You are using the latest version of Ferric (v{current_version})."),
         Err(err) => format!("Update check failed: {err}"),
     }
@@ -499,7 +502,7 @@ mod tests {
     #[test]
     fn release_parser_filters_drafts_prereleases_and_older_versions() {
         let newer = parse_latest_release(
-            r#"{"tag_name":"v0.2.0","draft":false,"prerelease":false,"body":"## Added\n- Better Liquid Glass caustics"}"#,
+            r###"{"tag_name":"v0.2.0","draft":false,"prerelease":false,"body":"## Added\n- Better Liquid Glass caustics"}"###,
             "0.1.0",
         )
         .expect("parse newer")

@@ -102,7 +102,7 @@ impl StereoEqProcessor {
     /// Process interleaved stereo `[L, R, L, R, ...]` samples in place.
     pub fn process_interleaved_stereo(&mut self, samples: &mut [f32], volume: f32) {
         let vol = volume.clamp(0.0, 1.5);
-        for frame in samples.chunks_exact_mut(2) {
+        for frame in samples.as_chunks_mut::<2>().0 {
             let mut l = frame[0];
             let mut r = frame[1];
             if self.enabled {

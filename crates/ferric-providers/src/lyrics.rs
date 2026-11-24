@@ -102,7 +102,7 @@ pub fn fetch_lrclib_synced(
         .query("artist_name", artist)
         .query("track_name", title)
         .query("album_name", album)
-        .query("duration", &duration_secs.to_string())
+        .query("duration", duration_secs.to_string())
         .call()
         .map_err(|e| ProviderError::Http(e.to_string()))?;
 

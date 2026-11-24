@@ -148,7 +148,7 @@ live_design! {
     // Sidebar Navigation Item with Real Crisp GPU SVG Vector Icon
     FerricNavItem = <Button> {
         width: Fill,
-        height: 38,
+        height: 34,
         padding: { left: 12, right: 12 }
         spacing: 11,
         align: { x: 0.0, y: 0.5 }
@@ -403,7 +403,7 @@ live_design! {
                                 height: Fill,
                                 align: { x: 0.5, y: 0.5 }
                                 search_bar_wrap = <View> {
-                                    width: 440,
+                                    width: 470,
                                     height: 36,
                                     padding: { left: 12, right: 6 }
                                     flow: Right,
@@ -429,7 +429,7 @@ live_design! {
                                     search_input = <TextInput> {
                                         width: Fill,
                                         height: 30,
-                                        empty_text: "Search songs, artists, or paste Spotify/YouTube link..."
+                                        empty_text: "Search library or paste Spotify / YouTube link..."
                                         draw_bg: {
                                             fn pixel(self) -> vec4 {
                                                 return vec4(0.0, 0.0, 0.0, 0.0);
@@ -528,7 +528,7 @@ live_design! {
                                 }
 
                                 <Label> {
-                                    margin: { left: 10, top: 14, bottom: 4 }
+                                    margin: { left: 10, top: 8, bottom: 2 }
                                     draw_text: { color: #66615A, text_style: { font_size: 10.0 } }
                                     text: "STUDIO & SOUND"
                                 }
@@ -554,7 +554,7 @@ live_design! {
                                 }
 
                                 <View> {
-                                    width: Fill, height: Fit, margin: { left: 10, right: 2, top: 14, bottom: 4 }
+                                    width: Fill, height: Fit, margin: { left: 10, right: 2, top: 8, bottom: 2 }
                                     flow: Right, align: { y: 0.5 }
                                     <Label> {
                                         width: Fill,
@@ -571,20 +571,25 @@ live_design! {
                                     }
                                 }
 
-                                pl_all_btn = <FerricPlaylistBtn> { text: "All Songs", draw_bg: { active: 1.0 } }
-                                pl_liked_btn = <FerricPlaylistBtn> { text: "Liked Songs" }
-                                pl_local_btn = <FerricPlaylistBtn> { text: "Local Lossless" }
-                                pl_slot_0 = <FerricPlaylistBtn> { visible: false, text: "" }
-                                pl_slot_1 = <FerricPlaylistBtn> { visible: false, text: "" }
-                                pl_slot_2 = <FerricPlaylistBtn> { visible: false, text: "" }
-                                pl_slot_3 = <FerricPlaylistBtn> { visible: false, text: "" }
-                                pl_slot_4 = <FerricPlaylistBtn> { visible: false, text: "" }
-
-                                <View> { width: Fill, height: Fill }
+                                <ScrollYView> {
+                                    width: Fill,
+                                    height: Fill,
+                                    flow: Down,
+                                    spacing: 2,
+                                    pl_all_btn = <FerricPlaylistBtn> { text: "All Songs", draw_bg: { active: 1.0 } }
+                                    pl_liked_btn = <FerricPlaylistBtn> { text: "Liked Songs" }
+                                    pl_local_btn = <FerricPlaylistBtn> { text: "Local Lossless" }
+                                    pl_slot_0 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                    pl_slot_1 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                    pl_slot_2 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                    pl_slot_3 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                    pl_slot_4 = <FerricPlaylistBtn> { visible: false, text: "" }
+                                }
 
                                 sidebar_add_folder_btn = <FerricBtn> {
                                     width: Fill,
-                                    height: 36,
+                                    height: 34,
+                                    margin: { top: 6 }
                                     text: "Add Music Folder"
                                     draw_icon: {
                                         svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z"
@@ -1020,23 +1025,23 @@ live_design! {
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 8,
                                             autoeq_input = <FerricInput> {
-                                                width: 248, height: 32,
-                                                empty_text: "Search 24 AutoEq headphone profiles..."
+                                                width: 248, height: 36,
+                                                empty_text: "Search 24 AutoEq headphones..."
                                             }
-                                            autoeq_apply_btn = <FerricAccentPill> { height: 32, padding: { left: 14, right: 14 }, text: "Apply Best Match" }
-                                            eq_pre_flat = <FerricBtn> { height: 32, text: "Flat" }
-                                            eq_pre_copper = <FerricBtn> { height: 32, text: "Warm Copper" }
-                                            eq_pre_bass = <FerricBtn> { height: 32, text: "Deep Bass" }
-                                            eq_pre_vocal = <FerricBtn> { height: 32, text: "Vocal" }
+                                            autoeq_apply_btn = <FerricAccentPill> { height: 34, padding: { left: 14, right: 14 }, text: "Apply Best Match" }
+                                            eq_pre_flat = <FerricBtn> { height: 34, text: "Flat" }
+                                            eq_pre_copper = <FerricBtn> { height: 34, text: "Warm Copper" }
+                                            eq_pre_bass = <FerricBtn> { height: 34, text: "Deep Bass" }
+                                            eq_pre_vocal = <FerricBtn> { height: 34, text: "Vocal" }
                                         }
 
                                         eq_graph = <FerricEqGraph> {}
 
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 } spacing: 12,
-                                            <Label> { width: 82, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Preamp" }
+                                            <Label> { width: 72, draw_text: { color: #9E988E, text_style: { font_size: 12.5 } }, text: "Preamp" }
                                             eq_preamp_slider = <FerricBarSlider> { min: -12.0, max: 12.0, value: 0.0 }
-                                            eq_preamp_lbl = <Label> { width: 80, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.5 } }, text: "+0.0 dB" }
+                                            eq_preamp_lbl = <Label> { width: Fit, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.5 } }, text: "+0.0 dB" }
                                         }
 
                                         <View> {
@@ -1147,21 +1152,21 @@ live_design! {
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                                     <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Refraction Index (IOR)" }
-                                                    lg_ior_lbl = <Label> { width: 64, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "1.48" }
+                                                    lg_ior_lbl = <Label> { width: Fit, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "1.48" }
                                                 }
                                                 lg_ior_slider = <FerricBarSlider> { min: 1.05, max: 1.85, value: 1.48 }
 
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                                     <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Chromatic Edge Dispersion" }
-                                                    lg_disp_lbl = <Label> { width: 64, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "42%" }
+                                                    lg_disp_lbl = <Label> { width: Fit, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "42%" }
                                                 }
                                                 lg_disp_slider = <FerricBarSlider> { min: 0.0, max: 1.0, value: 0.42 }
 
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                                     <Label> { width: Fill, draw_text: { color: #9E988E, text_style: { font_size: 12.0 } }, text: "Specular Rim & Corner Radius" }
-                                                    lg_rim_lbl = <Label> { width: 100, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "78% · 14px" }
+                                                    lg_rim_lbl = <Label> { width: Fit, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 12.0 } }, text: "78% · 14px" }
                                                 }
                                                 lg_rim_slider = <FerricBarSlider> { min: 0.0, max: 1.0, value: 0.78 }
                                                 lg_rad_slider = <FerricBarSlider> { min: 4.0, max: 28.0, value: 14.0 }
@@ -1426,7 +1431,7 @@ live_design! {
 
                             // Left: Cover Art + Song Title / Artist + Vector Heart Icon
                             <View> {
-                                width: 274,
+                                width: 300,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
@@ -1444,7 +1449,7 @@ live_design! {
                                     spacing: 3,
                                     np_title_lbl = <Label> {
                                         width: Fill,
-                                        draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }
+                                        draw_text: { color: #F3EEE3, text_style: { font_size: 12.5 } }
                                         text: "Ready to Play"
                                     }
                                     np_artist_lbl = <Label> {
@@ -1930,6 +1935,12 @@ impl App {
             "connect" => self.switch_main_page(cx, live_id!(page_connect)),
             "appearance" => self.switch_main_page(cx, live_id!(page_appearance)),
             "accounts" => self.switch_main_page(cx, live_id!(page_accounts)),
+            "oled" => {
+                self.theme = ThemeConfig::default();
+                self.sync_controls_from_state(cx);
+                self.apply_theme_live(cx);
+                self.switch_main_page(cx, live_id!(page_library));
+            }
             "glass" => {
                 self.theme.material.liquid_glass = true;
                 self.sync_controls_from_state(cx);

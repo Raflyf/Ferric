@@ -350,9 +350,10 @@ live_design! {
 
                 // Horizontal dB gridlines (+12, +6, 0, -6, -12 dB)
                 for i in 0..5 {
-                    let gy = top + h * (float(i) / 4.0);
+                    let fi = float(i);
+                    let gy = top + h * (fi / 4.0);
                     if (p.x >= left && p.x <= right && abs(p.y - gy) < 0.6) {
-                        if (i == 2) {
+                        if (fi > 1.5 && fi < 2.5) {
                             return vec4(0.20, 0.20, 0.20, 1.0);
                         } else {
                             return vec4(0.11, 0.11, 0.11, 1.0);

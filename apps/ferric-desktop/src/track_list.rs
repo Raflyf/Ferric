@@ -111,7 +111,8 @@ live_design! {
         }
 
         dur_lbl = <Label> {
-            width: 60,
+            width: 68,
+            padding: { right: 4 }
             align: { x: 1.0, y: 0.5 }
             draw_text: {
                 color: #9E988E,

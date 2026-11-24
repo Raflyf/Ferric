@@ -368,9 +368,8 @@ live_design! {
                     let dist = abs(p.y - cy);
 
                     // Subtle warm copper fill between curve and 0 dB axis
-                    let between = (p.y >= min(cy, mid_y)) && (p.y <= max(cy, mid_y));
                     let mut rgb = self.bg_col.xyz;
-                    if (between) {
+                    if (p.y >= min(cy, mid_y) && p.y <= max(cy, mid_y)) {
                         let fade = 1.0 - clamp(abs(p.y - cy) / (h * 0.55), 0.0, 1.0);
                         rgb += self.accent.xyz * (0.13 * fade * max(self.enabled, 0.25));
                     }

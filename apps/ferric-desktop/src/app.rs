@@ -799,7 +799,7 @@ live_design! {
                                         <Label> { width: Fill, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Title" }
                                         <Label> { width: 220, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Album" }
                                         <View> { width: 34, height: 1 }
-                                        <Label> { width: 60, align: { x: 1.0 }, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Time" }
+                                        <Label> { width: 68, padding: { right: 4 }, align: { x: 1.0 }, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Time" }
                                     }
 
                                     track_list = <TrackList> {}
@@ -910,7 +910,7 @@ live_design! {
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 }
                                             <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Crossfade Overlap Between Songs" }
-                                            xfade_val_lbl = <Label> { width: 72, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }, text: "6.0 s" }
+                                            xfade_val_lbl = <Label> { width: Fit, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }, text: "6.0 s" }
                                         }
                                         xfade_slider = <FerricBarSlider> { min: 0.0, max: 12.0, value: 6.0 }
                                         <View> {
@@ -924,7 +924,7 @@ live_design! {
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 } margin: { top: 4 }
                                             <Label> { width: Fill, draw_text: { color: #F3EEE3, text_style: { font_size: 13.5 } }, text: "Smooth Fade-In on Play / Resume / Seek" }
-                                            fadein_val_lbl = <Label> { width: 72, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }, text: "240 ms" }
+                                            fadein_val_lbl = <Label> { width: Fit, align: { x: 1.0 }, draw_text: { color: #D9541E, text_style: { font_size: 13.0 } }, text: "240 ms" }
                                         }
                                         fadein_slider = <FerricBarSlider> { min: 0.0, max: 1500.0, value: 240.0 }
 
@@ -1854,6 +1854,16 @@ impl App {
     fn hide_native_makepad_caption(&self, cx: &mut Cx) {
         self.ui.view(id!(caption_bar)).set_visible(cx, false);
         self.ui.view(id!(windows_buttons)).set_visible(cx, false);
+    }
+
+    fn sync_maximized_chrome_padding(&self, cx: &mut Cx, is_max: bool) {
+        let right_pad = if is_max { 22.0 } else { 8.0 };
+        self.ui.view(id!(top_bar)).apply_over(
+            cx,
+            live! {
+                padding: { left: 16.0, right: (right_pad) }
+            },
+        );
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
@@ -3583,6 +3593,8 @@ impl App {
             self.ui
                 .ferric_win_btn(id!(win_max_btn))
                 .set_maximized(cx, is_max);
+            self.sync_maximized_chrome_padding(cx, is_max);
+            cx.redraw_all();
             return;
         }
         if self.ui.ferric_win_btn(id!(win_close_btn)).clicked(actions) {
@@ -4509,6 +4521,11 @@ impl AppMain for App {
 
         if matches!(event, Event::WindowGeomChange(_)) {
             self.hide_native_makepad_caption(cx);
+            let is_max = win32_is_active_window_maximized();
+            self.ui
+                .ferric_win_btn(id!(win_max_btn))
+                .set_maximized(cx, is_max);
+            self.sync_maximized_chrome_padding(cx, is_max);
         }
 
         // Native Windows 11 Frameless Drag & Aero Snap on empty regions of our unified `top_bar`

@@ -153,14 +153,16 @@ pub fn copy_text_to_clipboard(_text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Direct Win32 window state helpers ensuring custom frameless Minimize / Maximize / Restore
-/// buttons operate reliably on the active Ferric window at any DPI scale.
+/// Direct Win32 window state helpers using asynchronous `WM_SYSCOMMAND` so Makepad's
+/// top-level message pump processes `WM_SIZE` and DX11 swapchain resize cleanly with zero re-entrancy.
 #[cfg(target_os = "windows")]
 pub fn win32_minimize_active_window() {
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const SC_MINIMIZE: usize = 0xF020;
     if let Some(hwnd) = active_process_hwnd() {
         // SAFETY: Valid HWND owned by the current process.
         unsafe {
-            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            let _ = PostMessageW(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0);
         }
     }
 }
@@ -170,18 +172,19 @@ pub fn win32_minimize_active_window() {}
 
 #[cfg(target_os = "windows")]
 pub fn win32_toggle_maximize_active_window() -> bool {
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const SC_MAXIMIZE: usize = 0xF030;
+    const SC_RESTORE: usize = 0xF120;
     if let Some(hwnd) = active_process_hwnd() {
         // SAFETY: Valid HWND owned by the current process.
         unsafe {
             let currently_max = IsZoomed(hwnd) != 0;
-            let _ = ShowWindow(
-                hwnd,
-                if currently_max {
-                    SW_RESTORE
-                } else {
-                    SW_MAXIMIZE
-                },
-            );
+            let cmd = if currently_max {
+                SC_RESTORE
+            } else {
+                SC_MAXIMIZE
+            };
+            let _ = PostMessageW(hwnd, WM_SYSCOMMAND, cmd, 0);
             return !currently_max;
         }
     }
@@ -210,11 +213,12 @@ pub fn win32_is_active_window_maximized() -> bool {
 
 #[cfg(target_os = "windows")]
 pub fn win32_close_active_window() {
-    const WM_CLOSE: u32 = 0x0010;
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const SC_CLOSE: usize = 0xF060;
     if let Some(hwnd) = active_process_hwnd() {
         // SAFETY: Valid HWND owned by the current process.
         unsafe {
-            let _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            let _ = PostMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0);
         }
     }
 }
@@ -224,12 +228,6 @@ pub fn win32_close_active_window() {}
 
 #[cfg(target_os = "windows")]
 const SW_SHOWNORMAL: i32 = 1;
-#[cfg(target_os = "windows")]
-const SW_MAXIMIZE: i32 = 3;
-#[cfg(target_os = "windows")]
-const SW_MINIMIZE: i32 = 6;
-#[cfg(target_os = "windows")]
-const SW_RESTORE: i32 = 9;
 
 #[cfg(target_os = "windows")]
 type EnumWindowsProc = unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32;
@@ -243,7 +241,6 @@ unsafe extern "system" {
     fn EnumWindows(lp_enum_func: EnumWindowsProc, l_param: isize) -> i32;
     fn IsWindowVisible(hwnd: *mut std::ffi::c_void) -> i32;
     fn IsIconic(hwnd: *mut std::ffi::c_void) -> i32;
-    fn ShowWindow(hwnd: *mut std::ffi::c_void, n_cmd_show: i32) -> i32;
     fn IsZoomed(hwnd: *mut std::ffi::c_void) -> i32;
     fn PostMessageW(hwnd: *mut std::ffi::c_void, msg: u32, w_param: usize, l_param: isize) -> i32;
 }

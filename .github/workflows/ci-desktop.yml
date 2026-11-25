@@ -69,6 +69,12 @@ jobs:
       - name: Setup Rust stable (MSVC)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Configure neutral CARGO_HOME (prevent runner username path leaks)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\c | Out-Null
+          "CARGO_HOME=C:\c" >> $env:GITHUB_ENV
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -88,37 +94,47 @@ jobs:
         shell: pwsh
         env:
           MAKEPAD_PACKAGE_DIR: makepad
-          CFLAGS: /guard:cf
-          CXXFLAGS: /guard:cf
         run: |
           $ws = (Resolve-Path .).ProviderPath
           $wsSlash = $ws.Replace('\', '/')
-          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $cargoHome = $env:CARGO_HOME
           $cargoSlash = $cargoHome.Replace('\', '/')
           $userProf = $env:USERPROFILE
           $userSlash = $userProf.Replace('\', '/')
-          $flags = @(
-            '-C', 'control-flow-guard=yes',
-            '-C', 'link-arg=/GUARD:CF',
-            '-C', 'link-arg=/CETCOMPAT',
-            '-C', 'link-arg=/DYNAMICBASE',
-            '-C', 'link-arg=/HIGHENTROPYVA',
-            '-C', 'link-arg=/NXCOMPAT',
-            '-C', 'link-arg=/DEBUG:NONE',
-            '-C', 'link-arg=/NOCOFFGRPINFO',
-            '-C', 'link-arg=/INCREMENTAL:NO',
-            '-C', 'link-arg=/OPT:REF',
-            '-C', 'link-arg=/OPT:ICF',
-            '-C', 'link-arg=/BREPRO',
-            "--remap-path-prefix=$ws=/s",
-            "--remap-path-prefix=$wsSlash=/s",
-            "--remap-path-prefix=$cargoHome=/c",
-            "--remap-path-prefix=$cargoSlash=/c",
-            "--remap-path-prefix=$userProf=/u",
-            "--remap-path-prefix=$userSlash=/u"
-          )
-          $env:CARGO_ENCODED_RUSTFLAGS = $flags -join ([char]0x1F)
-          cargo build --release -p ferric-desktop --locked
+          subst S: $ws
+          try {
+            Push-Location S:\
+            $env:CFLAGS = "/guard:cf /d1trimfile:S:\ /d1trimfile:$cargoHome"
+            $env:CXXFLAGS = "/guard:cf /d1trimfile:S:\ /d1trimfile:$cargoHome"
+            $flags = @(
+              '-C', 'control-flow-guard=yes',
+              '-C', 'link-arg=/GUARD:CF',
+              '-C', 'link-arg=/CETCOMPAT',
+              '-C', 'link-arg=/DYNAMICBASE',
+              '-C', 'link-arg=/HIGHENTROPYVA',
+              '-C', 'link-arg=/NXCOMPAT',
+              '-C', 'link-arg=/DEBUG:NONE',
+              '-C', 'link-arg=/NOCOFFGRPINFO',
+              '-C', 'link-arg=/INCREMENTAL:NO',
+              '-C', 'link-arg=/OPT:REF',
+              '-C', 'link-arg=/OPT:ICF',
+              '-C', 'link-arg=/BREPRO',
+              '--remap-path-prefix=S:\=/s',
+              '--remap-path-prefix=S:/=/s',
+              "--remap-path-prefix=$ws=/s",
+              "--remap-path-prefix=$wsSlash=/s",
+              "--remap-path-prefix=$cargoHome=/c",
+              "--remap-path-prefix=$cargoSlash=/c",
+              "--remap-path-prefix=$userProf=/u",
+              "--remap-path-prefix=$userSlash=/u"
+            )
+            $env:CARGO_ENCODED_RUSTFLAGS = $flags -join ([char]0x1F)
+            cargo build --release -p ferric-desktop --locked
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+            subst S: /D | Out-Null
+          }
 
       - name: Verify PE hardening flags and zero path/PDB leaks
         shell: pwsh

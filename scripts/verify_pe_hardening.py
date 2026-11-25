@@ -81,11 +81,28 @@ def main() -> int:
         b"ferric native rust hi-fi music player",
     ]
     for needle in forbidden_list:
-        if needle in low_data:
-            raise AssertionError(f"Forbidden ASCII string leaked in binary: {needle!r}")
+        pos = low_data.find(needle)
+        if pos != -1:
+            samples = []
+            start = 0
+            while len(samples) < 5:
+                idx = low_data.find(needle, start)
+                if idx == -1:
+                    break
+                ctx = data[max(0, idx - 40) : min(len(data), idx + len(needle) + 80)]
+                samples.append(ctx.decode("ascii", errors="replace"))
+                start = idx + len(needle)
+            raise AssertionError(
+                f"Forbidden ASCII string leaked in binary: {needle!r}; samples={samples}"
+            )
         u16 = needle.decode("ascii").encode("utf-16le")
         if u16 in low_data:
-            raise AssertionError(f"Forbidden UTF-16 string leaked in binary: {needle!r}")
+            idx = low_data.find(u16)
+            ctx = data[max(0, idx - 60) : min(len(data), idx + len(u16) + 120)]
+            sample = ctx.decode("utf-16le", errors="replace")
+            raise AssertionError(
+                f"Forbidden UTF-16 string leaked in binary: {needle!r}; sample={sample!r}"
+            )
 
     print(
         f"PE HARDENING OK: DllChars=0x{dll_chars:04X}, GUARD_CF=True, "

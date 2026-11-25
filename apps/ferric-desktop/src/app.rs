@@ -6516,7 +6516,7 @@ impl App {
                 self.eq = best.to_eq_config();
                 self.sync_controls_from_state(cx);
                 self.apply_eq_live(cx);
-                self.show_toast(cx, &format!("Applied AutoEq: {}", best.model));
+                self.show_toast(cx, &format!("Applied AutoEq: {}", best.name));
             }
         }
         if self.ui.button(id!(eq_import_btn)).clicked(actions)

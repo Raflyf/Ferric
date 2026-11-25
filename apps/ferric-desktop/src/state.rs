@@ -1,7 +1,7 @@
 use crate::google_login::GoogleLoginOutcome;
 use ferric_core::models::{Playlist, Track};
 use ferric_providers::lyrics::SyncedLyrics;
-use ferric_providers::updater::{DownloadEvent, ReleaseInfo, UpdateError};
+use ferric_providers::updater::{DownloadEvent, ReleaseInfo};
 use ferric_providers::ytmusic::{
     CachedAudioStream, YtmAccountLibrary, YtmBrowseDetail, YtmCardKind, YtmRichHome, YtmRichSearch,
 };
@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MainPage {
+    #[default]
     Home,
     Search,
     Recents,
@@ -22,8 +23,9 @@ pub enum MainPage {
     Settings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingsTab {
+    #[default]
     Accounts,
     Playback,
     Equalizer,
@@ -32,8 +34,9 @@ pub enum SettingsTab {
     Connect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LibraryFilter {
+    #[default]
     All,
     Liked,
     Local,
@@ -41,8 +44,9 @@ pub enum LibraryFilter {
     YouTube,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SearchFilter {
+    #[default]
     All,
     Songs,
     Albums,
@@ -51,8 +55,9 @@ pub enum SearchFilter {
     Local,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SortField {
+    #[default]
     Artist,
     Title,
     Album,
@@ -79,8 +84,9 @@ impl SortField {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SleepTimerMode {
+    #[default]
     Off,
     Deadline(Instant),
     EndOfTrack,
@@ -234,7 +240,7 @@ pub enum BgMessage {
     SubsonicFailed(String),
     UpdateChecked {
         manual: bool,
-        result: Result<Option<ReleaseInfo>, UpdateError>,
+        result: Result<Option<ReleaseInfo>, String>,
     },
     UpdateDownload(DownloadEvent),
 }

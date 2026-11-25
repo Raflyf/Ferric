@@ -607,9 +607,13 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
+            uniform ghost: 0.0
             uniform acrylic_on: 0.0
             uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
+                if self.ghost > 0.5 {
+                    return vec4(0.0, 0.0, 0.0, 0.0);
+                }
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
                 let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.102, 0.108, 0.148, 1.0), self.hover);
@@ -635,29 +639,35 @@ live_design! {
                 on = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { down: 1.0 } } }
             }
         }
-        art = <FerricCoverArt> {
+        inner = <View> {
             width: Fill,
-            height: 116,
-            draw_bg: { radius: 7.0 }
-        }
-        <View> {
-            width: Fill,
-            height: Fit,
+            height: Fill,
             flow: Down,
-            spacing: 2,
-            title = <Label> {
+            spacing: 6,
+            art = <FerricCoverArt> {
                 width: Fill,
-                flow: Right,
-                padding: 0,
-                draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 9.0, line_spacing: 1.0 } }
-                text: ""
+                height: 116,
+                draw_bg: { radius: 7.0 }
             }
-            sub = <Label> {
+            <View> {
                 width: Fill,
-                flow: Right,
-                padding: 0,
-                draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 8.0, line_spacing: 1.0 } }
-                text: ""
+                height: Fit,
+                flow: Down,
+                spacing: 2,
+                title = <Label> {
+                    width: Fill,
+                    flow: Right,
+                    padding: 0,
+                    draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 9.0, line_spacing: 1.0 } }
+                    text: ""
+                }
+                sub = <Label> {
+                    width: Fill,
+                    flow: Right,
+                    padding: 0,
+                    draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 8.0, line_spacing: 1.0 } }
+                    text: ""
+                }
             }
         }
     }
@@ -3081,14 +3091,21 @@ impl App {
             id!(sc_3),
             id!(sc_4),
         ] {
-            self.ui.view(cid).apply_over(
+            let cv = self.ui.view(cid);
+            cv.apply_over(
                 cx,
                 live! {
                     height: (174.0 * z),
-                    art = { height: (116.0 * z) }
-                    title = { draw_text: { text_style: { font_size: (9.0 * z) } } }
-                    sub = { draw_text: { text_style: { font_size: (8.0 * z) } } }
+                    inner = { art = { height: (116.0 * z) } }
                 },
+            );
+            cv.label(id!(title)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (9.0 * z) } } },
+            );
+            cv.label(id!(sub)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (8.0 * z) } } },
             );
         }
 
@@ -4387,12 +4404,15 @@ impl App {
                 let offset = self.shelf_pages[si] * 5;
                 for (ci, cid) in card_ids.into_iter().enumerate() {
                     let card_v = self.ui.view(cid);
+                    card_v.set_visible(cx, true);
                     if let Some(card) = shelf.cards.get(offset + ci) {
-                        card_v.set_visible(cx, true);
+                        card_v.view(id!(inner)).set_visible(cx, true);
                         card_v.apply_over(
                             cx,
                             live! {
+                                cursor: Hand,
                                 draw_bg: {
+                                    ghost: 0.0,
                                     acrylic_on: (acr),
                                     accent_col: (accent)
                                 }
@@ -4414,7 +4434,15 @@ impl App {
                             card.kind == YtmCardKind::Artist,
                         );
                     } else {
-                        card_v.set_visible(cx, false);
+                        // Keep empty slot width so shelves with < 5 cards never stretch horizontally
+                        card_v.view(id!(inner)).set_visible(cx, false);
+                        card_v.apply_over(
+                            cx,
+                            live! {
+                                cursor: Default,
+                                draw_bg: { ghost: 1.0 }
+                            },
+                        );
                     }
                 }
             } else {
@@ -4459,7 +4487,7 @@ impl App {
             for t in &hist {
                 let _ = cache.request_for_track(t);
             }
-            for t in upcoming.iter().take(6) {
+            for t in upcoming.iter().take(10) {
                 let _ = cache.request_for_track(t);
             }
         }
@@ -4839,11 +4867,12 @@ impl App {
             .enumerate()
         {
             let cv = self.ui.view(cid);
+            cv.set_visible(cx, true);
             if let Some(card) = filtered_cards.get(i) {
-                cv.set_visible(cx, true);
+                cv.view(id!(inner)).set_visible(cx, true);
                 cv.apply_over(
                     cx,
-                    live! { draw_bg: { acrylic_on: (acr), accent_col: (accent) } },
+                    live! { cursor: Hand, draw_bg: { ghost: 0.0, acrylic_on: (acr), accent_col: (accent) } },
                 );
                 cv.label(id!(title))
                     .set_text(cx, &clip_text(&clean_display_text(&card.title), 18));
@@ -4859,7 +4888,8 @@ impl App {
                     card.kind == YtmCardKind::Artist,
                 );
             } else {
-                cv.set_visible(cx, false);
+                cv.view(id!(inner)).set_visible(cx, false);
+                cv.apply_over(cx, live! { cursor: Default, draw_bg: { ghost: 1.0 } });
             }
         }
     }
@@ -8041,9 +8071,10 @@ impl App {
         }
 
         // TrackList actions (routes automatically to active page's list!)
+        // TrackList emits WidgetAction via cx.widget_action(...), so unwrap via as_widget_action()!
         let active_list = self.active_track_list();
         for action in actions {
-            match action.cast() {
+            match action.as_widget_action().cast() {
                 TrackListAction::PlayIndex(idx) => {
                     if let Some(clicked) = active_list.get(idx).cloned() {
                         self.queue_context = match self.active_page {

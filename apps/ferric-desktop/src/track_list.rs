@@ -610,17 +610,31 @@ impl Widget for TrackList {
                         } else {
                             format!("{}", item_id + 1)
                         };
+                        let clean = |s: &str| -> String {
+                            s.chars()
+                                .filter(|&c| {
+                                    let cp = c as u32;
+                                    !matches!(
+                                        cp,
+                                        0x200D | 0xFE00..=0xFE0F | 0x2600..=0x27BF | 0x1F000..=0x1FFFF
+                                    )
+                                })
+                                .collect::<String>()
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        };
                         let artist_sub = match track.source {
-                            TrackSource::Local => track.artist.clone(),
-                            other => format!("{} · {}", track.artist, other.as_badge()),
+                            TrackSource::Local => clean(&track.artist),
+                            other => format!("{} · {}", clean(&track.artist), other.as_badge()),
                         };
                         row.label(id!(idx_lbl)).set_text(cx, &idx_txt);
                         row.label(id!(title_lbl))
-                            .set_text(cx, &clip_text(&track.title, 30));
+                            .set_text(cx, &clip_text(&clean(&track.title), 38));
                         row.label(id!(artist_lbl))
-                            .set_text(cx, &clip_text(&artist_sub, 34));
+                            .set_text(cx, &clip_text(&artist_sub, 42));
                         row.label(id!(album_lbl))
-                            .set_text(cx, &clip_text(&track.album, 20));
+                            .set_text(cx, &clip_text(&clean(&track.album), 24));
                         let dur_txt = if track.duration_ms > 0 {
                             format_duration_ms(track.duration_ms)
                         } else {

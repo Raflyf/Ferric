@@ -65,8 +65,8 @@ pub fn clean_youtube_metadata(raw_title: &str, channel_title: &str) -> CleanedYo
 
     for sep in [" - ", " – ", " — "] {
         if let Some((left, right)) = collapsed.split_once(sep) {
-            let left_clean = left.trim();
-            let right_clean = right.trim();
+            let left_clean = trim_edge_punct(left);
+            let right_clean = trim_edge_punct(right);
             if !left_clean.is_empty() && !right_clean.is_empty() {
                 return CleanedYouTubeTrack {
                     title: right_clean.to_string(),
@@ -77,15 +77,20 @@ pub fn clean_youtube_metadata(raw_title: &str, channel_title: &str) -> CleanedYo
         }
     }
 
+    let clean_artist = trim_edge_punct(&channel_artist);
     CleanedYouTubeTrack {
-        title: collapsed,
-        artist: if channel_artist.is_empty() {
+        title: trim_edge_punct(&collapsed).to_string(),
+        artist: if clean_artist.is_empty() {
             "Unknown Artist".to_string()
         } else {
-            channel_artist
+            clean_artist.to_string()
         },
         is_yt_music_topic: false,
     }
+}
+
+fn trim_edge_punct(s: &str) -> &str {
+    s.trim_matches(|c: char| matches!(c, ' ' | '-' | '–' | '—' | '|' | ':' | '•' | '/'))
 }
 
 fn collapse_whitespace(s: &str) -> String {
@@ -96,8 +101,7 @@ fn collapse_whitespace(s: &str) -> String {
         }
         out.push_str(word);
     }
-    out.trim_matches(|c| c == '-' || c == '|' || c == ' ')
-        .to_string()
+    trim_edge_punct(&out).to_string()
 }
 
 #[cfg(test)]
@@ -124,5 +128,12 @@ mod tests {
         assert!(!cleaned.is_yt_music_topic);
         assert_eq!(cleaned.artist, "Daft Punk");
         assert_eq!(cleaned.title, "Instant Crush");
+    }
+
+    #[test]
+    fn trims_leading_colon_and_punctuation_on_split() {
+        let cleaned = clean_youtube_metadata(": The Kid LAROI, Justin Bieber - Stay", "Channel");
+        assert_eq!(cleaned.artist, "The Kid LAROI, Justin Bieber");
+        assert_eq!(cleaned.title, "Stay");
     }
 }

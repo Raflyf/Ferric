@@ -911,7 +911,8 @@ pub fn fetch_radio_up_next(
     Ok(tracks)
 }
 
-/// Search YouTube Music returning both playable songs and clickable Album / Artist / Playlist cards.
+/// Search YouTube Music returning both playable studio songs (with full Artist, Album & Duration)
+/// and clickable Album / Artist / Playlist cards by querying Songs + General endpoints in parallel.
 pub fn fetch_rich_search(
     session: &YtmSession,
     query: &str,
@@ -921,38 +922,55 @@ pub fn fetch_rich_search(
     if q.is_empty() {
         return Ok(YtmRichSearch::default());
     }
+
+    let songs_body = json!({
+        "query": q,
+        "params": "EgWKAQIIAWoMEAMQBBAJEAoQBRAV",
+        "context": web_remix_context(session),
+    });
     let general_body = json!({
         "query": q,
         "context": web_remix_context(session),
     });
-    let root = post_ytm_json("search", &general_body, session)?;
+
+    let (songs_res, general_res) = std::thread::scope(|s| {
+        let h_songs = s.spawn(|| post_ytm_json("search", &songs_body, session));
+        let h_gen = s.spawn(|| post_ytm_json("search", &general_body, session));
+        (
+            h_songs.join().unwrap_or_else(|_| {
+                Err(ProviderError::Http(
+                    "YouTube Music songs search worker panicked".to_string(),
+                ))
+            }),
+            h_gen.join().unwrap_or_else(|_| {
+                Err(ProviderError::Http(
+                    "YouTube Music general search worker panicked".to_string(),
+                ))
+            }),
+        )
+    });
+
+    let (songs_opt, gen_opt) = match (songs_res, general_res) {
+        (Err(_), Err(err)) => return Err(err),
+        (s, g) => (s.ok(), g.ok()),
+    };
+
+    let cap = limit.max(1);
     let mut tracks = Vec::new();
     let mut seen_vids = HashSet::new();
     let mut cards = Vec::new();
     let mut seen_cards = HashSet::new();
-    collect_music_items(
-        &root,
-        "YouTube Music",
-        limit.max(1),
-        &mut seen_vids,
-        &mut tracks,
-    );
-    collect_search_cards(&root, 18, &mut seen_cards, &mut cards);
 
-    if tracks.len() < 12 {
-        let songs_body = json!({
-            "query": q,
-            "params": "EgWKAQIIAWoMEAMQBBAJEAoQBRAV",
-            "context": web_remix_context(session),
-        });
-        if let Ok(songs_root) = post_ytm_json("search", &songs_body, session) {
-            collect_music_items(
-                &songs_root,
-                "YouTube Music",
-                limit.max(1),
-                &mut seen_vids,
-                &mut tracks,
-            );
+    // 1. Official Songs results first — always carry verified Artist, Album, and exact Duration
+    if let Some(ref songs_root) = songs_opt {
+        collect_music_items(songs_root, "Single", cap, &mut seen_vids, &mut tracks);
+    }
+
+    // 2. General search provides Album/Artist/Playlist cards plus supplementary official videos
+    if let Some(ref gen_root) = gen_opt {
+        collect_search_cards(gen_root, 18, &mut seen_cards, &mut cards);
+        if tracks.len() < cap {
+            collect_music_items(gen_root, "YouTube Music", cap, &mut seen_vids, &mut tracks);
         }
     }
 
@@ -1644,9 +1662,14 @@ pub fn collect_music_items(
     }
 }
 
-fn is_livestream_subtitle(subtitle: &str) -> bool {
+fn is_non_music_subtitle(subtitle: &str) -> bool {
     let low = subtitle.to_ascii_lowercase();
-    low.contains("watching") || low.contains("live now") || low.contains("livestream")
+    low.contains("watching")
+        || low.contains("live now")
+        || low.contains("livestream")
+        || low.starts_with("episode •")
+        || low.contains("• episode •")
+        || low.contains("podcast")
 }
 
 fn parse_responsive_item(item: &Value, default_album: &str) -> Option<Track> {
@@ -1677,7 +1700,7 @@ fn parse_responsive_item(item: &Value, default_album: &str) -> Option<Track> {
         }
     }
     let subtitle = extra_parts.join(" • ");
-    if is_livestream_subtitle(&subtitle) {
+    if is_non_music_subtitle(&subtitle) {
         return None;
     }
 
@@ -1737,7 +1760,7 @@ fn parse_two_row_song(item: &Value, default_album: &str) -> Option<Track> {
     }
     let raw_title = extract_runs_text(item.get("title"))?;
     let subtitle = extract_runs_text(item.get("subtitle")).unwrap_or_default();
-    if is_livestream_subtitle(&subtitle) {
+    if is_non_music_subtitle(&subtitle) {
         return None;
     }
     let (artist, album, duration_ms) = parse_ytm_subtitle(&subtitle, default_album);
@@ -2184,16 +2207,20 @@ fn parse_ytm_subtitle(subtitle: &str, default_album: &str) -> (String, String, u
     let mut artist = String::new();
     let mut album = String::new();
     let mut duration_ms = 0u64;
+    let mut is_video = false;
+    let mut is_song = false;
 
     for part in parts {
         let lower = part.to_ascii_lowercase();
-        if lower == "song"
-            || lower == "video"
-            || lower == "single"
-            || lower == "ep"
-            || lower == "e"
-            || lower == "explicit"
-        {
+        if lower == "video" {
+            is_video = true;
+            continue;
+        }
+        if lower == "song" || lower == "single" {
+            is_song = true;
+            continue;
+        }
+        if lower == "ep" || lower == "e" || lower == "explicit" {
             continue;
         }
         if let Some(ms) = parse_clock_ms(part) {
@@ -2209,10 +2236,14 @@ fn parse_ytm_subtitle(subtitle: &str, default_album: &str) -> (String, String, u
         {
             continue;
         }
+        let cleaned = part.trim_matches(|c: char| matches!(c, ' ' | ':' | '-' | '|'));
+        if cleaned.is_empty() {
+            continue;
+        }
         if artist.is_empty() {
-            artist = part.to_string();
+            artist = cleaned.to_string();
         } else if album.is_empty() {
-            album = part.to_string();
+            album = cleaned.to_string();
         }
     }
 
@@ -2220,7 +2251,17 @@ fn parse_ytm_subtitle(subtitle: &str, default_album: &str) -> (String, String, u
         artist = "YouTube Music".to_string();
     }
     if album.is_empty() {
-        album = default_album.to_string();
+        album = if default_album == "YouTube Music" {
+            if is_video {
+                "Music Video".to_string()
+            } else if is_song {
+                "Single".to_string()
+            } else {
+                default_album.to_string()
+            }
+        } else {
+            default_album.to_string()
+        };
     }
     (artist, album, duration_ms)
 }
@@ -2353,5 +2394,38 @@ mod tests {
             tracks[0].thumbnail_url.as_deref(),
             Some("https://lh3.googleusercontent.com/cover99=w180-h180-l85-rj")
         );
+    }
+
+    #[test]
+    fn filters_podcast_episodes_and_labels_music_videos() {
+        let sample = json!({
+            "items": [
+                {
+                    "musicResponsiveListItemRenderer": {
+                        "playlistItemData": { "videoId": "mX24T1uzsKI" },
+                        "flexColumns": [
+                            { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{"text": "Podcast Episode Title"}] } } },
+                            { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{"text": "Episode • Nov 2 • Business Podcast"}] } } }
+                        ]
+                    }
+                },
+                {
+                    "musicResponsiveListItemRenderer": {
+                        "playlistItemData": { "videoId": "yWHrYNP6j4k" },
+                        "flexColumns": [
+                            { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{"text": "STAY"}] } } },
+                            { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{"text": "Video • Justin Bieber & The Kid LAROI • 283M views"}] } } }
+                        ]
+                    }
+                }
+            ]
+        });
+        let mut tracks = Vec::new();
+        let mut seen = HashSet::new();
+        collect_music_items(&sample, "YouTube Music", 10, &mut seen, &mut tracks);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].title, "STAY");
+        assert_eq!(tracks[0].artist, "Justin Bieber & The Kid LAROI");
+        assert_eq!(tracks[0].album, "Music Video");
     }
 }

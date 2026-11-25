@@ -3056,10 +3056,10 @@ impl App {
                         card_v.set_visible(cx, true);
                         card_v
                             .label(id!(title))
-                            .set_text(cx, &clip_text(&card.title, 14));
+                            .set_text(cx, &clip_text(&card.title, 12));
                         card_v
                             .label(id!(sub))
-                            .set_text(cx, &clip_text(&card.subtitle, 17));
+                            .set_text(cx, &clip_text(&card.subtitle, 15));
                         self.bind_cover_art_url(
                             cx,
                             card_v.ferric_cover_art(id!(art)),

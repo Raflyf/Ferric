@@ -83,7 +83,7 @@ live_design! {
         }
 
         album_lbl = <Label> {
-            width: 190,
+            width: 150,
             draw_text: {
                 color: #888B99,
                 text_style: { font_size: 11.5 }
@@ -453,11 +453,11 @@ impl Widget for TrackList {
                         };
                         row.label(id!(idx_lbl)).set_text(cx, &idx_txt);
                         row.label(id!(title_lbl))
-                            .set_text(cx, &clip_text(&track.title, 34));
+                            .set_text(cx, &clip_text(&track.title, 28));
                         row.label(id!(artist_lbl))
-                            .set_text(cx, &clip_text(&artist_sub, 38));
+                            .set_text(cx, &clip_text(&artist_sub, 30));
                         row.label(id!(album_lbl))
-                            .set_text(cx, &clip_text(&track.album, 22));
+                            .set_text(cx, &clip_text(&track.album, 18));
                         let dur_txt = if track.duration_ms > 0 {
                             format_duration_ms(track.duration_ms)
                         } else {

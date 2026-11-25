@@ -2378,13 +2378,303 @@ pub fn resolve_and_cache_audio_stream(
     resolve_and_cache_audio_stream_with_quality(video_id, session, cache_dir, AudioQuality::High)
 }
 
-/// Fetch direct hardware-decodable MP4/WebM video stream URLs for 360p, 480p, 720p, and 1080p
-/// so Ferric plays official music videos natively inside the app with instant quality switching.
-pub fn fetch_video_streams(
-    video_id: &str,
+/// Resolved video stream set distinguishing true Official Music Videos (OMV / widescreen)
+/// from static YouTube Music Art Track cover videos (`" - Topic"` / 1:1 album cover).
+#[derive(Debug, Clone)]
+pub struct ResolvedVideoStreams {
+    pub video_id: String,
+    pub is_official_mv: bool,
+    pub streams: Vec<VideoStreamOption>,
+}
+
+#[derive(Debug, Clone)]
+struct MusicVideoCandidate {
+    video_id: String,
+    title: String,
+    subtitle: String,
+    is_omv: bool,
+    duration_ms: u64,
+}
+
+fn is_static_art_track(root: &Value, streams: &[VideoStreamOption]) -> bool {
+    let author = root
+        .pointer("/videoDetails/author")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let desc = root
+        .pointer("/videoDetails/shortDescription")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if author.ends_with(" - topic") || desc.contains("provided to youtube by") {
+        return true;
+    }
+    !streams.is_empty()
+        && streams
+            .iter()
+            .all(|s| s.width > 0 && s.height > 0 && (s.width as f32 / s.height as f32) < 1.18)
+}
+
+fn tokenize_alnum(s: &str) -> Vec<String> {
+    s.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn score_music_video_candidate(
+    cand: &MusicVideoCandidate,
+    track_artist: &str,
+    track_title: &str,
+    track_duration_ms: u64,
+) -> i32 {
+    let target_core = normalize_core_title(track_title);
+    let cand_core = normalize_core_title(&cand.title);
+    let cand_full = format!("{} {}", cand.title, cand.subtitle).to_ascii_lowercase();
+    let target_title_low = track_title.to_ascii_lowercase();
+
+    let target_tokens: Vec<String> = tokenize_alnum(&target_core)
+        .into_iter()
+        .filter(|t| t.len() >= 2)
+        .collect();
+    let cand_tokens: HashSet<String> = tokenize_alnum(&cand_core).into_iter().collect();
+
+    let title_matched = if !target_core.is_empty() && cand_core == target_core {
+        100
+    } else if !target_core.is_empty()
+        && (cand_core.contains(&target_core) || target_core.contains(&cand_core))
+    {
+        75
+    } else if !target_tokens.is_empty() {
+        let hits = target_tokens
+            .iter()
+            .filter(|t| cand_tokens.contains(*t))
+            .count();
+        let ratio = hits as f32 / target_tokens.len() as f32;
+        if ratio >= 0.75 {
+            65
+        } else if ratio >= 0.50 {
+            35
+        } else {
+            return -200;
+        }
+    } else {
+        0
+    };
+
+    let mut score = title_matched;
+    if cand.is_omv {
+        score += 85;
+    }
+
+    let artist_tokens = extract_artist_tokens(track_artist);
+    let sub_low = cand.subtitle.to_ascii_lowercase();
+    let primary_art = primary_artist_key(track_artist).to_ascii_lowercase();
+    if !primary_art.is_empty()
+        && (sub_low.contains(&primary_art) || cand_full.contains(&primary_art))
+    {
+        score += 55;
+    } else if !artist_tokens.is_empty()
+        && artist_tokens
+            .iter()
+            .any(|t| sub_low.contains(t) || cand_full.contains(t))
+    {
+        score += 35;
+    } else if !artist_tokens.is_empty() {
+        score -= 55;
+    }
+
+    for positive in ["official music video", "official video", "(official"] {
+        if cand_full.contains(positive) {
+            score += 22;
+            break;
+        }
+    }
+
+    for bad in [
+        "slowed",
+        "reverb",
+        "sped up",
+        "nightcore",
+        "8d audio",
+        "karaoke",
+        "instrumental",
+        "piano cover",
+        "guitar cover",
+        "tutorial",
+        "reaction",
+        "cover",
+        "remix",
+        "mashup",
+        "clean version",
+    ] {
+        if cand_full.contains(bad) && !target_title_low.contains(bad) {
+            score -= 115;
+        }
+    }
+    for static_hint in ["lyrics", "lyric video", "official audio", " - topic"] {
+        if cand_full.contains(static_hint) && !target_title_low.contains(static_hint) {
+            score -= 65;
+        }
+    }
+
+    if track_duration_ms > 0 && cand.duration_ms > 0 {
+        let diff_ms = track_duration_ms.abs_diff(cand.duration_ms);
+        if diff_ms <= 45_000 {
+            score += 20;
+        } else if diff_ms > 180_000 {
+            score -= 45;
+        }
+    }
+
+    score
+}
+
+fn collect_video_search_candidates(
+    val: &Value,
+    out: &mut Vec<MusicVideoCandidate>,
+    seen: &mut HashSet<String>,
+) {
+    match val {
+        Value::Object(map) => {
+            if let Some(item) = map.get("musicResponsiveListItemRenderer")
+                && let Some(cand) = parse_video_search_candidate(item)
+                && seen.insert(cand.video_id.clone())
+            {
+                out.push(cand);
+            }
+            for v in map.values() {
+                collect_video_search_candidates(v, out, seen);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                collect_video_search_candidates(v, out, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn find_music_video_type(val: &Value) -> Option<&str> {
+    match val {
+        Value::Object(map) => {
+            if let Some(s) = map.get("musicVideoType").and_then(Value::as_str) {
+                return Some(s);
+            }
+            for v in map.values() {
+                if let Some(found) = find_music_video_type(v) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(arr) => arr.iter().find_map(find_music_video_type),
+        _ => None,
+    }
+}
+
+fn find_first_video_id(val: &Value) -> Option<String> {
+    match val {
+        Value::Object(map) => {
+            if let Some(id) = map.get("videoId").and_then(Value::as_str)
+                && is_valid_video_id(id)
+            {
+                return Some(id.to_string());
+            }
+            for v in map.values() {
+                if let Some(found) = find_first_video_id(v) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(arr) => arr.iter().find_map(find_first_video_id),
+        _ => None,
+    }
+}
+
+fn parse_video_search_candidate(item: &Value) -> Option<MusicVideoCandidate> {
+    let video_id = find_first_video_id(item)?;
+    let vtype = find_music_video_type(item).unwrap_or("");
+    // Skip static Art Tracks (`ATV`) explicitly when looking for real music videos
+    if vtype == "MUSIC_VIDEO_TYPE_ATV" {
+        return None;
+    }
+    let cols = item.get("flexColumns").and_then(Value::as_array)?;
+    let title = cols
+        .first()
+        .and_then(|c| c.pointer("/musicResponsiveListItemFlexColumnRenderer/text"))
+        .and_then(|v| extract_runs_text(Some(v)))
+        .unwrap_or_default();
+    if title.trim().is_empty() {
+        return None;
+    }
+    let subtitle = cols
+        .get(1)
+        .and_then(|c| c.pointer("/musicResponsiveListItemFlexColumnRenderer/text"))
+        .and_then(|v| extract_runs_text(Some(v)))
+        .unwrap_or_default();
+    let duration_ms = subtitle
+        .split('•')
+        .rev()
+        .find_map(|part| parse_clock_ms(part.trim()))
+        .unwrap_or(0);
+    Some(MusicVideoCandidate {
+        video_id,
+        title,
+        subtitle,
+        is_omv: vtype == "MUSIC_VIDEO_TYPE_OMV",
+        duration_ms,
+    })
+}
+
+fn search_official_music_video_candidates(
     session: &YtmSession,
-) -> ProviderResult<Vec<VideoStreamOption>> {
-    let root = fetch_player_root(video_id, session)?;
+    artist: &str,
+    title: &str,
+    track_duration_ms: u64,
+    exclude_vid: Option<&str>,
+) -> Vec<MusicVideoCandidate> {
+    let clean_title = normalize_core_title(title);
+    let clean_artist = primary_artist_key(artist);
+    let query = if !clean_artist.is_empty() && !clean_title.is_empty() {
+        format!("{clean_artist} {clean_title}")
+    } else {
+        format!("{artist} {title}").trim().to_string()
+    };
+    if query.is_empty() {
+        return Vec::new();
+    }
+    // YouTube Music "Videos" search tab filter — surfaces `MUSIC_VIDEO_TYPE_OMV` official music videos
+    let body = json!({
+        "query": query,
+        "params": "EgWKAQIQAWoKEAMQBBAJEAoQBQ%3D%3D",
+        "context": web_remix_context(session),
+    });
+    let Ok(root) = post_ytm_json("search", &body, session) else {
+        return Vec::new();
+    };
+    let mut raw = Vec::new();
+    let mut seen = HashSet::new();
+    collect_video_search_candidates(&root, &mut raw, &mut seen);
+
+    let mut scored: Vec<(i32, MusicVideoCandidate)> = raw
+        .into_iter()
+        .filter(|c| exclude_vid != Some(c.video_id.as_str()))
+        .map(|c| {
+            let s = score_music_video_candidate(&c, artist, title, track_duration_ms);
+            (s, c)
+        })
+        .filter(|(s, _)| *s >= 45)
+        .collect();
+    scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+    scored.into_iter().take(3).map(|(_, c)| c).collect()
+}
+
+fn extract_video_streams_from_player(root: &Value) -> ProviderResult<Vec<VideoStreamOption>> {
     let Some(formats) = root
         .pointer("/streamingData/adaptiveFormats")
         .and_then(Value::as_array)
@@ -2451,6 +2741,82 @@ pub fn fetch_video_streams(
         ));
     }
     Ok(out)
+}
+
+/// Resolve the real Official Music Video (widescreen OMV) for a track instead of playing a static
+/// album-cover YouTube Art Track (`" - Topic"`), falling back cleanly only when no MV exists.
+pub fn resolve_music_video_streams(
+    session: &YtmSession,
+    artist: &str,
+    title: &str,
+    existing_vid: Option<&str>,
+    track_duration_ms: u64,
+) -> ProviderResult<ResolvedVideoStreams> {
+    let valid_existing = existing_vid.map(str::trim).filter(|v| is_valid_video_id(v));
+
+    let mut fallback_art: Option<ResolvedVideoStreams> = None;
+    if let Some(vid) = valid_existing
+        && let Ok(root) = fetch_player_root(vid, session)
+        && let Ok(streams) = extract_video_streams_from_player(&root)
+    {
+        if !is_static_art_track(&root, &streams) {
+            return Ok(ResolvedVideoStreams {
+                video_id: vid.to_string(),
+                is_official_mv: true,
+                streams,
+            });
+        }
+        fallback_art = Some(ResolvedVideoStreams {
+            video_id: vid.to_string(),
+            is_official_mv: false,
+            streams,
+        });
+    }
+
+    let candidates = search_official_music_video_candidates(
+        session,
+        artist,
+        title,
+        track_duration_ms,
+        valid_existing,
+    );
+    for cand in candidates.into_iter().take(2) {
+        if let Ok(root) = fetch_player_root(&cand.video_id, session)
+            && let Ok(streams) = extract_video_streams_from_player(&root)
+            && !is_static_art_track(&root, &streams)
+        {
+            return Ok(ResolvedVideoStreams {
+                video_id: cand.video_id,
+                is_official_mv: true,
+                streams,
+            });
+        }
+    }
+
+    if let Some(fb) = fallback_art {
+        return Ok(fb);
+    }
+
+    let vid = resolve_best_video_id_for_track(session, artist, title)?
+        .ok_or_else(|| ProviderError::Metadata("No music video found for this song".to_string()))?;
+    let root = fetch_player_root(&vid, session)?;
+    let streams = extract_video_streams_from_player(&root)?;
+    let is_official_mv = !is_static_art_track(&root, &streams);
+    Ok(ResolvedVideoStreams {
+        video_id: vid,
+        is_official_mv,
+        streams,
+    })
+}
+
+/// Fetch direct hardware-decodable MP4/WebM video stream URLs for 360p, 480p, 720p, and 1080p
+/// so Ferric plays official music videos natively inside the app with instant quality switching.
+pub fn fetch_video_streams(
+    video_id: &str,
+    session: &YtmSession,
+) -> ProviderResult<Vec<VideoStreamOption>> {
+    let root = fetch_player_root(video_id, session)?;
+    extract_video_streams_from_player(&root)
 }
 
 struct SelectedStreamFormat {
@@ -3639,5 +4005,46 @@ mod tests {
         assert_eq!(out[0].title, "Blinding Lights");
         assert_eq!(out[1].title, "As It Was");
         assert_eq!(out[2].title, "Diva");
+    }
+
+    #[test]
+    fn music_video_candidate_scoring_picks_official_mv_over_unrelated_or_ugc() {
+        let unrelated = MusicVideoCandidate {
+            video_id: "U68MJz9DrI4".to_string(),
+            title: "Wake Up in the Sky".to_string(),
+            subtitle: "Gucci Mane, Bruno Mars & Kodak Black • 697M views • 3:27".to_string(),
+            is_omv: true,
+            duration_ms: 207_000,
+        };
+        let official_mv = MusicVideoCandidate {
+            video_id: "PMivT7MJ41M".to_string(),
+            title: "That's What I Like".to_string(),
+            subtitle: "Bruno Mars • 2.5B views • 3:31".to_string(),
+            is_omv: true,
+            duration_ms: 211_000,
+        };
+        let slowed_ugc = MusicVideoCandidate {
+            video_id: "slowed12345".to_string(),
+            title: "Bruno Mars - That's What I Like (Slowed + Reverb Lyrics)".to_string(),
+            subtitle: "Random Channel • 40K views • 4:10".to_string(),
+            is_omv: false,
+            duration_ms: 250_000,
+        };
+
+        let s_unrel =
+            score_music_video_candidate(&unrelated, "Bruno Mars", "That's What I Like", 206_000);
+        let s_omv =
+            score_music_video_candidate(&official_mv, "Bruno Mars", "That's What I Like", 206_000);
+        let s_ugc =
+            score_music_video_candidate(&slowed_ugc, "Bruno Mars", "That's What I Like", 206_000);
+        assert!(
+            s_unrel < 0,
+            "unrelated song must be rejected (got {s_unrel})"
+        );
+        assert!(s_omv > 200, "official OMV must score high (got {s_omv})");
+        assert!(
+            s_omv > s_ugc + 150,
+            "official OMV must crush slowed/lyrics UGC ({s_omv} vs {s_ugc})"
+        );
     }
 }

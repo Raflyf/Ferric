@@ -389,28 +389,42 @@ live_design! {
                 let c = self.rect_size * 0.5;
                 let base_r = min(c.x, c.y) - 2.0;
 
-                // Soft expanding outer aura on hover
-                if (self.hover > 0.01) {
-                    sdf.circle(c.x, c.y, base_r + 1.8 * self.hover);
-                    sdf.fill(vec4(1.0, 1.0, 1.0, 0.14 * self.hover));
+                // Soft expanding outer aura on hover & play/pause transition
+                let p_t = clamp(self.playing, 0.0, 1.0);
+                let morph_pop = sin(p_t * 3.14159265);
+                let aura_a = max(0.14 * self.hover, 0.22 * morph_pop);
+                if (aura_a > 0.005) {
+                    sdf.circle(c.x, c.y, base_r + 1.8 * self.hover + 2.4 * morph_pop);
+                    sdf.fill(vec4(1.0, 1.0, 1.0, aura_a));
                 }
 
-                // Tactile spring scale: gentle lift on hover, crisp press compression on down
-                let r = base_r + 0.9 * self.hover - 1.4 * self.down;
+                // Tactile spring scale: gentle lift on hover, crisp press compression on down, joyful morph pop
+                let r = base_r + 0.9 * self.hover - 1.4 * self.down + 0.95 * morph_pop;
                 sdf.circle(c.x, c.y, r);
                 sdf.fill(mix(mix(self.accent_col, self.accent_hover, self.hover), #D8DAE4, self.down));
 
                 let gs = 1.0 + 0.04 * self.hover - 0.06 * self.down;
-                if (self.playing > 0.5) {
-                    sdf.box(c.x - 4.8 * gs, c.y - 5.8 * gs, 3.3 * gs, 11.6 * gs, 0.8);
-                    sdf.box(c.x + 1.5 * gs, c.y - 5.8 * gs, 3.3 * gs, 11.6 * gs, 0.8);
-                    sdf.fill(self.glyph_col);
+                if (p_t >= 0.5) {
+                    let s_in = clamp((p_t - 0.5) * 2.0, 0.0, 1.0);
+                    let ease = 1.0 - pow(1.0 - s_in, 2.5);
+                    let bw = mix(1.4, 3.3, ease) * gs;
+                    let bh = mix(6.8, 11.6, ease) * gs;
+                    let sep = mix(0.9, 1.5, ease) * gs;
+                    let lx = c.x - sep - bw;
+                    let rx = c.x + sep;
+                    let ty = c.y - bh * 0.5;
+                    sdf.box(lx, ty, bw, bh, 0.85);
+                    sdf.box(rx, ty, bw, bh, 0.85);
+                    sdf.fill(vec4(self.glyph_col.xyz, self.glyph_col.w * clamp(0.35 + 0.65 * ease, 0.0, 1.0)));
                 } else {
-                    sdf.move_to(c.x - 3.6 * gs, c.y - 6.0 * gs);
-                    sdf.line_to(c.x + 6.0 * gs, c.y);
-                    sdf.line_to(c.x - 3.6 * gs, c.y + 6.0 * gs);
+                    let s_out = clamp(1.0 - p_t * 2.0, 0.0, 1.0);
+                    let ease = 1.0 - pow(1.0 - s_out, 2.2);
+                    let tri_s = mix(0.42, 1.0, ease) * gs;
+                    sdf.move_to(c.x - 3.6 * tri_s, c.y - 6.0 * tri_s);
+                    sdf.line_to(c.x + 6.0 * tri_s, c.y);
+                    sdf.line_to(c.x - 3.6 * tri_s, c.y + 6.0 * tri_s);
                     sdf.close_path();
-                    sdf.fill(self.glyph_col);
+                    sdf.fill(vec4(self.glyph_col.xyz, self.glyph_col.w * clamp(0.35 + 0.65 * ease, 0.0, 1.0)));
                 }
                 return sdf.result;
             }
@@ -1441,6 +1455,10 @@ pub struct FerricPlayBtn {
     #[rust]
     down_target: f32,
     #[rust]
+    playing_target: f32,
+    #[rust]
+    playing_synced: bool,
+    #[rust]
     anim_frame: NextFrame,
 }
 
@@ -1449,11 +1467,14 @@ impl Widget for FerricPlayBtn {
         if self.anim_frame.is_event(event).is_some() {
             self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.26;
             self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
+            self.draw_bg.playing += (self.playing_target - self.draw_bg.playing) * 0.24;
             let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
-                && (self.down_target - self.draw_bg.down).abs() < 0.008;
+                && (self.down_target - self.draw_bg.down).abs() < 0.008
+                && (self.playing_target - self.draw_bg.playing).abs() < 0.006;
             if done {
                 self.draw_bg.hover = self.hover_target;
                 self.draw_bg.down = self.down_target;
+                self.draw_bg.playing = self.playing_target;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
@@ -1503,9 +1524,14 @@ impl FerricPlayBtnRef {
     pub fn set_playing(&self, cx: &mut Cx, playing: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             let next = if playing { 1.0 } else { 0.0 };
-            if (inner.draw_bg.playing - next).abs() > 0.1 {
+            if !inner.playing_synced {
+                inner.playing_synced = true;
+                inner.playing_target = next;
                 inner.draw_bg.playing = next;
                 inner.draw_bg.redraw(cx);
+            } else if (inner.playing_target - next).abs() > 0.1 {
+                inner.playing_target = next;
+                inner.anim_frame = cx.new_next_frame();
             }
         }
     }

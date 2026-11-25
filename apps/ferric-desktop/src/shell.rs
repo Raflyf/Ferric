@@ -392,8 +392,10 @@ mod win_impl {
                     .ends_with("ferric.exe.friendlyappname")
                 {
                     let words: Vec<u16> = data_buf[..(data_len as usize).min(data_buf.len())]
-                        .chunks_exact(2)
-                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&c| u16::from_le_bytes(c))
                         .take_while(|&w| w != 0)
                         .collect();
                     let cur_val = String::from_utf16_lossy(&words);
@@ -687,16 +689,25 @@ mod win_impl {
                         | WS_SYSMENU.0) as i32;
                 if next_style != cur_style {
                     let _ = SetWindowLongW(hwnd, GWL_STYLE, next_style);
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
                 }
+                let margins = DwmMargins {
+                    cx_left_width: -1,
+                    cx_right_width: -1,
+                    cy_top_height: -1,
+                    cy_bottom_height: -1,
+                };
+                let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+                // Always force a fresh WM_NCCALCSIZE pass after subclassing so DWM clears any
+                // initial non-client caption frame even when style flags already matched.
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
                 let disable_trans: i32 = 0;
                 let _ = DwmSetWindowAttribute(
                     hwnd,

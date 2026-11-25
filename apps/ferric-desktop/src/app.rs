@@ -50,9 +50,9 @@ use ferric_providers::updater::{
 use ferric_providers::ytmusic::{
     VideoStreamOption, YtmCardKind, YtmHomeTasteProfile, YtmRichHome, YtmRichSearch, YtmSession,
     YtmShelfCard, fetch_account_library, fetch_browse_detail, fetch_home_continuation,
-    fetch_radio_up_next_for_track, fetch_rich_home, fetch_rich_search, fetch_video_streams,
-    normalize_ytm_thumbnail_url, resolve_and_cache_audio_stream_with_quality,
-    resolve_best_video_id_for_track,
+    fetch_radio_up_next_for_track, fetch_rich_home, fetch_rich_search, normalize_ytm_thumbnail_url,
+    resolve_and_cache_audio_stream_with_quality, resolve_best_video_id_for_track,
+    resolve_music_video_streams,
 };
 use ferric_sync::{
     ActiveSpeakerLease, LanDiscoveryBeacon, PairingPayload, QrMatrix, detect_local_lan_ip,
@@ -526,6 +526,8 @@ live_design! {
         label_walk: { width: 0, height: 0 }
         icon_walk: { width: Fit, height: 14 }
         draw_icon: {
+            instance pulse: 0.0
+            instance pulse_kind: 0.0
             curve: 1.15,
             linearize: 0.08,
             brightness: 1.05,
@@ -533,15 +535,52 @@ live_design! {
             color_hover: #F4F4F7,
             color_focus: #F4F4F7,
             color_down: #E86A2C
+            fn pixel(self) -> vec4 {
+                let t = clamp(self.pulse, 0.0, 1.0);
+                let mut scale = 1.0 - 0.07 * self.down;
+                let mut ang = 0.0;
+                if (t > 0.001 && t < 0.999) {
+                    let env = sin(t * 3.14159265);
+                    if (self.pulse_kind > 2.5) {
+                        // Heartbeat elastic pop
+                        scale = 1.0 + 0.28 * env - 0.09 * sin(t * 6.2831853) * (1.0 - t);
+                    } else if (self.pulse_kind > 1.5) {
+                        // Tactile mute/unmute shake + pop
+                        scale = 1.0 + 0.16 * env;
+                        ang = sin(t * 15.707963) * 0.24 * (1.0 - t);
+                    } else if (self.pulse_kind > 0.5) {
+                        // Repeat / refresh crisp 180-deg spring spin settle
+                        let ease = 1.0 - pow(1.0 - t, 3.0);
+                        scale = 1.0 + 0.16 * env;
+                        ang = (1.0 - ease) * 3.14159265;
+                    } else {
+                        // Crisp spring bounce
+                        scale = 1.0 + 0.20 * env;
+                    }
+                }
+                let uv_c = (self.pos - vec2(0.5, 0.5)) / max(scale, 0.45);
+                let ca = cos(ang);
+                let sa = sin(ang);
+                let rot = vec2(uv_c.x * ca - uv_c.y * sa, uv_c.x * sa + uv_c.y * ca) + vec2(0.5, 0.5);
+                if (rot.x < 0.0 || rot.x > 1.0 || rot.y < 0.0 || rot.y > 1.0) {
+                    return vec4(0.0, 0.0, 0.0, 0.0);
+                }
+                let tc = mix(self.icon_t1.xy, self.icon_t2.xy, rot);
+                let s = pow(sample2d_rt(self.tex, tc).x, self.u_curve);
+                let col = self.get_color();
+                return vec4(s * col.rgb * self.u_brightness * col.a, s * col.a);
+            }
         }
         draw_bg: {
             instance active: 0.0
             instance hover: 0.0
             instance down: 0.0
+            instance pulse: 0.0
             uniform acrylic_on: 0.0
             uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let p = self.pos * self.rect_size;
+                let sdf = Sdf2d::viewport(p);
                 let inset = 1.0 + self.down * 0.85;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
@@ -551,6 +590,14 @@ live_design! {
                 sdf.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.25));
                 let rim = vec4(ink, (0.12 * self.hover + 0.16 * self.active));
                 sdf.stroke(rim, 1.0);
+                let pt = clamp(self.pulse, 0.0, 1.0);
+                if (pt > 0.001 && pt < 0.999) {
+                    let c = self.rect_size * 0.5;
+                    let max_r = min(c.x, c.y) - 1.2;
+                    let ring_r = mix(max_r * 0.42, max_r, 1.0 - pow(1.0 - pt, 2.5));
+                    sdf.circle(c.x, c.y, ring_r);
+                    sdf.stroke(vec4(ink, 0.34 * (1.0 - pt)), 1.25);
+                }
                 return sdf.result;
             }
         }
@@ -3319,6 +3366,10 @@ pub struct App {
     #[rust]
     video_streams: Vec<VideoStreamOption>,
     #[rust]
+    video_is_official_mv: bool,
+    #[rust]
+    icon_pulses: Vec<(&'static [LiveId], f32, f32)>,
+    #[rust]
     last_video_sync: Option<Instant>,
     #[rust]
     displayed_accent: Vec4,
@@ -3471,6 +3522,25 @@ impl App {
         self.motion_frame = cx.new_next_frame();
     }
 
+    /// Trigger a crisp 250ms GPU micro-animation on a stateful `FerricIconBtn`
+    /// (`kind`: 0.0 = Bounce, 1.0 = Spin, 2.0 = Shake, 3.0 = HeartPop). Zero CPU once settled.
+    fn trigger_icon_pulse(&mut self, cx: &mut Cx, btn_id: &'static [LiveId], kind: f32) {
+        if let Some(slot) = self.icon_pulses.iter_mut().find(|(id, _, _)| *id == btn_id) {
+            slot.1 = 0.005;
+            slot.2 = kind;
+        } else {
+            self.icon_pulses.push((btn_id, 0.005, kind));
+        }
+        self.ui.button(btn_id).apply_over(
+            cx,
+            live! {
+                draw_bg: { pulse: 0.005 }
+                draw_icon: { pulse: 0.005, pulse_kind: (kind) }
+            },
+        );
+        self.start_motion(cx);
+    }
+
     fn active_page_view_id(&self) -> &'static [LiveId] {
         match self.active_page {
             MainPage::Home => id!(page_home),
@@ -3590,6 +3660,36 @@ impl App {
                     .apply_over(cx, live! { width: (self.right_w_cur) });
             }
             self.sync_video_bounds(cx);
+        }
+
+        if !self.icon_pulses.is_empty() {
+            let step = (dt as f32) / 0.26_f32;
+            let mut idx = 0;
+            while idx < self.icon_pulses.len() {
+                let (btn_id, cur_t, kind) = self.icon_pulses[idx];
+                let next_t = cur_t + step;
+                if next_t >= 1.0 {
+                    self.ui.button(btn_id).apply_over(
+                        cx,
+                        live! {
+                            draw_bg: { pulse: 0.0 }
+                            draw_icon: { pulse: 0.0, pulse_kind: (kind) }
+                        },
+                    );
+                    self.icon_pulses.swap_remove(idx);
+                } else {
+                    self.icon_pulses[idx].1 = next_t;
+                    self.ui.button(btn_id).apply_over(
+                        cx,
+                        live! {
+                            draw_bg: { pulse: (next_t) }
+                            draw_icon: { pulse: (next_t), pulse_kind: (kind) }
+                        },
+                    );
+                    active = true;
+                    idx += 1;
+                }
+            }
         }
 
         if active {
@@ -4090,10 +4190,15 @@ impl App {
                 (s.position_ms as f64 / 1000.0, s.is_playing)
             })
             .unwrap_or((0.0, true));
+        let mv_tag = if self.video_is_official_mv {
+            "Official MV"
+        } else {
+            "Audio Cover (No Official MV)"
+        };
         self.ui.label(id!(vid_status_lbl)).set_text(
             cx,
             &format!(
-                "{} ({}p · {} kbps) · Synced to WASAPI",
+                "{mv_tag} · {} ({}p · {} kbps)",
                 chosen.label, chosen.height, chosen.bitrate_kbps
             ),
         );
@@ -4169,6 +4274,7 @@ impl App {
                 if cand != *local_p && cand.is_file() {
                     let uri = format!("file:///{}", cand.to_string_lossy().replace('\\', "/"));
                     self.video_track_id = Some(cur.id.clone());
+                    self.video_is_official_mv = true;
                     self.video_streams = vec![VideoStreamOption {
                         quality: VideoQuality::P1080,
                         label: "Local HD".to_string(),
@@ -4186,13 +4292,14 @@ impl App {
         }
 
         self.video_track_id = Some(cur.id.clone());
+        self.video_is_official_mv = false;
         self.video_streams.clear();
         self.ui
             .label(id!(vid_status_lbl))
-            .set_text(cx, "Resolving native MP4 video streams...");
+            .set_text(cx, "Searching for Official Music Video...");
         self.ui
             .label(id!(vid_stage_hint_lbl))
-            .set_text(cx, "Loading in-app video clip...");
+            .set_text(cx, "Matching official music video clip...");
         self.ui.redraw(cx);
 
         let Some(tx) = self.bg_tx.clone() else {
@@ -4202,24 +4309,24 @@ impl App {
         let track_id = cur.id;
         let artist = cur.artist;
         let title = cur.title;
+        let track_dur_ms = cur.duration_ms;
         let existing_vid = cur.youtube_video_id;
         thread::spawn(move || {
-            let res = (|| {
-                let vid = match existing_vid {
-                    Some(v) if !v.trim().is_empty() => v,
-                    _ => resolve_best_video_id_for_track(&session, &artist, &title)
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| "No official music video found for this song".to_string())?,
-                };
-                let streams = fetch_video_streams(&vid, &session).map_err(|e| e.to_string())?;
-                Ok::<_, String>((vid, streams))
-            })();
+            let res = resolve_music_video_streams(
+                &session,
+                &artist,
+                &title,
+                existing_vid.as_deref(),
+                track_dur_ms,
+            )
+            .map_err(|e| e.to_string());
             match res {
-                Ok((video_id, streams)) => {
+                Ok(resolved) => {
                     let _ = tx.send(BgMessage::VideoStreamsLoaded {
                         track_id,
-                        video_id,
-                        streams,
+                        video_id: resolved.video_id,
+                        is_official_mv: resolved.is_official_mv,
+                        streams: resolved.streams,
                     });
                 }
                 Err(error) => {
@@ -9816,6 +9923,7 @@ impl App {
                 BgMessage::VideoStreamsLoaded {
                     track_id,
                     video_id,
+                    is_official_mv,
                     streams,
                 } => {
                     if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == track_id)
@@ -9825,6 +9933,7 @@ impl App {
                     }
                     if self.video_open && self.video_track_id.as_deref() == Some(track_id.as_str())
                     {
+                        self.video_is_official_mv = is_official_mv;
                         self.video_streams = streams;
                         self.load_selected_video_quality(cx);
                     }
@@ -10317,6 +10426,7 @@ impl App {
             self.navigate_to(cx, next, false);
         }
         if self.ui.button(id!(refresh_btn)).clicked(actions) {
+            self.trigger_icon_pulse(cx, id!(refresh_btn), 1.0);
             let params = if self.active_mood_idx > 0 {
                 self.rich_home
                     .chips
@@ -11197,6 +11307,7 @@ impl App {
             self.set_right_sidebar(cx, true, true);
         }
         if self.ui.button(id!(rs_radio_btn)).clicked(actions) {
+            self.trigger_icon_pulse(cx, id!(rs_radio_btn), 0.0);
             self.session_state.autoplay_radio = !self.session_state.autoplay_radio;
             if let Some(db) = &self.db {
                 let _ = db.save_session_state(&self.session_state);
@@ -11368,6 +11479,7 @@ impl App {
             self.set_fullscreen(cx, false);
         }
         if self.ui.button(id!(bar_lyrics_btn)).clicked(actions) {
+            self.trigger_icon_pulse(cx, id!(bar_lyrics_btn), 0.0);
             if self.right_sidebar_open && self.right_lyrics_tab {
                 self.set_right_sidebar(cx, false, false);
             } else {
@@ -11375,6 +11487,7 @@ impl App {
             }
         }
         if self.ui.button(id!(bar_queue_btn)).clicked(actions) {
+            self.trigger_icon_pulse(cx, id!(bar_queue_btn), 0.0);
             if self.right_sidebar_open && !self.right_lyrics_tab {
                 self.set_right_sidebar(cx, false, false);
             } else {
@@ -11427,6 +11540,8 @@ impl App {
             }
             self.sync_next_deck_to_engine();
             self.sync_controls_from_state(cx);
+            self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
+            self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
             self.refresh_right_sidebar(cx);
         }
         if self.ui.button(id!(repeat_btn)).clicked(actions)
@@ -11439,6 +11554,8 @@ impl App {
             }
             self.sync_next_deck_to_engine();
             self.sync_controls_from_state(cx);
+            self.trigger_icon_pulse(cx, id!(repeat_btn), 1.0);
+            self.trigger_icon_pulse(cx, id!(fs_repeat_btn), 1.0);
             self.show_toast(
                 cx,
                 match self.queue.repeat {
@@ -11458,6 +11575,8 @@ impl App {
             && let Some(cur) = self.queue.current().cloned()
         {
             let next_liked = self.toggle_track_like(cx, &cur);
+            self.trigger_icon_pulse(cx, id!(np_like_btn), 3.0);
+            self.trigger_icon_pulse(cx, id!(fs_like_btn), 3.0);
             self.show_toast(
                 cx,
                 if next_liked {
@@ -11501,7 +11620,9 @@ impl App {
                     .changed(actions)
             })
         {
+            let was_muted = self.session_state.volume < 0.01;
             self.session_state.volume = vol as f32;
+            let now_muted = self.session_state.volume < 0.01;
             if self.session_state.volume > 0.02 {
                 self.pre_mute_volume = self.session_state.volume;
             }
@@ -11512,6 +11633,10 @@ impl App {
                 let _ = db.save_session_state(&self.session_state);
             }
             self.sync_controls_from_state(cx);
+            if was_muted != now_muted {
+                self.trigger_icon_pulse(cx, id!(vol_mute_btn), 2.0);
+                self.trigger_icon_pulse(cx, id!(fs_vol_mute_btn), 2.0);
+            }
         }
         if self.ui.button(id!(vol_mute_btn)).clicked(actions)
             || self.ui.button(id!(fs_vol_mute_btn)).clicked(actions)
@@ -11529,6 +11654,8 @@ impl App {
                 let _ = db.save_session_state(&self.session_state);
             }
             self.sync_controls_from_state(cx);
+            self.trigger_icon_pulse(cx, id!(vol_mute_btn), 2.0);
+            self.trigger_icon_pulse(cx, id!(fs_vol_mute_btn), 2.0);
             self.ui.redraw(cx);
         }
 
@@ -11581,6 +11708,7 @@ impl App {
             self.show_toast(cx, "Lyrics copied to clipboard");
         }
         if self.ui.button(id!(bar_video_btn)).clicked(actions) {
+            self.trigger_icon_pulse(cx, id!(bar_video_btn), 0.0);
             if self.video_open && self.fullscreen_open {
                 self.close_native_video_stage(cx);
             } else {
@@ -12814,6 +12942,8 @@ impl AppMain for App {
                         audio.send(EngineCommand::SetVolume(self.session_state.volume));
                     }
                     self.sync_controls_from_state(cx);
+                    self.trigger_icon_pulse(cx, id!(vol_mute_btn), 2.0);
+                    self.trigger_icon_pulse(cx, id!(fs_vol_mute_btn), 2.0);
                     return;
                 }
                 if ke.key_code == KeyCode::KeyS {
@@ -12821,6 +12951,8 @@ impl AppMain for App {
                     self.session_state.shuffle = next_s;
                     self.queue.set_shuffle(next_s);
                     self.sync_controls_from_state(cx);
+                    self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
+                    self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
                     self.refresh_right_sidebar(cx);
                     self.show_toast(cx, if next_s { "Shuffle On" } else { "Shuffle Off" });
                     return;
@@ -12834,6 +12966,8 @@ impl AppMain for App {
                     self.session_state.repeat = next_r;
                     self.queue.repeat = next_r;
                     self.sync_controls_from_state(cx);
+                    self.trigger_icon_pulse(cx, id!(repeat_btn), 1.0);
+                    self.trigger_icon_pulse(cx, id!(fs_repeat_btn), 1.0);
                     self.show_toast(
                         cx,
                         match next_r {
@@ -12848,6 +12982,8 @@ impl AppMain for App {
                     && let Some(cur) = self.queue.current().cloned()
                 {
                     let next_liked = self.toggle_track_like(cx, &cur);
+                    self.trigger_icon_pulse(cx, id!(np_like_btn), 3.0);
+                    self.trigger_icon_pulse(cx, id!(fs_like_btn), 3.0);
                     self.show_toast(
                         cx,
                         if next_liked {

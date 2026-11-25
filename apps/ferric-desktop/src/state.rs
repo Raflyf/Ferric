@@ -237,6 +237,7 @@ pub enum BgMessage {
     VideoStreamsLoaded {
         track_id: String,
         video_id: String,
+        is_official_mv: bool,
         streams: Vec<VideoStreamOption>,
     },
     VideoStreamsFailed {

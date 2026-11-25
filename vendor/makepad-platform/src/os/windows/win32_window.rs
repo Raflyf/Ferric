@@ -102,7 +102,13 @@ use {
                         SW_MINIMIZE,
                         SWP_NOMOVE,
                         SWP_NOSIZE,
+                        SWP_NOZORDER,
+                        SWP_NOACTIVATE,
+                        SWP_FRAMECHANGED,
+                        IsIconic,
                         WM_ACTIVATE,
+                        WM_NCACTIVATE,
+                        WM_NCPAINT,
                         WM_NCCALCSIZE,
                         WM_NCHITTEST,
                         WA_ACTIVE,
@@ -379,11 +385,46 @@ impl Win32Window {
         with_win32_app(|app| app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd));
         with_win32_app(|app| app.all_windows.push(self.hwnd));
 
+        // Trigger immediate WM_NCCALCSIZE recalculation before first ShowWindow so DWM never
+        // paints ghost native caption buttons behind Ferric's custom titlebar controls.
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                HWND(0),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+
         self.set_outer_size(size);
     }
     
     pub unsafe extern "system" fn window_class_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {
-        
+        // Suppress native OS non-client chrome from the very first CreateWindowExW message
+        // (even while GWLP_USERDATA is still 0) so DWM never creates ghost caption glyphs at startup.
+        match msg {
+            WM_NCCALCSIZE if wparam == WPARAM(1) => {
+                let margins = MARGINS {
+                    cxLeftWidth: -1,
+                    cxRightWidth: -1,
+                    cyTopHeight: -1,
+                    cyBottomHeight: -1,
+                };
+                let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+                return LRESULT(0);
+            }
+            WM_NCPAINT => return LRESULT(0),
+            WM_NCACTIVATE => {
+                if IsIconic(hwnd).0 == 0 {
+                    return LRESULT(1);
+                }
+            }
+            _ => {}
+        }
+
         let user_data = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
         if user_data == 0 {
             return DefWindowProcW(hwnd, msg, wparam, lparam);

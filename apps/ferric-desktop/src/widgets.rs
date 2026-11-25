@@ -2012,11 +2012,9 @@ impl Widget for FerricLyricsView {
                     cx.widget_action(uid, &scope.path, FerricLyricsAction::SeekMs(ts_ms));
                 }
             }
-            Hit::FingerUp(_) => {
-                if self.pressed_idx.is_some() {
-                    self.pressed_idx = None;
-                    self.area.redraw(cx);
-                }
+            Hit::FingerUp(_) if self.pressed_idx.is_some() => {
+                self.pressed_idx = None;
+                self.area.redraw(cx);
             }
             _ => {}
         }

@@ -6,7 +6,8 @@ use crate::shell::{
     win32_install_window_hooks, win32_is_active_window_maximized,
     win32_is_window_hidden_or_minimized, win32_main_hwnd_raw, win32_minimize_active_window,
     win32_poll_tray_events, win32_set_close_to_tray, win32_set_native_acrylic,
-    win32_toggle_maximize_active_window, win32_trim_working_set, win32_update_tray_tooltip,
+    win32_toggle_maximize_active_window, win32_trim_working_set, win32_update_taskbar_playback,
+    win32_update_tray_tooltip,
 };
 use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::state::{
@@ -6969,6 +6970,7 @@ impl App {
         }
 
         win32_update_tray_tooltip(&format!("Ferric — {} · {}", track.title, track.artist));
+        win32_update_taskbar_playback(&track.title, &track.artist, true);
 
         let out_rate = self
             .audio
@@ -8560,6 +8562,11 @@ impl App {
 
             if let Some(smtc) = &mut self.smtc {
                 smtc.set_playing(snap.is_playing);
+            }
+            if let Some(cur) = self.queue.current() {
+                win32_update_taskbar_playback(&cur.title, &cur.artist, snap.is_playing);
+            } else {
+                win32_update_taskbar_playback("", "", false);
             }
 
             // Skip GPU UI telemetry redraws when hidden in tray / minimized -> near-0% idle GPU/CPU

@@ -67,30 +67,39 @@ pub fn launch_verified_installer(msi_path: &Path) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 mod win_impl {
     use super::{TrayEvent, WindowClientScreenRect};
+    use std::cell::RefCell;
     use std::ffi::c_void;
     use std::ptr;
     use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
-        ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, ClientToScreen, CreateBitmap, CreateDIBSection,
+        DIB_RGB_COLORS, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
+        MONITORINFO, MonitorFromWindow,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     };
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
     use windows::Win32::System::Threading::GetCurrentProcess;
     use windows::Win32::UI::Shell::{
-        NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-        Shell_NotifyIconW,
+        ITaskbarList3, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+        NOTIFYICONDATAW, Shell_NotifyIconW, THB_FLAGS, THB_ICON, THB_TOOLTIP, THBF_ENABLED,
+        THBN_CLICKED, THUMBBUTTON, TaskbarList,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetCursorPos, IDI_APPLICATION,
-        LoadIconW, MF_SEPARATOR, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, SW_HIDE,
-        SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
+        AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetClientRect,
+        GetCursorPos, HICON, ICONINFO, IDI_APPLICATION, LoadIconW, MF_SEPARATOR, MF_STRING,
+        MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN,
         TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE,
-        WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE, WM_NCCALCSIZE,
-        WM_NCHITTEST, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED,
-        WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE,
+        WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND,
+        WM_WINDOWPOSCHANGED, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME,
     };
     use windows::core::{PCWSTR, s, w};
 
@@ -110,6 +119,10 @@ mod win_impl {
     const CMD_PREV: u32 = 1004;
     const CMD_QUIT: u32 = 1005;
 
+    const TB_BTN_PREV: u32 = 2001;
+    const TB_BTN_PLAY_PAUSE: u32 = 2002;
+    const TB_BTN_NEXT: u32 = 2003;
+
     const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
     const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
@@ -122,7 +135,32 @@ mod win_impl {
 
     static SINGLE_INSTANCE_MUTEX: AtomicIsize = AtomicIsize::new(0);
     static ACTIVATE_MSG: AtomicU32 = AtomicU32::new(0);
+    static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
     static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+
+    #[derive(Clone, Copy)]
+    enum ThumbIconKind {
+        Prev,
+        Play,
+        Pause,
+        Next,
+    }
+
+    struct TaskbarThumbState {
+        tb: ITaskbarList3,
+        ico_prev: HICON,
+        ico_play: HICON,
+        ico_pause: HICON,
+        ico_next: HICON,
+        buttons_added: bool,
+        add_retries: u8,
+        last_playing: Option<bool>,
+        last_title: String,
+    }
+
+    thread_local! {
+        static TASKBAR_STATE: RefCell<Option<TaskbarThumbState>> = const { RefCell::new(None) };
+    }
     static ACRYLIC_ENABLED: AtomicBool = AtomicBool::new(false);
     static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
@@ -515,9 +553,284 @@ mod win_impl {
                 ensure_tray_icon(hwnd, "Ferric — Music Player");
             }
             apply_window_icon(hwnd);
+            init_taskbar_thumbbar(hwnd);
             let acr_on = ACRYLIC_ENABLED.load(Ordering::Acquire);
             set_native_acrylic(acr_on, 0.72);
         }
+    }
+
+    fn taskbar_created_message_id() -> u32 {
+        let cached = TASKBAR_CREATED_MSG.load(Ordering::Acquire);
+        if cached != 0 {
+            return cached;
+        }
+        let name: Vec<u16> = "TaskbarButtonCreated\0".encode_utf16().collect();
+        // SAFETY: Null-terminated UTF-16 message name for Windows Explorer taskbar button creation.
+        let id = unsafe { RegisterWindowMessageW(name.as_ptr()) };
+        if id != 0 {
+            TASKBAR_CREATED_MSG.store(id, Ordering::Release);
+        }
+        id
+    }
+
+    fn fill_tip_buf(tip: &str) -> [u16; 260] {
+        let mut buf = [0u16; 260];
+        for (i, ch) in tip.encode_utf16().take(259).enumerate() {
+            buf[i] = ch;
+        }
+        buf
+    }
+
+    fn hit_media_glyph(kind: ThumbIconKind, x: f32, y: f32) -> bool {
+        match kind {
+            ThumbIconKind::Prev => {
+                let bar = (6.5..=9.5).contains(&x) && (7.0..=25.0).contains(&y);
+                let tri = (11.5..=24.5).contains(&x) && (y - 16.0).abs() <= 8.5 * (x - 11.5) / 13.0;
+                bar || tri
+            }
+            ThumbIconKind::Play => {
+                (10.0..=24.5).contains(&x) && (y - 16.0).abs() <= 9.0 * (24.5 - x) / 14.5
+            }
+            ThumbIconKind::Pause => {
+                let l = (8.5..=13.5).contains(&x) && (7.0..=25.0).contains(&y);
+                let r = (18.5..=23.5).contains(&x) && (7.0..=25.0).contains(&y);
+                l || r
+            }
+            ThumbIconKind::Next => {
+                let tri = (7.5..=20.5).contains(&x) && (y - 16.0).abs() <= 8.5 * (20.5 - x) / 13.0;
+                let bar = (22.5..=25.5).contains(&x) && (7.0..=25.0).contains(&y);
+                tri || bar
+            }
+        }
+    }
+
+    fn create_media_hicon(kind: ThumbIconKind) -> HICON {
+        const SZ: i32 = 32;
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: SZ,
+                biHeight: -SZ, // Top-down 32-bit BGRA
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // SAFETY: Allocates a 32x32 top-down DIB section and zeroed 1bpp mask bitmap, fills 4x4
+        // supersampled white media glyph pixels, builds an HICON, and releases temp bitmaps.
+        unsafe {
+            let mut bits_ptr: *mut c_void = ptr::null_mut();
+            let Ok(hbm_color) =
+                CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)
+            else {
+                return HICON::default();
+            };
+            if bits_ptr.is_null() {
+                let _ = DeleteObject(HGDIOBJ(hbm_color.0));
+                return HICON::default();
+            }
+            let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (SZ * SZ) as usize);
+            for py in 0..SZ {
+                for px in 0..SZ {
+                    let mut hits = 0u32;
+                    for sy in 0..4 {
+                        for sx in 0..4 {
+                            let fx = px as f32 + (sx as f32 + 0.5) * 0.25;
+                            let fy = py as f32 + (sy as f32 + 0.5) * 0.25;
+                            if hit_media_glyph(kind, fx, fy) {
+                                hits += 1;
+                            }
+                        }
+                    }
+                    let a = ((hits * 255) / 16).min(255);
+                    // Straight white BGRA for CreateIconIndirect (Windows premultiplies on draw)
+                    pixels[(py * SZ + px) as usize] =
+                        if a == 0 { 0 } else { (a << 24) | 0x00FF_FFFF };
+                }
+            }
+            let mask_bits = [0u8; (SZ * SZ / 8) as usize];
+            let hbm_mask = CreateBitmap(SZ, SZ, 1, 1, Some(mask_bits.as_ptr().cast()));
+            let ii = ICONINFO {
+                fIcon: true.into(),
+                xHotspot: 0,
+                yHotspot: 0,
+                hbmMask: hbm_mask,
+                hbmColor: hbm_color,
+            };
+            let hicon = CreateIconIndirect(&ii).unwrap_or_default();
+            let _ = DeleteObject(HGDIOBJ(hbm_color.0));
+            if !hbm_mask.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(hbm_mask.0));
+            }
+            hicon
+        }
+    }
+
+    fn build_thumb_buttons(
+        ico_prev: HICON,
+        ico_play: HICON,
+        ico_pause: HICON,
+        ico_next: HICON,
+        is_playing: bool,
+    ) -> [THUMBBUTTON; 3] {
+        let mask = THB_ICON | THB_TOOLTIP | THB_FLAGS;
+        [
+            THUMBBUTTON {
+                dwMask: mask,
+                iId: TB_BTN_PREV,
+                iBitmap: 0,
+                hIcon: ico_prev,
+                szTip: fill_tip_buf("Previous"),
+                dwFlags: THBF_ENABLED,
+            },
+            THUMBBUTTON {
+                dwMask: mask,
+                iId: TB_BTN_PLAY_PAUSE,
+                iBitmap: 0,
+                hIcon: if is_playing { ico_pause } else { ico_play },
+                szTip: fill_tip_buf(if is_playing { "Pause" } else { "Play" }),
+                dwFlags: THBF_ENABLED,
+            },
+            THUMBBUTTON {
+                dwMask: mask,
+                iId: TB_BTN_NEXT,
+                iBitmap: 0,
+                hIcon: ico_next,
+                szTip: fill_tip_buf("Next"),
+                dwFlags: THBF_ENABLED,
+            },
+        ]
+    }
+
+    fn init_taskbar_thumbbar(hwnd: HWND) {
+        let _ = taskbar_created_message_id();
+        // SAFETY: STA COM creation of Shell ITaskbarList3 on Ferric's UI thread.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let Ok(tb) =
+                CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+            else {
+                return;
+            };
+            if tb.HrInit().is_err() {
+                return;
+            }
+            TASKBAR_STATE.with(|cell| {
+                let mut guard = cell.borrow_mut();
+                let (prev_playing, prev_title) = if let Some(old) = guard.take() {
+                    for ic in [old.ico_prev, old.ico_play, old.ico_pause, old.ico_next] {
+                        if !ic.is_invalid() {
+                            let _ = DestroyIcon(ic);
+                        }
+                    }
+                    (old.last_playing.unwrap_or(false), old.last_title)
+                } else {
+                    (false, String::new())
+                };
+                let ico_prev = create_media_hicon(ThumbIconKind::Prev);
+                let ico_play = create_media_hicon(ThumbIconKind::Play);
+                let ico_pause = create_media_hicon(ThumbIconKind::Pause);
+                let ico_next = create_media_hicon(ThumbIconKind::Next);
+                let buttons =
+                    build_thumb_buttons(ico_prev, ico_play, ico_pause, ico_next, prev_playing);
+                let added = tb.ThumbBarAddButtons(hwnd, &buttons).is_ok();
+                *guard = Some(TaskbarThumbState {
+                    tb,
+                    ico_prev,
+                    ico_play,
+                    ico_pause,
+                    ico_next,
+                    buttons_added: added,
+                    add_retries: 0,
+                    last_playing: if added { Some(prev_playing) } else { None },
+                    last_title: prev_title,
+                });
+            });
+        }
+    }
+
+    pub fn update_taskbar_playback(title: &str, artist: &str, is_playing: bool) {
+        let Some(hwnd) = active_process_hwnd() else {
+            return;
+        };
+        let win_title = if title.trim().is_empty() {
+            "Ferric".to_string()
+        } else if artist.trim().is_empty() {
+            format!("{} - Ferric", title.trim())
+        } else {
+            format!("{} - {} - Ferric", title.trim(), artist.trim())
+        };
+        TASKBAR_STATE.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let Some(st) = guard.as_mut() else {
+                let wide: Vec<u16> = win_title.encode_utf16().chain(Some(0)).collect();
+                // SAFETY: Valid HWND and null-terminated UTF-16 title string.
+                unsafe {
+                    let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
+                }
+                return;
+            };
+            if st.last_title != win_title {
+                st.last_title = win_title.clone();
+                let wide: Vec<u16> = win_title.encode_utf16().chain(Some(0)).collect();
+                // SAFETY: Valid HWND and null-terminated UTF-16 title string.
+                unsafe {
+                    let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
+                }
+            }
+            if !st.buttons_added && st.add_retries < 8 {
+                st.add_retries += 1;
+                let buttons = build_thumb_buttons(
+                    st.ico_prev,
+                    st.ico_play,
+                    st.ico_pause,
+                    st.ico_next,
+                    is_playing,
+                );
+                // SAFETY: UI-thread COM retry when Explorer taskbar button finishes registering.
+                if unsafe { st.tb.ThumbBarAddButtons(hwnd, &buttons) }.is_ok() {
+                    st.buttons_added = true;
+                    st.last_playing = Some(is_playing);
+                    return;
+                }
+            }
+            if st.buttons_added && st.last_playing != Some(is_playing) {
+                st.last_playing = Some(is_playing);
+                let btn = THUMBBUTTON {
+                    dwMask: THB_ICON | THB_TOOLTIP | THB_FLAGS,
+                    iId: TB_BTN_PLAY_PAUSE,
+                    iBitmap: 0,
+                    hIcon: if is_playing {
+                        st.ico_pause
+                    } else {
+                        st.ico_play
+                    },
+                    szTip: fill_tip_buf(if is_playing { "Pause" } else { "Play" }),
+                    dwFlags: THBF_ENABLED,
+                };
+                // SAFETY: UI-thread COM call updating center Play/Pause thumbnail toolbar button.
+                unsafe {
+                    let _ = st.tb.ThumbBarUpdateButtons(hwnd, &[btn]);
+                }
+            }
+        });
+    }
+
+    fn destroy_taskbar_thumbbar() {
+        TASKBAR_STATE.with(|cell| {
+            if let Some(st) = cell.borrow_mut().take() {
+                // SAFETY: Releases HICONs created via CreateIconIndirect on shutdown.
+                unsafe {
+                    for ic in [st.ico_prev, st.ico_play, st.ico_pause, st.ico_next] {
+                        if !ic.is_invalid() {
+                            let _ = DestroyIcon(ic);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn apply_window_icon(hwnd: HWND) {
@@ -779,7 +1092,33 @@ mod win_impl {
                 push_event(TrayEvent::ShowWindow);
                 return LRESULT(0);
             }
+            let tb_msg = TASKBAR_CREATED_MSG.load(Ordering::Acquire);
+            if tb_msg != 0 && msg == tb_msg {
+                init_taskbar_thumbbar(hwnd);
+                return LRESULT(0);
+            }
             match msg {
+                WM_COMMAND => {
+                    let hi = ((wparam.0 >> 16) & 0xFFFF) as u32;
+                    let lo = (wparam.0 & 0xFFFF) as u32;
+                    if hi == THBN_CLICKED {
+                        match lo {
+                            TB_BTN_PREV => {
+                                push_event(TrayEvent::PrevTrack);
+                                return LRESULT(0);
+                            }
+                            TB_BTN_PLAY_PAUSE => {
+                                push_event(TrayEvent::TogglePlayPause);
+                                return LRESULT(0);
+                            }
+                            TB_BTN_NEXT => {
+                                push_event(TrayEvent::NextTrack);
+                                return LRESULT(0);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 WM_GETMINMAXINFO => {
                     let _ = DefSubclassProc(hwnd, msg, wparam, lparam);
                     let mmi = lparam.0 as *mut MINMAXINFO;
@@ -894,6 +1233,7 @@ mod win_impl {
                     }
                 }
                 WM_DESTROY => {
+                    destroy_taskbar_thumbbar();
                     let mh = SINGLE_INSTANCE_MUTEX.swap(0, Ordering::AcqRel);
                     if mh != 0 {
                         let _ = CloseHandle(mh as *mut c_void);
@@ -1065,6 +1405,13 @@ pub fn win32_update_tray_tooltip(tip: &str) {
     win_impl::update_tray_tooltip(tip);
     #[cfg(not(target_os = "windows"))]
     let _ = tip;
+}
+
+pub fn win32_update_taskbar_playback(title: &str, artist: &str, is_playing: bool) {
+    #[cfg(target_os = "windows")]
+    win_impl::update_taskbar_playback(title, artist, is_playing);
+    #[cfg(not(target_os = "windows"))]
+    let _ = (title, artist, is_playing);
 }
 
 #[allow(dead_code)]

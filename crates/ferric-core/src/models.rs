@@ -48,6 +48,8 @@ pub struct Track {
     pub isrc: Option<String>,
     pub spotify_id: Option<String>,
     pub youtube_video_id: Option<String>,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
     pub replay_gain_db: i32,
     pub liked: bool,
 }
@@ -89,6 +91,8 @@ pub struct Playlist {
     pub track_count: usize,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,6 +313,12 @@ pub struct SessionResumeState {
     pub total_tracks_played: u64,
     pub total_listened_secs: u64,
     pub recent_track_ids: Vec<String>,
+    #[serde(default)]
+    pub recent_searches: Vec<String>,
+    #[serde(default)]
+    pub pinned_ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub autoplay_radio: bool,
 }
 
 impl Default for SessionResumeState {
@@ -321,6 +331,9 @@ impl Default for SessionResumeState {
             total_tracks_played: 0,
             total_listened_secs: 0,
             recent_track_ids: Vec::new(),
+            recent_searches: Vec::new(),
+            pinned_ids: Vec::new(),
+            autoplay_radio: true,
         }
     }
 }
@@ -334,8 +347,33 @@ impl SessionResumeState {
             .saturating_add((duration_ms / 1_000).min(900));
         self.recent_track_ids.retain(|id| id != track_id);
         self.recent_track_ids.insert(0, track_id.to_string());
-        if self.recent_track_ids.len() > 12 {
-            self.recent_track_ids.truncate(12);
+        if self.recent_track_ids.len() > 50 {
+            self.recent_track_ids.truncate(50);
+        }
+    }
+
+    pub fn record_search(&mut self, query: &str) {
+        let q = query.trim();
+        if q.is_empty() {
+            return;
+        }
+        self.recent_searches.retain(|s| !s.eq_ignore_ascii_case(q));
+        self.recent_searches.insert(0, q.to_string());
+        if self.recent_searches.len() > 12 {
+            self.recent_searches.truncate(12);
+        }
+    }
+
+    pub fn toggle_pin(&mut self, item_id: &str) -> bool {
+        if let Some(pos) = self.pinned_ids.iter().position(|x| x == item_id) {
+            self.pinned_ids.remove(pos);
+            false
+        } else {
+            self.pinned_ids.insert(0, item_id.to_string());
+            if self.pinned_ids.len() > 16 {
+                self.pinned_ids.truncate(16);
+            }
+            true
         }
     }
 }
@@ -428,6 +466,7 @@ pub fn parse_playlist_import_text(
                 isrc,
                 spotify_id: uri.strip_prefix("spotify:track:").map(ToOwned::to_owned),
                 youtube_video_id: None,
+                thumbnail_url: None,
                 replay_gain_db: 0,
                 liked: false,
             });
@@ -496,6 +535,7 @@ pub fn parse_playlist_import_text(
                 isrc: None,
                 spotify_id: None,
                 youtube_video_id: None,
+                thumbnail_url: None,
                 replay_gain_db: 0,
                 liked: false,
             });
@@ -509,6 +549,7 @@ pub fn parse_playlist_import_text(
         etag: None,
         track_count: tracks.len(),
         description: "Imported playlist".to_string(),
+        thumbnail_url: None,
     };
     (playlist, tracks)
 }

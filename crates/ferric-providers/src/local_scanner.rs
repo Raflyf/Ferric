@@ -97,6 +97,7 @@ pub fn read_track_metadata(path: &Path) -> Option<Track> {
             isrc,
             spotify_id: None,
             youtube_video_id: None,
+            thumbnail_url: None,
             replay_gain_db: 0,
             liked: false,
         });
@@ -117,6 +118,7 @@ pub fn read_track_metadata(path: &Path) -> Option<Track> {
         isrc: None,
         spotify_id: None,
         youtube_video_id: None,
+        thumbnail_url: None,
         replay_gain_db: 0,
         liked: false,
     })

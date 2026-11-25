@@ -135,6 +135,12 @@ pub fn import_spotify_public_url(raw_url: &str) -> ProviderResult<(Playlist, Vec
         .and_then(Value::as_str)
         .unwrap_or("Spotify Import")
         .to_string();
+    let thumb = v
+        .get("thumbnail_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
     let track = Track {
         id: format!("spotify:{}:{}", target.kind_str(), target.id()),
         title: title.clone(),
@@ -150,6 +156,7 @@ pub fn import_spotify_public_url(raw_url: &str) -> ProviderResult<(Playlist, Vec
         isrc: None,
         spotify_id: Some(target.id().to_string()),
         youtube_video_id: None,
+        thumbnail_url: thumb.clone(),
         replay_gain_db: 0,
         liked: false,
     };
@@ -160,6 +167,7 @@ pub fn import_spotify_public_url(raw_url: &str) -> ProviderResult<(Playlist, Vec
         etag: None,
         track_count: 1,
         description: "Imported via Spotify Public Link".to_string(),
+        thumbnail_url: thumb,
     };
     Ok((pl, vec![track]))
 }
@@ -196,6 +204,17 @@ pub fn parse_spotify_embed_html(
         .unwrap_or("Spotify Playlist")
         .trim()
         .to_string();
+
+    let cover_url = entity
+        .pointer("/coverArt/sources")
+        .or_else(|| entity.pointer("/visualIdentity/image"))
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .filter_map(|s| s.get("url").and_then(Value::as_str))
+                .next()
+        })
+        .map(ToOwned::to_owned);
 
     let mut tracks = Vec::new();
     if let Some(list) = entity.get("trackList").and_then(Value::as_array) {
@@ -238,6 +257,7 @@ pub fn parse_spotify_embed_html(
                 isrc: None,
                 spotify_id: sp_id,
                 youtube_video_id: None,
+                thumbnail_url: cover_url.clone(),
                 replay_gain_db: 0,
                 liked: false,
             });
@@ -270,6 +290,7 @@ pub fn parse_spotify_embed_html(
             isrc: None,
             spotify_id: Some(target.id().to_string()),
             youtube_video_id: None,
+            thumbnail_url: cover_url.clone(),
             replay_gain_db: 0,
             liked: false,
         });
@@ -288,6 +309,7 @@ pub fn parse_spotify_embed_html(
         etag: None,
         track_count: tracks.len(),
         description: "Imported via Spotify Public Link".to_string(),
+        thumbnail_url: cover_url,
     };
     Ok((playlist, tracks))
 }
@@ -355,6 +377,7 @@ pub fn import_youtube_public_url(raw_url: &str) -> ProviderResult<(Playlist, Vec
                 .and_then(Value::as_str)
                 .unwrap_or("YouTube Music");
             let cleaned = clean_youtube_metadata(raw_title, raw_author);
+            let thumb = Some(format!("https://i.ytimg.com/vi/{vid}/mqdefault.jpg"));
             let track = Track {
                 id: format!("yt:video:{vid}"),
                 title: cleaned.title.clone(),
@@ -370,6 +393,7 @@ pub fn import_youtube_public_url(raw_url: &str) -> ProviderResult<(Playlist, Vec
                 isrc: None,
                 spotify_id: None,
                 youtube_video_id: Some(vid.clone()),
+                thumbnail_url: thumb.clone(),
                 replay_gain_db: 0,
                 liked: false,
             };
@@ -380,6 +404,7 @@ pub fn import_youtube_public_url(raw_url: &str) -> ProviderResult<(Playlist, Vec
                 etag: None,
                 track_count: 1,
                 description: "Imported via YouTube Link".to_string(),
+                thumbnail_url: thumb,
             };
             Ok((pl, vec![track]))
         }
@@ -423,6 +448,7 @@ pub fn parse_youtube_playlist_html(
         ));
     }
 
+    let pl_thumb = tracks.first().and_then(|t| t.thumbnail_url.clone());
     let playlist = Playlist {
         id: format!("yt:playlist:{list_id}"),
         name: pl_title,
@@ -430,6 +456,7 @@ pub fn parse_youtube_playlist_html(
         etag: None,
         track_count: tracks.len(),
         description: "Imported via YouTube Public Playlist".to_string(),
+        thumbnail_url: pl_thumb,
     };
     Ok((playlist, tracks))
 }
@@ -545,6 +572,7 @@ fn collect_youtube_renderers(
                         isrc: None,
                         spotify_id: None,
                         youtube_video_id: Some(vid.to_string()),
+                        thumbnail_url: Some(format!("https://i.ytimg.com/vi/{vid}/mqdefault.jpg")),
                         replay_gain_db: 0,
                         liked: false,
                     });

@@ -114,21 +114,21 @@ pub struct ThemeConfig {
 }
 
 impl Default for ThemeConfig {
-    /// Strict 3-color LivelyDesk-family identity on Pure OLED Pitch Black (`#000000`).
+    /// Sonora Midnight obsidian dark surface with adaptive album-art accent (WCAG AAA > 17.4:1).
     fn default() -> Self {
         Self {
-            name: "Ferric 3-Color AMOLED".to_string(),
-            canvas_hex: "#000000".to_string(),
-            surface_hex: "#0A0A0A".to_string(),
-            border_hex: "#222222".to_string(),
-            text_primary_hex: "#F3EEE3".to_string(),
-            text_secondary_hex: "#ABA59B".to_string(),
-            accent_hex: "#D9541E".to_string(),
+            name: "Sonora Midnight".to_string(),
+            canvas_hex: "#0E0F13".to_string(),
+            surface_hex: "#15161C".to_string(),
+            border_hex: "#23252F".to_string(),
+            text_primary_hex: "#F4F4F7".to_string(),
+            text_secondary_hex: "#9A9CA8".to_string(),
+            accent_hex: "#A882FF".to_string(),
             background_mode: BackgroundMode::AmoledSolid,
             corner_radius_px: 10.0,
             track_row_height_px: 52.0,
             panel_opacity: 1.0,
-            adaptive_album_art: false,
+            adaptive_album_art: true,
             zero_gpu_minimize_saver: true,
             sync_theme_to_android: true,
             material: LiquidGlassConfig::default(),
@@ -137,6 +137,20 @@ impl Default for ThemeConfig {
 }
 
 impl ThemeConfig {
+    pub fn pure_amoled() -> Self {
+        Self {
+            name: "Ferric Pure AMOLED".to_string(),
+            canvas_hex: "#000000".to_string(),
+            surface_hex: "#09090B".to_string(),
+            border_hex: "#1D1E24".to_string(),
+            text_primary_hex: "#F3EEE3".to_string(),
+            text_secondary_hex: "#ABA59B".to_string(),
+            accent_hex: "#D9541E".to_string(),
+            adaptive_album_art: false,
+            ..Self::default()
+        }
+    }
+
     pub fn cream_light() -> Self {
         Self {
             name: "LivelyDesk Cream Light".to_string(),

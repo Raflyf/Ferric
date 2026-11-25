@@ -10,14 +10,88 @@ live_design! {
     pub DrawFerricWinBtn = {{DrawFerricWinBtn}} {}
     pub DrawFerricPlayBtn = {{DrawFerricPlayBtn}} {}
     pub DrawFerricEqGraph = {{DrawFerricEqGraph}} {}
+    pub DrawFerricCoverArt = {{DrawFerricCoverArt}} {}
+
+    pub FerricCoverArt = {{FerricCoverArt}} {
+        width: 48,
+        height: 48,
+        draw_bg: {
+            texture image: texture2d
+            accent: #A882FF
+            uniform fallback_col: #1C1D24
+            uniform border_col: #2A2C38
+
+            fn pixel(self) -> vec4 {
+                let p = self.pos * self.rect_size;
+                let sdf = Sdf2d::viewport(p);
+                let c = self.rect_size * 0.5;
+                let min_dim = min(self.rect_size.x, self.rect_size.y);
+
+                if self.circle > 0.5 {
+                    sdf.circle(c.x, c.y, min_dim * 0.5 - 0.5);
+                } else {
+                    let r = min(self.radius * 0.5, min_dim * 0.22);
+                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                }
+
+                let mut rgb = self.fallback_col.xyz;
+                if self.has_image > 0.5 {
+                    let box_aspect = self.rect_size.x / max(self.rect_size.y, 1.0);
+                    let mut uv = self.pos;
+                    if self.img_aspect > box_aspect {
+                        let scale = box_aspect / max(self.img_aspect, 0.01);
+                        uv.x = (uv.x - 0.5) * scale + 0.5;
+                    } else {
+                        let scale = max(self.img_aspect, 0.01) / max(box_aspect, 0.01);
+                        uv.y = (uv.y - 0.5) * scale + 0.5;
+                    }
+                    let sampled = sample2d(self.image, clamp(uv, vec2(0.002, 0.002), vec2(0.998, 0.998)));
+                    rgb = sampled.xyz;
+                } else {
+                    // Subtle obsidian placeholder with gentle sheen while cover loads
+                    let sheen = clamp(1.0 - (self.pos.x * 0.55 + self.pos.y * 0.75), 0.0, 1.0);
+                    rgb = self.fallback_col.xyz + self.accent.xyz * (0.06 + 0.07 * sheen);
+                }
+
+                if self.hover > 0.01 {
+                    rgb = mix(rgb, vec3(1.0, 1.0, 1.0), 0.06 * self.hover);
+                }
+
+                if self.playing > 0.5 {
+                    rgb = mix(rgb, vec3(0.04, 0.04, 0.06), 0.44);
+                }
+
+                sdf.fill_keep(vec4(clamp(rgb, 0.0, 1.0), 1.0));
+                sdf.stroke(mix(self.border_col, vec4(self.accent.xyz, 0.75), self.playing), 1.0);
+
+                if self.playing > 0.5 {
+                    let bw = max(min_dim * 0.095, 2.5);
+                    let gap = max(min_dim * 0.055, 2.0);
+                    let base_y = self.rect_size.y * 0.76;
+                    let h1 = min_dim * (0.20 + 0.28 * self.level);
+                    let h2 = min_dim * (0.36 + 0.22 * (1.0 - self.level * 0.45));
+                    let h3 = min_dim * (0.26 + 0.30 * self.level);
+
+                    sdf.box(c.x - bw * 1.5 - gap, base_y - h1, bw, h1, 1.2);
+                    sdf.fill(self.accent);
+                    sdf.box(c.x - bw * 0.5, base_y - h2, bw, h2, 1.2);
+                    sdf.fill(#FFFFFF);
+                    sdf.box(c.x + bw * 0.5 + gap, base_y - h3, bw, h3, 1.2);
+                    sdf.fill(self.accent);
+                }
+
+                return sdf.result;
+            }
+        }
+    }
 
     pub FerricPlayBtn = {{FerricPlayBtn}} {
-        width: 42,
-        height: 42,
+        width: 36,
+        height: 36,
         draw_bg: {
-            uniform accent_col: #D9541E
-            uniform accent_hover: #EC6630
-            uniform glyph_col: #080808
+            uniform accent_col: #F4F4F7
+            uniform accent_hover: #FFFFFF
+            uniform glyph_col: #0E0F13
 
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
@@ -28,15 +102,13 @@ live_design! {
                 sdf.fill(mix(self.accent_col, self.accent_hover, self.hover));
 
                 if (self.playing > 0.5) {
-                    // Crisp dual vertical Pause bars
-                    sdf.box(c.x - 5.5, c.y - 6.5, 3.8, 13.0, 0.7);
-                    sdf.box(c.x + 1.7, c.y - 6.5, 3.8, 13.0, 0.7);
+                    sdf.box(c.x - 4.8, c.y - 5.8, 3.3, 11.6, 0.7);
+                    sdf.box(c.x + 1.5, c.y - 5.8, 3.3, 11.6, 0.7);
                     sdf.fill(self.glyph_col);
                 } else {
-                    // Crisp optically-centered Play triangle
-                    sdf.move_to(c.x - 4.2, c.y - 6.8);
-                    sdf.line_to(c.x + 6.8, c.y);
-                    sdf.line_to(c.x - 4.2, c.y + 6.8);
+                    sdf.move_to(c.x - 3.6, c.y - 6.0);
+                    sdf.line_to(c.x + 6.0, c.y);
+                    sdf.line_to(c.x - 3.6, c.y + 6.0);
                     sdf.close_path();
                     sdf.fill(self.glyph_col);
                 }
@@ -47,11 +119,11 @@ live_design! {
 
     pub FerricBarSlider = {{FerricBarSlider}} {
         width: Fill,
-        height: 22,
+        height: 20,
         draw_bg: {
-            uniform track_col: #222222
-            uniform fill_col: #D9541E
-            uniform thumb_col: #F3EEE3
+            uniform track_col: #2A2C38
+            uniform fill_col: #A882FF
+            uniform thumb_col: #F4F4F7
 
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
@@ -62,28 +134,24 @@ live_design! {
                 let t = clamp(self.norm_val, 0.0, 1.0);
                 let tx = pad + usable * t;
 
-                // Track background
-                sdf.box(pad, cy - 1.75, usable, 3.5, 0.85);
+                sdf.box(pad, cy - 1.5, usable, 3.0, 0.75);
                 sdf.fill(self.track_col);
 
-                // Active Burnt Orange fill
                 if (tx > pad + 0.5) {
-                    sdf.box(pad, cy - 1.75, tx - pad, 3.5, 0.85);
+                    sdf.box(pad, cy - 1.5, tx - pad, 3.0, 0.75);
                     sdf.fill(self.fill_col);
                 }
 
-                // Subtle copper halo on hover / drag
                 let active_amt = max(self.hover, self.drag);
                 if (active_amt > 0.01) {
-                    sdf.circle(tx, cy, 9.5);
-                    sdf.fill(vec4(self.fill_col.xyz, 0.22 * active_amt));
+                    sdf.circle(tx, cy, 8.5);
+                    sdf.fill(vec4(self.fill_col.xyz, 0.24 * active_amt));
                 }
 
-                // Crisp Warm Cream circular thumb
-                let r = mix(5.2, 6.4, active_amt);
+                let r = mix(4.2, 5.8, active_amt);
                 sdf.circle(tx, cy, r);
                 sdf.fill_keep(self.thumb_col);
-                sdf.stroke(#000000, 1.0);
+                sdf.stroke(#0E0F13, 0.9);
                 return sdf.result;
             }
         }
@@ -96,9 +164,9 @@ live_design! {
         max: 12.0,
         value: 0.0,
         draw_bg: {
-            uniform track_col: #222222
-            uniform fill_col: #D9541E
-            uniform thumb_col: #F3EEE3
+            uniform track_col: #262834
+            uniform fill_col: #A882FF
+            uniform thumb_col: #F4F4F7
 
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
@@ -110,15 +178,12 @@ live_design! {
                 let ty = self.rect_size.y - pad - usable * t;
                 let mid_y = self.rect_size.y * 0.5;
 
-                // 0 dB center tick mark
                 sdf.rect(cx - 6.0, mid_y - 0.5, 12.0, 1.0);
-                sdf.fill(#2B2B2B);
+                sdf.fill(#323544);
 
-                // Vertical background rail
                 sdf.box(cx - 1.75, pad, 3.5, usable, 0.85);
                 sdf.fill(self.track_col);
 
-                // Bottom-up Burnt Orange bar matching FigCraft D2
                 let bar_h = max((self.rect_size.y - pad) - ty, 1.0);
                 sdf.box(cx - 1.75, ty, 3.5, bar_h, 0.85);
                 sdf.fill(self.fill_col);
@@ -129,23 +194,23 @@ live_design! {
                     sdf.fill(vec4(self.fill_col.xyz, 0.24 * active_amt));
                 }
 
-                let r = mix(5.5, 6.6, active_amt);
+                let r = mix(5.2, 6.4, active_amt);
                 sdf.circle(cx, ty, r);
                 sdf.fill_keep(self.thumb_col);
-                sdf.stroke(#000000, 1.2);
+                sdf.stroke(#0E0F13, 1.1);
                 return sdf.result;
             }
         }
     }
 
     pub FerricToggle = {{FerricToggle}} {
-        width: 44,
-        height: 24,
+        width: 42,
+        height: 23,
         draw_bg: {
-            uniform on_col: #D9541E
-            uniform off_col: #181818
-            uniform border_col: #333333
-            uniform knob_col: #F3EEE3
+            uniform on_col: #A882FF
+            uniform off_col: #222430
+            uniform border_col: #323544
+            uniform knob_col: #F4F4F7
 
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
@@ -159,7 +224,7 @@ live_design! {
                 sdf.stroke(bcol, 1.0);
 
                 let kx = mix(h * 0.5, self.rect_size.x - h * 0.5, self.active);
-                let kr = (h - 2.0) * 0.5 - 3.0 + self.hover * 0.6;
+                let kr = (h - 2.0) * 0.5 - 3.0 + self.hover * 0.5;
                 sdf.circle(kx, h * 0.5, kr);
                 sdf.fill(self.knob_col);
                 return sdf.result;
@@ -168,58 +233,53 @@ live_design! {
     }
 
     pub FerricWinBtn = {{FerricWinBtn}} {
-        width: 38,
-        height: 30,
+        width: 36,
+        height: 28,
         draw_bg: {
-            uniform fg_col: #ABA59B
-            uniform fg_hover: #F3EEE3
+            uniform fg_col: #9A9CA8
+            uniform fg_hover: #F4F4F7
 
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
                 let c = self.rect_size * 0.5;
 
-                // Hover pill background (crimson for Close, subtle charcoal for Min/Max/Mini)
                 if (self.hover > 0.01) {
                     sdf.box(2.0, 2.0, self.rect_size.x - 4.0, self.rect_size.y - 4.0, 3.5);
                     if self.kind > 1.5 && self.kind < 2.5 {
-                        sdf.fill(vec4(0.78, 0.20, 0.16, 0.92 * self.hover));
+                        sdf.fill(vec4(0.80, 0.22, 0.20, 0.92 * self.hover));
                     } else {
-                        sdf.fill(vec4(0.16, 0.16, 0.16, 0.90 * self.hover));
+                        sdf.fill(vec4(0.18, 0.19, 0.25, 0.90 * self.hover));
                     }
                 }
 
                 let stroke_col = mix(self.fg_col, self.fg_hover, self.hover);
                 if self.kind < 0.5 {
-                    // Minimize: crisp horizontal dash
                     sdf.move_to(c.x - 5.0, c.y + 0.5);
                     sdf.line_to(c.x + 5.0, c.y + 0.5);
-                    sdf.stroke(stroke_col, 1.3);
+                    sdf.stroke(stroke_col, 1.25);
                 } else if self.kind < 1.5 {
-                    // Maximize / Restore
                     if self.is_maximized > 0.5 {
                         sdf.rect(c.x - 3.0, c.y - 5.0, 7.5, 7.5);
                         sdf.stroke(stroke_col, 1.15);
                         sdf.rect(c.x - 5.0, c.y - 3.0, 7.5, 7.5);
-                        sdf.fill_keep(#0A0A0A);
+                        sdf.fill_keep(#15161C);
                         sdf.stroke(stroke_col, 1.2);
                     } else {
                         sdf.rect(c.x - 4.5, c.y - 4.5, 9.0, 9.0);
-                        sdf.stroke(stroke_col, 1.25);
+                        sdf.stroke(stroke_col, 1.2);
                     }
                 } else if self.kind < 2.5 {
-                    // Close X
                     sdf.move_to(c.x - 4.5, c.y - 4.5);
                     sdf.line_to(c.x + 4.5, c.y + 4.5);
                     sdf.move_to(c.x + 4.5, c.y - 4.5);
                     sdf.line_to(c.x - 4.5, c.y + 4.5);
-                    sdf.stroke(stroke_col, 1.35);
+                    sdf.stroke(stroke_col, 1.3);
                 } else {
-                    // Picture-in-Picture / Mini-Player icon
                     sdf.box(c.x - 6.0, c.y - 4.5, 12.0, 9.0, 1.5);
                     sdf.stroke(stroke_col, 1.15);
                     sdf.rect(c.x + 0.2, c.y - 0.2, 4.8, 3.8);
-                    sdf.fill(#D9541E);
+                    sdf.fill(#A882FF);
                 }
                 return sdf.result;
             }
@@ -305,9 +365,9 @@ live_design! {
         width: Fill,
         height: 176,
         draw_bg: {
-            uniform accent: #D9541E
-            uniform bg_col: #090909
-            uniform border_col: #1E1E1E
+            uniform accent: #A882FF
+            uniform bg_col: #12131A
+            uniform border_col: #232530
 
             fn eval_band_y(self, idx: float) -> float {
                 if idx < 0.5 { return self.g0; }
@@ -410,7 +470,7 @@ live_design! {
 
     pub FerricNowPlayingCanvas = <View> {
         width: Fill,
-        height: 280,
+        height: 220,
         show_bg: true,
         draw_bg: {
             instance mode: 1.0
@@ -423,7 +483,7 @@ live_design! {
             instance s5: 0.50
             instance s6: 0.30
             instance s7: 0.24
-            uniform accent: #D9541E
+            uniform accent: #A882FF
 
             fn bin_val(self, i: float) -> float {
                 if i < 0.5 { return self.s0; }
@@ -1219,6 +1279,106 @@ impl FerricQrViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.qr_size = size;
             inner.modules = modules;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+}
+
+#[derive(Clone, Debug, DefaultNone)]
+pub enum FerricCoverArtAction {
+    Clicked,
+    None,
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawFerricCoverArt {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live(0.0_f32)]
+    has_image: f32,
+    #[live(1.0_f32)]
+    img_aspect: f32,
+    #[live(12.0_f32)]
+    radius: f32,
+    #[live(0.0_f32)]
+    circle: f32,
+    #[live(0.0_f32)]
+    playing: f32,
+    #[live(0.5_f32)]
+    level: f32,
+    #[live(0.0_f32)]
+    hover: f32,
+    #[live]
+    accent: Vec4,
+}
+
+#[derive(Live, LiveHook, Widget)]
+pub struct FerricCoverArt {
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawFerricCoverArt,
+    #[rust]
+    texture: Option<Texture>,
+}
+
+impl Widget for FerricCoverArt {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.draw_bg.hover = 1.0;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                self.draw_bg.hover = 0.0;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerUp(fe) if fe.is_over && fe.was_tap() => {
+                cx.widget_action(uid, &scope.path, FerricCoverArtAction::Clicked);
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if let Some(tex) = &self.texture {
+            self.draw_bg.draw_vars.set_texture(0, tex);
+            self.draw_bg.has_image = 1.0;
+        } else {
+            self.draw_bg.draw_vars.empty_texture(0);
+            self.draw_bg.has_image = 0.0;
+        }
+        let _ = self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+}
+
+impl FerricCoverArtRef {
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).cast(),
+            FerricCoverArtAction::Clicked
+        )
+    }
+
+    pub fn set_texture(&self, cx: &mut Cx, texture: Option<Texture>, aspect: f32) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.texture = texture;
+            inner.draw_bg.img_aspect = aspect.clamp(0.25, 4.0);
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn set_state(&self, cx: &mut Cx, playing: bool, level: f32, accent: Vec4, circle: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.draw_bg.playing = if playing { 1.0 } else { 0.0 };
+            inner.draw_bg.level = level;
+            inner.draw_bg.accent = accent;
+            inner.draw_bg.circle = if circle { 1.0 } else { 0.0 };
             inner.draw_bg.redraw(cx);
         }
     }

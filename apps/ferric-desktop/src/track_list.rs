@@ -1,52 +1,58 @@
+use crate::artwork::{ArtworkCache, CachedArtwork};
+use crate::widgets::FerricCoverArtWidgetRefExt;
 use ferric_core::models::{Track, TrackSource, format_duration_ms};
 use makepad_widgets::*;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 live_design! {
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
-    use crate::widgets::FerricArtTile;
+    use crate::widgets::FerricCoverArt;
 
     TrackRow = <View> {
         width: Fill,
-        height: 56,
-        padding: { left: 16, right: 18, top: 6, bottom: 6 }
+        height: 54,
+        padding: { left: 12, right: 14, top: 5, bottom: 5 }
         margin: { bottom: 2 }
         flow: Right,
         align: { y: 0.5 }
-        spacing: 14,
+        spacing: 12,
         show_bg: true,
         cursor: Hand,
 
         draw_bg: {
             instance active: 0.0
+            instance hover: 0.0
             uniform base_col: #00000000
-            uniform active_col: #190D08
-            uniform active_border: #D9541E
+            uniform hover_col: #191B23
+            uniform active_col: #1D1B2B
+            uniform accent_col: #A882FF
             uniform radius: 8.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, self.radius * 0.5);
-                let bg = mix(self.base_col, self.active_col, self.active);
-                sdf.fill_keep(bg);
-                let border = mix(vec4(0.0, 0.0, 0.0, 0.0), self.active_border, self.active * 0.55);
-                sdf.stroke(border, 1.0);
+                let idle_or_hover = mix(self.base_col, self.hover_col, self.hover);
+                let active_tint = mix(self.active_col, vec4(self.accent_col.xyz, 0.16), 0.35);
+                let bg = mix(idle_or_hover, active_tint, self.active);
+                sdf.fill(bg);
                 return sdf.result;
             }
         }
 
         idx_lbl = <Label> {
-            width: 26,
+            width: 24,
+            align: { x: 0.5, y: 0.5 }
             draw_text: {
-                color: #888279,
-                text_style: { font_size: 12.0 }
+                color: #707382,
+                text_style: { font_size: 11.5 }
             }
             text: "1"
         }
 
-        art_tile = <FerricArtTile> {
+        art_tile = <FerricCoverArt> {
             width: 40,
             height: 40,
             draw_bg: { radius: 8.0 }
@@ -60,15 +66,15 @@ live_design! {
             title_lbl = <Label> {
                 width: Fill,
                 draw_text: {
-                    color: #F3EEE3,
-                    text_style: { font_size: 13.5 }
+                    color: #F4F4F7,
+                    text_style: { font_size: 13.0 }
                 }
                 text: "Song Title"
             }
             artist_lbl = <Label> {
                 width: Fill,
                 draw_text: {
-                    color: #9E988E,
+                    color: #9A9CA8,
                     text_style: { font_size: 11.5 }
                 }
                 text: "Artist"
@@ -76,47 +82,73 @@ live_design! {
         }
 
         album_lbl = <Label> {
-            width: 220,
+            width: 190,
             draw_text: {
-                color: #9E988E,
-                text_style: { font_size: 12.0 }
+                color: #888B99,
+                text_style: { font_size: 11.5 }
             }
             text: "Album"
         }
 
-        like_btn = <Button> {
-            width: 34,
-            height: 30,
+        queue_add_btn = <Button> {
+            width: 30,
+            height: 28,
             padding: 0,
             spacing: 0,
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 15, height: Fit }
+            icon_walk: { width: 14, height: Fit }
             draw_icon: {
-                svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
-                color: #5A5650
-                color_hover: #F3EEE3
-                color_down: #D9541E
+                svg_path: "M14 10H2V12H14V10ZM14 6H2V8H14V6ZM18 14V10H16V14H12V16H16V20H18V16H22V14H18ZM2 16H10V14H2V16Z"
+                color: #6E7180
+                color_hover: #F4F4F7
+                color_down: #A882FF
             }
             draw_bg: {
                 instance hover: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0);
-                    sdf.fill(vec4(0.14, 0.14, 0.14, 0.80 * self.hover));
+                    sdf.fill(vec4(0.18, 0.19, 0.25, 0.80 * self.hover));
+                    return sdf.result;
+                }
+            }
+        }
+
+        like_btn = <Button> {
+            width: 30,
+            height: 28,
+            padding: 0,
+            spacing: 0,
+            align: { x: 0.5, y: 0.5 }
+            text: ""
+            label_walk: { width: 0, height: 0 }
+            icon_walk: { width: 14, height: Fit }
+            draw_icon: {
+                svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
+                color: #5C5F6E
+                color_hover: #F4F4F7
+                color_down: #A882FF
+            }
+            draw_bg: {
+                instance hover: 0.0
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0);
+                    sdf.fill(vec4(0.18, 0.19, 0.25, 0.80 * self.hover));
                     return sdf.result;
                 }
             }
         }
 
         dur_lbl = <Label> {
-            width: 76,
-            padding: { right: 10 }
+            width: 58,
+            padding: { right: 6 }
             align: { x: 1.0, y: 0.5 }
             draw_text: {
-                color: #9E988E,
-                text_style: { font_size: 12.0 }
+                color: #888B99,
+                text_style: { font_size: 11.5 }
             }
             text: "03:45"
         }
@@ -124,117 +156,117 @@ live_design! {
 
     EmptyLibraryState = <View> {
         width: Fill,
-        height: 236,
-        padding: { left: 28, right: 28, top: 26, bottom: 26 }
+        height: 210,
+        padding: { left: 26, right: 26, top: 24, bottom: 24 }
         margin: { top: 8 }
         flow: Down,
         align: { x: 0.0, y: 0.5 }
-        spacing: 12,
+        spacing: 10,
         show_bg: true,
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 6.0);
-                sdf.fill_keep(#0A0A0A);
-                sdf.stroke(#1E1E1E, 1.0);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 8.0);
+                sdf.fill_keep(#15161C);
+                sdf.stroke(#232530, 1.0);
                 return sdf.result;
             }
         }
         <Label> {
-            draw_text: { color: #F3EEE3, text_style: { font_size: 19.0 } }
-            text: "Discover Music is loading..."
+            draw_text: { color: #F4F4F7, text_style: { font_size: 18.0 } }
+            text: "No tracks here yet"
         }
         <Label> {
             width: Fill,
-            draw_text: { color: #9E988E, text_style: { font_size: 13.0 } }
-            text: "Ferric automatically loads playable YouTube Music tracks with zero login. You can also search any song in the top bar, add local lossless folders (FLAC, MP3, Opus, WAV), or sign in with Google."
+            draw_text: { color: #9A9CA8, text_style: { font_size: 12.5 } }
+            text: "Browse YouTube Music immediately in Guest Mode, add a local folder (FLAC, MP3, Opus, WAV), or sign in with Google."
         }
         <View> {
             width: Fill,
             height: Fit,
-            margin: { top: 8 }
+            margin: { top: 6 }
             flow: Right,
             spacing: 10,
             empty_discover_btn = <Button> {
-                width: Fit, height: 38, padding: { left: 16, right: 18 }, spacing: 8,
-                text: "Load Discover Music"
-                icon_walk: { width: 15, height: Fit }
+                width: Fit, height: 36, padding: { left: 16, right: 18 }, spacing: 8,
+                text: "Refresh Discover"
+                icon_walk: { width: 14, height: Fit }
                 draw_icon: {
                     svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z"
-                    color: #080808
-                    color_hover: #080808
+                    color: #0E0F13
+                    color_hover: #0E0F13
                 }
-                draw_text: { color: #080808, color_hover: #080808, text_style: { font_size: 12.5 } }
+                draw_text: { color: #0E0F13, color_hover: #0E0F13, text_style: { font_size: 12.5 } }
                 draw_bg: {
                     instance hover: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                         let r = (self.rect_size.y - 1.0) * 0.25;
                         sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                        sdf.fill(mix(#D9541E, #EB642C, self.hover));
+                        sdf.fill(mix(#F4F4F7, #FFFFFF, self.hover));
                         return sdf.result;
                     }
                 }
             }
             empty_add_folder_btn = <Button> {
-                width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
-                text: "Add Music Folder"
-                icon_walk: { width: 15, height: Fit }
+                width: Fit, height: 36, padding: { left: 14, right: 16 }, spacing: 8,
+                text: "Add Folder"
+                icon_walk: { width: 14, height: Fit }
                 draw_icon: {
                     svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z"
-                    color: #D9541E
-                    color_hover: #F3EEE3
+                    color: #A882FF
+                    color_hover: #F4F4F7
                 }
-                draw_text: { color: #F3EEE3, color_hover: #FFFFFF, text_style: { font_size: 12.5 } }
+                draw_text: { color: #F4F4F7, color_hover: #FFFFFF, text_style: { font_size: 12.5 } }
                 draw_bg: {
                     instance hover: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
-                        sdf.fill_keep(mix(#121212, #1C1C1C, self.hover));
-                        sdf.stroke(#2A2A2A, 1.0);
+                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
+                        sdf.fill_keep(mix(#1C1D24, #252732, self.hover));
+                        sdf.stroke(#2A2C38, 1.0);
                         return sdf.result;
                     }
                 }
             }
             empty_youtube_btn = <Button> {
-                width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
+                width: Fit, height: 36, padding: { left: 14, right: 16 }, spacing: 8,
                 text: "Sign in with Google"
-                icon_walk: { width: 15, height: Fit }
+                icon_walk: { width: 14, height: Fit }
                 draw_icon: {
                     svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z"
-                    color: #D9541E
-                    color_hover: #F3EEE3
+                    color: #A882FF
+                    color_hover: #F4F4F7
                 }
-                draw_text: { color: #F3EEE3, color_hover: #FFFFFF, text_style: { font_size: 12.5 } }
+                draw_text: { color: #F4F4F7, color_hover: #FFFFFF, text_style: { font_size: 12.5 } }
                 draw_bg: {
                     instance hover: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
-                        sdf.fill_keep(mix(#121212, #1C1C1C, self.hover));
-                        sdf.stroke(#2A2A2A, 1.0);
+                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
+                        sdf.fill_keep(mix(#1C1D24, #252732, self.hover));
+                        sdf.stroke(#2A2C38, 1.0);
                         return sdf.result;
                     }
                 }
             }
             empty_demo_btn = <Button> {
-                width: Fit, height: 38, padding: { left: 14, right: 16 }, spacing: 8,
-                text: "Play Offline Demo"
-                icon_walk: { width: 13, height: Fit }
+                width: Fit, height: 36, padding: { left: 14, right: 16 }, spacing: 8,
+                text: "Offline Demo"
+                icon_walk: { width: 12, height: Fit }
                 draw_icon: {
                     svg_path: "M8 5V19L19 12L8 5Z"
-                    color: #D9541E
-                    color_hover: #F3EEE3
+                    color: #A882FF
+                    color_hover: #F4F4F7
                 }
-                draw_text: { color: #D9541E, color_hover: #F3EEE3, text_style: { font_size: 12.5 } }
+                draw_text: { color: #C5B2FF, color_hover: #FFFFFF, text_style: { font_size: 12.5 } }
                 draw_bg: {
                     instance hover: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
-                        sdf.fill_keep(mix(#150B06, #231109, self.hover));
-                        sdf.stroke(#D9541E, 1.0);
+                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
+                        sdf.fill_keep(mix(#1C1A29, #27233B, self.hover));
+                        sdf.stroke(#443B66, 1.0);
                         return sdf.result;
                     }
                 }
@@ -259,6 +291,7 @@ live_design! {
 pub enum TrackListAction {
     PlayIndex(usize),
     ToggleLike(usize),
+    AddToQueue(usize),
     LoadDiscoverFeed,
     AddLocalFolder,
     OpenYouTubeLogin,
@@ -271,6 +304,8 @@ pub struct TrackListScope {
     pub active_track_id: Option<String>,
     pub is_playing: bool,
     pub audio_level: f32,
+    pub accent: Vec4,
+    pub artworks: Rc<HashMap<String, CachedArtwork>>,
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -303,8 +338,16 @@ impl Widget for TrackList {
                 cx.widget_action(uid, &scope.path, TrackListAction::LoadDemoSuite);
                 continue;
             }
+            if item.button(id!(queue_add_btn)).clicked(&actions) {
+                cx.widget_action(uid, &scope.path, TrackListAction::AddToQueue(item_id));
+                continue;
+            }
             if item.button(id!(like_btn)).clicked(&actions) {
                 cx.widget_action(uid, &scope.path, TrackListAction::ToggleLike(item_id));
+                continue;
+            }
+            if item.ferric_cover_art(id!(art_tile)).clicked(&actions) {
+                cx.widget_action(uid, &scope.path, TrackListAction::PlayIndex(item_id));
                 continue;
             }
             if let Some(fe) = item.as_view().finger_up(&actions)
@@ -317,7 +360,7 @@ impl Widget for TrackList {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let (tracks, active_id, is_playing, level) = scope
+        let (tracks, active_id, is_playing, level, accent, artworks) = scope
             .props
             .get::<TrackListScope>()
             .map(|d| {
@@ -326,9 +369,20 @@ impl Widget for TrackList {
                     d.active_track_id.clone(),
                     d.is_playing,
                     d.audio_level,
+                    d.accent,
+                    Rc::clone(&d.artworks),
                 )
             })
-            .unwrap_or_else(|| (Rc::new(Vec::new()), None, false, 0.5));
+            .unwrap_or_else(|| {
+                (
+                    Rc::new(Vec::new()),
+                    None,
+                    false,
+                    0.5,
+                    vec4(0.659, 0.510, 1.0, 1.0),
+                    Rc::new(HashMap::new()),
+                )
+            });
         let count = tracks.len();
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
@@ -350,39 +404,43 @@ impl Widget for TrackList {
                         let row = list.item(cx, item_id, live_id!(Row));
                         let is_active = active_id.as_deref() == Some(track.id.as_str());
                         let title_col = if is_active {
-                            vec4(0.851, 0.329, 0.118, 1.0)
+                            accent
                         } else {
-                            vec4(0.953, 0.933, 0.890, 1.0)
+                            vec4(0.957, 0.957, 0.969, 1.0)
                         };
                         let idx_col = if is_active {
-                            vec4(0.851, 0.329, 0.118, 1.0)
+                            accent
                         } else {
-                            vec4(0.533, 0.510, 0.475, 1.0)
+                            vec4(0.439, 0.451, 0.510, 1.0)
                         };
                         let like_col = if track.liked {
-                            vec4(0.851, 0.329, 0.118, 1.0)
+                            accent
                         } else {
-                            vec4(0.353, 0.337, 0.314, 1.0)
+                            vec4(0.361, 0.373, 0.431, 1.0)
                         };
-                        let art_var = if item_id % 2 == 0 { 0.0 } else { 1.0 };
-                        let art_play = if is_active && is_playing { 1.0 } else { 0.0 };
 
                         row.apply_over(
                             cx,
                             live! {
-                                draw_bg: { active: (if is_active { 1.0 } else { 0.0 }) }
+                                draw_bg: {
+                                    active: (if is_active { 1.0 } else { 0.0 }),
+                                    accent_col: (accent)
+                                }
                                 idx_lbl = { draw_text: { color: (idx_col) } }
                                 title_lbl = { draw_text: { color: (title_col) } }
                                 like_btn = { draw_icon: { color: (like_col) } }
-                                art_tile = {
-                                    draw_bg: {
-                                        variant: (art_var),
-                                        playing: (art_play),
-                                        level: (level)
-                                    }
-                                }
                             },
                         );
+
+                        let art_ref = row.ferric_cover_art(id!(art_tile));
+                        if let Some(key) = ArtworkCache::key_for_track(track)
+                            && let Some(cached) = artworks.get(&key)
+                        {
+                            art_ref.set_texture(cx, Some(cached.texture.clone()), cached.aspect);
+                        } else {
+                            art_ref.set_texture(cx, None, 1.0);
+                        }
+                        art_ref.set_state(cx, is_active && is_playing, level, accent, false);
 
                         let idx_txt = if is_active {
                             "•".to_string()

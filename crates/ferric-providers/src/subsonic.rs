@@ -240,6 +240,7 @@ fn map_subsonic_song(song: SubsonicSong) -> Option<Track> {
         isrc: song.isrc,
         spotify_id: None,
         youtube_video_id: None,
+        thumbnail_url: None,
         replay_gain_db: 0,
         liked: song.starred.is_some(),
     })
@@ -357,6 +358,7 @@ pub fn sync_subsonic_catalog(
                 .comment
                 .map(|c| c.trim().to_string())
                 .unwrap_or_default(),
+            thumbnail_url: None,
         };
         bundles.push(SyncedPlaylistBundle {
             playlist,

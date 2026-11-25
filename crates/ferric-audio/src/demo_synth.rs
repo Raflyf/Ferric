@@ -95,6 +95,7 @@ pub fn ensure_demo_tracks(target_dir: &Path) -> AudioResult<Vec<Track>> {
             isrc: None,
             spotify_id: None,
             youtube_video_id: None,
+            thumbnail_url: None,
             replay_gain_db: 0,
             liked: false,
         });

@@ -671,6 +671,7 @@ fn map_spotify_track(raw: SpotifyTrackObject, liked: bool) -> Option<Track> {
         isrc,
         spotify_id: Some(spotify_id),
         youtube_video_id: None,
+        thumbnail_url: None,
         replay_gain_db: 0,
         liked,
     })
@@ -758,6 +759,7 @@ pub fn sync_spotify_catalog(access_token: &str) -> ProviderResult<CloudSyncRepor
                 .description
                 .map(|d| d.trim().to_string())
                 .unwrap_or_default(),
+            thumbnail_url: None,
         };
         playlists.push(SyncedPlaylistBundle {
             playlist,
@@ -1018,6 +1020,7 @@ fn build_yt_track(
     } else {
         "YouTube".to_string()
     };
+    let thumb = Some(format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"));
     Track {
         id: format!("ytmusic:{video_id}"),
         title: if cleaned.title.is_empty() {
@@ -1037,6 +1040,7 @@ fn build_yt_track(
         isrc: None,
         spotify_id: None,
         youtube_video_id: Some(video_id),
+        thumbnail_url: thumb,
         replay_gain_db: 0,
         liked,
     }
@@ -1266,6 +1270,7 @@ pub fn sync_youtube_catalog(
         };
 
         let effective_etag = header_etag.or(items_page.etag).or(pl.etag);
+        let pl_thumb = bundle_tracks.first().and_then(|t| t.thumbnail_url.clone());
         playlists.push(SyncedPlaylistBundle {
             playlist: Playlist {
                 id: canonical_pl_id,
@@ -1274,6 +1279,7 @@ pub fn sync_youtube_catalog(
                 etag: effective_etag,
                 track_count: bundle_tracks.len(),
                 description: pl_desc,
+                thumbnail_url: pl_thumb,
             },
             tracks: bundle_tracks,
         });

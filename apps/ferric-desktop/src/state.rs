@@ -1,0 +1,358 @@
+use crate::google_login::GoogleLoginOutcome;
+use ferric_core::models::{Playlist, Track};
+use ferric_providers::lyrics::SyncedLyrics;
+use ferric_providers::updater::{DownloadEvent, ReleaseInfo, UpdateError};
+use ferric_providers::ytmusic::{
+    CachedAudioStream, YtmAccountLibrary, YtmBrowseDetail, YtmCardKind, YtmRichHome, YtmRichSearch,
+};
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::Instant;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainPage {
+    Home,
+    Search,
+    Recents,
+    Songs,
+    Albums,
+    Artists,
+    Playlists,
+    Detail,
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    Accounts,
+    Playback,
+    Equalizer,
+    Appearance,
+    Storage,
+    Connect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryFilter {
+    All,
+    Liked,
+    Local,
+    Spotify,
+    YouTube,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFilter {
+    All,
+    Songs,
+    Albums,
+    Artists,
+    Playlists,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortField {
+    Artist,
+    Title,
+    Album,
+    Duration,
+}
+
+impl SortField {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Artist => Self::Title,
+            Self::Title => Self::Album,
+            Self::Album => Self::Duration,
+            Self::Duration => Self::Artist,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Artist => "Sort: Artist",
+            Self::Title => "Sort: Title",
+            Self::Album => "Sort: Album",
+            Self::Duration => "Sort: Duration",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepTimerMode {
+    Off,
+    Deadline(Instant),
+    EndOfTrack,
+}
+
+#[derive(Debug, Clone)]
+pub struct CollectionGroup {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub kind: YtmCardKind,
+    pub thumbnail_url: Option<String>,
+    pub tracks: Vec<Track>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetailViewState {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub description: String,
+    pub kind: YtmCardKind,
+    pub thumbnail_url: Option<String>,
+    pub loading: bool,
+    pub tracks: Vec<Track>,
+}
+
+impl Default for DetailViewState {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            title: "Collection".to_string(),
+            subtitle: String::new(),
+            description: String::new(),
+            kind: YtmCardKind::Playlist,
+            thumbnail_url: None,
+            loading: false,
+            tracks: Vec::new(),
+        }
+    }
+}
+
+pub struct NavHistory {
+    entries: Vec<MainPage>,
+    cursor: usize,
+}
+
+impl NavHistory {
+    pub fn new(initial: MainPage) -> Self {
+        Self {
+            entries: vec![initial],
+            cursor: 0,
+        }
+    }
+
+    pub fn push(&mut self, page: MainPage) {
+        if self.entries.get(self.cursor).copied() == Some(page) {
+            return;
+        }
+        self.entries.truncate(self.cursor + 1);
+        self.entries.push(page);
+        if self.entries.len() > 32 {
+            self.entries.remove(0);
+        }
+        self.cursor = self.entries.len().saturating_sub(1);
+    }
+
+    pub fn can_back(&self) -> bool {
+        self.cursor > 0
+    }
+
+    pub fn can_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+
+    pub fn go_back(&mut self) -> Option<MainPage> {
+        if self.can_back() {
+            self.cursor -= 1;
+            self.entries.get(self.cursor).copied()
+        } else {
+            None
+        }
+    }
+
+    pub fn go_forward(&mut self) -> Option<MainPage> {
+        if self.can_forward() {
+            self.cursor += 1;
+            self.entries.get(self.cursor).copied()
+        } else {
+            None
+        }
+    }
+}
+
+pub enum BgMessage {
+    ScanCompleted(Vec<Track>),
+    LyricsLoaded {
+        track_id: String,
+        lrc_raw: String,
+        parsed: SyncedLyrics,
+    },
+    YtmRichHomeLoaded {
+        mood_index: usize,
+        home: Box<YtmRichHome>,
+    },
+    YtmRichHomeFailed(String),
+    YtmBrowseDetailLoaded(Box<YtmBrowseDetail>),
+    YtmBrowseDetailFailed {
+        browse_id: String,
+        error: String,
+    },
+    YtmRichSearchCompleted {
+        query: String,
+        result: Box<YtmRichSearch>,
+    },
+    YtmSearchFailed {
+        query: String,
+        error: String,
+    },
+    RadioLoaded {
+        seed_track_id: String,
+        seed_title: String,
+        tracks: Vec<Track>,
+    },
+    GoogleLoginResult(GoogleLoginOutcome),
+    YtmAccountSynced(Box<YtmAccountLibrary>),
+    YtmAccountSyncFailed(String),
+    StreamReady {
+        track_id: String,
+        video_id: String,
+        stream: CachedAudioStream,
+        auto_play: bool,
+    },
+    StreamFailed {
+        track_id: String,
+        error: String,
+        auto_play: bool,
+    },
+    PublicSyncCompleted {
+        provider: &'static str,
+        payload: Box<(Playlist, Vec<Track>)>,
+    },
+    PublicSyncFailed {
+        provider: &'static str,
+        error: String,
+    },
+    SubsonicSynced {
+        tracks: Vec<Track>,
+        playlists: Vec<(Playlist, Vec<Track>)>,
+    },
+    SubsonicFailed(String),
+    UpdateChecked {
+        manual: bool,
+        result: Result<Option<ReleaseInfo>, UpdateError>,
+    },
+    UpdateDownload(DownloadEvent),
+}
+
+/// Group all library tracks into visual Album cards with real cover artwork.
+pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
+    let mut map: HashMap<String, CollectionGroup> = HashMap::new();
+    for track in tracks {
+        let album_name = if track.album.trim().is_empty() {
+            "Singles".to_string()
+        } else {
+            track.album.trim().to_string()
+        };
+        let key = format!(
+            "{}::{}",
+            album_name.to_ascii_lowercase(),
+            track.artist.trim().to_ascii_lowercase()
+        );
+        let entry = map.entry(key).or_insert_with(|| CollectionGroup {
+            id: format!("album:{}", album_name.to_ascii_lowercase()),
+            title: album_name.clone(),
+            subtitle: track.artist.clone(),
+            kind: YtmCardKind::Album,
+            thumbnail_url: track.thumbnail_url.clone(),
+            tracks: Vec::new(),
+        });
+        if entry.thumbnail_url.is_none() && track.thumbnail_url.is_some() {
+            entry.thumbnail_url = track.thumbnail_url.clone();
+        }
+        entry.tracks.push(track.clone());
+    }
+    let mut out: Vec<CollectionGroup> = map.into_values().collect();
+    for g in &mut out {
+        g.subtitle = format!("{} · {} songs", g.subtitle, g.tracks.len());
+    }
+    out.sort_by(|a, b| {
+        b.tracks.len().cmp(&a.tracks.len()).then_with(|| {
+            a.title
+                .to_ascii_lowercase()
+                .cmp(&b.title.to_ascii_lowercase())
+        })
+    });
+    out
+}
+
+/// Group all library tracks into circular Artist cards with real artwork.
+pub fn build_artist_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
+    let mut map: HashMap<String, CollectionGroup> = HashMap::new();
+    for track in tracks {
+        let artist_name = if track.artist.trim().is_empty() {
+            "Unknown Artist".to_string()
+        } else {
+            track.artist.trim().to_string()
+        };
+        let key = artist_name.to_ascii_lowercase();
+        let entry = map.entry(key.clone()).or_insert_with(|| CollectionGroup {
+            id: format!("artist:{key}"),
+            title: artist_name.clone(),
+            subtitle: String::new(),
+            kind: YtmCardKind::Artist,
+            thumbnail_url: track.thumbnail_url.clone(),
+            tracks: Vec::new(),
+        });
+        if entry.thumbnail_url.is_none() && track.thumbnail_url.is_some() {
+            entry.thumbnail_url = track.thumbnail_url.clone();
+        }
+        entry.tracks.push(track.clone());
+    }
+    let mut out: Vec<CollectionGroup> = map.into_values().collect();
+    for g in &mut out {
+        g.subtitle = if g.tracks.len() == 1 {
+            "1 song".to_string()
+        } else {
+            format!("{} songs", g.tracks.len())
+        };
+    }
+    out.sort_by(|a, b| {
+        b.tracks.len().cmp(&a.tracks.len()).then_with(|| {
+            a.title
+                .to_ascii_lowercase()
+                .cmp(&b.title.to_ascii_lowercase())
+        })
+    });
+    out
+}
+
+/// Truncate text cleanly at UTF-8 char boundaries so cards & sidebar rows stay single-line crisp.
+pub fn clip_text(raw: &str, max_chars: usize) -> String {
+    let cleaned = raw.trim().replace('\n', " ");
+    if cleaned.chars().count() <= max_chars {
+        return cleaned;
+    }
+    let take = max_chars.saturating_sub(1);
+    let mut out: String = cleaned.chars().take(take).collect();
+    out.push('…');
+    out
+}
+
+/// Compute total size in bytes of files inside a cache directory (non-recursive).
+pub fn dir_size_bytes(dir: &Path) -> u64 {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in read_dir.flatten() {
+        if let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+pub fn format_bytes_mb(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}

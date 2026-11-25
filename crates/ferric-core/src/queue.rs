@@ -21,6 +21,44 @@ impl PlayQueue {
         self.rebuild_order(start_index);
     }
 
+    /// Append tracks to the end of the active queue (skipping duplicates by ID).
+    pub fn append_tracks(&mut self, extra: Vec<Track>) -> usize {
+        let mut added = 0usize;
+        for t in extra {
+            if self.tracks.iter().any(|existing| existing.id == t.id) {
+                continue;
+            }
+            let idx = self.tracks.len();
+            self.tracks.push(t);
+            self.order.push(idx);
+            added += 1;
+        }
+        added
+    }
+
+    /// Insert a single track right after the currently playing track ("Play Next").
+    pub fn insert_play_next(&mut self, track: Track) {
+        let idx = self.tracks.len();
+        self.tracks.push(track);
+        let insert_pos = self.cursor.map_or(0, |c| (c + 1).min(self.order.len()));
+        self.order.insert(insert_pos, idx);
+    }
+
+    /// Jump directly to the `offset`-th upcoming track (0 = very next song in Up Next).
+    pub fn jump_to_upcoming(&mut self, offset: usize) -> Option<&Track> {
+        let pos = self.cursor?;
+        let target = pos + 1 + offset;
+        if target < self.order.len() {
+            self.cursor = Some(target);
+            self.current()
+        } else if self.repeat == RepeatMode::All && !self.order.is_empty() {
+            self.cursor = Some(target % self.order.len());
+            self.current()
+        } else {
+            None
+        }
+    }
+
     pub fn tracks(&self) -> &[Track] {
         &self.tracks
     }
@@ -226,6 +264,7 @@ mod tests {
             isrc: None,
             spotify_id: None,
             youtube_video_id: None,
+            thumbnail_url: None,
             replay_gain_db: 0,
             liked: false,
         }

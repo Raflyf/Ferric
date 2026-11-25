@@ -53,6 +53,7 @@ impl LibraryDb {
                 isrc TEXT,
                 spotify_id TEXT,
                 youtube_video_id TEXT,
+                thumbnail_url TEXT,
                 replay_gain_db INTEGER NOT NULL DEFAULT 0,
                 liked INTEGER NOT NULL DEFAULT 0,
                 added_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
@@ -67,6 +68,7 @@ impl LibraryDb {
                 source TEXT NOT NULL,
                 etag TEXT,
                 description TEXT NOT NULL DEFAULT '',
+                thumbnail_url TEXT,
                 updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );
 
@@ -100,6 +102,13 @@ impl LibraryDb {
             );
             "#,
         )?;
+        // Safe idempotent schema upgrades for existing user databases.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tracks ADD COLUMN thumbnail_url TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE playlists ADD COLUMN thumbnail_url TEXT", []);
         Ok(())
     }
 
@@ -112,8 +121,8 @@ impl LibraryDb {
                 INSERT INTO tracks (
                     id, title, artist, album, duration_ms, file_path, source,
                     codec, sample_rate, bit_depth, bitrate_kbps, isrc,
-                    spotify_id, youtube_video_id, replay_gain_db, liked
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+                    spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
                 ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title,
                     artist = excluded.artist,
@@ -146,7 +155,8 @@ impl LibraryDb {
                         WHEN excluded.replay_gain_db != 0 THEN excluded.replay_gain_db
                         ELSE tracks.replay_gain_db
                     END,
-                    liked = MAX(tracks.liked, excluded.liked)
+                    liked = MAX(tracks.liked, excluded.liked),
+                    thumbnail_url = COALESCE(excluded.thumbnail_url, tracks.thumbnail_url)
                 "#,
             )?;
             for t in tracks {
@@ -168,6 +178,7 @@ impl LibraryDb {
                     t.youtube_video_id,
                     t.replay_gain_db,
                     i64::from(t.liked),
+                    t.thumbnail_url,
                 ])?;
                 count += 1;
             }
@@ -180,11 +191,11 @@ impl LibraryDb {
         let q = search_query.trim();
         let mut stmt = if q.is_empty() {
             self.conn.prepare(
-                "SELECT id, title, artist, album, duration_ms, file_path, source, codec, sample_rate, bit_depth, bitrate_kbps, isrc, spotify_id, youtube_video_id, replay_gain_db, liked FROM tracks ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE",
+                "SELECT id, title, artist, album, duration_ms, file_path, source, codec, sample_rate, bit_depth, bitrate_kbps, isrc, spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url FROM tracks ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE",
             )?
         } else {
             self.conn.prepare(
-                "SELECT id, title, artist, album, duration_ms, file_path, source, codec, sample_rate, bit_depth, bitrate_kbps, isrc, spotify_id, youtube_video_id, replay_gain_db, liked FROM tracks WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1 ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE",
+                "SELECT id, title, artist, album, duration_ms, file_path, source, codec, sample_rate, bit_depth, bitrate_kbps, isrc, spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url FROM tracks WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1 ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE",
             )?
         };
 
@@ -216,13 +227,14 @@ impl LibraryDb {
         let tx = self.conn.transaction()?;
         tx.execute(
             r#"
-            INSERT INTO playlists (id, name, source, etag, description, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))
+            INSERT INTO playlists (id, name, source, etag, description, thumbnail_url, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 source = excluded.source,
                 etag = excluded.etag,
                 description = excluded.description,
+                thumbnail_url = COALESCE(excluded.thumbnail_url, playlists.thumbnail_url),
                 updated_at = strftime('%s','now')
             "#,
             params![
@@ -231,6 +243,7 @@ impl LibraryDb {
                 playlist.source.as_badge(),
                 playlist.etag,
                 playlist.description,
+                playlist.thumbnail_url,
             ],
         )?;
         tx.execute(
@@ -249,6 +262,30 @@ impl LibraryDb {
         Ok(())
     }
 
+    pub fn add_track_to_playlist(&mut self, playlist_id: &str, track_id: &str) -> CoreResult<()> {
+        let next_pos: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
+            [playlist_id],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO playlist_tracks (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+            params![playlist_id, next_pos, track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_playlist(&mut self, playlist_id: &str) -> CoreResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+            [playlist_id],
+        )?;
+        tx.execute("DELETE FROM playlists WHERE id = ?1", [playlist_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_playlists(&self) -> CoreResult<Vec<Playlist>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -258,7 +295,8 @@ impl LibraryDb {
                 p.source,
                 p.etag,
                 p.description,
-                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count
+                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count,
+                p.thumbnail_url
             FROM playlists p
             ORDER BY p.name COLLATE NOCASE ASC
             "#,
@@ -272,6 +310,7 @@ impl LibraryDb {
                 etag: row.get(3)?,
                 description: row.get(4)?,
                 track_count: row.get::<_, i64>(5)?.max(0) as usize,
+                thumbnail_url: row.get(6)?,
             })
         })?;
         let mut out = Vec::new();
@@ -287,7 +326,7 @@ impl LibraryDb {
             SELECT
                 t.id, t.title, t.artist, t.album, t.duration_ms, t.file_path, t.source,
                 t.codec, t.sample_rate, t.bit_depth, t.bitrate_kbps, t.isrc,
-                t.spotify_id, t.youtube_video_id, t.replay_gain_db, t.liked
+                t.spotify_id, t.youtube_video_id, t.replay_gain_db, t.liked, t.thumbnail_url
             FROM playlist_tracks pt
             INNER JOIN tracks t ON t.id = pt.track_id
             WHERE pt.playlist_id = ?1
@@ -558,6 +597,7 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         isrc: row.get(11)?,
         spotify_id: row.get(12)?,
         youtube_video_id: row.get(13)?,
+        thumbnail_url: row.get(16)?,
         replay_gain_db: row.get(14)?,
         liked: row.get::<_, i64>(15)? != 0,
     })
@@ -596,6 +636,7 @@ mod tests {
             isrc: Some("USQX91300105".to_string()),
             spotify_id: None,
             youtube_video_id: None,
+            thumbnail_url: Some("https://example.com/ram.jpg".to_string()),
             replay_gain_db: 0,
             liked: true,
         };
@@ -603,6 +644,10 @@ mod tests {
         let found = db.list_tracks("Daft").expect("search");
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].title, "Instant Crush");
+        assert_eq!(
+            found[0].thumbnail_url.as_deref(),
+            Some("https://example.com/ram.jpg")
+        );
 
         let mut theme = ThemeConfig::default();
         theme.material.liquid_glass = true;
@@ -644,6 +689,7 @@ mod tests {
             isrc: Some("USQX91300105".to_string()),
             spotify_id: None,
             youtube_video_id: None,
+            thumbnail_url: None,
             replay_gain_db: -2,
             liked: false,
         };
@@ -662,6 +708,7 @@ mod tests {
             isrc: Some("usqx91300105".to_string()),
             spotify_id: Some("2cGxRwrMyEAp8dEbuZaVv6".to_string()),
             youtube_video_id: None,
+            thumbnail_url: None,
             replay_gain_db: 0,
             liked: true,
         };
@@ -677,6 +724,7 @@ mod tests {
             etag: Some("etag-1".to_string()),
             track_count: 1,
             description: "Synced audiophile favorites".to_string(),
+            thumbnail_url: None,
         };
         db.upsert_playlist(&pl, &["spotify:track:2cGxRwrMyEAp8dEbuZaVv6".to_string()])
             .expect("upsert playlist");

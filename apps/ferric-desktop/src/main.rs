@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod artwork;
 mod google_login;
 mod icons;
 mod shell;
 mod smtc;
+mod state;
 mod theme;
 mod track_list;
 mod widgets;

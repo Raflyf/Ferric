@@ -245,6 +245,29 @@ pub enum BgMessage {
     UpdateDownload(DownloadEvent),
 }
 
+fn resolved_track_thumb(track: &Track) -> Option<String> {
+    if let Some(url) = track
+        .thumbnail_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(url.to_string());
+    }
+    if let Some(vid) = track
+        .youtube_video_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(format!("https://i.ytimg.com/vi/{vid}/mqdefault.jpg"));
+    }
+    if let Some(vid) = track.id.strip_prefix("yt:video:").filter(|s| !s.is_empty()) {
+        return Some(format!("https://i.ytimg.com/vi/{vid}/mqdefault.jpg"));
+    }
+    None
+}
+
 /// Group all library tracks into visual Album cards with real cover artwork.
 pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
     let mut map: HashMap<String, CollectionGroup> = HashMap::new();
@@ -259,16 +282,17 @@ pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
             album_name.to_ascii_lowercase(),
             track.artist.trim().to_ascii_lowercase()
         );
+        let thumb = resolved_track_thumb(track);
         let entry = map.entry(key).or_insert_with(|| CollectionGroup {
             id: format!("album:{}", album_name.to_ascii_lowercase()),
             title: album_name.clone(),
             subtitle: track.artist.clone(),
             kind: YtmCardKind::Album,
-            thumbnail_url: track.thumbnail_url.clone(),
+            thumbnail_url: thumb.clone(),
             tracks: Vec::new(),
         });
-        if entry.thumbnail_url.is_none() && track.thumbnail_url.is_some() {
-            entry.thumbnail_url = track.thumbnail_url.clone();
+        if entry.thumbnail_url.is_none() && thumb.is_some() {
+            entry.thumbnail_url = thumb;
         }
         entry.tracks.push(track.clone());
     }
@@ -296,16 +320,17 @@ pub fn build_artist_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
             track.artist.trim().to_string()
         };
         let key = artist_name.to_ascii_lowercase();
+        let thumb = resolved_track_thumb(track);
         let entry = map.entry(key.clone()).or_insert_with(|| CollectionGroup {
             id: format!("artist:{key}"),
             title: artist_name.clone(),
             subtitle: String::new(),
             kind: YtmCardKind::Artist,
-            thumbnail_url: track.thumbnail_url.clone(),
+            thumbnail_url: thumb.clone(),
             tracks: Vec::new(),
         });
-        if entry.thumbnail_url.is_none() && track.thumbnail_url.is_some() {
-            entry.thumbnail_url = track.thumbnail_url.clone();
+        if entry.thumbnail_url.is_none() && thumb.is_some() {
+            entry.thumbnail_url = thumb;
         }
         entry.tracks.push(track.clone());
     }
@@ -346,7 +371,7 @@ pub fn clip_text(raw: &str, max_chars: usize) -> String {
         .collect();
     let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let final_str = if trimmed.is_empty() {
-        raw.trim().to_string()
+        "Unknown".to_string()
     } else {
         trimmed
     };

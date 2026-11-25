@@ -1,4 +1,5 @@
 use crate::artwork::{ArtworkCache, CachedArtwork};
+use crate::state::clip_text;
 use crate::widgets::FerricCoverArtWidgetRefExt;
 use ferric_core::models::{Track, TrackSource, format_duration_ms};
 use makepad_widgets::*;
@@ -144,8 +145,7 @@ live_design! {
 
         dur_lbl = <Label> {
             width: 58,
-            padding: { right: 6 }
-            align: { x: 1.0, y: 0.5 }
+            align: { x: 0.5, y: 0.5 }
             draw_text: {
                 color: #888B99,
                 text_style: { font_size: 11.5 }
@@ -452,9 +452,12 @@ impl Widget for TrackList {
                             other => format!("{} · {}", track.artist, other.as_badge()),
                         };
                         row.label(id!(idx_lbl)).set_text(cx, &idx_txt);
-                        row.label(id!(title_lbl)).set_text(cx, &track.title);
-                        row.label(id!(artist_lbl)).set_text(cx, &artist_sub);
-                        row.label(id!(album_lbl)).set_text(cx, &track.album);
+                        row.label(id!(title_lbl))
+                            .set_text(cx, &clip_text(&track.title, 34));
+                        row.label(id!(artist_lbl))
+                            .set_text(cx, &clip_text(&artist_sub, 38));
+                        row.label(id!(album_lbl))
+                            .set_text(cx, &clip_text(&track.album, 22));
                         let dur_txt = if track.duration_ms > 0 {
                             format_duration_ms(track.duration_ms)
                         } else {

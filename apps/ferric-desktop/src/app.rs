@@ -425,10 +425,10 @@ live_design! {
     // Sonora Horizontal Album / Playlist Shelf Card (Real Square Cover Art!)
     ShelfCard = <View> {
         width: Fill,
-        height: 184,
+        height: 196,
         padding: 8,
         flow: Down,
-        spacing: 7,
+        spacing: 6,
         show_bg: true,
         cursor: Hand,
         draw_bg: {
@@ -460,10 +460,10 @@ live_design! {
     // Visual Grid Card for Albums / Artists / Playlists pages
     GridCard = <View> {
         width: Fill,
-        height: 214,
+        height: 226,
         padding: 10,
         flow: Down,
-        spacing: 8,
+        spacing: 6,
         show_bg: true,
         cursor: Hand,
         draw_bg: {
@@ -477,7 +477,7 @@ live_design! {
         }
         art = <FerricCoverArt> {
             width: Fill,
-            height: 146,
+            height: 144,
             draw_bg: { radius: 10.0 }
         }
         title = <Label> {
@@ -1738,7 +1738,7 @@ live_design! {
                         bottom_bar = <AmbientBottomBar> {
                             // Left: 44x44 Real Cover Art + Title + Heart + Artist
                             <View> {
-                                width: 256,
+                                width: 286,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
@@ -1762,7 +1762,7 @@ live_design! {
                                     np_artist_lbl = <Label> {
                                         width: Fill,
                                         draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }
-                                        text: "Pick a song from Quick picks"
+                                        text: "Pick a song to play"
                                     }
                                 }
                                 np_like_btn = <SonoraIconBtn> {
@@ -1805,8 +1805,8 @@ live_design! {
                                 <View> { width: 6, height: 1 }
 
                                 pos_lbl = <Label> {
-                                    width: 48,
-                                    align: { x: 1.0, y: 0.5 }
+                                    width: 52,
+                                    align: { x: 0.5, y: 0.5 }
                                     draw_text: { color: #9A9CA8, text_style: { font_size: 11.0 } }
                                     text: "00:00"
                                 }
@@ -1816,8 +1816,8 @@ live_design! {
                                     min: 0.0, max: 1.0, value: 0.0
                                 }
                                 dur_btn = <Button> {
-                                    width: 48, height: 24, padding: 0,
-                                    align: { x: 0.0, y: 0.5 }
+                                    width: 52, height: 24, padding: 0,
+                                    align: { x: 0.5, y: 0.5 }
                                     text: "00:00"
                                     draw_bg: { fn pixel(self) -> vec4 { return vec4(0.0, 0.0, 0.0, 0.0); } }
                                     draw_text: { color: #9A9CA8, color_hover: #F4F4F7, text_style: { font_size: 11.0 } }
@@ -1882,7 +1882,7 @@ live_design! {
                                 let glow1 = exp(-d1 * d1 * 2.8) * 0.28;
                                 let glow2 = exp(-d2 * d2 * 3.2) * 0.14;
                                 let rgb = vec3(0.055, 0.058, 0.075) + self.accent_col.xyz * (glow1 + glow2);
-                                return vec4(clamp(rgb, 0.0, 1.0), 0.99);
+                                return vec4(clamp(rgb, 0.0, 1.0), 1.0);
                             }
                         }
 
@@ -2564,6 +2564,7 @@ impl App {
 
     fn set_fullscreen(&mut self, cx: &mut Cx, open: bool) {
         self.fullscreen_open = open;
+        self.ui.view(id!(shell_col)).set_visible(cx, !open);
         self.ui.view(id!(fullscreen_overlay)).set_visible(cx, open);
         self.ui.redraw(cx);
     }
@@ -2592,7 +2593,7 @@ impl App {
 
     fn request_artwork_for_tracks(&mut self, tracks: &[Track]) {
         if let Some(cache) = &mut self.artwork {
-            for t in tracks.iter().take(48) {
+            for t in tracks.iter().take(240) {
                 let _ = cache.request_for_track(t);
             }
         }
@@ -2838,6 +2839,26 @@ impl App {
         // Album & Artist groups
         self.album_groups = build_album_groups(&self.all_tracks);
         self.artist_groups = build_artist_groups(&self.all_tracks);
+        if let Some(cache) = &mut self.artwork {
+            for t in self.recents_tracks.iter().take(12) {
+                let _ = cache.request_for_track(t);
+            }
+            for g in self.album_groups.iter().take(24) {
+                if let Some(url) = g.thumbnail_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+            }
+            for g in self.artist_groups.iter().take(24) {
+                if let Some(url) = g.thumbnail_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+            }
+            for pl in self.playlists.iter().take(16) {
+                if let Some(url) = pl.thumbnail_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+            }
+        }
         self.request_artwork_for_tracks(&self.all_tracks.clone());
 
         // Sidebar Pinned slots
@@ -2884,10 +2905,19 @@ impl App {
     }
 
     fn home_quick_picks_pool(&self) -> Vec<Track> {
-        if !self.rich_home.quick_picks.is_empty() {
-            return self.rich_home.quick_picks.clone();
-        }
-        self.all_tracks.clone()
+        let raw = if !self.rich_home.quick_picks.is_empty() {
+            &self.rich_home.quick_picks
+        } else {
+            &self.all_tracks
+        };
+        raw.iter()
+            .filter(|t| {
+                let alb = t.album.to_ascii_lowercase();
+                let art = t.artist.to_ascii_lowercase();
+                !alb.contains("watching") && !art.contains("watching")
+            })
+            .cloned()
+            .collect()
     }
 
     fn refresh_home_ui(&self, cx: &mut Cx) {
@@ -3026,10 +3056,10 @@ impl App {
                         card_v.set_visible(cx, true);
                         card_v
                             .label(id!(title))
-                            .set_text(cx, &clip_text(&card.title, 16));
+                            .set_text(cx, &clip_text(&card.title, 14));
                         card_v
                             .label(id!(sub))
-                            .set_text(cx, &clip_text(&card.subtitle, 19));
+                            .set_text(cx, &clip_text(&card.subtitle, 17));
                         self.bind_cover_art_url(
                             cx,
                             card_v.ferric_cover_art(id!(art)),
@@ -3223,13 +3253,18 @@ impl App {
             let v = self.ui.view(vid);
             if let Some(g) = self.album_groups.get(start + i) {
                 v.set_visible(cx, true);
-                v.label(id!(title)).set_text(cx, &clip_text(&g.title, 22));
-                v.label(id!(sub)).set_text(cx, &clip_text(&g.subtitle, 24));
+                v.label(id!(title)).set_text(cx, &clip_text(&g.title, 20));
+                v.label(id!(sub)).set_text(cx, &clip_text(&g.subtitle, 23));
+                let best_track = g
+                    .tracks
+                    .iter()
+                    .find(|t| t.thumbnail_url.is_some() || t.youtube_video_id.is_some())
+                    .or_else(|| g.tracks.first());
                 self.bind_cover_art_url(
                     cx,
                     v.ferric_cover_art(id!(art)),
                     g.thumbnail_url.as_deref(),
-                    g.tracks.first(),
+                    best_track,
                     false,
                     0.4,
                     false,
@@ -3260,13 +3295,18 @@ impl App {
             let v = self.ui.view(vid);
             if let Some(g) = self.artist_groups.get(start + i) {
                 v.set_visible(cx, true);
-                v.label(id!(title)).set_text(cx, &clip_text(&g.title, 22));
-                v.label(id!(sub)).set_text(cx, &clip_text(&g.subtitle, 24));
+                v.label(id!(title)).set_text(cx, &clip_text(&g.title, 20));
+                v.label(id!(sub)).set_text(cx, &clip_text(&g.subtitle, 23));
+                let best_track = g
+                    .tracks
+                    .iter()
+                    .find(|t| t.thumbnail_url.is_some() || t.youtube_video_id.is_some())
+                    .or_else(|| g.tracks.first());
                 self.bind_cover_art_url(
                     cx,
                     v.ferric_cover_art(id!(art)),
                     g.thumbnail_url.as_deref(),
-                    g.tracks.first(),
+                    best_track,
                     false,
                     0.4,
                     true,
@@ -3981,10 +4021,10 @@ impl App {
             self.pending_stream_track_id = Some(track.id.clone());
             self.ui
                 .label(id!(np_title_lbl))
-                .set_text(cx, &clip_text(&track.title, 19));
+                .set_text(cx, &clip_text(&track.title, 20));
             self.ui.label(id!(np_artist_lbl)).set_text(
                 cx,
-                &clip_text(&format!("{} · Buffering...", track.artist), 22),
+                &clip_text(&format!("{} · Buffering...", track.artist), 23),
             );
             self.ui
                 .button(id!(codec_pill_btn))
@@ -4026,7 +4066,7 @@ impl App {
             .map_or(48_000, |a| a.telemetry().output_rate);
         self.ui
             .label(id!(np_title_lbl))
-            .set_text(cx, &clip_text(&track.title, 19));
+            .set_text(cx, &clip_text(&track.title, 20));
         self.ui
             .label(id!(np_artist_lbl))
             .set_text(cx, &clip_text(&track.artist, 22));

@@ -1199,6 +1199,11 @@ pub fn collect_music_items(
     }
 }
 
+fn is_livestream_subtitle(subtitle: &str) -> bool {
+    let low = subtitle.to_ascii_lowercase();
+    low.contains("watching") || low.contains("live now") || low.contains("livestream")
+}
+
 fn parse_responsive_item(item: &Value, default_album: &str) -> Option<Track> {
     let vid = item
         .pointer("/playlistItemData/videoId")
@@ -1223,6 +1228,9 @@ fn parse_responsive_item(item: &Value, default_album: &str) -> Option<Track> {
             extract_runs_text(c.pointer("/musicResponsiveListItemFlexColumnRenderer/text"))
         })
         .unwrap_or_default();
+    if is_livestream_subtitle(&subtitle) {
+        return None;
+    }
 
     let (artist, album, mut duration_ms) = parse_ytm_subtitle(&subtitle, default_album);
     if duration_ms == 0
@@ -1274,6 +1282,9 @@ fn parse_two_row_song(item: &Value, default_album: &str) -> Option<Track> {
     }
     let raw_title = extract_runs_text(item.get("title"))?;
     let subtitle = extract_runs_text(item.get("subtitle")).unwrap_or_default();
+    if is_livestream_subtitle(&subtitle) {
+        return None;
+    }
     let (artist, album, duration_ms) = parse_ytm_subtitle(&subtitle, default_album);
     let cleaned = clean_youtube_metadata(&raw_title, &artist);
     let thumbnail_url = extract_best_thumbnail(item, Some(vid));

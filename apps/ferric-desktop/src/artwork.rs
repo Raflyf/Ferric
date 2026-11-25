@@ -122,6 +122,7 @@ impl ArtworkCache {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            .or_else(|| track.id.strip_prefix("yt:video:").filter(|s| !s.is_empty()))
         {
             return Some(format!("https://i.ytimg.com/vi/{vid}/mqdefault.jpg"));
         }

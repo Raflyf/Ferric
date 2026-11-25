@@ -111,8 +111,8 @@ live_design! {
         }
 
         dur_lbl = <Label> {
-            width: 68,
-            padding: { right: 4 }
+            width: 76,
+            padding: { right: 10 }
             align: { x: 1.0, y: 0.5 }
             draw_text: {
                 color: #9E988E,
@@ -397,8 +397,12 @@ impl Widget for TrackList {
                         row.label(id!(title_lbl)).set_text(cx, &track.title);
                         row.label(id!(artist_lbl)).set_text(cx, &artist_sub);
                         row.label(id!(album_lbl)).set_text(cx, &track.album);
-                        row.label(id!(dur_lbl))
-                            .set_text(cx, &format_duration_ms(track.duration_ms));
+                        let dur_txt = if track.duration_ms > 0 {
+                            format_duration_ms(track.duration_ms)
+                        } else {
+                            "--:--".to_string()
+                        };
+                        row.label(id!(dur_lbl)).set_text(cx, &dur_txt);
                         row.draw_all(cx, scope);
                     }
                 }

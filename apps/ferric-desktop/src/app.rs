@@ -643,12 +643,13 @@ live_design! {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
                                                 home_discover_btn = <FerricAccentPill> {
                                                     height: 34,
-                                                    text: "Refresh Discover"
+                                                    padding: { left: 13, right: 15 }
+                                                    text: "Discover"
                                                     draw_icon: { svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z" }
                                                 }
                                                 home_demo_btn = <FerricBtn> {
                                                     height: 34,
-                                                    text: "Offline Demo"
+                                                    text: "Demo"
                                                     draw_icon: { svg_path: "M8 5V19L19 12L8 5Z", color: #D9541E }
                                                 }
                                             }
@@ -662,10 +663,10 @@ live_design! {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8, margin: { top: 4 }
                                                 home_google_btn = <FerricBtn> {
                                                     height: 34,
-                                                    text: "Sign in with Google"
+                                                    text: "Google Login"
                                                     draw_icon: { svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z", color: #D9541E }
                                                 }
-                                                home_accounts_btn = <FerricBtn> { height: 34, text: "Spotify Link" }
+                                                home_accounts_btn = <FerricBtn> { height: 34, text: "Spotify" }
                                             }
                                         }
 
@@ -813,7 +814,7 @@ live_design! {
                                         <Label> { width: Fill, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Title" }
                                         <Label> { width: 220, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Album" }
                                         <View> { width: 34, height: 1 }
-                                        <Label> { width: 68, padding: { right: 4 }, align: { x: 1.0 }, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Time" }
+                                        <Label> { width: 76, padding: { right: 10 }, align: { x: 1.0 }, draw_text: { color: #757068, text_style: { font_size: 11.0 } }, text: "Time" }
                                     }
 
                                     track_list = <TrackList> {}

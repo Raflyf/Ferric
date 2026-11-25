@@ -137,10 +137,13 @@ $packagedExe = Join-Path $staging 'ferric.exe'
 $makepadStage = Join-Path $staging 'makepad'
 $mwDest = Join-Path $makepadStage 'makepad_widgets\resources'
 $fdDest = Join-Path $makepadStage 'ferric_desktop\resources'
+$binDest = Join-Path $makepadStage 'ferric\resources'
 New-Item -ItemType Directory -Path $mwDest -Force | Out-Null
 New-Item -ItemType Directory -Path $fdDest -Force | Out-Null
+New-Item -ItemType Directory -Path $binDest -Force | Out-Null
 Copy-Item (Join-Path $MakepadWidgetsResources '*') $mwDest -Recurse -Force
-Copy-Item (Join-Path $root 'apps\ferric-desktop\resources\*') $fdDest -Force
+Copy-Item (Join-Path $root 'apps\ferric-desktop\resources\*') $fdDest -Recurse -Force
+Copy-Item (Join-Path $root 'apps\ferric-desktop\resources\*') $binDest -Recurse -Force
 
 # Generate ICE38/ICE64-compliant per-user WiX fragment for all staged makepad/ resources
 $dirIds = @{}

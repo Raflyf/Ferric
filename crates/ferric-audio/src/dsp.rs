@@ -196,13 +196,21 @@ impl SpectrumAnalyzer8 {
     }
 }
 
-/// Smooth soft-clip limiter preventing harsh digital clipping when EQ bands are boosted.
+/// C1-continuous transparent soft-knee limiter (exact 1:1 linear below 0.92, smooth asymptotic
+/// tanh knee from 0.92..1.0) so mastered loud tracks stay 100% distortion-free with zero step cliff.
 #[inline]
 pub fn soft_limit(sample: f32) -> f32 {
-    if sample.abs() <= 0.85 {
+    const THRESHOLD: f32 = 0.92;
+    const KNEE: f32 = 1.0 - THRESHOLD;
+    if !sample.is_finite() {
+        return 0.0;
+    }
+    let abs = sample.abs();
+    if abs <= THRESHOLD {
         sample
     } else {
-        sample.tanh()
+        let excess = (abs - THRESHOLD) / KNEE;
+        sample.signum() * (THRESHOLD + KNEE * excess.tanh())
     }
 }
 
@@ -285,10 +293,20 @@ impl StereoEqProcessor {
         }
     }
 
-    /// Process interleaved stereo `[L, R, L, R, ...]` samples in place.
-    pub fn process_interleaved_stereo(&mut self, samples: &mut [f32], volume: f32) {
-        let vol = volume.clamp(0.0, 1.5);
+    /// Process interleaved stereo `[L, R, L, R, ...]` samples in place with click-free volume smoothing.
+    pub fn process_interleaved_stereo_ramped(
+        &mut self,
+        samples: &mut [f32],
+        current_vol: &mut f32,
+        target_vol: f32,
+    ) {
+        let target = target_vol.clamp(0.0, 1.5);
         for frame in samples.as_chunks_mut::<2>().0 {
+            *current_vol += (target - *current_vol) * 0.004;
+            if (target - *current_vol).abs() < 1e-4 {
+                *current_vol = target;
+            }
+            let vol = *current_vol;
             let mut l = frame[0];
             let mut r = frame[1];
             if self.enabled {
@@ -304,6 +322,12 @@ impl StereoEqProcessor {
             frame[0] = soft_limit(l * vol);
             frame[1] = soft_limit(r * vol);
         }
+    }
+
+    /// Process interleaved stereo `[L, R, L, R, ...]` samples in place.
+    pub fn process_interleaved_stereo(&mut self, samples: &mut [f32], volume: f32) {
+        let mut cur = volume.clamp(0.0, 1.5);
+        self.process_interleaved_stereo_ramped(samples, &mut cur, cur);
     }
 }
 
@@ -359,5 +383,27 @@ mod tests {
         let mut buf = vec![0.5_f32; 256];
         proc.process_interleaved_stereo(&mut buf, 1.0);
         assert!(buf.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+    }
+
+    #[test]
+    fn soft_limit_is_c1_continuous_and_monotonic() {
+        let mut prev = soft_limit(-4.0);
+        for i in -3999..=4000 {
+            let x = i as f32 / 1000.0;
+            let y = soft_limit(x);
+            assert!(y.is_finite() && y.abs() <= 1.0);
+            assert!(
+                y >= prev - 1e-6,
+                "non-monotonic step at x={x}: prev={prev} y={y}"
+            );
+            assert!(
+                (y - prev).abs() <= 0.002,
+                "discontinuity cliff at x={x}: prev={prev} y={y}"
+            );
+            prev = y;
+        }
+        // Strictly transparent inside linear headroom (-0.92..0.92)
+        assert!((soft_limit(0.86) - 0.86).abs() < 1e-6);
+        assert!((soft_limit(-0.91) + 0.91).abs() < 1e-6);
     }
 }

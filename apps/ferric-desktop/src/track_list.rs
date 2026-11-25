@@ -14,9 +14,9 @@ live_design! {
 
     TrackRow = <View> {
         width: Fill,
-        height: 54,
-        padding: { left: 12, right: 14, top: 5, bottom: 5 }
-        margin: { bottom: 2 }
+        height: 58,
+        padding: { left: 12, right: 14, top: 6, bottom: 6 }
+        margin: { bottom: 3 }
         flow: Right,
         align: { y: 0.5 }
         spacing: 12,
@@ -26,39 +26,90 @@ live_design! {
         draw_bg: {
             instance active: 0.0
             instance hover: 0.0
+            instance down: 0.0
             uniform base_col: #00000000
-            uniform hover_col: #14151D
+            uniform hover_col: #13151D
             uniform active_col: #181726
             uniform accent_col: #A882FF
             uniform glass_on: 0.0
-            uniform radius: 8.0
+            uniform dispersion: 0.42
+            uniform rim_amt: 0.78
+            uniform scrim_amt: 0.28
+            uniform radius: 10.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = mix(self.radius * 0.5, 9.0, self.glass_on);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, r);
-                let glass_idle = vec4(0.11, 0.12, 0.17, 0.34 * self.glass_on);
-                let base = mix(self.base_col, glass_idle, self.glass_on);
-                let hov = mix(self.hover_col, vec4(0.20, 0.21, 0.28, 0.56), self.glass_on);
-                let idle_or_hover = mix(base, hov, self.hover);
-                let active_tint = mix(self.active_col, vec4(self.accent_col.xyz, 0.22), 0.42);
-                let bg = mix(idle_or_hover, active_tint, self.active);
+                let r = mix(7.0, clamp(self.radius * 0.55, 7.0, 14.0), self.glass_on);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+
+                let uv = self.pos;
+                let top_sheen = smoothstep(0.45, 0.0, uv.y) * (0.09 + 0.06 * self.hover);
+                let glass_base = clamp(
+                    mix(vec3(0.11, 0.12, 0.18), self.accent_col.xyz, 0.08 + 0.06 * self.hover)
+                        + vec3(top_sheen, top_sheen, top_sheen),
+                    0.0,
+                    1.0
+                );
+                let glass_alpha = clamp(0.28 + self.scrim_amt * 0.34 + self.hover * 0.14 - self.down * 0.04, 0.24, 0.78);
+                let glass_idle = vec4(glass_base, glass_alpha);
+                let solid_idle = mix(self.base_col, self.hover_col, self.hover);
+                let idle_or_hover = mix(solid_idle, glass_idle, self.glass_on);
+
+                let active_solid = mix(self.active_col, vec4(self.accent_col.xyz, 0.24), 0.40);
+                let active_glass = vec4(
+                    clamp(mix(vec3(0.14, 0.14, 0.22), self.accent_col.xyz, 0.32) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0),
+                    clamp(0.46 + self.scrim_amt * 0.30, 0.40, 0.84)
+                );
+                let bg = mix(idle_or_hover, mix(active_solid, active_glass, self.glass_on), self.active);
                 sdf.fill_keep(bg);
-                let top_rim = smoothstep(0.45, 0.0, self.pos.y);
-                let g_border = vec4(1.0, 1.0, 1.0, (0.09 + 0.14 * top_rim) * self.glass_on);
-                let a_border = vec4(self.accent_col.xyz, 0.45 * self.active);
-                let border = mix(g_border, a_border, self.active);
+
+                let tl = smoothstep(0.65, 0.0, uv.y * 0.8 + uv.x * 0.2);
+                let prism = vec3(
+                    0.82 + 0.18 * cos(uv.x * 6.283),
+                    0.82 + 0.18 * cos(uv.x * 6.283 - 2.094),
+                    0.82 + 0.18 * cos(uv.x * 6.283 + 2.094)
+                );
+                let rim_rgb = mix(vec3(1.0, 1.0, 1.0), prism, self.dispersion * 0.65);
+                let g_border = vec4(rim_rgb, (0.12 + (0.28 * tl + 0.12 * self.hover) * self.rim_amt) * self.glass_on);
+                let s_border = vec4(1.0, 1.0, 1.0, 0.06 * self.hover);
+                let a_border = vec4(self.accent_col.xyz, 0.62 * self.active);
+                let border = mix(mix(s_border, g_border, self.glass_on), a_border, self.active);
                 sdf.stroke(border, 1.0);
                 return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: { all: Forward { duration: 0.16 } }
+                    apply: { draw_bg: { hover: 0.0 } }
+                }
+                on = {
+                    from: { all: Forward { duration: 0.13 } }
+                    apply: { draw_bg: { hover: 1.0 } }
+                }
+            }
+            down = {
+                default: off,
+                off = {
+                    from: { all: Forward { duration: 0.12 } }
+                    apply: { draw_bg: { down: 0.0 } }
+                }
+                on = {
+                    from: { all: Forward { duration: 0.06 } }
+                    apply: { draw_bg: { down: 1.0 } }
+                }
             }
         }
 
         idx_lbl = <Label> {
             width: 24,
+            padding: 0,
             align: { x: 0.5, y: 0.5 }
             draw_text: {
                 color: #707382,
-                text_style: { font_size: 11.5 }
+                text_style: <THEME_FONT_MEDIUM> { font_size: 11.5 }
             }
             text: "1"
         }
@@ -76,17 +127,19 @@ live_design! {
             spacing: 2,
             title_lbl = <Label> {
                 width: Fill,
+                padding: 0,
                 draw_text: {
                     color: #F4F4F7,
-                    text_style: { font_size: 13.0 }
+                    text_style: <THEME_FONT_BOLD> { font_size: 13.0, line_spacing: 1.0 }
                 }
                 text: "Song Title"
             }
             artist_lbl = <Label> {
                 width: Fill,
+                padding: 0,
                 draw_text: {
                     color: #9A9CA8,
-                    text_style: { font_size: 11.5 }
+                    text_style: <THEME_FONT_REGULAR> { font_size: 11.5, line_spacing: 1.0 }
                 }
                 text: "Artist"
             }
@@ -94,9 +147,10 @@ live_design! {
 
         album_lbl = <Label> {
             width: 150,
+            padding: 0,
             draw_text: {
                 color: #888B99,
-                text_style: { font_size: 11.5 }
+                text_style: <THEME_FONT_REGULAR> { font_size: 11.5, line_spacing: 1.0 }
             }
             text: "Album"
         }
@@ -120,9 +174,16 @@ live_design! {
                 instance hover: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0);
+                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
                     sdf.fill(vec4(0.18, 0.19, 0.25, 0.80 * self.hover));
                     return sdf.result;
+                }
+            }
+            animator: {
+                hover = {
+                    default: off,
+                    off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 }, draw_icon: { hover: 0.0 } } }
+                    on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 }, draw_icon: { hover: 1.0 } } }
                 }
             }
         }
@@ -146,19 +207,27 @@ live_design! {
                 instance hover: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0);
+                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
                     sdf.fill(vec4(0.18, 0.19, 0.25, 0.80 * self.hover));
                     return sdf.result;
+                }
+            }
+            animator: {
+                hover = {
+                    default: off,
+                    off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 }, draw_icon: { hover: 0.0 } } }
+                    on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 }, draw_icon: { hover: 1.0 } } }
                 }
             }
         }
 
         dur_lbl = <Label> {
             width: 58,
+            padding: 0,
             align: { x: 0.5, y: 0.5 }
             draw_text: {
                 color: #888B99,
-                text_style: { font_size: 11.5 }
+                text_style: <THEME_FONT_MEDIUM> { font_size: 11.5 }
             }
             text: "03:45"
         }
@@ -316,6 +385,10 @@ pub struct TrackListScope {
     pub audio_level: f32,
     pub accent: Vec4,
     pub glass_on: f32,
+    pub glass_dispersion: f32,
+    pub glass_rim: f32,
+    pub glass_scrim: f32,
+    pub glass_radius: f32,
     pub ui_zoom: f32,
     pub artworks: Rc<HashMap<String, CachedArtwork>>,
 }
@@ -364,7 +437,7 @@ impl Widget for TrackList {
             }
             if let Some(fe) = item.as_view().finger_up(&actions)
                 && fe.is_over
-                && fe.was_tap()
+                && (fe.abs - fe.abs_start).length() < 16.0
             {
                 cx.widget_action(uid, &scope.path, TrackListAction::PlayIndex(item_id));
             }
@@ -372,7 +445,20 @@ impl Widget for TrackList {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let (tracks, active_id, is_playing, level, accent, glass_on, zoom, artworks) = scope
+        let (
+            tracks,
+            active_id,
+            is_playing,
+            level,
+            accent,
+            glass_on,
+            dispersion,
+            rim_amt,
+            scrim_amt,
+            radius,
+            zoom,
+            artworks,
+        ) = scope
             .props
             .get::<TrackListScope>()
             .map(|d| {
@@ -383,6 +469,10 @@ impl Widget for TrackList {
                     d.audio_level,
                     d.accent,
                     d.glass_on,
+                    d.glass_dispersion,
+                    d.glass_rim,
+                    d.glass_scrim,
+                    d.glass_radius,
                     d.ui_zoom.clamp(0.8, 1.4),
                     Rc::clone(&d.artworks),
                 )
@@ -395,12 +485,16 @@ impl Widget for TrackList {
                     0.5,
                     vec4(0.659, 0.510, 1.0, 1.0),
                     0.0,
+                    0.42,
+                    0.78,
+                    0.28,
+                    12.0,
                     1.0,
                     Rc::new(HashMap::new()),
                 )
             });
         let count = tracks.len();
-        let row_h = (54.0 * zoom) as f64;
+        let row_h = (58.0 * zoom) as f64;
         let art_sz = (40.0 * zoom) as f64;
         let title_fs = (13.0 * zoom) as f64;
         let sub_fs = (11.5 * zoom) as f64;
@@ -446,7 +540,11 @@ impl Widget for TrackList {
                                 draw_bg: {
                                     active: (if is_active { 1.0 } else { 0.0 }),
                                     accent_col: (accent),
-                                    glass_on: (glass_on)
+                                    glass_on: (glass_on),
+                                    dispersion: (dispersion),
+                                    rim_amt: (rim_amt),
+                                    scrim_amt: (scrim_amt),
+                                    radius: (radius)
                                 }
                                 art_tile = { width: (art_sz), height: (art_sz) }
                                 idx_lbl = { draw_text: { color: (idx_col), text_style: { font_size: (sub_fs) } } }

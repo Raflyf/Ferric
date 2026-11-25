@@ -598,6 +598,27 @@ pub fn fetch_browse_detail(
     let mut seen = HashSet::new();
     collect_music_items(&root, &resolved_title, 80, &mut seen, &mut tracks);
 
+    // YouTube Music Mix / Radio cards (e.g. `VLRDCLAK...` / `VLRD...`) often return tracks via `next`
+    // (`playlistId` without `VL` prefix) instead of `browse`. Fall back automatically so every card works.
+    if tracks.is_empty() {
+        let stripped_pl = bid.strip_prefix("VL").unwrap_or(bid);
+        let next_body = json!({
+            "playlistId": stripped_pl,
+            "enablePersistentPlaylistPanel": true,
+            "isAudioOnly": true,
+            "context": web_remix_context(session),
+        });
+        if let Ok(next_root) = post_ytm_json("next", &next_body, session) {
+            collect_music_items(&next_root, &resolved_title, 50, &mut seen, &mut tracks);
+        }
+    }
+    if tracks.is_empty()
+        && resolved_title != "YouTube Music"
+        && let Ok(hits) = search_music(session, &resolved_title, 20)
+    {
+        tracks = hits;
+    }
+
     let kind = if bid.starts_with("MPREb_") || bid.starts_with("OLAK5uy_") {
         YtmCardKind::Album
     } else if bid.starts_with("UC") {

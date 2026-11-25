@@ -6,7 +6,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ferric_core::eq::EqConfig;
 use ferric_core::models::{FadeCurve, PlaybackDspSettings};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
-use rubato::{Adjustable, Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
+use rubato::{
+    Adjustable, Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters, WindowFunction,
+};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -134,28 +136,31 @@ impl AudioEngine {
 
         let out_rate = default_cfg.sample_rate();
         let out_channels = usize::from(default_cfg.channels()).max(1);
+        let sample_format = default_cfg.sample_format();
         let stream_cfg: cpal::StreamConfig = default_cfg.into();
 
-        // ~140 ms wait-free SPSC ring buffer (stereo interleaved f32) for responsive fades & EQ.
-        let ring_samples = ((out_rate as usize * 140) / 1000).max(4096) * 2;
-        let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(ring_samples);
+        // ~260 ms wait-free SPSC ring buffer of atomic stereo `[L, R]` frames — eliminates
+        // L/R channel desync and absorbs disk/Deck-B pre-open jitter with zero underrun crackles.
+        let ring_frames = ((out_rate as usize * 260) / 1000).max(4096);
+        let (producer, mut consumer) = rtrb::RingBuffer::<[f32; 2]>::new(ring_frames);
 
         let telemetry = Arc::new(AudioTelemetry::default());
         telemetry.output_rate.store(out_rate, Ordering::Relaxed);
         let cb_telemetry = Arc::clone(&telemetry);
 
-        let stream = device
-            .build_output_stream(
+        let err_fn = |err| {
+            eprintln!("ferric-audio stream error: {err}");
+        };
+
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => device.build_output_stream(
                 stream_cfg,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
                         while consumer.pop().is_ok() {}
                     }
-                    // Drain queued stereo samples cleanly so 120 ms pause fade-outs reach exact 0.0
-                    // before silence, with zero allocations inside the audio callback.
                     for frame in data.chunks_exact_mut(out_channels) {
-                        let l = consumer.pop().unwrap_or(0.0);
-                        let r = consumer.pop().unwrap_or(0.0);
+                        let [l, r] = consumer.pop().unwrap_or([0.0, 0.0]);
                         if out_channels == 1 {
                             frame[0] = 0.5 * (l + r);
                         } else {
@@ -167,12 +172,81 @@ impl AudioEngine {
                         }
                     }
                 },
-                |err| {
-                    eprintln!("ferric-audio stream error: {err}");
-                },
+                err_fn,
                 None,
-            )
-            .map_err(|e| AudioError::Device(e.to_string()))?;
+            ),
+            cpal::SampleFormat::I16 => device.build_output_stream(
+                stream_cfg,
+                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
+                        while consumer.pop().is_ok() {}
+                    }
+                    for frame in data.chunks_exact_mut(out_channels) {
+                        let [l, r] = consumer.pop().unwrap_or([0.0, 0.0]);
+                        let to_i16 = |s: f32| (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+                        if out_channels == 1 {
+                            frame[0] = to_i16(0.5 * (l + r));
+                        } else {
+                            frame[0] = to_i16(l);
+                            frame[1] = to_i16(r);
+                            for ch in frame.iter_mut().skip(2) {
+                                *ch = 0;
+                            }
+                        }
+                    }
+                },
+                err_fn,
+                None,
+            ),
+            cpal::SampleFormat::I32 => device.build_output_stream(
+                stream_cfg,
+                move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
+                    if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
+                        while consumer.pop().is_ok() {}
+                    }
+                    for frame in data.chunks_exact_mut(out_channels) {
+                        let [l, r] = consumer.pop().unwrap_or([0.0, 0.0]);
+                        let to_i32 = |s: f32| {
+                            (f64::from(s.clamp(-1.0, 1.0)) * 2_147_483_647.0).round() as i32
+                        };
+                        if out_channels == 1 {
+                            frame[0] = to_i32(0.5 * (l + r));
+                        } else {
+                            frame[0] = to_i32(l);
+                            frame[1] = to_i32(r);
+                            for ch in frame.iter_mut().skip(2) {
+                                *ch = 0;
+                            }
+                        }
+                    }
+                },
+                err_fn,
+                None,
+            ),
+            _ => device.build_output_stream(
+                stream_cfg,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
+                        while consumer.pop().is_ok() {}
+                    }
+                    for frame in data.chunks_exact_mut(out_channels) {
+                        let [l, r] = consumer.pop().unwrap_or([0.0, 0.0]);
+                        if out_channels == 1 {
+                            frame[0] = 0.5 * (l + r);
+                        } else {
+                            frame[0] = l;
+                            frame[1] = r;
+                            for ch in frame.iter_mut().skip(2) {
+                                *ch = 0.0;
+                            }
+                        }
+                    }
+                },
+                err_fn,
+                None,
+            ),
+        }
+        .map_err(|e| AudioError::Device(e.to_string()))?;
 
         stream
             .play()
@@ -206,7 +280,7 @@ impl AudioEngine {
         let telemetry = Arc::new(AudioTelemetry::default());
         telemetry.output_rate.store(48_000, Ordering::Relaxed);
         let thread_telemetry = Arc::clone(&telemetry);
-        let (producer, _consumer) = rtrb::RingBuffer::<f32>::new(8192);
+        let (producer, _consumer) = rtrb::RingBuffer::<[f32; 2]>::new(4096);
         let _ = thread::Builder::new()
             .name("ferric-audio-headless".to_string())
             .spawn(move || {
@@ -705,10 +779,11 @@ impl StereoResampler {
     fn new(in_rate: u32, out_rate: u32, playback_speed: f32) -> AudioResult<Self> {
         let base_ratio = f64::from(out_rate.max(8_000)) / f64::from(in_rate.max(8_000));
         let chunk_frames = 512;
-        let mut inner = Async::<f32>::new_poly(
+        let sinc_params = SincInterpolationParameters::new(128, WindowFunction::BlackmanHarris2);
+        let mut inner = Async::<f32>::new_sinc(
             base_ratio,
             2.2,
-            PolynomialDegree::Cubic,
+            &sinc_params,
             chunk_frames,
             2,
             FixedAsync::Input,
@@ -1062,14 +1137,15 @@ impl DecodeRuntime {
 
 fn decode_loop(
     cmd_rx: Receiver<EngineCommand>,
-    mut producer: rtrb::Producer<f32>,
+    mut producer: rtrb::Producer<[f32; 2]>,
     out_rate: u32,
     mut eq_config: EqConfig,
     telemetry: Arc<AudioTelemetry>,
     headless: bool,
 ) {
     let mut rt = DecodeRuntime::new(out_rate, &eq_config);
-    let mut volume = 0.85_f32;
+    let mut target_volume = 0.85_f32;
+    let mut smoothed_volume = 0.85_f32;
     let mut dsp_scratch = Vec::with_capacity(2048);
 
     loop {
@@ -1213,7 +1289,7 @@ fn decode_loop(
                     }
                 }
                 EngineCommand::SetVolume(v) => {
-                    volume = v.clamp(0.0, 1.5);
+                    target_volume = v.clamp(0.0, 1.5);
                 }
                 EngineCommand::SetEq(cfg) => {
                     eq_config = cfg;
@@ -1250,12 +1326,12 @@ fn decode_loop(
         let max_frames = if headless {
             512
         } else {
-            let slots = producer.slots() & !1;
-            if slots < 512 {
+            let slots = producer.slots();
+            if slots < 256 {
                 thread::sleep(Duration::from_millis(3));
                 continue;
             }
-            (slots / 2).min(1024)
+            slots.min(1024)
         };
 
         // 1. Proactively pre-open and prime Deck B within max(eff_xfade_ms + 8000, 12000) ms of Deck A end.
@@ -1473,11 +1549,15 @@ fn decode_loop(
         }
 
         if !dsp_scratch.is_empty() {
-            rt.eq.process_interleaved_stereo(&mut dsp_scratch, volume);
+            rt.eq.process_interleaved_stereo_ramped(
+                &mut dsp_scratch,
+                &mut smoothed_volume,
+                target_volume,
+            );
             telemetry.store_spectrum(rt.spectrum.analyze_interleaved(&dsp_scratch));
             if !headless {
-                for &sample in &dsp_scratch {
-                    if producer.push(sample).is_err() {
+                for &[l, r] in dsp_scratch.as_chunks::<2>().0 {
+                    if producer.push([l, r]).is_err() {
                         break;
                     }
                 }

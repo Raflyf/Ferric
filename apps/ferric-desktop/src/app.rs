@@ -71,7 +71,8 @@ live_design! {
     use crate::widgets::*;
     use crate::track_list::TrackList;
 
-    // Ferric Pure AMOLED Black surface that upgrades cohesively into frosted translucent Liquid Glass
+    // Ferric Pure AMOLED Black surface that upgrades into true Optical Liquid Glass
+    // matching the Appearance Preview (refractive bevel glow, RGB Fresnel dispersion, specular rim)
     FerricSurface = <View> {
         show_bg: true,
         draw_bg: {
@@ -79,7 +80,7 @@ live_design! {
             uniform border_col: #1C1D25
             uniform accent_col: #A882FF
             uniform glass_enabled: 0.0
-            uniform glass_alpha: 0.62
+            uniform glass_alpha: 0.52
             uniform glass_ior: 1.48
             uniform glass_disp: 0.42
             uniform glass_rim: 0.78
@@ -92,31 +93,41 @@ live_design! {
                 }
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                let r = min(self.radius * 0.5, min(self.rect_size.x, self.rect_size.y) * 0.12);
+                let r = min(self.radius * 0.5, min(self.rect_size.x, self.rect_size.y) * 0.14);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
 
                 let uv = self.pos;
-                let top_sheen = smoothstep(0.45, 0.0, uv.y) * 0.065;
-                let diag = clamp(1.0 - (uv.x * 0.55 + uv.y * 0.75), 0.0, 1.0);
-                let tint = self.accent_col.xyz * (0.06 + 0.08 * diag) * clamp(self.glass_ior - 0.85, 0.2, 1.2);
-                let frost = mix(vec3(0.06, 0.065, 0.09), vec3(0.02, 0.022, 0.03), clamp(self.glass_scrim, 0.05, 0.65));
-                let rgb = clamp(frost + tint + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0);
-                let alpha = clamp(self.glass_alpha + self.glass_scrim * 0.16, 0.24, 0.86);
+                let ior_k = clamp((self.glass_ior - 1.0) * 1.35, 0.15, 1.25);
+                let edge_x = min(uv.x, 1.0 - uv.x);
+                let edge_y = min(uv.y, 1.0 - uv.y);
+                let bevel = smoothstep(0.14, 0.0, min(edge_x, edge_y)) * 0.14 * ior_k;
+                let top_sheen = smoothstep(0.42, 0.0, uv.y) * (0.11 + 0.04 * ior_k);
+                let diag = clamp(1.0 - (uv.x * 0.5 + uv.y * 0.7), 0.0, 1.0);
+                let tint = self.accent_col.xyz * (0.08 + 0.10 * diag) * ior_k;
+                let frost = mix(vec3(0.085, 0.092, 0.135), vec3(0.025, 0.028, 0.042), clamp(self.glass_scrim, 0.05, 0.72));
+                let rgb = clamp(frost + tint + vec3(top_sheen + bevel, top_sheen + bevel, top_sheen + bevel), 0.0, 1.0);
+                let alpha = clamp(self.glass_alpha * 0.76 + self.glass_scrim * 0.26, 0.22, 0.78);
                 sdf.fill_keep(vec4(rgb, alpha));
 
-                let rim_grad = smoothstep(0.70, 0.0, uv.y);
-                let disp_tint = mix(vec3(1.0, 1.0, 1.0), mix(vec3(0.92, 0.96, 1.0), self.accent_col.xyz, 0.32), self.glass_disp * 0.45);
-                let rim_a = (0.07 + 0.16 * rim_grad) * clamp(self.glass_rim, 0.25, 1.0);
-                sdf.stroke(vec4(disp_tint, rim_a), 1.0);
+                let tl = smoothstep(0.75, 0.0, uv.x * 0.45 + uv.y * 0.75);
+                let br = smoothstep(0.75, 0.0, (1.0 - uv.x) * 0.45 + (1.0 - uv.y) * 0.75);
+                let prism = vec3(
+                    0.72 + 0.28 * cos(uv.x * 5.4 + uv.y * 2.2),
+                    0.72 + 0.28 * cos(uv.x * 5.4 + uv.y * 2.2 - 2.094),
+                    0.72 + 0.28 * cos(uv.x * 5.4 + uv.y * 2.2 + 2.094)
+                );
+                let rim_rgb = mix(vec3(0.98, 0.99, 1.0), prism, clamp(self.glass_disp * 0.85, 0.0, 0.9));
+                let rim_a = (0.12 + 0.42 * tl + 0.18 * br) * clamp(self.glass_rim, 0.2, 1.0);
+                sdf.stroke(vec4(rim_rgb, rim_a), 1.15);
                 return sdf.result;
             }
         }
     }
 
-    // Adaptive ambient bottom player bar (AMOLED Black default + full Liquid Glass dock when enabled)
+    // Adaptive ambient bottom player bar (76px, zero text clipping, full Optical Liquid Glass dock)
     AmbientBottomBar = <View> {
         width: Fill,
-        height: 74,
+        height: 76,
         padding: { left: 16, right: 16, top: 6, bottom: 6 }
         flow: Right,
         align: { y: 0.5 }
@@ -127,20 +138,28 @@ live_design! {
             uniform accent_col: #A882FF
             uniform glow_amt: 0.22
             uniform glass_on: 0.0
+            uniform glass_disp: 0.42
+            uniform glass_rim: 0.78
+            uniform glass_scrim: 0.28
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
-                if (p.y < 1.0) {
-                    let top_a = mix(1.0, 0.30, self.glass_on);
-                    let top_rgb = mix(vec3(0.11, 0.12, 0.16), vec3(0.95, 0.96, 1.0), self.glass_on);
+                if (p.y < 1.2) {
+                    let prism = vec3(
+                        0.76 + 0.24 * cos(self.pos.x * 6.283),
+                        0.76 + 0.24 * cos(self.pos.x * 6.283 - 2.094),
+                        0.76 + 0.24 * cos(self.pos.x * 6.283 + 2.094)
+                    );
+                    let top_rgb = mix(vec3(0.12, 0.13, 0.17), mix(vec3(1.0, 1.0, 1.0), prism, self.glass_disp * 0.7), self.glass_on);
+                    let top_a = mix(1.0, 0.34 + 0.26 * self.glass_rim, self.glass_on);
                     return vec4(top_rgb, top_a);
                 }
                 let d_left = length((self.pos - vec2(0.08, 0.55)) * vec2(1.4, 2.2));
                 let d_mid = length((self.pos - vec2(0.46, 0.85)) * vec2(0.9, 2.4));
                 let wash = (exp(-d_left * d_left * 2.4) * 0.65 + exp(-d_mid * d_mid * 1.8) * 0.45) * self.glow_amt;
-                let top_sheen = self.glass_on * smoothstep(0.45, 0.0, self.pos.y) * 0.07;
-                let base_rgb = mix(self.base_col.xyz, vec3(0.065, 0.07, 0.10), self.glass_on);
-                let rgb = base_rgb + self.accent_col.xyz * (wash * mix(1.0, 1.25, self.glass_on)) + vec3(top_sheen, top_sheen, top_sheen);
-                let alpha = mix(1.0, 0.72, self.glass_on);
+                let top_sheen = self.glass_on * smoothstep(0.48, 0.0, self.pos.y) * 0.12;
+                let base_rgb = mix(self.base_col.xyz, vec3(0.09, 0.098, 0.145), self.glass_on);
+                let rgb = base_rgb + self.accent_col.xyz * (wash * mix(1.0, 1.45, self.glass_on)) + vec3(top_sheen, top_sheen, top_sheen);
+                let alpha = mix(1.0, clamp(0.44 + self.glass_scrim * 0.36, 0.36, 0.78), self.glass_on);
                 return vec4(clamp(rgb, 0.0, 1.0), alpha);
             }
         }
@@ -166,20 +185,36 @@ live_design! {
         draw_bg: {
             uniform glass_on: 0.0
             uniform accent_col: #A882FF
+            uniform glass_ior: 1.48
+            uniform glass_disp: 0.42
+            uniform glass_rim: 0.78
+            uniform glass_scrim: 0.28
+            uniform glass_rad: 14.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = mix(7.0, 11.0, self.glass_on);
+                let r = mix(8.0, clamp(self.glass_rad * 0.65, 9.0, 20.0), self.glass_on);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                let top_sheen = smoothstep(0.42, 0.0, self.pos.y) * 0.06;
+                let uv = self.pos;
+                let ior_k = clamp((self.glass_ior - 1.0) * 1.35, 0.15, 1.25);
+                let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+                let bevel = smoothstep(0.10, 0.0, edge) * 0.12 * ior_k;
+                let top_sheen = smoothstep(0.42, 0.0, uv.y) * 0.10;
                 let solid_fill = vec4(0.051, 0.055, 0.075, 1.0);
-                let glass_rgb = vec3(0.085, 0.092, 0.13) + self.accent_col.xyz * 0.045 + vec3(top_sheen, top_sheen, top_sheen);
-                let glass_fill = vec4(clamp(glass_rgb, 0.0, 1.0), 0.56);
+                let glass_rgb = vec3(0.095, 0.104, 0.152) + self.accent_col.xyz * (0.075 * ior_k) + vec3(top_sheen + bevel, top_sheen + bevel, top_sheen + bevel);
+                let glass_fill = vec4(clamp(glass_rgb, 0.0, 1.0), clamp(0.32 + self.glass_scrim * 0.36, 0.26, 0.74));
                 sdf.fill_keep(mix(solid_fill, glass_fill, self.glass_on));
 
-                let rim = smoothstep(0.65, 0.0, self.pos.y);
+                let tl = smoothstep(0.75, 0.0, uv.x * 0.45 + uv.y * 0.75);
+                let br = smoothstep(0.75, 0.0, (1.0 - uv.x) * 0.45 + (1.0 - uv.y) * 0.75);
+                let prism = vec3(
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8),
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8 - 2.094),
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8 + 2.094)
+                );
+                let rim_rgb = mix(vec3(0.98, 0.99, 1.0), prism, clamp(self.glass_disp * 0.85, 0.0, 0.92));
                 let solid_border = vec4(0.114, 0.122, 0.161, 1.0);
-                let glass_border = vec4(1.0, 1.0, 1.0, 0.09 + 0.17 * rim);
-                sdf.stroke(mix(solid_border, glass_border, self.glass_on), 1.0);
+                let glass_border = vec4(rim_rgb, (0.14 + 0.44 * tl + 0.18 * br) * clamp(self.glass_rim, 0.25, 1.0));
+                sdf.stroke(mix(solid_border, glass_border, self.glass_on), mix(1.0, 1.2, self.glass_on));
                 return sdf.result;
             }
         }
@@ -420,15 +455,20 @@ live_design! {
     FerricChipBtn = <Button> {
         width: Fit,
         height: 30,
-        padding: { left: 10, right: 10 }
+        padding: { left: 11, right: 11 }
         spacing: 0,
         align: { x: 0.5, y: 0.5 }
         draw_text: {
+            instance active: 0.0
             color: #C8CAD6,
             color_hover: #FFFFFF,
             color_focus: #FFFFFF,
             color_down: #FFFFFF,
-            text_style: { font_size: 12.0 }
+            text_style: <THEME_FONT_MEDIUM> { font_size: 12.0 }
+            fn get_color(self) -> vec4 {
+                let idle_c = mix(self.color, #FFFFFF, max(self.hover, self.down));
+                return mix(idle_c, #09090D, self.active);
+            }
         }
         draw_bg: {
             instance active: 0.0
@@ -437,15 +477,20 @@ live_design! {
             uniform glass_on: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = (self.rect_size.y - 1.0) * 0.25;
+                let r = (self.rect_size.y - 1.0) * 0.28;
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let top_sheen = smoothstep(0.55, 0.0, self.pos.y) * 0.10;
                 let solid_idle = mix(#14151D, #20222F, self.hover);
-                let glass_idle = mix(vec4(1.0, 1.0, 1.0, 0.08), vec4(1.0, 1.0, 1.0, 0.16), self.hover);
+                let glass_idle = mix(
+                    vec4(0.14 + top_sheen, 0.15 + top_sheen, 0.22 + top_sheen, 0.42),
+                    vec4(0.20 + top_sheen, 0.22 + top_sheen, 0.30 + top_sheen, 0.58),
+                    self.hover
+                );
                 let idle = mix(solid_idle, glass_idle, self.glass_on);
-                let bg = mix(idle, #F4F4F7, self.active);
+                let bg = mix(idle, #F4F5FA, self.active);
                 sdf.fill_keep(bg);
                 let rim = smoothstep(0.60, 0.0, self.pos.y);
-                let idle_b = mix(#242633, vec4(1.0, 1.0, 1.0, 0.14 + 0.18 * rim), self.glass_on);
+                let idle_b = mix(#242633, vec4(1.0, 1.0, 1.0, 0.18 + 0.24 * rim), self.glass_on);
                 sdf.stroke(mix(idle_b, #FFFFFF, self.active), 1.0);
                 return sdf.result;
             }
@@ -547,11 +592,11 @@ live_design! {
         draw_cursor: { color: #A882FF }
     }
 
-    // 2x4 Home Quick Picks Song Tile (46x46 Cover Art + Title + Artist + Liquid Glass support)
+    // 2x4 Home Quick Picks Song Tile (60px, tight 2px text rhythm, smooth hover/press + Optical Liquid Glass)
     QuickPickTile = <View> {
         width: Fill,
-        height: 58,
-        padding: { left: 6, right: 10, top: 5, bottom: 5 }
+        height: 60,
+        padding: { left: 7, right: 12, top: 6, bottom: 6 }
         flow: Right,
         align: { y: 0.5 }
         spacing: 11,
@@ -559,24 +604,62 @@ live_design! {
         cursor: Hand,
         draw_bg: {
             instance active: 0.0
+            instance hover: 0.0
+            instance down: 0.0
             uniform glass_on: 0.0
             uniform accent_col: #A882FF
+            uniform glass_ior: 1.48
+            uniform glass_disp: 0.42
+            uniform glass_rim: 0.78
+            uniform glass_scrim: 0.28
+            uniform glass_rad: 12.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = mix(6.0, 9.0, self.glass_on);
+                let r = mix(7.0, clamp(self.glass_rad * 0.65, 8.0, 16.0), self.glass_on);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                let top_sheen = smoothstep(0.45, 0.0, self.pos.y) * 0.06;
-                let solid_idle = vec4(0.047, 0.051, 0.071, 1.0);
-                let solid_act = mix(vec4(0.11, 0.10, 0.18, 1.0), vec4(self.accent_col.xyz, 0.22), 0.35);
-                let glass_idle = vec4(clamp(vec3(0.10, 0.11, 0.16) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0), 0.48);
-                let glass_act = vec4(clamp(mix(vec3(0.14, 0.14, 0.20), self.accent_col.xyz, 0.28) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0), 0.62);
+                let uv = self.pos;
+                let ior_k = clamp((self.glass_ior - 1.0) * 1.35, 0.15, 1.25);
+                let top_sheen = smoothstep(0.48, 0.0, uv.y) * (0.09 + 0.07 * self.hover);
+                let solid_idle = mix(vec4(0.047, 0.051, 0.071, 1.0), vec4(0.088, 0.094, 0.130, 1.0), self.hover);
+                let solid_act = mix(vec4(0.105, 0.098, 0.175, 1.0), vec4(self.accent_col.xyz, 0.24), 0.36);
+                let glass_idle = vec4(
+                    clamp(vec3(0.105, 0.115, 0.170) + self.accent_col.xyz * (0.055 * ior_k) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0),
+                    clamp(0.30 + self.glass_scrim * 0.34 + 0.14 * self.hover - 0.04 * self.down, 0.26, 0.78)
+                );
+                let glass_act = vec4(
+                    clamp(mix(vec3(0.14, 0.145, 0.22), self.accent_col.xyz, 0.30) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0),
+                    clamp(0.46 + self.glass_scrim * 0.30 + 0.08 * self.hover, 0.40, 0.84)
+                );
                 let col = mix(mix(solid_idle, solid_act, self.active), mix(glass_idle, glass_act, self.active), self.glass_on);
                 sdf.fill_keep(col);
-                let rim = smoothstep(0.60, 0.0, self.pos.y);
-                let solid_b = mix(#1A1C26, vec4(self.accent_col.xyz, 0.60), self.active);
-                let glass_b = mix(vec4(1.0, 1.0, 1.0, 0.10 + 0.16 * rim), vec4(self.accent_col.xyz, 0.78), self.active);
-                sdf.stroke(mix(solid_b, glass_b, self.glass_on), 1.0);
+
+                let tl = smoothstep(0.75, 0.0, uv.x * 0.45 + uv.y * 0.75);
+                let prism = vec3(
+                    0.75 + 0.25 * cos(uv.x * 6.0 + uv.y * 2.5),
+                    0.75 + 0.25 * cos(uv.x * 6.0 + uv.y * 2.5 - 2.094),
+                    0.75 + 0.25 * cos(uv.x * 6.0 + uv.y * 2.5 + 2.094)
+                );
+                let rim_rgb = mix(vec3(0.98, 0.99, 1.0), prism, clamp(self.glass_disp * 0.82, 0.0, 0.9));
+                let solid_b = mix(mix(#1A1C26, #2E3245, self.hover), vec4(self.accent_col.xyz, 0.72), self.active);
+                let glass_b = mix(
+                    vec4(rim_rgb, (0.14 + (0.36 * tl + 0.16 * self.hover) * self.glass_rim)),
+                    vec4(self.accent_col.xyz, 0.86),
+                    self.active
+                );
+                sdf.stroke(mix(solid_b, glass_b, self.glass_on), mix(1.0, 1.15, self.glass_on));
                 return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.16 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.13 } } apply: { draw_bg: { hover: 1.0 } } }
+            }
+            down = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { down: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.06 } } apply: { draw_bg: { down: 1.0 } } }
             }
         }
         art = <FerricCoverArt> {
@@ -591,86 +674,162 @@ live_design! {
             spacing: 2,
             title = <Label> {
                 width: Fill,
-                draw_text: { color: #F4F4F7, text_style: { font_size: 13.0 } }
+                padding: 0,
+                draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 13.0, line_spacing: 1.0 } }
                 text: ""
             }
             sub = <Label> {
                 width: Fill,
-                draw_text: { color: #8E909E, text_style: { font_size: 11.0 } }
+                padding: 0,
+                draw_text: { color: #8E909E, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
                 text: ""
             }
         }
     }
 
-    // Horizontal Album / Playlist Shelf Card (Balanced cover proportion + Liquid Glass support)
+    // Horizontal Album / Playlist Shelf Card (Balanced proportion, tight text spacing, hover motion + Optical Liquid Glass)
     ShelfCard = <View> {
         width: Fill,
         height: 222,
         padding: 10,
         flow: Down,
-        spacing: 6,
+        spacing: 8,
         show_bg: true,
         cursor: Hand,
         draw_bg: {
+            instance hover: 0.0
+            instance down: 0.0
             uniform glass_on: 0.0
             uniform accent_col: #A882FF
+            uniform glass_ior: 1.48
+            uniform glass_disp: 0.42
+            uniform glass_rim: 0.78
+            uniform glass_scrim: 0.28
+            uniform glass_rad: 14.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = mix(7.0, 11.0, self.glass_on);
+                let r = mix(8.0, clamp(self.glass_rad * 0.65, 9.0, 18.0), self.glass_on);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                let top_sheen = smoothstep(0.38, 0.0, self.pos.y) * 0.065;
-                let solid_fill = vec4(0.051, 0.055, 0.075, 1.0);
-                let glass_fill = vec4(clamp(vec3(0.095, 0.102, 0.145) + self.accent_col.xyz * 0.03 + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0), 0.50);
+                let uv = self.pos;
+                let ior_k = clamp((self.glass_ior - 1.0) * 1.35, 0.15, 1.25);
+                let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+                let bevel = smoothstep(0.12, 0.0, edge) * (0.11 + 0.06 * self.hover) * ior_k;
+                let top_sheen = smoothstep(0.40, 0.0, uv.y) * (0.10 + 0.08 * self.hover);
+                let solid_fill = mix(vec4(0.051, 0.055, 0.075, 1.0), vec4(0.090, 0.096, 0.132, 1.0), self.hover);
+                let glass_fill = vec4(
+                    clamp(vec3(0.105, 0.114, 0.168) + self.accent_col.xyz * (0.065 * ior_k) + vec3(top_sheen + bevel, top_sheen + bevel, top_sheen + bevel), 0.0, 1.0),
+                    clamp(0.32 + self.glass_scrim * 0.34 + 0.14 * self.hover - 0.04 * self.down, 0.26, 0.78)
+                );
                 sdf.fill_keep(mix(solid_fill, glass_fill, self.glass_on));
-                let rim = smoothstep(0.55, 0.0, self.pos.y);
-                let solid_b = #1B1D27;
-                let glass_b = vec4(1.0, 1.0, 1.0, 0.10 + 0.18 * rim);
-                sdf.stroke(mix(solid_b, glass_b, self.glass_on), 1.0);
+
+                let tl = smoothstep(0.75, 0.0, uv.x * 0.45 + uv.y * 0.75);
+                let prism = vec3(
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8),
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8 - 2.094),
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8 + 2.094)
+                );
+                let rim_rgb = mix(vec3(0.98, 0.99, 1.0), prism, clamp(self.glass_disp * 0.84, 0.0, 0.92));
+                let solid_b = mix(#1B1D27, #34384F, self.hover);
+                let glass_b = vec4(rim_rgb, (0.14 + (0.40 * tl + 0.18 * self.hover) * self.glass_rim));
+                sdf.stroke(mix(solid_b, glass_b, self.glass_on), mix(1.0, 1.2, self.glass_on));
                 return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.18 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.14 } } apply: { draw_bg: { hover: 1.0 } } }
+            }
+            down = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { down: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.06 } } apply: { draw_bg: { down: 1.0 } } }
             }
         }
         art = <FerricCoverArt> {
             width: Fill,
-            height: 136,
+            height: 142,
             draw_bg: { radius: 8.0 }
         }
-        title = <Label> {
+        <View> {
             width: Fill,
-            draw_text: { color: #F4F4F7, text_style: { font_size: 12.0 } }
-            text: ""
-        }
-        sub = <Label> {
-            width: Fill,
-            draw_text: { color: #8A8D9B, text_style: { font_size: 11.0 } }
-            text: ""
+            height: Fit,
+            flow: Down,
+            spacing: 2,
+            title = <Label> {
+                width: Fill,
+                padding: 0,
+                draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 12.5, line_spacing: 1.0 } }
+                text: ""
+            }
+            sub = <Label> {
+                width: Fill,
+                padding: 0,
+                draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
+                text: ""
+            }
         }
     }
 
     // Visual Grid Card for Albums / Artists / Playlists pages
     GridCard = <View> {
         width: Fill,
-        height: 236,
+        height: 238,
         padding: 10,
         flow: Down,
-        spacing: 6,
+        spacing: 8,
         show_bg: true,
         cursor: Hand,
         draw_bg: {
+            instance hover: 0.0
+            instance down: 0.0
             uniform glass_on: 0.0
             uniform accent_col: #A882FF
+            uniform glass_ior: 1.48
+            uniform glass_disp: 0.42
+            uniform glass_rim: 0.78
+            uniform glass_scrim: 0.28
+            uniform glass_rad: 14.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = mix(7.0, 11.0, self.glass_on);
+                let r = mix(8.0, clamp(self.glass_rad * 0.65, 9.0, 18.0), self.glass_on);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                let top_sheen = smoothstep(0.38, 0.0, self.pos.y) * 0.065;
-                let solid_fill = vec4(0.051, 0.055, 0.075, 1.0);
-                let glass_fill = vec4(clamp(vec3(0.095, 0.102, 0.145) + self.accent_col.xyz * 0.03 + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0), 0.50);
+                let uv = self.pos;
+                let ior_k = clamp((self.glass_ior - 1.0) * 1.35, 0.15, 1.25);
+                let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+                let bevel = smoothstep(0.12, 0.0, edge) * (0.11 + 0.06 * self.hover) * ior_k;
+                let top_sheen = smoothstep(0.40, 0.0, uv.y) * (0.10 + 0.08 * self.hover);
+                let solid_fill = mix(vec4(0.051, 0.055, 0.075, 1.0), vec4(0.090, 0.096, 0.132, 1.0), self.hover);
+                let glass_fill = vec4(
+                    clamp(vec3(0.105, 0.114, 0.168) + self.accent_col.xyz * (0.065 * ior_k) + vec3(top_sheen + bevel, top_sheen + bevel, top_sheen + bevel), 0.0, 1.0),
+                    clamp(0.32 + self.glass_scrim * 0.34 + 0.14 * self.hover - 0.04 * self.down, 0.26, 0.78)
+                );
                 sdf.fill_keep(mix(solid_fill, glass_fill, self.glass_on));
-                let rim = smoothstep(0.55, 0.0, self.pos.y);
-                let solid_b = #1C1E28;
-                let glass_b = vec4(1.0, 1.0, 1.0, 0.10 + 0.18 * rim);
-                sdf.stroke(mix(solid_b, glass_b, self.glass_on), 1.0);
+
+                let tl = smoothstep(0.75, 0.0, uv.x * 0.45 + uv.y * 0.75);
+                let prism = vec3(
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8),
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8 - 2.094),
+                    0.74 + 0.26 * cos(uv.x * 5.8 + uv.y * 2.8 + 2.094)
+                );
+                let rim_rgb = mix(vec3(0.98, 0.99, 1.0), prism, clamp(self.glass_disp * 0.84, 0.0, 0.92));
+                let solid_b = mix(#1C1E28, #34384F, self.hover);
+                let glass_b = vec4(rim_rgb, (0.14 + (0.40 * tl + 0.18 * self.hover) * self.glass_rim));
+                sdf.stroke(mix(solid_b, glass_b, self.glass_on), mix(1.0, 1.2, self.glass_on));
                 return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.18 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.14 } } apply: { draw_bg: { hover: 1.0 } } }
+            }
+            down = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { down: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.06 } } apply: { draw_bg: { down: 1.0 } } }
             }
         }
         art = <FerricCoverArt> {
@@ -678,23 +837,31 @@ live_design! {
             height: 158,
             draw_bg: { radius: 10.0 }
         }
-        title = <Label> {
+        <View> {
             width: Fill,
-            draw_text: { color: #F4F4F7, text_style: { font_size: 12.5 } }
-            text: ""
-        }
-        sub = <Label> {
-            width: Fill,
-            draw_text: { color: #8A8D9B, text_style: { font_size: 11.0 } }
-            text: ""
+            height: Fit,
+            flow: Down,
+            spacing: 2,
+            title = <Label> {
+                width: Fill,
+                padding: 0,
+                draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 12.5, line_spacing: 1.0 } }
+                text: ""
+            }
+            sub = <Label> {
+                width: Fill,
+                padding: 0,
+                draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
+                text: ""
+            }
         }
     }
 
-    // Compact Right Sidebar Queue / History Row with 36x36 cover art + Liquid Glass support
+    // Compact Right Sidebar Queue / History Row (54px, zero text wrapping/clipping, hover motion + Optical Liquid Glass)
     QueueMiniRow = <View> {
         width: Fill,
-        height: 52,
-        padding: { left: 7, right: 8, top: 6, bottom: 6 }
+        height: 54,
+        padding: { left: 8, right: 8, top: 6, bottom: 6 }
         flow: Right,
         align: { y: 0.5 }
         spacing: 9,
@@ -702,23 +869,62 @@ live_design! {
         cursor: Hand,
         draw_bg: {
             instance active: 0.0
+            instance hover: 0.0
+            instance down: 0.0
             uniform accent_col: #A882FF
             uniform glass_on: 0.0
+            uniform glass_ior: 1.48
+            uniform glass_disp: 0.42
+            uniform glass_rim: 0.78
+            uniform glass_scrim: 0.28
+            uniform glass_rad: 10.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
-                let idle = mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(1.0, 1.0, 1.0, 0.055), self.glass_on);
-                let act = mix(#1A1928, vec4(self.accent_col.xyz, 0.24), mix(0.32, 0.55, self.glass_on));
-                sdf.fill_keep(mix(idle, act, self.active));
-                let g_rim = vec4(1.0, 1.0, 1.0, 0.10 * self.glass_on);
-                let a_rim = vec4(self.accent_col.xyz, 0.50);
+                let r = mix(6.0, clamp(self.glass_rad * 0.55, 7.0, 12.0), self.glass_on);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let uv = self.pos;
+                let top_sheen = smoothstep(0.45, 0.0, uv.y) * (0.08 + 0.06 * self.hover);
+                let solid_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(0.09, 0.095, 0.13, 1.0), self.hover);
+                let glass_idle = vec4(
+                    clamp(vec3(0.11, 0.12, 0.18) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0),
+                    clamp(0.24 + self.glass_scrim * 0.28 + 0.16 * self.hover - 0.04 * self.down, 0.20, 0.72)
+                );
+                let idle = mix(solid_idle, glass_idle, self.glass_on);
+                let act_solid = mix(#1A1928, vec4(self.accent_col.xyz, 0.24), 0.34);
+                let act_glass = vec4(
+                    clamp(mix(vec3(0.15, 0.15, 0.23), self.accent_col.xyz, 0.30) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0),
+                    clamp(0.46 + self.glass_scrim * 0.28, 0.40, 0.82)
+                );
+                sdf.fill_keep(mix(idle, mix(act_solid, act_glass, self.glass_on), self.active));
+
+                let tl = smoothstep(0.7, 0.0, uv.x * 0.4 + uv.y * 0.8);
+                let prism = vec3(
+                    0.76 + 0.24 * cos(uv.x * 5.6),
+                    0.76 + 0.24 * cos(uv.x * 5.6 - 2.094),
+                    0.76 + 0.24 * cos(uv.x * 5.6 + 2.094)
+                );
+                let rim_rgb = mix(vec3(0.98, 0.99, 1.0), prism, clamp(self.glass_disp * 0.75, 0.0, 0.88));
+                let g_rim = vec4(rim_rgb, (0.12 + (0.28 * tl + 0.14 * self.hover) * self.glass_rim) * self.glass_on);
+                let a_rim = vec4(self.accent_col.xyz, 0.64);
                 sdf.stroke(mix(g_rim, a_rim, self.active), 1.0);
                 return sdf.result;
             }
         }
+        animator: {
+            hover = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 } } }
+            }
+            down = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.10 } } apply: { draw_bg: { down: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { down: 1.0 } } }
+            }
+        }
         art = <FerricCoverArt> {
-            width: 36,
-            height: 36,
+            width: 38,
+            height: 38,
             draw_bg: { radius: 6.0 }
         }
         <View> {
@@ -728,18 +934,21 @@ live_design! {
             spacing: 2,
             title = <Label> {
                 width: Fill,
-                draw_text: { color: #ECEEF5, text_style: { font_size: 12.0 } }
+                padding: 0,
+                draw_text: { color: #ECEEF5, text_style: <THEME_FONT_BOLD> { font_size: 12.0, line_spacing: 1.0 } }
                 text: ""
             }
             sub = <Label> {
                 width: Fill,
-                draw_text: { color: #848796, text_style: { font_size: 10.5 } }
+                padding: 0,
+                draw_text: { color: #848796, text_style: <THEME_FONT_REGULAR> { font_size: 10.5, line_spacing: 1.0 } }
                 text: ""
             }
         }
         dur = <Label> {
             width: Fit,
-            draw_text: { color: #6E7180, text_style: { font_size: 10.5 } }
+            padding: 0,
+            draw_text: { color: #6E7180, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5, line_spacing: 1.0 } }
             text: ""
         }
     }
@@ -763,19 +972,29 @@ live_design! {
                     draw_bg: {
                         uniform canvas_col: #000000
                         uniform glass_bg: 0.0
+                        uniform glass_disp: 0.42
+                        uniform glass_phase: 0.0
                         uniform accent_col: #A882FF
                         fn pixel(self) -> vec4 {
                             if (self.glass_bg < 0.5) {
                                 return self.canvas_col;
                             }
-                            let base = vec3(0.025, 0.028, 0.045);
-                            let d1 = length((self.pos - vec2(0.18, 0.16)) * vec2(0.95, 1.15));
-                            let d2 = length((self.pos - vec2(0.82, 0.24)) * vec2(1.05, 1.10));
-                            let d3 = length((self.pos - vec2(0.52, 0.88)) * vec2(0.85, 1.25));
-                            let g1 = exp(-d1 * d1 * 4.5) * self.accent_col.xyz * 0.42;
-                            let g2 = exp(-d2 * d2 * 5.0) * vec3(0.16, 0.36, 0.78) * 0.28;
-                            let g3 = exp(-d3 * d3 * 5.2) * mix(self.accent_col.xyz, vec3(0.58, 0.20, 0.52), 0.5) * 0.26;
-                            return vec4(clamp(base + g1 + g2 + g3, 0.0, 1.0), 1.0);
+                            let p1 = vec2(0.18 + 0.03 * sin(self.glass_phase * 0.45), 0.18 + 0.025 * cos(self.glass_phase * 0.35));
+                            let p2 = vec2(0.84 + 0.025 * cos(self.glass_phase * 0.40), 0.22 + 0.03 * sin(self.glass_phase * 0.50));
+                            let p3 = vec2(0.50 + 0.035 * sin(self.glass_phase * 0.30), 0.86 + 0.02 * cos(self.glass_phase * 0.40));
+                            let p4 = vec2(0.16, 0.80);
+
+                            let d1 = length((self.pos - p1) * vec2(0.85, 1.10));
+                            let d2 = length((self.pos - p2) * vec2(0.95, 1.05));
+                            let d3 = length((self.pos - p3) * vec2(0.80, 1.20));
+                            let d4 = length((self.pos - p4) * vec2(1.05, 1.15));
+
+                            let base = vec3(0.032, 0.036, 0.062);
+                            let g1 = exp(-d1 * d1 * 3.2) * self.accent_col.xyz * 0.68;
+                            let g2 = exp(-d2 * d2 * 3.6) * vec3(0.16, 0.48, 0.96) * (0.42 + 0.18 * self.glass_disp);
+                            let g3 = exp(-d3 * d3 * 3.8) * mix(self.accent_col.xyz, vec3(0.88, 0.30, 0.48), 0.55) * 0.46;
+                            let g4 = exp(-d4 * d4 * 4.4) * vec3(0.86, 0.38, 0.16) * (0.24 + 0.14 * self.glass_disp);
+                            return vec4(clamp(base + g1 + g2 + g3 + g4, 0.0, 1.0), 1.0);
                         }
                     }
 
@@ -1053,7 +1272,7 @@ live_design! {
                                         height: Fit,
                                         flow: Right,
                                         spacing: 5,
-                                        chip_0 = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                        chip_0 = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
                                         chip_1 = <FerricChipBtn> { text: "Feel good" }
                                         chip_2 = <FerricChipBtn> { text: "Relax" }
                                         chip_3 = <FerricChipBtn> { text: "Energize" }
@@ -1224,7 +1443,7 @@ live_design! {
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 7,
-                                        sf_all_btn = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                        sf_all_btn = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
                                         sf_songs_btn = <FerricChipBtn> { text: "Songs" }
                                         sf_albums_btn = <FerricChipBtn> { text: "Albums" }
                                         sf_artists_btn = <FerricChipBtn> { text: "Artists" }
@@ -1319,7 +1538,7 @@ live_design! {
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 7,
-                                        flt_all_btn = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                        flt_all_btn = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
                                         flt_liked_btn = <FerricChipBtn> { text: "Liked" }
                                         flt_local_btn = <FerricChipBtn> { text: "Local" }
                                         flt_spotify_btn = <FerricChipBtn> { text: "Spotify" }
@@ -1494,7 +1713,7 @@ live_design! {
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 5,
-                                        st_accounts_btn = <FerricChipBtn> { text: "Accounts", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                        st_accounts_btn = <FerricChipBtn> { text: "Accounts", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
                                         st_playback_btn = <FerricChipBtn> { text: "Playback & Fade-In" }
                                         st_eq_btn = <FerricChipBtn> { text: "Equalizer" }
                                         st_appearance_btn = <FerricChipBtn> { text: "Appearance" }
@@ -1868,70 +2087,6 @@ live_design! {
                                         }
                                     }
                                 }
-
-                                // --------------------------------------------------------
-                                // NATIVE IN-APP VIDEO CLIP STAGE (Docked inside Center Stage, Audio stays in Rust WASAPI)
-                                // --------------------------------------------------------
-                                video_overlay = <View> {
-                                    visible: false,
-                                    width: Fill,
-                                    height: Fill,
-                                    flow: Down,
-                                    show_bg: true,
-                                    draw_bg: { color: #000000 }
-
-                                    vid_header = <FerricSurface> {
-                                        width: Fill,
-                                        height: 54,
-                                        padding: { left: 16, right: 16 }
-                                        flow: Right,
-                                        align: { y: 0.5 }
-                                        spacing: 10,
-                                        draw_bg: { base_col: #09090D, glass_alpha: 0.72, radius: 0.0 }
-
-                                        <View> {
-                                            width: Fill,
-                                            height: Fit,
-                                            flow: Down,
-                                            spacing: 2,
-                                            vid_title_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #F4F4F7, text_style: { font_size: 13.0 } }
-                                                text: "Music Video"
-                                            }
-                                            vid_status_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #8E909E, text_style: { font_size: 11.0 } }
-                                                text: "Synced to WASAPI"
-                                            }
-                                        }
-                                        <View> {
-                                            width: Fit,
-                                            height: Fit,
-                                            flow: Right,
-                                            align: { y: 0.5 }
-                                            spacing: 5,
-                                            vq_auto_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "Auto", draw_text: { text_style: { font_size: 11.0 } } }
-                                            vq_360_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "360p", draw_text: { text_style: { font_size: 11.0 } } }
-                                            vq_480_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "480p", draw_text: { text_style: { font_size: 11.0 } } }
-                                            vq_720_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "720p", draw_text: { text_style: { font_size: 11.0 } } }
-                                            vq_1080_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "1080p", draw_text: { text_style: { font_size: 11.0 } } }
-                                            vid_close_btn = <FerricBtn> { height: 28, padding: { left: 10, right: 10 }, text: "Close" }
-                                        }
-                                    }
-                                    <FerricDividerH> {}
-                                    video_stage_slot = <View> {
-                                        width: Fill,
-                                        height: Fill,
-                                        align: { x: 0.5, y: 0.5 }
-                                        show_bg: true,
-                                        draw_bg: { color: #000000 }
-                                        vid_stage_hint_lbl = <Label> {
-                                            draw_text: { color: #7C8090, text_style: { font_size: 13.0 } }
-                                            text: "Loading native in-app video stage..."
-                                        }
-                                    }
-                                }
                             }
 
                             right_divider = <FerricDividerV> {}
@@ -1951,7 +2106,7 @@ live_design! {
                                 // Right Sidebar Header Tabs: [Queue] [Lyrics] + [Radio] [Clear]
                                 <View> {
                                     width: Fill, height: 32, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                    rs_tab_queue = <FerricChipBtn> { height: 28, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                    rs_tab_queue = <FerricChipBtn> { height: 28, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
                                     rs_tab_lyrics = <FerricChipBtn> { height: 28, text: "Lyrics" }
                                     <View> { width: Fill, height: 1 }
                                     rs_radio_btn = <FerricIconBtn> {
@@ -2045,14 +2200,14 @@ live_design! {
                                     }
 
                                     <View> {
-                                        width: Fill, height: Fill, flow: Down, align: { y: 0.5 }, spacing: 11,
-                                        rs_lyr_0 = <Label> { width: Fill, draw_text: { color: #4A4D5C, text_style: { font_size: 12.0 } }, text: "" }
-                                        rs_lyr_1 = <Label> { width: Fill, draw_text: { color: #6E7182, text_style: { font_size: 13.0 } }, text: "" }
-                                        rs_lyr_2 = <Label> { width: Fill, draw_text: { color: #A6A9B8, text_style: { font_size: 14.0 } }, text: "" }
-                                        rs_lyr_3 = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 16.5 } }, text: "Play a song to view synced lyrics" }
-                                        rs_lyr_4 = <Label> { width: Fill, draw_text: { color: #A6A9B8, text_style: { font_size: 14.0 } }, text: "" }
-                                        rs_lyr_5 = <Label> { width: Fill, draw_text: { color: #6E7182, text_style: { font_size: 13.0 } }, text: "" }
-                                        rs_lyr_6 = <Label> { width: Fill, draw_text: { color: #4A4D5C, text_style: { font_size: 12.0 } }, text: "" }
+                                        width: Fill, height: Fill, flow: Down, align: { y: 0.5 }, spacing: 10,
+                                        rs_lyr_0 = <Label> { width: Fill, padding: 0, draw_text: { color: #4A4D5C, text_style: <THEME_FONT_REGULAR> { font_size: 12.0, line_spacing: 1.08 } }, text: "" }
+                                        rs_lyr_1 = <Label> { width: Fill, padding: 0, draw_text: { color: #6E7182, text_style: <THEME_FONT_REGULAR> { font_size: 13.0, line_spacing: 1.08 } }, text: "" }
+                                        rs_lyr_2 = <Label> { width: Fill, padding: 0, draw_text: { color: #A6A9B8, text_style: <THEME_FONT_MEDIUM> { font_size: 14.0, line_spacing: 1.08 } }, text: "" }
+                                        rs_lyr_3 = <Label> { width: Fill, padding: 0, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 16.0, line_spacing: 1.08 } }, text: "Play a song to view synced lyrics" }
+                                        rs_lyr_4 = <Label> { width: Fill, padding: 0, draw_text: { color: #A6A9B8, text_style: <THEME_FONT_MEDIUM> { font_size: 14.0, line_spacing: 1.08 } }, text: "" }
+                                        rs_lyr_5 = <Label> { width: Fill, padding: 0, draw_text: { color: #6E7182, text_style: <THEME_FONT_REGULAR> { font_size: 13.0, line_spacing: 1.08 } }, text: "" }
+                                        rs_lyr_6 = <Label> { width: Fill, padding: 0, draw_text: { color: #4A4D5C, text_style: <THEME_FONT_REGULAR> { font_size: 12.0, line_spacing: 1.08 } }, text: "" }
                                     }
 
                                     <View> {
@@ -2085,15 +2240,17 @@ live_design! {
                                     width: Fill,
                                     height: Fit,
                                     flow: Down,
-                                    spacing: 3,
+                                    spacing: 2,
                                     np_title_lbl = <Label> {
                                         width: Fill,
-                                        draw_text: { color: #F4F4F7, text_style: { font_size: 13.0 } }
+                                        padding: 0,
+                                        draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 13.0, line_spacing: 1.0 } }
                                         text: "Ready to play"
                                     }
                                     np_artist_lbl = <Label> {
                                         width: Fill,
-                                        draw_text: { color: #9A9CA8, text_style: { font_size: 11.0 } }
+                                        padding: 0,
+                                        draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 11.5, line_spacing: 1.0 } }
                                         text: "Pick a song to play"
                                     }
                                 }
@@ -2200,83 +2357,242 @@ live_design! {
                     }
 
                     // ================================================================
-                    // OVERLAY 1: IMMERSIVE FULLSCREEN NOW PLAYING (F11 / Expand)
+                    // OVERLAY 1: OCD-PRECISION FULLSCREEN LYRICS & INTEGRATED VIDEO STAGE
+                    // (Video Clip seamlessly replaces the Left Cover Art Card right beside Synced Lyrics)
                     // ================================================================
                     fullscreen_overlay = <View> {
                         visible: false,
                         width: Fill,
                         height: Fill,
-                        padding: { left: 36, right: 36, top: 24, bottom: 28 }
+                        padding: { left: 28, right: 28, top: 18, bottom: 20 }
                         flow: Down,
-                        spacing: 20,
+                        spacing: 16,
                         show_bg: true,
                         draw_bg: {
                             uniform accent_col: #A882FF
+                            uniform glass_on: 0.0
                             fn pixel(self) -> vec4 {
-                                let d1 = length((self.pos - vec2(0.24, 0.42)) * vec2(1.1, 1.3));
-                                let d2 = length((self.pos - vec2(0.78, 0.65)) * vec2(1.2, 1.4));
-                                let glow1 = exp(-d1 * d1 * 2.8) * 0.24;
-                                let glow2 = exp(-d2 * d2 * 3.2) * 0.12;
-                                let rgb = vec3(0.025, 0.028, 0.040) + self.accent_col.xyz * (glow1 + glow2);
+                                let d1 = length((self.pos - vec2(0.22, 0.36)) * vec2(0.95, 1.15));
+                                let d2 = length((self.pos - vec2(0.80, 0.70)) * vec2(1.05, 1.25));
+                                let glow1 = exp(-d1 * d1 * 2.5) * mix(0.24, 0.42, self.glass_on);
+                                let glow2 = exp(-d2 * d2 * 3.0) * mix(0.12, 0.24, self.glass_on);
+                                let base = mix(vec3(0.015, 0.017, 0.025), vec3(0.032, 0.036, 0.060), self.glass_on);
+                                let rgb = base + self.accent_col.xyz * glow1 + vec3(0.18, 0.42, 0.90) * glow2;
                                 return vec4(clamp(rgb, 0.0, 1.0), 1.0);
                             }
                         }
 
-                        // Top Fullscreen Toolbar
+                        // ZONE 1: Top Precision Header Strip (40px)
                         <View> {
-                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
-                            <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 16.0 } }, text: "Now Playing" }
-                            signal_path_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }, text: "Signal Path: WASAPI 48.0 kHz · 6.0s Bass-Swap" }
-                            fs_radio_btn = <FerricBtn> { height: 32, text: "Start Radio" }
-                            fs_video_btn = <FerricBtn> { height: 32, text: "Watch Video Clip" }
-                            fs_close_btn = <FerricBtn> { height: 32, text: "Close (Esc)" }
+                            width: Fill, height: 40, flow: Right, align: { y: 0.5 }, spacing: 10,
+                            <Label> { padding: 0, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 16.0 } }, text: "Now Playing" }
+                            signal_path_lbl = <Label> { width: Fill, padding: 0, draw_text: { color: #8E92A4, text_style: <THEME_FONT_MEDIUM> { font_size: 11.5 } }, text: "Signal Path: WASAPI 48.0 kHz · 6.0s Bass-Swap" }
+                            fs_radio_btn = <FerricBtn> { height: 30, text: "Start Radio" }
+                            fs_close_btn = <FerricBtn> { height: 30, text: "Close (Esc)" }
                         }
 
-                        // Split Stage: Large Cover + Capsule Spectrum | Live Synced Lyrics
+                        // ZONE 2: Symmetrical Equal-Height Split Stage (Left Art/Video Card | Right 9-Line Synced Lyrics)
                         <View> {
-                            width: Fill, height: Fill, flow: Right, align: { y: 0.5 }, spacing: 36,
+                            width: Fill, height: Fill, flow: Right, spacing: 20,
 
-                            <View> {
-                                width: 380, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 14,
-                                fs_art = <FerricCoverArt> {
-                                    width: 286,
-                                    height: 286,
-                                    draw_bg: { radius: 16.0 }
+                            // LEFT STAGE CARD (Cover Art OR Native In-App Video Clip + Metadata + Live Spectrum)
+                            fs_left_card = <FerricCard> {
+                                width: 452,
+                                height: Fill,
+                                padding: { left: 20, right: 20, top: 18, bottom: 18 }
+                                flow: Down,
+                                spacing: 12,
+
+                                // Mode Switcher: [ Cover Art ] [ Video Clip ] + Like Heart
+                                <View> {
+                                    width: Fill, height: 32, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                    fs_mode_art_btn = <FerricChipBtn> {
+                                        height: 28, text: "Cover Art",
+                                        draw_bg: { active: 1.0 },
+                                        draw_text: { active: 1.0 }
+                                    }
+                                    fs_mode_video_btn = <FerricChipBtn> { height: 28, text: "Video Clip" }
+                                    <View> { width: Fill, height: 1 }
+                                    fs_like_btn = <FerricIconBtn> {
+                                        width: 30, height: 30,
+                                        draw_icon: {
+                                            svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
+                                            color: #707382
+                                        }
+                                    }
                                 }
-                                fs_title_lbl = <Label> {
+
+                                // Visual Card Slot (Cover Art OR Docked Native 16:9 Video Stage in the exact same slot)
+                                <View> {
                                     width: Fill,
+                                    height: Fill,
+                                    flow: Overlay,
                                     align: { x: 0.5, y: 0.5 }
-                                    draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }
-                                    text: "No track playing"
+
+                                    fs_art_wrap = <View> {
+                                        visible: true,
+                                        width: Fill,
+                                        height: Fill,
+                                        align: { x: 0.5, y: 0.5 }
+                                        fs_art = <FerricCoverArt> {
+                                            width: 288,
+                                            height: 288,
+                                            draw_bg: { radius: 14.0 }
+                                        }
+                                    }
+
+                                    fs_video_wrap = <View> {
+                                        visible: false,
+                                        width: Fill,
+                                        height: Fill,
+                                        flow: Down,
+                                        align: { x: 0.5, y: 0.5 }
+                                        spacing: 10,
+
+                                        video_stage_slot = <View> {
+                                            width: Fill,
+                                            height: 234,
+                                            align: { x: 0.5, y: 0.5 }
+                                            show_bg: true,
+                                            draw_bg: { color: #050508 }
+                                            vid_stage_hint_lbl = <Label> {
+                                                padding: 0,
+                                                draw_text: { color: #8A8E9E, text_style: <THEME_FONT_MEDIUM> { font_size: 12.0 } }
+                                                text: "Loading native in-app video clip..."
+                                            }
+                                        }
+
+                                        <View> {
+                                            width: Fill, height: Fit, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 5,
+                                            vq_auto_btn = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Auto", draw_text: { text_style: { font_size: 10.5 } } }
+                                            vq_360_btn = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "360p", draw_text: { text_style: { font_size: 10.5 } } }
+                                            vq_480_btn = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "480p", draw_text: { text_style: { font_size: 10.5 } } }
+                                            vq_720_btn = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "720p", draw_text: { text_style: { font_size: 10.5 } } }
+                                            vq_1080_btn = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "1080p", draw_text: { text_style: { font_size: 10.5 } } }
+                                        }
+
+                                        vid_status_lbl = <Label> {
+                                            width: Fill,
+                                            padding: 0,
+                                            align: { x: 0.5, y: 0.5 }
+                                            draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 11.0 } }
+                                            text: "Synced to WASAPI"
+                                        }
+                                    }
                                 }
-                                fs_artist_lbl = <Label> {
-                                    width: Fill,
-                                    align: { x: 0.5, y: 0.5 }
-                                    draw_text: { color: #A6A9B8, text_style: { font_size: 14.0 } }
-                                    text: ""
+
+                                // Tight Metadata Block (Zero Vertical Bloat)
+                                <View> {
+                                    width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3,
+                                    fs_title_lbl = <Label> {
+                                        width: Fill,
+                                        padding: 0,
+                                        align: { x: 0.5, y: 0.5 }
+                                        draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 19.0, line_spacing: 1.02 } }
+                                        text: "No track playing"
+                                    }
+                                    fs_artist_lbl = <Label> {
+                                        width: Fill,
+                                        padding: 0,
+                                        align: { x: 0.5, y: 0.5 }
+                                        draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 12.5, line_spacing: 1.02 } }
+                                        text: ""
+                                    }
                                 }
+
+                                // Live 24-Bar Centered Capsule Spectrum anchored cleanly at card base
                                 np_canvas = <FerricNowPlayingCanvas> {
                                     width: Fill,
-                                    height: 86,
+                                    height: 58,
                                 }
                             }
 
-                            <View> {
-                                width: Fill, height: Fill, flow: Down, align: { y: 0.5 }, spacing: 14,
+                            // RIGHT LYRICS PANEL (Matching Height, 9 Balanced Synced Lyric Lines, Zero Dead Void)
+                            fs_right_card = <FerricCard> {
+                                width: Fill,
+                                height: Fill,
+                                padding: { left: 26, right: 26, top: 18, bottom: 18 }
+                                flow: Down,
+                                spacing: 12,
+
                                 <View> {
-                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                    fs_lyr_source = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "Synced Lyrics" }
-                                    fs_lyr_minus = <FerricBtn> { height: 28, text: "-0.5s" }
-                                    fs_lyr_plus = <FerricBtn> { height: 28, text: "+0.5s" }
-                                    fs_lyr_copy = <FerricBtn> { height: 28, text: "Copy" }
+                                    width: Fill, height: 32, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                    fs_lyr_source = <Label> { width: Fill, padding: 0, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 12.0 } }, text: "Synced Lyrics" }
+                                    fs_lyr_minus = <FerricBtn> { height: 26, padding: { left: 9, right: 9 }, text: "-0.5s", draw_text: { text_style: { font_size: 11.0 } } }
+                                    fs_lyr_plus = <FerricBtn> { height: 26, padding: { left: 9, right: 9 }, text: "+0.5s", draw_text: { text_style: { font_size: 11.0 } } }
+                                    fs_lyr_copy = <FerricBtn> { height: 26, padding: { left: 10, right: 10 }, text: "Copy", draw_text: { text_style: { font_size: 11.0 } } }
                                 }
-                                fs_lyr_0 = <Label> { width: Fill, draw_text: { color: #545768, text_style: { font_size: 15.0 } }, text: "" }
-                                fs_lyr_1 = <Label> { width: Fill, draw_text: { color: #7C8094, text_style: { font_size: 17.0 } }, text: "" }
-                                fs_lyr_2 = <Label> { width: Fill, draw_text: { color: #A8ACB8, text_style: { font_size: 19.0 } }, text: "" }
-                                fs_lyr_3 = <Label> { width: Fill, draw_text: { color: #FFFFFF, text_style: { font_size: 24.0 } }, text: "Play any song to show live synced lyrics" }
-                                fs_lyr_4 = <Label> { width: Fill, draw_text: { color: #A8ACB8, text_style: { font_size: 19.0 } }, text: "" }
-                                fs_lyr_5 = <Label> { width: Fill, draw_text: { color: #7C8094, text_style: { font_size: 17.0 } }, text: "" }
-                                fs_lyr_6 = <Label> { width: Fill, draw_text: { color: #545768, text_style: { font_size: 15.0 } }, text: "" }
+
+                                <FerricDividerH> {}
+
+                                <View> {
+                                    width: Fill, height: Fill, flow: Down, align: { y: 0.5 }, spacing: 11,
+                                    fs_lyr_0 = <Label> { width: Fill, padding: 0, draw_text: { color: #444757, text_style: <THEME_FONT_REGULAR> { font_size: 13.5, line_spacing: 1.08 } }, text: "" }
+                                    fs_lyr_1 = <Label> { width: Fill, padding: 0, draw_text: { color: #626679, text_style: <THEME_FONT_REGULAR> { font_size: 15.0, line_spacing: 1.08 } }, text: "" }
+                                    fs_lyr_2 = <Label> { width: Fill, padding: 0, draw_text: { color: #8A8EA4, text_style: <THEME_FONT_MEDIUM> { font_size: 16.5, line_spacing: 1.08 } }, text: "" }
+                                    fs_lyr_3 = <Label> { width: Fill, padding: 0, draw_text: { color: #B8BCCB, text_style: <THEME_FONT_MEDIUM> { font_size: 18.5, line_spacing: 1.08 } }, text: "" }
+                                    fs_lyr_4 = <Label> { width: Fill, padding: 0, draw_text: { color: #FFFFFF, text_style: <THEME_FONT_DISPLAY> { font_size: 25.0, line_spacing: 1.08 } }, text: "Play any song to show live synced lyrics" }
+                                    fs_lyr_5 = <Label> { width: Fill, padding: 0, draw_text: { color: #B8BCCB, text_style: <THEME_FONT_MEDIUM> { font_size: 18.5, line_spacing: 1.08 } }, text: "" }
+                                    fs_lyr_6 = <Label> { width: Fill, padding: 0, draw_text: { color: #8A8EA4, text_style: <THEME_FONT_MEDIUM> { font_size: 16.5, line_spacing: 1.08 } }, text: "" }
+                                    fs_lyr_7 = <Label> { width: Fill, padding: 0, draw_text: { color: #626679, text_style: <THEME_FONT_REGULAR> { font_size: 15.0, line_spacing: 1.08 } }, text: "" }
+                                    fs_lyr_8 = <Label> { width: Fill, padding: 0, draw_text: { color: #444757, text_style: <THEME_FONT_REGULAR> { font_size: 13.5, line_spacing: 1.08 } }, text: "" }
+                                }
+                            }
+                        }
+
+                        // ZONE 3: Integrated Bottom Transport Dock (Complete Control Inside Lyrics/Video Mode)
+                        fs_transport_card = <FerricCard> {
+                            width: Fill,
+                            height: 62,
+                            padding: { left: 18, right: 18, top: 8, bottom: 8 }
+                            flow: Right,
+                            align: { y: 0.5 }
+                            spacing: 10,
+
+                            fs_shuffle_btn = <FerricIconBtn> {
+                                width: 30, height: 30,
+                                draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z" }
+                            }
+                            fs_prev_btn = <FerricIconBtn> {
+                                width: 30, height: 30,
+                                draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z" }
+                            }
+                            fs_play_pause_btn = <FerricPlayBtn> {
+                                width: 36, height: 36,
+                            }
+                            fs_next_btn = <FerricIconBtn> {
+                                width: 30, height: 30,
+                                draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z" }
+                            }
+                            fs_repeat_btn = <FerricIconBtn> {
+                                width: 30, height: 30,
+                                draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z" }
+                            }
+
+                            <View> { width: 8, height: 1 }
+
+                            fs_pos_lbl = <Label> {
+                                width: 48, padding: 0, align: { x: 0.5, y: 0.5 }
+                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 11.5 } }
+                                text: "00:00"
+                            }
+                            fs_seek_slider = <FerricBarSlider> {
+                                width: Fill, height: 20, min: 0.0, max: 1.0, value: 0.0
+                            }
+                            fs_dur_lbl = <Label> {
+                                width: 48, padding: 0, align: { x: 0.5, y: 0.5 }
+                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 11.5 } }
+                                text: "00:00"
+                            }
+
+                            <View> { width: 8, height: 1 }
+
+                            fs_vol_mute_btn = <FerricIconBtn> {
+                                width: 28, height: 28,
+                                draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" }
+                            }
+                            fs_vol_slider = <FerricBarSlider> {
+                                width: 84, height: 20, min: 0.0, max: 1.0, value: 0.85
                             }
                         }
                     }
@@ -2543,6 +2859,8 @@ pub struct App {
     #[rust]
     canvas_phase: f32,
     #[rust]
+    glass_phase: f32,
+    #[rust]
     sleep_timer: SleepTimerMode,
     #[rust]
     tick_timer: Timer,
@@ -2578,31 +2896,19 @@ impl App {
     }
 
     fn style_chip_btn(&self, cx: &mut Cx, btn_id: &[LiveId], active: bool) {
-        let dark = vec4(0.035, 0.038, 0.050, 1.0);
-        let light = vec4(0.800, 0.812, 0.855, 1.0);
-        let white = vec4(1.0, 1.0, 1.0, 1.0);
+        let a = if active { 1.0_f32 } else { 0.0_f32 };
         let glass = if self.theme.material.liquid_glass {
             1.0_f32
         } else {
             0.0_f32
         };
-        if active {
-            self.ui.button(btn_id).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: 1.0, glass_on: (glass) }
-                    draw_text: { color: (dark), color_hover: (dark), color_focus: (dark), color_down: (dark) }
-                },
-            );
-        } else {
-            self.ui.button(btn_id).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: 0.0, glass_on: (glass) }
-                    draw_text: { color: (light), color_hover: (white), color_focus: (white), color_down: (white) }
-                },
-            );
-        }
+        self.ui.button(btn_id).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (a), glass_on: (glass) }
+                draw_text: { active: (a) }
+            },
+        );
     }
 
     fn target_accent(&self) -> Vec4 {
@@ -2663,7 +2969,7 @@ impl App {
             .apply_over(cx, live! { width: (296.0 * z) });
         self.ui
             .view(id!(bottom_bar))
-            .apply_over(cx, live! { height: (74.0 * z) });
+            .apply_over(cx, live! { height: (76.0 * z) });
         self.ui
             .ferric_cover_art(id!(np_art))
             .apply_over(cx, live! { width: (46.0 * z), height: (46.0 * z) });
@@ -2676,7 +2982,7 @@ impl App {
         );
         self.ui.label(id!(np_artist_lbl)).apply_over(
             cx,
-            live! { draw_text: { text_style: { font_size: (11.0 * z) } } },
+            live! { draw_text: { text_style: { font_size: (11.5 * z) } } },
         );
 
         for nid in [
@@ -2712,7 +3018,7 @@ impl App {
             self.ui.view(vid).apply_over(
                 cx,
                 live! {
-                    height: (58.0 * z),
+                    height: (60.0 * z),
                     art = { width: (46.0 * z), height: (46.0 * z) }
                     title = { draw_text: { text_style: { font_size: (13.0 * z) } } }
                     sub = { draw_text: { text_style: { font_size: (11.0 * z) } } }
@@ -2745,9 +3051,9 @@ impl App {
             self.ui.view(cid).apply_over(
                 cx,
                 live! {
-                    height: (222.0 * z),
-                    art = { height: (136.0 * z) }
-                    title = { draw_text: { text_style: { font_size: (12.0 * z) } } }
+                    height: (224.0 * z),
+                    art = { height: (142.0 * z) }
+                    title = { draw_text: { text_style: { font_size: (12.5 * z) } } }
                     sub = { draw_text: { text_style: { font_size: (11.0 * z) } } }
                 },
             );
@@ -2782,7 +3088,7 @@ impl App {
             self.ui.view(gid).apply_over(
                 cx,
                 live! {
-                    height: (236.0 * z),
+                    height: (238.0 * z),
                     art = { height: (158.0 * z) }
                     title = { draw_text: { text_style: { font_size: (12.5 * z) } } }
                     sub = { draw_text: { text_style: { font_size: (11.0 * z) } } }
@@ -2809,8 +3115,8 @@ impl App {
             self.ui.view(qid).apply_over(
                 cx,
                 live! {
-                    height: (52.0 * z),
-                    art = { width: (36.0 * z), height: (36.0 * z) }
+                    height: (54.0 * z),
+                    art = { width: (38.0 * z), height: (38.0 * z) }
                     title = { draw_text: { text_style: { font_size: (12.0 * z) } } }
                     sub = { draw_text: { text_style: { font_size: (10.5 * z) } } }
                 },
@@ -2832,24 +3138,16 @@ impl App {
                 height: (slot.size.y as f32 * scale).round() as i32,
             })
         } else {
-            let z = self.theme.ui_zoom.clamp(0.80, 1.40);
-            let left_px = if self.left_sidebar_open {
-                (197.0 * z * scale).round() as i32
-            } else {
-                0
-            };
-            let right_px = if self.right_sidebar_open {
-                (297.0 * z * scale).round() as i32
-            } else {
-                0
-            };
-            let top_px = ((45.0 * z + 55.0) * scale).round() as i32;
-            let bot_px = (75.0 * z * scale).round() as i32;
+            // Fallback geometry matching fs_left_card's 16:9 video_stage_slot inside Fullscreen Lyrics Mode
+            let left_px = (48.0 * scale).round() as i32;
+            let top_px = (128.0 * scale).round() as i32;
+            let width_px = (412.0 * scale).round() as i32;
+            let height_px = (234.0 * scale).round() as i32;
             Some(VideoViewportRect {
                 x: client.left + left_px,
                 y: client.top + top_px,
-                width: (client.width - left_px - right_px).max(320),
-                height: (client.height - top_px - bot_px).max(180),
+                width: width_px.min((client.width - left_px * 2).max(240)),
+                height: height_px.min((client.height - top_px - 160).max(160)),
             })
         }
     }
@@ -2930,7 +3228,7 @@ impl App {
         if !vp.is_open() {
             return;
         }
-        let obstructed = self.fullscreen_open
+        let obstructed = !self.fullscreen_open
             || self.cmdk_open
             || self.update_popup_visible
             || self.compact_mini_mode
@@ -2950,22 +3248,15 @@ impl App {
             self.show_toast(cx, "Play a song first to watch its video clip");
             return;
         };
-        if self.fullscreen_open {
-            self.set_fullscreen(cx, false);
+        // Video Clip lives INSIDE Fullscreen Lyrics Mode replacing the Left Cover Art card
+        if !self.fullscreen_open {
+            self.set_fullscreen(cx, true);
         }
         self.video_open = true;
-        self.ui.view(id!(video_overlay)).set_visible(cx, true);
-        self.ui.label(id!(vid_title_lbl)).set_text(
-            cx,
-            &clip_text(
-                &format!(
-                    "{} · {}",
-                    clip_text(&cur.title, 22),
-                    clip_text(&cur.artist, 18)
-                ),
-                38,
-            ),
-        );
+        self.ui.view(id!(fs_art_wrap)).set_visible(cx, false);
+        self.ui.view(id!(fs_video_wrap)).set_visible(cx, true);
+        self.style_chip_btn(cx, id!(fs_mode_art_btn), false);
+        self.style_chip_btn(cx, id!(fs_mode_video_btn), true);
         self.refresh_video_quality_buttons(cx);
         let accent = self.current_accent();
         self.ui.button(id!(bar_video_btn)).apply_over(
@@ -2981,11 +3272,14 @@ impl App {
             return;
         }
 
-        // Check for local sidecar video file (.mp4 / .webm / .mkv) next to audio file first
-        if let Some(local_p) = &cur.path {
+        // Check for a REAL local sidecar video file next to a Local audio track only
+        // (never match cached YouTube audio-only `.webm` files in stream_cache!).
+        if cur.source == TrackSource::Local
+            && let Some(local_p) = &cur.path
+        {
             for ext in ["mp4", "webm", "mkv"] {
                 let cand = local_p.with_extension(ext);
-                if cand.is_file() {
+                if cand != *local_p && cand.is_file() {
                     let uri = format!("file:///{}", cand.to_string_lossy().replace('\\', "/"));
                     self.video_track_id = Some(cur.id.clone());
                     self.video_streams = vec![VideoStreamOption {
@@ -3050,7 +3344,10 @@ impl App {
 
     fn close_native_video_stage(&mut self, cx: &mut Cx) {
         self.video_open = false;
-        self.ui.view(id!(video_overlay)).set_visible(cx, false);
+        self.ui.view(id!(fs_video_wrap)).set_visible(cx, false);
+        self.ui.view(id!(fs_art_wrap)).set_visible(cx, true);
+        self.style_chip_btn(cx, id!(fs_mode_art_btn), true);
+        self.style_chip_btn(cx, id!(fs_mode_video_btn), false);
         if let Some(vp) = &mut self.video_player {
             vp.close();
         }
@@ -3415,9 +3712,22 @@ impl App {
     }
 
     fn set_fullscreen(&mut self, cx: &mut Cx, open: bool) {
+        if !open && self.video_open {
+            self.close_native_video_stage(cx);
+        }
         self.fullscreen_open = open;
         self.ui.view(id!(shell_col)).set_visible(cx, !open);
         self.ui.view(id!(fullscreen_overlay)).set_visible(cx, open);
+        if open {
+            self.ui
+                .view(id!(fs_art_wrap))
+                .set_visible(cx, !self.video_open);
+            self.ui
+                .view(id!(fs_video_wrap))
+                .set_visible(cx, self.video_open);
+            self.style_chip_btn(cx, id!(fs_mode_art_btn), !self.video_open);
+            self.style_chip_btn(cx, id!(fs_mode_video_btn), self.video_open);
+        }
         self.sync_video_bounds(cx);
         self.ui.redraw(cx);
     }
@@ -3542,33 +3852,49 @@ impl App {
 
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
         let accent = self.current_accent();
-        let glass_f = if self.theme.material.liquid_glass {
-            1.0_f32
-        } else {
-            0.0_f32
-        };
-        self.ui
-            .view(id!(body))
-            .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+        let g = &self.theme.material;
+        let glass_f = if g.liquid_glass { 1.0_f32 } else { 0.0_f32 };
+        self.ui.view(id!(body)).apply_over(
+            cx,
+            live! { draw_bg: { accent_col: (accent), glass_disp: (g.dispersion) } },
+        );
         self.ui.view(id!(bottom_bar)).apply_over(
             cx,
             live! {
                 draw_bg: {
                     accent_col: (accent),
                     glass_on: (glass_f),
+                    glass_disp: (g.dispersion),
+                    glass_rim: (g.specular_rim),
+                    glass_scrim: (g.scrim_alpha),
                     glow_amt: (if self.queue.current().is_some() { 0.28 } else { 0.14 })
                 }
             },
         );
-        self.ui
-            .view(id!(fullscreen_overlay))
-            .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
-        self.ui
-            .ferric_bar_slider(id!(seek_slider))
-            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
-        self.ui
-            .ferric_bar_slider(id!(vol_slider))
-            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui.view(id!(fullscreen_overlay)).apply_over(
+            cx,
+            live! { draw_bg: { accent_col: (accent), glass_on: (glass_f) } },
+        );
+        for fs_card in [
+            id!(fs_left_card),
+            id!(fs_right_card),
+            id!(fs_transport_card),
+        ] {
+            self.ui.view(fs_card).apply_over(
+                cx,
+                live! { draw_bg: { accent_col: (accent), glass_on: (glass_f) } },
+            );
+        }
+        for slider_id in [
+            id!(seek_slider),
+            id!(vol_slider),
+            id!(fs_seek_slider),
+            id!(fs_vol_slider),
+        ] {
+            self.ui
+                .ferric_bar_slider(slider_id)
+                .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        }
         self.ui.view(id!(q_now_row)).apply_over(
             cx,
             live! { draw_bg: { accent_col: (accent), glass_on: (glass_f) } },
@@ -3578,6 +3904,9 @@ impl App {
             .apply_over(cx, live! { draw_text: { color: (accent) } });
         self.ui
             .label(id!(rs_lyr_3))
+            .apply_over(cx, live! { draw_text: { color: (accent) } });
+        self.ui
+            .label(id!(fs_lyr_4))
             .apply_over(cx, live! { draw_text: { color: (accent) } });
         self.ui.view(id!(np_canvas)).apply_over(
             cx,
@@ -3780,8 +4109,9 @@ impl App {
                 self.rich_home.chips.get(i - 1).map(|c| c.title.clone())
             };
             if let Some(txt) = label {
+                let clean_lbl = clean_display_text(&txt);
                 self.ui.button(cid).set_visible(cx, true);
-                self.ui.button(cid).set_text(cx, &txt);
+                self.ui.button(cid).set_text(cx, &clean_lbl);
                 self.style_chip_btn(cx, cid, self.active_mood_idx == i);
             } else if i > 0 && !self.rich_home.chips.is_empty() {
                 self.ui.button(cid).set_visible(cx, false);
@@ -3810,11 +4140,9 @@ impl App {
             .audio
             .as_ref()
             .is_some_and(|a| a.telemetry().is_playing);
-        let glass_f = if self.theme.material.liquid_glass {
-            1.0_f32
-        } else {
-            0.0_f32
-        };
+        let g = &self.theme.material;
+        let glass_f = if g.liquid_glass { 1.0_f32 } else { 0.0_f32 };
+        let rad = self.theme.corner_radius_px.clamp(8.0, 22.0);
         let accent = self.current_accent();
         let qp_ids = [
             id!(qp_0),
@@ -3833,13 +4161,27 @@ impl App {
                 let is_act = active_id == Some(track.id.as_str());
                 v.apply_over(
                     cx,
-                    live! { draw_bg: { active: (if is_act { 1.0 } else { 0.0 }), glass_on: (glass_f), accent_col: (accent) } },
+                    live! {
+                        draw_bg: {
+                            active: (if is_act { 1.0 } else { 0.0 }),
+                            glass_on: (glass_f),
+                            accent_col: (accent),
+                            glass_ior: (g.ior),
+                            glass_disp: (g.dispersion),
+                            glass_rim: (g.specular_rim),
+                            glass_scrim: (g.scrim_alpha),
+                            glass_rad: (rad)
+                        }
+                    },
                 );
                 v.label(id!(title))
-                    .set_text(cx, &clip_text(&track.title, 28));
+                    .set_text(cx, &clip_text(&clean_display_text(&track.title), 24));
                 v.label(id!(sub)).set_text(
                     cx,
-                    &clip_text(&format!("{} · {}", track.artist, track.album), 34),
+                    &clip_text(
+                        &clean_display_text(&format!("{} · {}", track.artist, track.album)),
+                        28,
+                    ),
                 );
                 self.bind_cover_art_url(
                     cx,
@@ -3902,7 +4244,7 @@ impl App {
                 self.ui.view(wrap_id).set_visible(cx, true);
                 self.ui
                     .label(title_id)
-                    .set_text(cx, &clip_text(&shelf.title, 44));
+                    .set_text(cx, &clip_text(&clean_display_text(&shelf.title), 44));
                 let offset = self.shelf_pages[si] * 5;
                 for (ci, cid) in card_ids.into_iter().enumerate() {
                     let card_v = self.ui.view(cid);
@@ -3910,14 +4252,24 @@ impl App {
                         card_v.set_visible(cx, true);
                         card_v.apply_over(
                             cx,
-                            live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+                            live! {
+                                draw_bg: {
+                                    glass_on: (glass_f),
+                                    accent_col: (accent),
+                                    glass_ior: (g.ior),
+                                    glass_disp: (g.dispersion),
+                                    glass_rim: (g.specular_rim),
+                                    glass_scrim: (g.scrim_alpha),
+                                    glass_rad: (rad)
+                                }
+                            },
                         );
                         card_v
                             .label(id!(title))
-                            .set_text(cx, &clip_text(&card.title, 15));
+                            .set_text(cx, &clip_text(&clean_display_text(&card.title), 16));
                         card_v
                             .label(id!(sub))
-                            .set_text(cx, &clip_text(&card.subtitle, 18));
+                            .set_text(cx, &clip_text(&clean_display_text(&card.subtitle), 19));
                         self.bind_cover_art_url(
                             cx,
                             card_v.ferric_cover_art(id!(art)),
@@ -3943,11 +4295,9 @@ impl App {
             .as_ref()
             .is_some_and(|a| a.telemetry().is_playing);
         let accent = self.current_accent();
-        let glass_f = if self.theme.material.liquid_glass {
-            1.0_f32
-        } else {
-            0.0_f32
-        };
+        let g = &self.theme.material;
+        let glass_f = if g.liquid_glass { 1.0_f32 } else { 0.0_f32 };
+        let rad = self.theme.corner_radius_px.clamp(8.0, 22.0);
 
         // History (last 3 played tracks excluding current)
         let cur_id = self.queue.current().map(|t| t.id.clone());
@@ -3978,10 +4328,22 @@ impl App {
                 rv.set_visible(cx, true);
                 rv.apply_over(
                     cx,
-                    live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+                    live! {
+                        draw_bg: {
+                            glass_on: (glass_f),
+                            accent_col: (accent),
+                            glass_ior: (g.ior),
+                            glass_disp: (g.dispersion),
+                            glass_rim: (g.specular_rim),
+                            glass_scrim: (g.scrim_alpha),
+                            glass_rad: (rad)
+                        }
+                    },
                 );
-                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 18));
-                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 20));
+                rv.label(id!(title))
+                    .set_text(cx, &clip_text(&clean_display_text(&t.title), 16));
+                rv.label(id!(sub))
+                    .set_text(cx, &clip_text(&clean_display_text(&t.artist), 18));
                 rv.label(id!(dur)).set_text(
                     cx,
                     &if t.duration_ms > 0 {
@@ -4007,24 +4369,35 @@ impl App {
         // Now playing
         self.ui.label(id!(q_now_header)).set_text(
             cx,
-            &format!("Now playing · {}", clip_text(&self.queue_context, 20)),
+            &format!("Now playing · {}", clip_text(&self.queue_context, 18)),
         );
         let now_v = self.ui.view(id!(q_now_row));
         now_v.apply_over(
             cx,
-            live! { draw_bg: { active: 1.0, glass_on: (glass_f), accent_col: (accent) } },
+            live! {
+                draw_bg: {
+                    active: 1.0,
+                    glass_on: (glass_f),
+                    accent_col: (accent),
+                    glass_ior: (g.ior),
+                    glass_disp: (g.dispersion),
+                    glass_rim: (g.specular_rim),
+                    glass_scrim: (g.scrim_alpha),
+                    glass_rad: (rad)
+                }
+            },
         );
         if let Some(cur) = self.queue.current().cloned() {
             now_v.set_visible(cx, true);
             now_v
                 .label(id!(title))
-                .set_text(cx, &clip_text(&cur.title, 18));
+                .set_text(cx, &clip_text(&clean_display_text(&cur.title), 16));
             now_v
                 .label(id!(title))
                 .apply_over(cx, live! { draw_text: { color: (accent) } });
             now_v
                 .label(id!(sub))
-                .set_text(cx, &clip_text(&cur.artist, 20));
+                .set_text(cx, &clip_text(&clean_display_text(&cur.artist), 18));
             now_v.label(id!(dur)).set_text(
                 cx,
                 &if cur.duration_ms > 0 {
@@ -4046,8 +4419,9 @@ impl App {
             now_v.set_visible(cx, true);
             now_v.label(id!(title)).set_text(cx, "Nothing playing");
             now_v
-                .label(id!(sub))
-                .set_text(cx, "Click any song to listen");
+                .label(id!(title))
+                .apply_over(cx, live! { draw_text: { color: #ECEEF5 } });
+            now_v.label(id!(sub)).set_text(cx, "Pick any song");
             now_v.label(id!(dur)).set_text(cx, "");
             now_v.ferric_cover_art(id!(art)).set_texture(cx, None, 1.0);
         }
@@ -4090,10 +4464,22 @@ impl App {
                 rv.set_visible(cx, true);
                 rv.apply_over(
                     cx,
-                    live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+                    live! {
+                        draw_bg: {
+                            glass_on: (glass_f),
+                            accent_col: (accent),
+                            glass_ior: (g.ior),
+                            glass_disp: (g.dispersion),
+                            glass_rim: (g.specular_rim),
+                            glass_scrim: (g.scrim_alpha),
+                            glass_rad: (rad)
+                        }
+                    },
                 );
-                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 18));
-                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 20));
+                rv.label(id!(title))
+                    .set_text(cx, &clip_text(&clean_display_text(&t.title), 16));
+                rv.label(id!(sub))
+                    .set_text(cx, &clip_text(&clean_display_text(&t.artist), 18));
                 rv.label(id!(dur)).set_text(
                     cx,
                     &if t.duration_ms > 0 {
@@ -4403,7 +4789,7 @@ impl App {
 
     fn open_remote_card(&mut self, cx: &mut Cx, card: YtmShelfCard) {
         if let Some(vid) = card.video_id.clone()
-            && card.kind == YtmCardKind::Song
+            && (card.kind == YtmCardKind::Song || card.browse_id.is_none())
         {
             let track = Track {
                 id: format!("yt:video:{vid}"),
@@ -4649,30 +5035,43 @@ impl App {
         self.ui
             .ferric_bar_slider(id!(vol_slider))
             .set_value(cx, f64::from(self.session_state.volume));
-        self.ui.button(id!(vol_mute_btn)).apply_over(
-            cx,
-            live! { draw_icon: { color: (if self.session_state.volume < 0.01 { accent } else { muted }) } },
-        );
-        self.ui.button(id!(shuffle_btn)).apply_over(
-            cx,
-            live! {
-                draw_bg: { active: (if self.queue.shuffle { 1.0 } else { 0.0 }) }
-                draw_icon: { color: (if self.queue.shuffle { accent } else { muted }) }
-            },
-        );
+        self.ui
+            .ferric_bar_slider(id!(fs_vol_slider))
+            .set_value(cx, f64::from(self.session_state.volume));
+        let mute_col = if self.session_state.volume < 0.01 {
+            accent
+        } else {
+            muted
+        };
+        for mbtn in [id!(vol_mute_btn), id!(fs_vol_mute_btn)] {
+            self.ui
+                .button(mbtn)
+                .apply_over(cx, live! { draw_icon: { color: (mute_col) } });
+        }
+        for sbtn in [id!(shuffle_btn), id!(fs_shuffle_btn)] {
+            self.ui.button(sbtn).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: (if self.queue.shuffle { 1.0 } else { 0.0 }) }
+                    draw_icon: { color: (if self.queue.shuffle { accent } else { muted }) }
+                },
+            );
+        }
         let rep_active = self.queue.repeat != RepeatMode::Off;
         let rep_col = match self.queue.repeat {
             RepeatMode::Off => muted,
             RepeatMode::All => accent,
             RepeatMode::One => vec4(0.95, 0.78, 0.36, 1.0),
         };
-        self.ui.button(id!(repeat_btn)).apply_over(
-            cx,
-            live! {
-                draw_bg: { active: (if rep_active { 1.0 } else { 0.0 }) }
-                draw_icon: { color: (rep_col) }
-            },
-        );
+        for rbtn in [id!(repeat_btn), id!(fs_repeat_btn)] {
+            self.ui.button(rbtn).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: (if rep_active { 1.0 } else { 0.0 }) }
+                    draw_icon: { color: (rep_col) }
+                },
+            );
+        }
 
         self.ui
             .text_input(id!(sub_url_input))
@@ -4692,16 +5091,22 @@ impl App {
         let surface = rgba_vec4(&self.theme.surface_hex);
         let border = rgba_vec4(&self.theme.border_hex);
         let accent = self.current_accent();
-        let rad = if g.liquid_glass {
+        let rad_surf = if g.liquid_glass {
             self.theme.corner_radius_px.clamp(8.0, 22.0)
         } else {
             0.0
         };
+        let rad_card = self.theme.corner_radius_px.clamp(8.0, 22.0);
 
         self.ui.view(id!(body)).apply_over(
             cx,
             live! {
-                draw_bg: { canvas_col: (canvas), glass_bg: (glass_f), accent_col: (accent) }
+                draw_bg: {
+                    canvas_col: (canvas),
+                    glass_bg: (glass_f),
+                    glass_disp: (g.dispersion),
+                    accent_col: (accent)
+                }
             },
         );
 
@@ -4710,7 +5115,6 @@ impl App {
             (id!(left_sidebar), surface, 0.56_f32),
             (id!(center_stage), canvas, 0.28_f32),
             (id!(right_sidebar), surface, 0.56_f32),
-            (id!(vid_header), surface, 0.72_f32),
         ] {
             self.ui.view(pid).apply_over(
                 cx,
@@ -4725,13 +5129,13 @@ impl App {
                         glass_disp: (g.dispersion),
                         glass_rim: (g.specular_rim),
                         glass_scrim: (g.scrim_alpha),
-                        radius: (rad)
+                        radius: (rad_surf)
                     }
                 },
             );
         }
 
-        // Propagate cohesive Liquid Glass material to EVERY card, tile, shelf, grid, queue row & pill
+        // Propagate cohesive Optical Liquid Glass material to EVERY card, tile, shelf, grid, queue row & fullscreen stage card
         for card_id in [
             id!(card_acct_yt),
             id!(card_acct_import),
@@ -4748,6 +5152,9 @@ impl App {
             id!(card_conn_main),
             id!(card_cmdk),
             id!(card_update_popup),
+            id!(fs_left_card),
+            id!(fs_right_card),
+            id!(fs_transport_card),
             id!(qp_0),
             id!(qp_1),
             id!(qp_2),
@@ -4817,7 +5224,17 @@ impl App {
         ] {
             self.ui.view(card_id).apply_over(
                 cx,
-                live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+                live! {
+                    draw_bg: {
+                        glass_on: (glass_f),
+                        accent_col: (accent),
+                        glass_ior: (g.ior),
+                        glass_disp: (g.dispersion),
+                        glass_rim: (g.specular_rim),
+                        glass_scrim: (g.scrim_alpha),
+                        glass_rad: (rad_card)
+                    }
+                },
             );
         }
 
@@ -4891,7 +5308,11 @@ impl App {
             id!(rs_lyr_copy),
             id!(rs_watch_video),
             id!(codec_pill_btn),
-            id!(vid_close_btn),
+            id!(fs_radio_btn),
+            id!(fs_close_btn),
+            id!(fs_lyr_minus),
+            id!(fs_lyr_plus),
+            id!(fs_lyr_copy),
         ] {
             self.ui.button(btn_id).apply_over(
                 cx,
@@ -4944,6 +5365,8 @@ impl App {
             id!(st_connect_btn),
             id!(rs_tab_queue),
             id!(rs_tab_lyrics),
+            id!(fs_mode_art_btn),
+            id!(fs_mode_video_btn),
             id!(aq_low_btn),
             id!(aq_norm_btn),
             id!(aq_high_btn),
@@ -4971,6 +5394,12 @@ impl App {
             id!(bar_queue_btn),
             id!(vol_mute_btn),
             id!(bar_fullscreen_btn),
+            id!(fs_like_btn),
+            id!(fs_shuffle_btn),
+            id!(fs_prev_btn),
+            id!(fs_next_btn),
+            id!(fs_repeat_btn),
+            id!(fs_vol_mute_btn),
         ] {
             self.ui
                 .button(chip_or_nav_id)
@@ -5284,14 +5713,20 @@ impl App {
             .map_or(48_000, |a| a.telemetry().output_rate);
         self.ui
             .label(id!(np_title_lbl))
-            .set_text(cx, &clip_text(&track.title, 22));
+            .set_text(cx, &clip_text(&clean_display_text(&track.title), 20));
         self.ui
             .label(id!(np_artist_lbl))
-            .set_text(cx, &clip_text(&track.artist, 24));
-        self.ui.label(id!(fs_title_lbl)).set_text(cx, &track.title);
+            .set_text(cx, &clip_text(&clean_display_text(&track.artist), 22));
         self.ui
-            .label(id!(fs_artist_lbl))
-            .set_text(cx, &format!("{} · {}", track.artist, track.album));
+            .label(id!(fs_title_lbl))
+            .set_text(cx, &clip_text(&clean_display_text(&track.title), 36));
+        self.ui.label(id!(fs_artist_lbl)).set_text(
+            cx,
+            &clip_text(
+                &clean_display_text(&format!("{} · {}", track.artist, track.album)),
+                44,
+            ),
+        );
         self.ui
             .button(id!(codec_pill_btn))
             .set_text(cx, &track.quality_badge());
@@ -5302,11 +5737,16 @@ impl App {
         } else {
             vec4(0.439, 0.451, 0.510, 1.0)
         };
-        self.ui
-            .button(id!(np_like_btn))
-            .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+        for lbtn in [id!(np_like_btn), id!(fs_like_btn)] {
+            self.ui
+                .button(lbtn)
+                .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+        }
         self.ui
             .ferric_play_btn(id!(play_pause_btn))
+            .set_playing(cx, true);
+        self.ui
+            .ferric_play_btn(id!(fs_play_pause_btn))
             .set_playing(cx, true);
         self.ui.label(id!(signal_path_lbl)).set_text(
             cx,
@@ -5360,18 +5800,7 @@ impl App {
 
     fn load_lyrics_for_track(&mut self, cx: &mut Cx, track: &Track) {
         self.synced_lyrics = SyncedLyrics::default();
-        self.set_lyrics_lines(
-            cx,
-            [
-                "",
-                "",
-                "",
-                "Searching synced lyrics (LRCLIB)...",
-                "",
-                "",
-                "",
-            ],
-        );
+        self.set_lyrics_center_message(cx, "Searching synced lyrics (LRCLIB)...");
 
         if let Some(db) = &self.db
             && let Ok(Some(cached)) = db.get_cached_lyrics(&track.id)
@@ -5417,7 +5846,15 @@ impl App {
         });
     }
 
-    fn set_lyrics_lines(&self, cx: &mut Cx, lines: [&str; 7]) {
+    fn set_lyrics_center_message(&self, cx: &mut Cx, msg: &str) {
+        self.set_lyrics_lines(
+            cx,
+            ["", "", "", msg, "", "", ""],
+            ["", "", "", "", msg, "", "", "", ""],
+        );
+    }
+
+    fn set_lyrics_lines(&self, cx: &mut Cx, rs_lines: [&str; 7], fs_lines: [&str; 9]) {
         let rs_ids = [
             id!(rs_lyr_0),
             id!(rs_lyr_1),
@@ -5435,10 +5872,14 @@ impl App {
             id!(fs_lyr_4),
             id!(fs_lyr_5),
             id!(fs_lyr_6),
+            id!(fs_lyr_7),
+            id!(fs_lyr_8),
         ];
         for i in 0..7 {
-            self.ui.label(rs_ids[i]).set_text(cx, lines[i]);
-            self.ui.label(fs_ids[i]).set_text(cx, lines[i]);
+            self.ui.label(rs_ids[i]).set_text(cx, rs_lines[i]);
+        }
+        for i in 0..9 {
+            self.ui.label(fs_ids[i]).set_text(cx, fs_lines[i]);
         }
     }
 
@@ -5468,6 +5909,17 @@ impl App {
                 get_txt(Some(idx + 1)),
                 get_txt(Some(idx + 2)),
                 get_txt(Some(idx + 3)),
+            ],
+            [
+                get_txt(idx.checked_sub(4)),
+                get_txt(idx.checked_sub(3)),
+                get_txt(idx.checked_sub(2)),
+                get_txt(idx.checked_sub(1)),
+                get_txt(Some(idx)),
+                get_txt(Some(idx + 1)),
+                get_txt(Some(idx + 2)),
+                get_txt(Some(idx + 3)),
+                get_txt(Some(idx + 4)),
             ],
         );
     }
@@ -5960,10 +6412,7 @@ impl App {
                     }
                     if self.queue.current().map(|t| t.id.as_str()) == Some(track_id.as_str()) {
                         if parsed.lines.is_empty() {
-                            self.set_lyrics_lines(
-                                cx,
-                                ["", "", "", "No lyrics found for this song.", "", "", ""],
-                            );
+                            self.set_lyrics_center_message(cx, "No lyrics found for this song.");
                         } else {
                             let mode = if parsed.is_synced {
                                 "Time-Synced"
@@ -6576,12 +7025,11 @@ impl App {
 
             if snap.duration_ms > 0 {
                 let ratio = (snap.position_ms as f64 / snap.duration_ms as f64).clamp(0.0, 1.0);
+                let pos_txt = format_duration_ms(snap.position_ms);
                 self.ui
                     .ferric_bar_slider(id!(seek_slider))
                     .set_value(cx, ratio);
-                self.ui
-                    .label(id!(pos_lbl))
-                    .set_text(cx, &format_duration_ms(snap.position_ms));
+                self.ui.label(id!(pos_lbl)).set_text(cx, &pos_txt);
                 let dur_txt = if self.show_remaining_time {
                     format!(
                         "-{}",
@@ -6591,12 +7039,24 @@ impl App {
                     format_duration_ms(snap.duration_ms)
                 };
                 self.ui.button(id!(dur_btn)).set_text(cx, &dur_txt);
+                if self.fullscreen_open {
+                    self.ui
+                        .ferric_bar_slider(id!(fs_seek_slider))
+                        .set_value(cx, ratio);
+                    self.ui.label(id!(fs_pos_lbl)).set_text(cx, &pos_txt);
+                    self.ui.label(id!(fs_dur_lbl)).set_text(cx, &dur_txt);
+                }
                 self.update_lyrics_display(cx, snap.position_ms);
             }
 
             self.ui
                 .ferric_play_btn(id!(play_pause_btn))
                 .set_playing(cx, snap.is_playing);
+            if self.fullscreen_open {
+                self.ui
+                    .ferric_play_btn(id!(fs_play_pause_btn))
+                    .set_playing(cx, snap.is_playing);
+            }
 
             if snap.is_crossfading {
                 self.ui.button(id!(codec_pill_btn)).set_text(cx, "XFADE");
@@ -6611,6 +7071,12 @@ impl App {
             let accent = self.current_accent();
             if snap.is_playing {
                 self.canvas_phase = (self.canvas_phase + 0.08) % 628.0;
+                if self.theme.material.liquid_glass {
+                    self.glass_phase = (self.glass_phase + 0.03) % 628.0;
+                    self.ui
+                        .view(id!(body))
+                        .apply_over(cx, live! { draw_bg: { glass_phase: (self.glass_phase) } });
+                }
                 let norm = |i: usize| (snap.spectrum_bins[i] as f32 / 1_000.0).clamp(0.05, 1.0);
                 let avg = (norm(0) + norm(1) + norm(2)) / 3.0;
                 self.ui
@@ -6840,8 +7306,7 @@ impl App {
         for (slot, vid) in qp_ids.into_iter().enumerate() {
             let v = self.ui.view(vid);
             if v.ferric_cover_art(id!(art)).clicked(actions)
-                || v.finger_up(actions)
-                    .is_some_and(|fe| fe.is_over && fe.was_tap())
+                || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe))
             {
                 let pool = self.home_quick_picks_pool();
                 let idx = self.qp_page * 8 + slot;
@@ -6908,7 +7373,7 @@ impl App {
                 if cv.ferric_cover_art(id!(art)).clicked(actions)
                     || cv
                         .finger_up(actions)
-                        .is_some_and(|fe| fe.is_over && fe.was_tap())
+                        .is_some_and(|fe| is_desktop_click(&fe))
                 {
                     let idx = self.shelf_pages[si] * 5 + ci;
                     if let Some(card) = self
@@ -6974,7 +7439,7 @@ impl App {
             if cv.ferric_cover_art(id!(art)).clicked(actions)
                 || cv
                     .finger_up(actions)
-                    .is_some_and(|fe| fe.is_over && fe.was_tap())
+                    .is_some_and(|fe| is_desktop_click(&fe))
             {
                 let card_opt = self
                     .search_result
@@ -7080,8 +7545,7 @@ impl App {
         {
             let v = self.ui.view(vid);
             if (v.ferric_cover_art(id!(art)).clicked(actions)
-                || v.finger_up(actions)
-                    .is_some_and(|fe| fe.is_over && fe.was_tap()))
+                || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
                 && let Some(g) = self.album_groups.get(self.albums_page * 8 + i).cloned()
             {
                 self.open_local_detail(cx, g);
@@ -7114,8 +7578,7 @@ impl App {
         {
             let v = self.ui.view(vid);
             if (v.ferric_cover_art(id!(art)).clicked(actions)
-                || v.finger_up(actions)
-                    .is_some_and(|fe| fe.is_over && fe.was_tap()))
+                || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
                 && let Some(g) = self.artist_groups.get(self.artists_page * 8 + i).cloned()
             {
                 self.open_local_detail(cx, g);
@@ -7201,8 +7664,7 @@ impl App {
         {
             let v = self.ui.view(vid);
             if (v.ferric_cover_art(id!(art)).clicked(actions)
-                || v.finger_up(actions)
-                    .is_some_and(|fe| fe.is_over && fe.was_tap()))
+                || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
                 && let Some(pl) = self.playlists.get(self.playlists_page * 8 + i).cloned()
             {
                 let tracks = self
@@ -7417,7 +7879,7 @@ impl App {
             if (rv.ferric_cover_art(id!(art)).clicked(actions)
                 || rv
                     .finger_up(actions)
-                    .is_some_and(|fe| fe.is_over && fe.was_tap()))
+                    .is_some_and(|fe| is_desktop_click(&fe)))
                 && let Some(t) = hist_tracks.get(i).cloned()
             {
                 self.queue.insert_play_next(t);
@@ -7446,7 +7908,7 @@ impl App {
             if (rv.ferric_cover_art(id!(art)).clicked(actions)
                 || rv
                     .finger_up(actions)
-                    .is_some_and(|fe| fe.is_over && fe.was_tap()))
+                    .is_some_and(|fe| is_desktop_click(&fe)))
                 && let Some(target) = self.queue.jump_to_upcoming(i).cloned()
             {
                 self.play_track(cx, target);
@@ -7478,10 +7940,14 @@ impl App {
                 self.set_right_sidebar(cx, true, false);
             }
         }
-        if self
+        if (self
             .ui
             .ferric_play_btn(id!(play_pause_btn))
             .clicked(actions)
+            || self
+                .ui
+                .ferric_play_btn(id!(fs_play_pause_btn))
+                .clicked(actions))
             && let Some(audio) = &self.audio
         {
             let snap = audio.telemetry();
@@ -7497,17 +7963,21 @@ impl App {
                 audio.send(EngineCommand::TogglePlayPause);
             }
         }
-        if self.ui.button(id!(next_btn)).clicked(actions)
+        if (self.ui.button(id!(next_btn)).clicked(actions)
+            || self.ui.button(id!(fs_next_btn)).clicked(actions))
             && let Some(next) = self.queue.next_track().cloned()
         {
             self.play_track(cx, next);
         }
-        if self.ui.button(id!(prev_btn)).clicked(actions)
+        if (self.ui.button(id!(prev_btn)).clicked(actions)
+            || self.ui.button(id!(fs_prev_btn)).clicked(actions))
             && let Some(prev) = self.queue.prev_track().cloned()
         {
             self.play_track(cx, prev);
         }
-        if self.ui.button(id!(shuffle_btn)).clicked(actions) {
+        if self.ui.button(id!(shuffle_btn)).clicked(actions)
+            || self.ui.button(id!(fs_shuffle_btn)).clicked(actions)
+        {
             let next_shuf = !self.queue.shuffle;
             self.queue.set_shuffle(next_shuf);
             self.session_state.shuffle = next_shuf;
@@ -7518,7 +7988,9 @@ impl App {
             self.sync_controls_from_state(cx);
             self.refresh_right_sidebar(cx);
         }
-        if self.ui.button(id!(repeat_btn)).clicked(actions) {
+        if self.ui.button(id!(repeat_btn)).clicked(actions)
+            || self.ui.button(id!(fs_repeat_btn)).clicked(actions)
+        {
             self.queue.repeat = self.queue.repeat.next();
             self.session_state.repeat = self.queue.repeat;
             if let Some(db) = &self.db {
@@ -7530,7 +8002,8 @@ impl App {
         if self.ui.button(id!(dur_btn)).clicked(actions) {
             self.show_remaining_time = !self.show_remaining_time;
         }
-        if self.ui.button(id!(np_like_btn)).clicked(actions)
+        if (self.ui.button(id!(np_like_btn)).clicked(actions)
+            || self.ui.button(id!(fs_like_btn)).clicked(actions))
             && let Some(cur) = self.queue.current().cloned()
         {
             let next_liked = !cur.liked;
@@ -7546,15 +8019,22 @@ impl App {
             } else {
                 vec4(0.439, 0.451, 0.510, 1.0)
             };
-            self.ui
-                .button(id!(np_like_btn))
-                .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+            for lbtn in [id!(np_like_btn), id!(fs_like_btn)] {
+                self.ui
+                    .button(lbtn)
+                    .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+            }
             self.rebuild_library_views(cx);
         }
         if let Some(pos_ratio) = self
             .ui
             .ferric_bar_slider(id!(seek_slider))
             .released(actions)
+            .or_else(|| {
+                self.ui
+                    .ferric_bar_slider(id!(fs_seek_slider))
+                    .released(actions)
+            })
             && let Some(audio) = &self.audio
         {
             let snap = audio.telemetry();
@@ -7570,7 +8050,16 @@ impl App {
                 }
             }
         }
-        if let Some(vol) = self.ui.ferric_bar_slider(id!(vol_slider)).changed(actions) {
+        if let Some(vol) = self
+            .ui
+            .ferric_bar_slider(id!(vol_slider))
+            .changed(actions)
+            .or_else(|| {
+                self.ui
+                    .ferric_bar_slider(id!(fs_vol_slider))
+                    .changed(actions)
+            })
+        {
             self.session_state.volume = vol as f32;
             if self.session_state.volume > 0.02 {
                 self.pre_mute_volume = self.session_state.volume;
@@ -7583,7 +8072,9 @@ impl App {
             }
             self.sync_controls_from_state(cx);
         }
-        if self.ui.button(id!(vol_mute_btn)).clicked(actions) {
+        if self.ui.button(id!(vol_mute_btn)).clicked(actions)
+            || self.ui.button(id!(fs_vol_mute_btn)).clicked(actions)
+        {
             if self.session_state.volume > 0.01 {
                 self.pre_mute_volume = self.session_state.volume;
                 self.session_state.volume = 0.0;
@@ -7599,7 +8090,7 @@ impl App {
             self.sync_controls_from_state(cx);
         }
 
-        // Lyrics & Video Clip actions (Right Sidebar + Fullscreen)
+        // Lyrics & Video Clip actions (Right Sidebar + Integrated Fullscreen Lyrics/Video Stage)
         if self.ui.button(id!(rs_lyr_minus)).clicked(actions)
             || self.ui.button(id!(fs_lyr_minus)).clicked(actions)
         {
@@ -7627,18 +8118,18 @@ impl App {
             self.show_toast(cx, "Lyrics copied to clipboard");
         }
         if self.ui.button(id!(bar_video_btn)).clicked(actions) {
-            if self.video_open {
+            if self.video_open && self.fullscreen_open {
                 self.close_native_video_stage(cx);
             } else {
                 self.open_native_video_stage(cx);
             }
         }
         if self.ui.button(id!(rs_watch_video)).clicked(actions)
-            || self.ui.button(id!(fs_video_btn)).clicked(actions)
+            || self.ui.button(id!(fs_mode_video_btn)).clicked(actions)
         {
             self.open_native_video_stage(cx);
         }
-        if self.ui.button(id!(vid_close_btn)).clicked(actions) {
+        if self.ui.button(id!(fs_mode_art_btn)).clicked(actions) {
             self.close_native_video_stage(cx);
         }
         for (btn, vq) in [
@@ -8429,6 +8920,10 @@ impl AppMain for App {
             } else {
                 0.0
             },
+            glass_dispersion: self.theme.material.dispersion,
+            glass_rim: self.theme.material.specular_rim,
+            glass_scrim: self.theme.material.scrim_alpha,
+            glass_radius: self.theme.corner_radius_px.clamp(8.0, 22.0),
             ui_zoom: self.theme.ui_zoom.clamp(0.80, 1.40),
             artworks: Rc::clone(&self.artwork_snapshot),
         };
@@ -8441,6 +8936,24 @@ impl AppMain for App {
             self.handle_actions(cx, actions);
         }
     }
+}
+
+fn is_desktop_click(fe: &FingerUpEvent) -> bool {
+    fe.is_over && (fe.abs - fe.abs_start).length() < 16.0
+}
+
+fn clean_display_text(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter(|&c| {
+            let cp = c as u32;
+            !matches!(
+                cp,
+                0x200D | 0xFE00..=0xFE0F | 0x2600..=0x27BF | 0x1F000..=0x1FFFF
+            )
+        })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn clear_flat_cache_files(dir: &std::path::Path) {

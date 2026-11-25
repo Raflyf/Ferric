@@ -104,6 +104,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$stage/resources" | Out-Null
           New-Item -ItemType Directory -Force -Path "$stage/makepad/makepad_widgets/resources" | Out-Null
           New-Item -ItemType Directory -Force -Path "$stage/makepad/ferric_desktop/resources" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$stage/makepad/ferric/resources" | Out-Null
 
           Copy-Item "target/release/ferric.exe" "$stage/ferric.exe"
           Copy-Item "README.md" "$stage/README.md"
@@ -111,7 +112,8 @@ jobs:
           Copy-Item "CHANGELOG.md" "$stage/CHANGELOG.md"
           Copy-Item "assets/brand/ferric.ico" "$stage/resources/ferric.ico"
           Copy-Item "assets/brand/ferric.png" "$stage/resources/ferric.png"
-          Copy-Item "apps/ferric-desktop/resources/*" "$stage/makepad/ferric_desktop/resources/" -Force
+          Copy-Item "apps/ferric-desktop/resources/*" "$stage/makepad/ferric_desktop/resources/" -Recurse -Force
+          Copy-Item "apps/ferric-desktop/resources/*" "$stage/makepad/ferric/resources/" -Recurse -Force
 
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
           $mwRes = Get-ChildItem (Join-Path $cargoHome "registry/src") -Recurse -Directory -Filter "makepad-widgets-*" |

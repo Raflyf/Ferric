@@ -960,25 +960,55 @@ pub struct FerricToggle {
     draw_bg: DrawFerricToggle,
     #[live(false)]
     is_on: bool,
+    #[rust]
+    visual_active: f32,
+    #[rust]
+    visual_hover: f32,
+    #[rust]
+    hover_target: f32,
+    #[rust]
+    visual_synced: bool,
+    #[rust]
+    anim_frame: NextFrame,
 }
 
 impl Widget for FerricToggle {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.anim_frame.is_event(event).is_some() {
+            let target_a = if self.is_on { 1.0_f32 } else { 0.0_f32 };
+            let target_h = self.hover_target;
+            self.visual_active += (target_a - self.visual_active) * 0.28;
+            self.visual_hover += (target_h - self.visual_hover) * 0.28;
+            if (target_a - self.visual_active).abs() < 0.005 {
+                self.visual_active = target_a;
+            }
+            if (target_h - self.visual_hover).abs() < 0.005 {
+                self.visual_hover = target_h;
+            }
+            self.draw_bg.active = self.visual_active;
+            self.draw_bg.hover = self.visual_hover;
+            self.draw_bg.redraw(cx);
+            if (target_a - self.visual_active).abs() > 0.005
+                || (target_h - self.visual_hover).abs() > 0.005
+            {
+                self.anim_frame = cx.new_next_frame();
+            }
+        }
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.draw_bg.hover = 1.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerHoverOut(_) => {
-                self.draw_bg.hover = 0.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerUp(fe) if fe.is_over => {
                 self.is_on = !self.is_on;
-                self.draw_bg.active = if self.is_on { 1.0 } else { 0.0 };
-                self.draw_bg.redraw(cx);
+                self.visual_synced = true;
+                self.anim_frame = cx.new_next_frame();
                 cx.widget_action(uid, &scope.path, FerricToggleAction::Toggled(self.is_on));
             }
             _ => {}
@@ -986,7 +1016,12 @@ impl Widget for FerricToggle {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_bg.active = if self.is_on { 1.0 } else { 0.0 };
+        if !self.visual_synced {
+            self.visual_synced = true;
+            self.visual_active = if self.is_on { 1.0 } else { 0.0 };
+        }
+        self.draw_bg.active = self.visual_active;
+        self.draw_bg.hover = self.visual_hover;
         let _ = self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()
     }
@@ -995,9 +1030,16 @@ impl Widget for FerricToggle {
 impl FerricToggleRef {
     pub fn set_active(&self, cx: &mut Cx, active: bool) {
         if let Some(mut inner) = self.borrow_mut() {
+            let changed = inner.is_on != active;
             inner.is_on = active;
-            inner.draw_bg.active = if active { 1.0 } else { 0.0 };
-            inner.draw_bg.redraw(cx);
+            if !inner.visual_synced {
+                inner.visual_synced = true;
+                inner.visual_active = if active { 1.0 } else { 0.0 };
+                inner.draw_bg.active = inner.visual_active;
+                inner.draw_bg.redraw(cx);
+            } else if changed {
+                inner.anim_frame = cx.new_next_frame();
+            }
         }
     }
 
@@ -1035,22 +1077,36 @@ pub struct FerricWinBtn {
     #[redraw]
     #[live]
     draw_bg: DrawFerricWinBtn,
+    #[rust]
+    hover_target: f32,
+    #[rust]
+    anim_frame: NextFrame,
 }
 
 impl Widget for FerricWinBtn {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.anim_frame.is_event(event).is_some() {
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.30;
+            if (self.hover_target - self.draw_bg.hover).abs() < 0.01 {
+                self.draw_bg.hover = self.hover_target;
+            } else {
+                self.anim_frame = cx.new_next_frame();
+            }
+            self.draw_bg.redraw(cx);
+        }
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.draw_bg.hover = 1.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerHoverOut(_) => {
-                self.draw_bg.hover = 0.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerUp(fe) if fe.is_over => {
+                self.hover_target = 0.0;
                 self.draw_bg.hover = 0.0;
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, FerricWinBtnAction::Clicked);
@@ -1105,20 +1161,33 @@ pub struct FerricPlayBtn {
     #[redraw]
     #[live]
     draw_bg: DrawFerricPlayBtn,
+    #[rust]
+    hover_target: f32,
+    #[rust]
+    anim_frame: NextFrame,
 }
 
 impl Widget for FerricPlayBtn {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.anim_frame.is_event(event).is_some() {
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
+            if (self.hover_target - self.draw_bg.hover).abs() < 0.01 {
+                self.draw_bg.hover = self.hover_target;
+            } else {
+                self.anim_frame = cx.new_next_frame();
+            }
+            self.draw_bg.redraw(cx);
+        }
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.draw_bg.hover = 1.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerHoverOut(_) => {
-                self.draw_bg.hover = 0.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerUp(fe) if fe.is_over => {
                 cx.widget_action(uid, &scope.path, FerricPlayBtnAction::Clicked);
@@ -1319,22 +1388,35 @@ pub struct FerricCoverArt {
     draw_bg: DrawFerricCoverArt,
     #[rust]
     texture: Option<Texture>,
+    #[rust]
+    hover_target: f32,
+    #[rust]
+    anim_frame: NextFrame,
 }
 
 impl Widget for FerricCoverArt {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.anim_frame.is_event(event).is_some() {
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.25;
+            if (self.hover_target - self.draw_bg.hover).abs() < 0.01 {
+                self.draw_bg.hover = self.hover_target;
+            } else {
+                self.anim_frame = cx.new_next_frame();
+            }
+            self.draw_bg.redraw(cx);
+        }
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.draw_bg.hover = 1.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerHoverOut(_) => {
-                self.draw_bg.hover = 0.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
             }
-            Hit::FingerUp(fe) if fe.is_over && fe.was_tap() => {
+            Hit::FingerUp(fe) if fe.is_over && (fe.abs - fe.abs_start).length() < 16.0 => {
                 cx.widget_action(uid, &scope.path, FerricCoverArtAction::Clicked);
             }
             _ => {}

@@ -12,6 +12,79 @@ live_design! {
     pub DrawFerricEqGraph = {{DrawFerricEqGraph}} {}
     pub DrawFerricCoverArt = {{DrawFerricCoverArt}} {}
     pub DrawLyricsPill = {{DrawLyricsPill}} {}
+    pub DrawLyricsText = {{DrawLyricsText}} {}
+    pub DrawAmbientStage = {{DrawAmbientStage}} {}
+
+    pub FerricAmbientStage = {{FerricAmbientStage}} {
+        width: Fill,
+        height: Fill,
+        draw_bg: {
+            texture image: texture2d
+            accent: #A882FF
+            has_image: 0.0
+            phase: 0.0
+            mouse_x: 0.5
+            mouse_y: 0.5
+            hover_amt: 0.0
+            acrylic_on: 0.0
+
+            fn sample_blur(self, uv: vec2) -> vec3 {
+                let c0 = sample2d(self.image, clamp(uv, vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz;
+                let r1 = 0.075;
+                let r2 = 0.155;
+                let mut acc = c0 * 0.16;
+                acc += sample2d(self.image, clamp(uv + vec2(r1, 0.0), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.09;
+                acc += sample2d(self.image, clamp(uv - vec2(r1, 0.0), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.09;
+                acc += sample2d(self.image, clamp(uv + vec2(0.0, r1), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.09;
+                acc += sample2d(self.image, clamp(uv - vec2(0.0, r1), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.09;
+                acc += sample2d(self.image, clamp(uv + vec2(r1 * 0.72, r1 * 0.72), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.07;
+                acc += sample2d(self.image, clamp(uv + vec2(-r1 * 0.72, r1 * 0.72), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.07;
+                acc += sample2d(self.image, clamp(uv + vec2(r1 * 0.72, -r1 * 0.72), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.07;
+                acc += sample2d(self.image, clamp(uv + vec2(-r1 * 0.72, -r1 * 0.72), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.07;
+                acc += sample2d(self.image, clamp(uv + vec2(r2, 0.05), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.05;
+                acc += sample2d(self.image, clamp(uv - vec2(r2, 0.05), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.05;
+                acc += sample2d(self.image, clamp(uv + vec2(0.05, r2), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.05;
+                acc += sample2d(self.image, clamp(uv - vec2(0.05, r2), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.05;
+                return acc;
+            }
+
+            fn pixel(self) -> vec4 {
+                let uv = self.pos;
+                let drift = vec2(sin(self.phase * 0.28) * 0.042, cos(self.phase * 0.21) * 0.036);
+                let mut col = mix(vec3(0.024, 0.025, 0.032), vec3(0.045, 0.047, 0.062), self.acrylic_on);
+
+                if self.has_image > 0.5 {
+                    let uv1 = (uv - 0.5) * 0.76 + 0.5 + drift;
+                    let uv2 = (vec2(1.0 - uv.x, uv.y) - 0.5) * 0.88 + 0.5 - drift * 0.85;
+                    let b1 = self.sample_blur(uv1);
+                    let b2 = self.sample_blur(uv2);
+                    let blended = mix(b1, b2, 0.34);
+                    // Rich cinematic dark ambient wash with guaranteed contrast for white lyrics
+                    let luma = dot(blended, vec3(0.299, 0.587, 0.114));
+                    let sat = mix(vec3(luma, luma, luma), blended, 1.42);
+                    col = mix(vec3(0.028, 0.026, 0.030), clamp(sat, 0.0, 1.0) * 0.42, 0.84);
+                } else {
+                    let d1 = length((uv - (vec2(0.26, 0.44) + drift)) * vec2(0.95, 1.15));
+                    let d2 = length((uv - (vec2(0.76, 0.62) - drift)) * vec2(1.05, 1.2));
+                    let g1 = exp(-d1 * d1 * 2.4) * 0.26;
+                    let g2 = exp(-d2 * d2 * 2.8) * 0.16;
+                    col += self.accent.xyz * g1 + vec3(0.28, 0.22, 0.38) * g2;
+                }
+
+                // Subtle interactive mouse-tracked ambient spotlight across the stage
+                let dm = length((uv - vec2(self.mouse_x, self.mouse_y)) * vec2(1.35, 1.0));
+                let spot = exp(-dm * dm * 6.5) * 0.095 * self.hover_amt;
+                let spot_col = mix(vec3(1.0, 0.96, 0.92), self.accent.xyz, 0.42);
+                col += spot_col * spot;
+
+                // Soft atmospheric edge vignette so cover art and lyrics float in clean depth
+                let dv = length((uv - vec2(0.50, 0.48)) * vec2(1.08, 1.22));
+                let vig = clamp(1.0 - dv * dv * 0.52, 0.42, 1.0);
+                col *= vig;
+                return vec4(clamp(col, 0.0, 1.0), 1.0);
+            }
+        }
+    }
 
     pub FerricLyricsView = {{FerricLyricsView}} {
         width: Fill,
@@ -20,30 +93,128 @@ live_design! {
         draw_pill: {
             accent: #A882FF
             alpha: 0.0
+            hover_mode: 0.0
+            mouse_x: 0.5
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                if self.hover_mode > 0.5 {
+                    // Frosted interactive hover glass container with subtle pointer sheen
+                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 13.0);
+                    let dx = self.pos.x - self.mouse_x;
+                    let sheen = exp(-dx * dx * 7.5) * 0.048;
+                    let fill_a = (0.072 + sheen) * self.alpha;
+                    sdf.fill_keep(vec4(1.0, 1.0, 1.0, fill_a));
+                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.115 * self.alpha), 1.0);
+                    return sdf.result;
+                }
                 sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 8.0);
                 let fill_col = vec4(self.accent.xyz, 0.13 * self.alpha);
                 sdf.fill_keep(fill_col);
                 sdf.stroke(vec4(self.accent.xyz, 0.24 * self.alpha), 1.0);
-                // Crisp 3px left accent beacon inside active lyric pill
                 sdf.box(4.0, 6.0, 3.0, max(self.rect_size.y - 12.0, 4.0), 1.5);
                 sdf.fill(vec4(self.accent.xyz, 0.92 * self.alpha));
                 return sdf.result;
             }
         }
         draw_line: {
-            color: #9A9EAE,
-            text_style: <THEME_FONT_MEDIUM> {
-                font_size: 11.5,
-                line_spacing: 1.15
+            color: #FFFFFF,
+            blur_amt: 0.0,
+            karaoke_on: 0.0,
+            sweep_x: 0.0,
+            sweep_y_min: 0.0,
+            sweep_y_max: 0.0,
+            dim_col: #FFFFFF6E,
+            glow_amt: 0.0,
+            text_style: <THEME_FONT_DISPLAY> {
+                font_size: 19.5,
+                line_spacing: 1.22
+            }
+            fn pixel(self) -> vec4 {
+                let dxt = length(dFdx(self.t));
+                let dyt = length(dFdy(self.t));
+                if self.texture_index == 0 {
+                    let base_scale = max((dxt + dyt) * self.grayscale_atlas_size.x * 0.5, 0.001);
+                    let blur = clamp(self.blur_amt, 0.0, 1.0);
+                    let eff_scale = base_scale * (1.0 + blur * 5.2);
+                    let mut s = self.sdf(eff_scale, self.t.xy);
+                    if blur > 0.02 {
+                        let r_uv = (self.t_max - self.t_min) * (0.048 * blur);
+                        let s1 = self.sdf(eff_scale, clamp(self.t.xy + vec2(r_uv.x, 0.0), self.t_min, self.t_max));
+                        let s2 = self.sdf(eff_scale, clamp(self.t.xy - vec2(r_uv.x, 0.0), self.t_min, self.t_max));
+                        let s3 = self.sdf(eff_scale, clamp(self.t.xy + vec2(0.0, r_uv.y), self.t_min, self.t_max));
+                        let s4 = self.sdf(eff_scale, clamp(self.t.xy - vec2(0.0, r_uv.y), self.t_min, self.t_max));
+                        s = mix(s, s * 0.36 + (s1 + s2 + s3 + s4) * 0.16, blur);
+                    }
+                    let mut c = self.get_color();
+                    if self.karaoke_on > 0.5 {
+                        let mut lit = 0.0;
+                        if self.world.y < self.sweep_y_min {
+                            lit = 1.0;
+                        } else if self.world.y <= self.sweep_y_max {
+                            let lo = self.sweep_x - 24.0;
+                            let hi = self.sweep_x + 14.0;
+                            lit = 1.0 - smoothstep(lo, hi, self.world.x);
+                        }
+                        c = mix(self.dim_col, c, lit);
+                        if self.glow_amt > 0.01 && lit > 0.05 {
+                            let halo = clamp(((sample2d(self.grayscale_texture, self.t.xy).x - (1.0 - self.cutoff)) * self.radius / (base_scale * 4.2) + 0.5), 0.0, 1.0);
+                            s = max(s, halo * 0.24 * lit * self.glow_amt);
+                        }
+                    }
+                    return s * vec4(c.rgb * c.a, c.a);
+                } else {
+                    let c = sample2d(self.color_texture, self.t);
+                    return vec4(c.rgb * c.a, c.a);
+                }
             }
         }
         draw_active: {
             color: #FFFFFF,
+            blur_amt: 0.0,
+            karaoke_on: 1.0,
+            sweep_x: 0.0,
+            sweep_y_min: 0.0,
+            sweep_y_max: 0.0,
+            dim_col: #FFFFFF6E,
+            glow_amt: 1.0,
             text_style: <THEME_FONT_DISPLAY> {
-                font_size: 13.5,
-                line_spacing: 1.12
+                font_size: 20.5,
+                line_spacing: 1.20
+            }
+            fn pixel(self) -> vec4 {
+                let dxt = length(dFdx(self.t));
+                let dyt = length(dFdy(self.t));
+                if self.texture_index == 0 {
+                    let base_scale = max((dxt + dyt) * self.grayscale_atlas_size.x * 0.5, 0.001);
+                    let mut s = self.sdf(base_scale, self.t.xy);
+                    let mut c = self.get_color();
+                    if self.karaoke_on > 0.5 {
+                        let mut lit = 0.0;
+                        if self.world.y < self.sweep_y_min {
+                            lit = 1.0;
+                        } else if self.world.y <= self.sweep_y_max {
+                            let lo = self.sweep_x - 24.0;
+                            let hi = self.sweep_x + 14.0;
+                            lit = 1.0 - smoothstep(lo, hi, self.world.x);
+                        }
+                        c = mix(self.dim_col, c, lit);
+                        if self.glow_amt > 0.01 && lit > 0.05 {
+                            let halo = clamp(((sample2d(self.grayscale_texture, self.t.xy).x - (1.0 - self.cutoff)) * self.radius / (base_scale * 4.0) + 0.5), 0.0, 1.0);
+                            s = max(s, halo * 0.26 * lit * self.glow_amt);
+                        }
+                    }
+                    return s * vec4(c.rgb * c.a, c.a);
+                } else {
+                    let c = sample2d(self.color_texture, self.t);
+                    return vec4(c.rgb * c.a, c.a);
+                }
+            }
+        }
+        draw_ts: {
+            color: #FFFFFF88,
+            text_style: <THEME_FONT_MEDIUM> {
+                font_size: 8.5,
+                line_spacing: 1.0
             }
         }
     }
@@ -74,6 +245,12 @@ live_design! {
                 if (self.has_image > 0.5) {
                     let box_aspect = self.rect_size.x / max(self.rect_size.y, 1.0);
                     let mut uv = self.pos;
+                    // Smooth interactive zoom + cursor-tracked micro-parallax on hero cover hover
+                    if (self.hero > 0.5 && self.hover > 0.005) {
+                        let zoom_s = mix(1.0, 0.962, self.hover);
+                        let par = (vec2(self.hover_x, self.hover_y) - 0.5) * (0.022 * self.hover);
+                        uv = (uv - 0.5) * zoom_s + 0.5 - par;
+                    }
                     if (self.img_aspect > box_aspect) {
                         let scale = box_aspect / max(self.img_aspect, 0.01);
                         uv.x = (uv.x - 0.5) * scale + 0.5;
@@ -90,7 +267,13 @@ live_design! {
                 }
 
                 if (self.hover > 0.01) {
-                    rgb = mix(rgb, vec3(1.0, 1.0, 1.0), 0.06 * self.hover);
+                    if (self.hero > 0.5) {
+                        let dg = length(self.pos - vec2(self.hover_x, self.hover_y));
+                        let glare = exp(-dg * dg * 4.5) * 0.14 * self.hover;
+                        rgb = mix(rgb, vec3(1.0, 1.0, 1.0), glare);
+                    } else {
+                        rgb = mix(rgb, vec3(1.0, 1.0, 1.0), 0.06 * self.hover);
+                    }
                 }
 
                 if (self.playing > 0.5) {
@@ -98,7 +281,12 @@ live_design! {
                 }
 
                 sdf.fill_keep(vec4(clamp(rgb, 0.0, 1.0), 1.0));
-                sdf.stroke(mix(self.border_col, vec4(self.accent.xyz, 0.75), self.playing), 1.0);
+                let rim_col = if (self.hero > 0.5) {
+                    mix(vec4(1.0, 1.0, 1.0, 0.12), vec4(1.0, 1.0, 1.0, 0.30), self.hover)
+                } else {
+                    mix(self.border_col, vec4(self.accent.xyz, 0.75), self.playing)
+                };
+                sdf.stroke(rim_col, 1.0);
 
                 if (self.playing > 0.5) {
                     let bw = max(min_dim * 0.095, 2.5);
@@ -535,30 +723,16 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
-                let sdf = Sdf2d::viewport(p);
-                let uv = self.pos;
                 let energy = (self.s0 + self.s1 + self.s2 + self.s3) * 0.25;
 
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 10.0);
-                let wave = clamp(0.5 + 0.5 * sin(uv.x * 4.0 + self.phase * 1.15), 0.0, 1.0);
-                let base_dark = mix(vec3(0.035, 0.037, 0.048), vec3(0.08, 0.085, 0.115), self.acrylic_on);
-                let ambient = self.accent.xyz * (0.08 + 0.14 * energy * wave);
-                let acrylic_sheen = self.acrylic_on * smoothstep(0.32, 0.0, uv.y) * 0.06;
-                let bg = clamp(base_dark + ambient + vec3(acrylic_sheen, acrylic_sheen, acrylic_sheen), 0.0, 1.0);
-                sdf.fill_keep(vec4(bg, mix(0.96, 0.84, self.acrylic_on)));
-
-                // Clean top-catchlight border
-                let rim = mix(vec4(self.accent.xyz, 0.24), vec4(1.0, 1.0, 1.0, 0.22), self.acrylic_on * smoothstep(0.6, 0.0, uv.y));
-                sdf.stroke(rim, 1.0);
-
-                // Smooth 24-bar centered rounded capsule spectrum visualizer (no overlapping circle clutter)
-                let pad_x = 18.0;
+                // Floating translucent 24-bar centered rounded capsule spectrum (zero boxy frame)
+                let pad_x = 12.0;
                 let span_x = max(self.rect_size.x - pad_x * 2.0, 24.0);
                 let cy = self.rect_size.y * 0.5;
-                let max_half = self.rect_size.y * 0.36;
+                let max_half = self.rect_size.y * 0.42;
                 let bars = 24.0;
                 let cell_w = span_x / bars;
-                let bar_w = max(cell_w * 0.44, 3.0);
+                let bar_w = max(cell_w * 0.40, 2.5);
 
                 if (p.x >= pad_x && p.x <= (self.rect_size.x - pad_x)) {
                     let norm_x = (p.x - pad_x) / span_x;
@@ -570,8 +744,8 @@ live_design! {
                     let f = sym_f - i0;
                     let raw_bv = mix(self.bin_val(i0), self.bin_val(i1), f);
                     let pulse = 0.08 * sin(self.phase * 1.9 + slot * 0.45) * (0.35 + energy);
-                    let bv = clamp(raw_bv * 1.15 + pulse, 0.08, 1.0);
-                    let half_h = max(max_half * bv, 3.5);
+                    let bv = clamp(raw_bv * 1.15 + pulse, 0.10, 1.0);
+                    let half_h = max(max_half * bv, 2.2);
                     let dx = abs(cell_local - cell_w * 0.5) - bar_w * 0.5;
                     let dy = abs(p.y - cy) - half_h;
                     let r_cap = bar_w * 0.5;
@@ -581,13 +755,13 @@ live_design! {
                     let alpha = 1.0 - smoothstep(-0.7, 0.7, dist);
                     if (alpha > 0.01) {
                         let t_v = 1.0 - clamp(abs(p.y - cy) / max(half_h, 1.0), 0.0, 1.0);
-                        let bar_col = mix(self.accent.xyz, vec3(0.97, 0.97, 0.99), t_v * 0.52);
-                        let out_rgb = mix(sdf.result.xyz, bar_col, alpha * 0.95);
-                        return vec4(out_rgb, sdf.result.w);
+                        let bar_col = mix(vec3(1.0, 1.0, 1.0), self.accent.xyz, 0.25 * (1.0 - t_v));
+                        let out_a = alpha * (0.38 + 0.34 * bv);
+                        return vec4(bar_col * out_a, out_a);
                     }
                 }
 
-                return sdf.result;
+                return vec4(0.0, 0.0, 0.0, 0.0);
             }
         }
     }
@@ -1245,6 +1419,12 @@ pub struct DrawFerricCoverArt {
     level: f32,
     #[live(0.0_f32)]
     hover: f32,
+    #[live(0.5_f32)]
+    hover_x: f32,
+    #[live(0.5_f32)]
+    hover_y: f32,
+    #[live(0.0_f32)]
+    hero: f32,
     #[live]
     accent: Vec4,
 }
@@ -1261,15 +1441,26 @@ pub struct FerricCoverArt {
     #[rust]
     hover_target: f32,
     #[rust]
+    hover_tx: f32,
+    #[rust]
+    hover_ty: f32,
+    #[rust]
     anim_frame: NextFrame,
 }
 
 impl Widget for FerricCoverArt {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.anim_frame.is_event(event).is_some() {
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.25;
-            if (self.hover_target - self.draw_bg.hover).abs() < 0.01 {
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.22;
+            self.draw_bg.hover_x += (self.hover_tx - self.draw_bg.hover_x) * 0.22;
+            self.draw_bg.hover_y += (self.hover_ty - self.draw_bg.hover_y) * 0.22;
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
+                && (self.hover_tx - self.draw_bg.hover_x).abs() < 0.008
+                && (self.hover_ty - self.draw_bg.hover_y).abs() < 0.008;
+            if done {
                 self.draw_bg.hover = self.hover_target;
+                self.draw_bg.hover_x = self.hover_tx;
+                self.draw_bg.hover_y = self.hover_ty;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
@@ -1277,13 +1468,20 @@ impl Widget for FerricCoverArt {
         }
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(fh) | Hit::FingerHoverOver(fh) => {
                 cx.set_cursor(MouseCursor::Hand);
+                let rect = self.draw_bg.area().rect(cx);
+                if rect.size.x > 1.0 && rect.size.y > 1.0 {
+                    self.hover_tx = ((fh.abs.x - rect.pos.x) / rect.size.x).clamp(0.0, 1.0) as f32;
+                    self.hover_ty = ((fh.abs.y - rect.pos.y) / rect.size.y).clamp(0.0, 1.0) as f32;
+                }
                 self.hover_target = 1.0;
                 self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerHoverOut(_) => {
                 self.hover_target = 0.0;
+                self.hover_tx = 0.5;
+                self.hover_ty = 0.5;
                 self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerUp(fe) if fe.is_over && (fe.abs - fe.abs_start).length() < 16.0 => {
@@ -1333,6 +1531,132 @@ impl FerricCoverArtRef {
     }
 }
 
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawAmbientStage {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    accent: Vec4,
+    #[live(0.0_f32)]
+    has_image: f32,
+    #[live(0.0_f32)]
+    phase: f32,
+    #[live(0.5_f32)]
+    mouse_x: f32,
+    #[live(0.5_f32)]
+    mouse_y: f32,
+    #[live(0.0_f32)]
+    hover_amt: f32,
+    #[live(0.0_f32)]
+    acrylic_on: f32,
+}
+
+/// Full-bleed blurred album artwork ambient stage with smooth slow drift
+/// and subtle cursor-following light response for immersive fullscreen lyrics.
+#[derive(Live, LiveHook, Widget)]
+pub struct FerricAmbientStage {
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawAmbientStage,
+    #[rust]
+    texture: Option<Texture>,
+    #[rust]
+    target_mx: f32,
+    #[rust]
+    target_my: f32,
+    #[rust]
+    target_hover: f32,
+    #[rust]
+    playing: bool,
+    #[rust]
+    active: bool,
+    #[rust]
+    last_time: f64,
+    #[rust]
+    anim_frame: NextFrame,
+}
+
+impl Widget for FerricAmbientStage {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if let Event::MouseMove(mm) = event
+            && self.active
+        {
+            let rect = self.draw_bg.area().rect(cx);
+            if rect.size.x > 10.0 && rect.size.y > 10.0 && rect.contains(mm.abs) {
+                self.target_mx = ((mm.abs.x - rect.pos.x) / rect.size.x).clamp(0.0, 1.0) as f32;
+                self.target_my = ((mm.abs.y - rect.pos.y) / rect.size.y).clamp(0.0, 1.0) as f32;
+                self.target_hover = 1.0;
+                self.anim_frame = cx.new_next_frame();
+            } else if self.target_hover > 0.01 {
+                self.target_hover = 0.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+        }
+        if let Some(nf) = self.anim_frame.is_event(event) {
+            if !self.active {
+                return;
+            }
+            let dt = if self.last_time > 0.0 {
+                (nf.time - self.last_time).clamp(0.004, 0.045) as f32
+            } else {
+                0.016
+            };
+            self.last_time = nf.time;
+            let k = 1.0 - (-8.0 * dt).exp();
+            self.draw_bg.mouse_x += (self.target_mx - self.draw_bg.mouse_x) * k;
+            self.draw_bg.mouse_y += (self.target_my - self.draw_bg.mouse_y) * k;
+            self.draw_bg.hover_amt += (self.target_hover - self.draw_bg.hover_amt) * k;
+            if self.playing {
+                self.draw_bg.phase = (self.draw_bg.phase + dt * 0.65) % 628.3;
+            }
+            let moving = (self.target_mx - self.draw_bg.mouse_x).abs() > 0.003
+                || (self.target_my - self.draw_bg.mouse_y).abs() > 0.003
+                || (self.target_hover - self.draw_bg.hover_amt).abs() > 0.005;
+            if self.playing || moving {
+                self.anim_frame = cx.new_next_frame();
+            }
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if let Some(tex) = &self.texture {
+            self.draw_bg.draw_vars.set_texture(0, tex);
+            self.draw_bg.has_image = 1.0;
+        } else {
+            self.draw_bg.draw_vars.empty_texture(0);
+            self.draw_bg.has_image = 0.0;
+        }
+        let _ = self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+}
+
+impl FerricAmbientStageRef {
+    pub fn set_texture(&self, cx: &mut Cx, texture: Option<Texture>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.texture = texture;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn set_state(&self, cx: &mut Cx, active: bool, playing: bool, accent: Vec4, acrylic: f32) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.active = active;
+            inner.playing = playing;
+            inner.draw_bg.accent = accent;
+            inner.draw_bg.acrylic_on = acrylic;
+            if active && playing {
+                inner.anim_frame = cx.new_next_frame();
+            }
+            inner.draw_bg.redraw(cx);
+        }
+    }
+}
+
 #[derive(Clone, Debug, DefaultNone)]
 pub enum FerricLyricsAction {
     SeekMs(u64),
@@ -1348,11 +1672,38 @@ pub struct DrawLyricsPill {
     accent: Vec4,
     #[live(0.0_f32)]
     alpha: f32,
+    #[live(0.0_f32)]
+    hover_mode: f32,
+    #[live(0.5_f32)]
+    mouse_x: f32,
 }
 
-/// 60 FPS GPU spring-animated synced lyrics stage with critically-damped vertical glide,
-/// per-line smooth SDF scale/color focus bloom, feathered top/bottom viewport fade,
-/// active accent beacon pill, mouse-wheel scrubbing, and click-any-line-to-seek.
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawLyricsText {
+    #[deref]
+    draw_super: DrawText,
+    #[live(0.0_f32)]
+    blur_amt: f32,
+    #[live(0.0_f32)]
+    karaoke_on: f32,
+    #[live(0.0_f32)]
+    sweep_x: f32,
+    #[live(0.0_f32)]
+    sweep_y_min: f32,
+    #[live(0.0_f32)]
+    sweep_y_max: f32,
+    #[live]
+    dim_col: Vec4,
+    #[live(0.0_f32)]
+    glow_amt: f32,
+}
+
+/// 60 FPS GPU interactive synced lyrics stage:
+/// - Staggered bottom-to-top critically-damped wave cascade on line change
+/// - True SDF optical depth-of-field blur on inactive lines, smoothly un-blurring on hover
+/// - Frosted cursor-tracked glass hover pill + timestamp hint + click-any-line-to-seek
+/// - Continuous 60 FPS sub-pixel word-by-word karaoke highlight sweep across wrapped rows
 #[derive(Live, LiveHook, Widget)]
 pub struct FerricLyricsView {
     #[walk]
@@ -1364,10 +1715,13 @@ pub struct FerricLyricsView {
     draw_pill: DrawLyricsPill,
     #[redraw]
     #[live]
-    draw_line: DrawText,
+    draw_line: DrawLyricsText,
     #[redraw]
     #[live]
-    draw_active: DrawText,
+    draw_active: DrawLyricsText,
+    #[redraw]
+    #[live]
+    draw_ts: DrawText,
     #[rust]
     area: Area,
     #[rust]
@@ -1379,6 +1733,12 @@ pub struct FerricLyricsView {
     #[rust]
     focus_vals: Vec<f32>,
     #[rust]
+    hover_vals: Vec<f32>,
+    #[rust]
+    cascade_y: Vec<f64>,
+    #[rust]
+    cascade_vel: Vec<f64>,
+    #[rust]
     scroll_y: f64,
     #[rust]
     scroll_vel: f64,
@@ -1386,6 +1746,12 @@ pub struct FerricLyricsView {
     target_scroll_y: f64,
     #[rust]
     manual_scroll_until: f64,
+    #[rust]
+    playback_pos_ms: u64,
+    #[rust]
+    playback_sync_time: f64,
+    #[rust]
+    is_playing: bool,
     #[rust]
     accent: Vec4,
     #[rust]
@@ -1397,7 +1763,13 @@ pub struct FerricLyricsView {
     #[rust]
     hovered_idx: Option<usize>,
     #[rust]
+    pressed_idx: Option<usize>,
+    #[rust]
+    mouse_abs: DVec2,
+    #[rust]
     line_rects: Vec<(usize, Rect)>,
+    #[rust]
+    line_heights: Vec<f64>,
     #[rust]
     last_viewport_h: f64,
 }
@@ -1409,7 +1781,31 @@ impl FerricLyricsView {
         } else {
             1.0
         };
-        if self.compact { 34.0 * z } else { 48.0 * z }
+        if self.compact { 34.0 * z } else { 64.0 * z }
+    }
+
+    fn line_gap(&self) -> f64 {
+        let z = if self.ui_zoom > 0.4 {
+            self.ui_zoom as f64
+        } else {
+            1.0
+        };
+        if self.compact { 12.0 * z } else { 24.0 * z }
+    }
+
+    fn cumulative_y_of(&self, target_idx: usize) -> f64 {
+        let step = self.base_step();
+        let gap = self.line_gap();
+        let mut y = 0.0_f64;
+        for i in 0..target_idx.min(self.lines.len()) {
+            let h = self.line_heights.get(i).copied().unwrap_or(0.0);
+            y += if h > 1.0 { h + gap } else { step };
+        }
+        y
+    }
+
+    fn total_content_h(&self) -> f64 {
+        self.cumulative_y_of(self.lines.len())
     }
 
     fn recompute_target_scroll(&mut self) {
@@ -1417,20 +1813,55 @@ impl FerricLyricsView {
             self.target_scroll_y = 0.0;
             return;
         }
-        let step = self.base_step();
         let vh = self
             .last_viewport_h
-            .max(if self.compact { 220.0 } else { 360.0 });
-        let anchor_y = if self.compact { vh * 0.34 } else { vh * 0.36 };
-        let desired = (self.active_idx as f64 * step - anchor_y).max(0.0);
-        let max_scroll = ((self.lines.len().saturating_sub(1)) as f64 * step - vh * 0.35).max(0.0);
+            .max(if self.compact { 220.0 } else { 420.0 });
+        let anchor_y = if self.compact { vh * 0.34 } else { vh * 0.39 };
+        let active_y = self.cumulative_y_of(self.active_idx);
+        let desired = (active_y - anchor_y).max(0.0);
+        let max_scroll = (self.total_content_h() - vh * 0.42).max(0.0);
         self.target_scroll_y = desired.min(max_scroll);
+    }
+
+    fn trigger_bottom_up_cascade(&mut self, old_idx: usize, new_idx: usize) {
+        if self.compact || self.lines.is_empty() || old_idx == new_idx {
+            return;
+        }
+        let dir = if new_idx > old_idx { 1.0_f64 } else { -1.0_f64 };
+        let jump = (new_idx.abs_diff(old_idx) as f64).min(3.0);
+        let amp = (14.0 + jump * 5.0) * dir;
+        for i in 0..self.cascade_y.len() {
+            let rel = i as isize - new_idx as isize;
+            if (-4..=6).contains(&rel) {
+                // Staggered bottom-to-top liquid wave: lower lines lag slightly and glide up into place
+                let lag = ((rel + 4) as f64 / 10.0).clamp(0.0, 1.0);
+                self.cascade_y[i] =
+                    (self.cascade_y[i] + amp * (0.35 + lag * 0.95)).clamp(-46.0, 46.0);
+            }
+        }
     }
 
     fn wake_anim(&mut self, cx: &mut Cx) {
         self.anim_frame = cx.new_next_frame();
         self.area.redraw(cx);
     }
+
+    fn estimated_pos_ms(&self) -> f64 {
+        if self.is_playing
+            && self.playback_sync_time > 0.0
+            && self.last_time >= self.playback_sync_time
+        {
+            let extra_ms = ((self.last_time - self.playback_sync_time) * 1000.0).clamp(0.0, 420.0);
+            self.playback_pos_ms as f64 + extra_ms
+        } else {
+            self.playback_pos_ms as f64
+        }
+    }
+}
+
+fn format_lyric_ts(ms: u64) -> String {
+    let total_s = ms / 1000;
+    format!("{}:{:02}", total_s / 60, total_s % 60)
 }
 
 impl Widget for FerricLyricsView {
@@ -1443,16 +1874,40 @@ impl Widget for FerricLyricsView {
             };
             self.last_time = nf.time;
 
-            // Critically damped spring for silky Apple-Music vertical glide (zero overshoot)
-            let stiffness = 175.0_f64;
-            let damping = 26.0_f64;
+            // Auto-resume synced scroll smoothly after manual mouse-wheel exploration expires
+            if self.manual_scroll_until > 0.0 && nf.time >= self.manual_scroll_until {
+                self.manual_scroll_until = 0.0;
+                self.recompute_target_scroll();
+            }
+
+            // Silky critically-damped vertical spring (smooth bottom-to-top glide, zero harsh bounce)
+            let stiffness = if self.compact { 170.0_f64 } else { 128.0_f64 };
+            let damping = if self.compact { 25.0_f64 } else { 22.5_f64 };
             let force =
                 (self.target_scroll_y - self.scroll_y) * stiffness - self.scroll_vel * damping;
             self.scroll_vel += force * dt;
             self.scroll_y += self.scroll_vel * dt;
 
-            let focus_k = (1.0 - (-12.5 * dt).exp()) as f32;
-            let mut max_focus_err = 0.0_f32;
+            // Per-line staggered wave cascade spring
+            let mut max_cascade = 0.0_f64;
+            for i in 0..self.cascade_y.len() {
+                let dist = i.abs_diff(self.active_idx) as f64;
+                let k_line = (145.0 - dist * 11.0).max(78.0);
+                let d_line = (23.0 - dist * 1.1).max(16.0);
+                let f = -self.cascade_y[i] * k_line - self.cascade_vel[i] * d_line;
+                self.cascade_vel[i] += f * dt;
+                self.cascade_y[i] += self.cascade_vel[i] * dt;
+                if self.cascade_y[i].abs() < 0.08 && self.cascade_vel[i].abs() < 0.4 {
+                    self.cascade_y[i] = 0.0;
+                    self.cascade_vel[i] = 0.0;
+                } else {
+                    max_cascade = max_cascade.max(self.cascade_y[i].abs());
+                }
+            }
+
+            let focus_k = (1.0 - (-10.5 * dt).exp()) as f32;
+            let hover_k = (1.0 - (-15.0 * dt).exp()) as f32;
+            let mut max_err = 0.0_f32;
             for (i, fv) in self.focus_vals.iter_mut().enumerate() {
                 let target = if i == self.active_idx { 1.0 } else { 0.0 };
                 let diff = target - *fv;
@@ -1460,12 +1915,33 @@ impl Widget for FerricLyricsView {
                 if diff.abs() < 0.004 {
                     *fv = target;
                 } else {
-                    max_focus_err = max_focus_err.max(diff.abs());
+                    max_err = max_err.max(diff.abs());
+                }
+            }
+            for (i, hv) in self.hover_vals.iter_mut().enumerate() {
+                let target = if self.hovered_idx == Some(i) {
+                    1.0
+                } else {
+                    0.0
+                };
+                let diff = target - *hv;
+                *hv += diff * hover_k;
+                if diff.abs() < 0.004 {
+                    *hv = target;
+                } else {
+                    max_err = max_err.max(diff.abs());
                 }
             }
 
             let scroll_err = (self.target_scroll_y - self.scroll_y).abs();
-            if scroll_err < 0.35 && self.scroll_vel.abs() < 1.2 && max_focus_err < 0.008 {
+            let waiting_manual = self.manual_scroll_until > nf.time;
+            let keep_alive = self.is_playing
+                || waiting_manual
+                || scroll_err >= 0.30
+                || self.scroll_vel.abs() >= 1.0
+                || max_cascade >= 0.08
+                || max_err >= 0.006;
+            if !keep_alive {
                 self.scroll_y = self.target_scroll_y;
                 self.scroll_vel = 0.0;
             } else {
@@ -1477,13 +1953,14 @@ impl Widget for FerricLyricsView {
         let uid = self.widget_uid();
         match event.hits(cx, self.area) {
             Hit::FingerScroll(fs) => {
-                let step = self.base_step();
-                let max_s = (self.lines.len().saturating_sub(1) as f64 * step).max(0.0);
-                self.target_scroll_y = (self.target_scroll_y + fs.scroll.y).clamp(0.0, max_s);
-                self.manual_scroll_until = fs.time + 3.0;
+                let max_s = (self.total_content_h() - self.last_viewport_h * 0.35).max(0.0);
+                self.target_scroll_y =
+                    (self.target_scroll_y + fs.scroll.y * 1.15).clamp(0.0, max_s);
+                self.manual_scroll_until = fs.time + 3.6;
                 self.wake_anim(cx);
             }
             Hit::FingerHoverIn(fh) | Hit::FingerHoverOver(fh) => {
+                self.mouse_abs = fh.abs;
                 let hit_i = self
                     .line_rects
                     .iter()
@@ -1496,27 +1973,49 @@ impl Widget for FerricLyricsView {
                 }
                 if hit_i != self.hovered_idx {
                     self.hovered_idx = hit_i;
-                    self.area.redraw(cx);
                 }
+                self.wake_anim(cx);
             }
             Hit::FingerHoverOut(_) => {
+                self.pressed_idx = None;
                 if self.hovered_idx.is_some() {
                     self.hovered_idx = None;
+                    self.wake_anim(cx);
+                }
+            }
+            Hit::FingerDown(fe) => {
+                self.pressed_idx = self
+                    .line_rects
+                    .iter()
+                    .find(|(_, r)| r.contains(fe.abs))
+                    .map(|(i, _)| *i);
+                if self.pressed_idx.is_some() {
                     self.area.redraw(cx);
                 }
             }
             Hit::FingerUp(fe) if fe.is_over && (fe.abs - fe.abs_start).length() < 16.0 => {
+                self.pressed_idx = None;
                 let clicked = self
                     .line_rects
                     .iter()
                     .find(|(_, r)| r.contains(fe.abs))
                     .and_then(|(idx, _)| self.lines.get(*idx).map(|(ts_ms, _)| (*idx, *ts_ms)));
                 if let Some((idx, ts_ms)) = clicked {
+                    let old_idx = self.active_idx;
                     self.active_idx = idx;
+                    self.playback_pos_ms = ts_ms;
+                    self.playback_sync_time = self.last_time;
                     self.manual_scroll_until = 0.0;
+                    self.trigger_bottom_up_cascade(old_idx, idx);
                     self.recompute_target_scroll();
                     self.wake_anim(cx);
                     cx.widget_action(uid, &scope.path, FerricLyricsAction::SeekMs(ts_ms));
+                }
+            }
+            Hit::FingerUp(_) => {
+                if self.pressed_idx.is_some() {
+                    self.pressed_idx = None;
+                    self.area.redraw(cx);
                 }
             }
             _ => {}
@@ -1553,20 +2052,23 @@ impl Widget for FerricLyricsView {
             } else {
                 self.empty_msg.as_str()
             };
-            let fs = if self.compact { 10.0 * z } else { 13.0 * z };
+            let fs = if self.compact { 10.0 * z } else { 15.0 * z };
             self.draw_line.text_style.font_size = fs;
             self.draw_line.font_scale = 1.0;
-            self.draw_line.color = vec4(0.56, 0.58, 0.66, 1.0);
-            let max_w = (rect.size.x - 16.0).max(80.0) as f32;
+            self.draw_line.blur_amt = 0.0;
+            self.draw_line.karaoke_on = 0.0;
+            self.draw_line.glow_amt = 0.0;
+            self.draw_line.color = vec4(0.72, 0.74, 0.80, 0.65);
+            let max_w = (rect.size.x - 24.0).max(80.0) as f32;
             let laid =
                 self.draw_line
                     .layout(cx, 0.0, 0.0, Some(max_w), true, Align::default(), msg);
             let lh = laid.size_in_lpxs.height as f64;
-            let y = rect.pos.y + (rect.size.y - lh) * 0.42;
+            let y = rect.pos.y + (rect.size.y - lh) * 0.44;
             let _ = self.draw_line.draw_walk_laidout(
                 cx,
                 Walk {
-                    abs_pos: Some(dvec2(rect.pos.x + 8.0, y)),
+                    abs_pos: Some(dvec2(rect.pos.x + 12.0, y)),
                     width: Size::Fixed(max_w as f64),
                     height: Size::Fixed(lh),
                     margin: Margin::default(),
@@ -1577,129 +2079,269 @@ impl Widget for FerricLyricsView {
             return DrawStep::done();
         }
 
-        let step = self.base_step();
-        let top_pad = if self.compact { 10.0 } else { 16.0 };
-        let base_fs = if self.compact { 9.8 * z } else { 13.2 * z };
-        let max_w = (rect.size.x - 28.0).max(80.0) as f32;
+        let top_pad = if self.compact { 12.0 } else { 44.0 };
+        let base_fs = if self.compact { 9.8 * z } else { 19.2 * z };
+        let base_step = self.base_step();
+        let gap = self.line_gap();
+        let pad_x = if self.compact { 10.0 } else { 20.0 };
+        let max_w =
+            (rect.size.x - pad_x * 2.0 - if self.compact { 8.0 } else { 36.0 }).max(80.0) as f32;
+        let est_pos_ms = self.estimated_pos_ms();
+        let line_count = self.lines.len();
+        if self.line_heights.len() != line_count {
+            self.line_heights = vec![0.0; line_count];
+        }
 
-        // First measure actual cumulative y offsets with smooth spring scroll
         let mut cur_y = rect.pos.y + top_pad - self.scroll_y;
-        for (i, (_, text)) in self.lines.iter().enumerate() {
-            let focus = self.focus_vals.get(i).copied().unwrap_or(0.0);
-            let is_hov = self.hovered_idx == Some(i);
-            let line_h_est = step + (focus as f64) * (if self.compact { 8.0 } else { 14.0 });
+        let mut heights_updated = false;
 
-            // Cull lines far outside viewport for O(visible) GPU cost
-            if cur_y + line_h_est < rect.pos.y - 60.0 {
-                cur_y += line_h_est;
+        for i in 0..line_count {
+            let (ts_ms, ref text) = self.lines[i];
+            let focus = self.focus_vals.get(i).copied().unwrap_or(0.0);
+            let hover_v = self.hover_vals.get(i).copied().unwrap_or(0.0);
+            let wave_y = self.cascade_y.get(i).copied().unwrap_or(0.0);
+            let is_pressed = self.pressed_idx == Some(i);
+
+            let cached_h = self.line_heights[i];
+            let est_h = if cached_h > 1.0 {
+                cached_h
+            } else {
+                base_step - gap
+            };
+            let draw_y = cur_y + wave_y;
+
+            // Cull lines far outside viewport while preserving exact cumulative height
+            if draw_y + est_h < rect.pos.y - 120.0 {
+                cur_y += est_h + gap;
                 continue;
             }
-            if cur_y > rect.pos.y + rect.size.y + 60.0 {
+            if draw_y > rect.pos.y + rect.size.y + 120.0 {
                 break;
             }
 
-            // Smooth feathered edge fade at top & bottom 14% of viewport
-            let rel_y = (cur_y + line_h_est * 0.5 - rect.pos.y) / rect.size.y.max(1.0);
-            let edge_fade = if rel_y < 0.14 {
-                (rel_y / 0.14).clamp(0.0, 1.0) as f32
-            } else if rel_y > 0.86 {
-                ((1.0 - rel_y) / 0.14).clamp(0.0, 1.0) as f32
+            // Smooth wide feathered edge fade (top 18% & bottom 18% melt seamlessly into backdrop)
+            let rel_y = (draw_y + est_h * 0.5 - rect.pos.y) / rect.size.y.max(1.0);
+            let fade_zone = if self.compact { 0.14 } else { 0.19 };
+            let edge_fade = if rel_y < fade_zone {
+                let t = (rel_y / fade_zone).clamp(0.0, 1.0) as f32;
+                t * t * (3.0 - 2.0 * t)
+            } else if rel_y > 1.0 - fade_zone {
+                let t = ((1.0 - rel_y) / fade_zone).clamp(0.0, 1.0) as f32;
+                t * t * (3.0 - 2.0 * t)
             } else {
                 1.0
             };
 
             let dist = i.abs_diff(self.active_idx) as f32;
-            let base_alpha = (0.72 - dist * 0.11).clamp(0.28, 0.72);
-            let alpha = (base_alpha + (1.0 - base_alpha) * focus + if is_hov { 0.16 } else { 0.0 })
-                .clamp(0.0, 1.0)
-                * edge_fade;
+            let press_scale = if is_pressed { 0.985_f32 } else { 1.0_f32 };
+            let scale = (1.0
+                + focus * if self.compact { 0.14 } else { 0.065 }
+                + hover_v * (1.0 - focus) * if self.compact { 0.02 } else { 0.018 })
+                * press_scale;
 
-            let scale = 1.0 + focus * if self.compact { 0.15 } else { 0.24 };
-            let x_shift = (focus as f64) * if self.compact { 6.0 } else { 10.0 };
-            let pad_x = if self.compact { 10.0 } else { 14.0 };
+            // Depth-of-field optical blur on inactive lines, snapping to razor sharp on mouse hover!
+            let base_blur = if self.compact {
+                0.0
+            } else {
+                ((dist - 0.15).max(0.0) * 0.34).clamp(0.0, 0.96)
+            };
+            let blur_amt = base_blur * (1.0 - focus) * (1.0 - hover_v);
+
+            // Clean luminance hierarchy: active 100%, hover 86%, nearby 34%, distant 18%
+            let base_alpha = if self.compact {
+                (0.72 - dist * 0.10).clamp(0.28, 0.72)
+            } else {
+                (0.42 - dist * 0.065).clamp(0.16, 0.42)
+            };
+            let target_alpha = base_alpha
+                + (1.0 - base_alpha) * focus
+                + (0.86 - base_alpha).max(0.0) * hover_v * (1.0 - focus);
+            let alpha = target_alpha.clamp(0.0, 1.0) * edge_fade;
+
+            let x_shift = if self.compact {
+                (focus as f64) * 6.0 + (hover_v as f64) * 3.0
+            } else {
+                (hover_v as f64) * 6.0 * (1.0 - focus as f64)
+            };
+            let draw_x = rect.pos.x + pad_x + x_shift;
 
             let display_str = if text.trim().is_empty() {
                 "···"
             } else {
                 text.as_str()
             };
-            let draw = if focus > 0.45 {
-                &mut self.draw_active
-            } else {
-                &mut self.draw_line
-            };
-            draw.text_style.font_size = base_fs;
-            draw.font_scale = scale;
-            let text_rgb = if focus > 0.02 {
-                let mix_r = 0.72 + (1.0 - 0.72) * focus;
-                let mix_g = 0.74 + (1.0 - 0.74) * focus;
-                let mix_b = 0.80 + (1.0 - 0.80) * focus;
-                // Blend clean bright white with subtle adaptive accent warmth on active line
-                vec3(
-                    mix_r * (1.0 - 0.28 * focus) + accent.x * (0.28 * focus),
-                    mix_g * (1.0 - 0.28 * focus) + accent.y * (0.28 * focus),
-                    mix_b * (1.0 - 0.28 * focus) + accent.z * (0.28 * focus),
-                )
-            } else if is_hov {
-                vec3(0.92, 0.93, 0.96)
-            } else {
-                vec3(0.68, 0.70, 0.78)
-            };
-            draw.color = vec4(text_rgb.x, text_rgb.y, text_rgb.z, alpha);
 
-            let laid = draw.layout(
-                cx,
-                0.0,
-                0.0,
-                Some((max_w - x_shift as f32).max(60.0)),
-                true,
-                Align::default(),
-                display_str,
-            );
-            let actual_h = (laid.size_in_lpxs.height * scale) as f64;
-            let pill_pad_y = if self.compact { 5.0 } else { 7.0 };
-
-            // Luminous active-line highlight pill + accent beacon bar
-            if focus > 0.03 {
-                self.draw_pill.accent = accent;
-                self.draw_pill.alpha = focus * edge_fade;
-                self.draw_pill.draw_abs(
+            // Measure layout first to get exact wrapped height & row geometry for karaoke sweep
+            let use_active_draw = focus > 0.35;
+            let laid = if use_active_draw {
+                self.draw_active.text_style.font_size = base_fs;
+                self.draw_active.font_scale = scale;
+                self.draw_active.layout(
                     cx,
-                    Rect {
-                        pos: dvec2(rect.pos.x + 2.0, cur_y - pill_pad_y),
-                        size: dvec2((rect.size.x - 4.0).max(20.0), actual_h + pill_pad_y * 2.0),
-                    },
-                );
+                    0.0,
+                    0.0,
+                    Some((max_w - x_shift as f32).max(60.0)),
+                    true,
+                    Align::default(),
+                    display_str,
+                )
+            } else {
+                self.draw_line.text_style.font_size = base_fs;
+                self.draw_line.font_scale = scale;
+                self.draw_line.layout(
+                    cx,
+                    0.0,
+                    0.0,
+                    Some((max_w - x_shift as f32).max(60.0)),
+                    true,
+                    Align::default(),
+                    display_str,
+                )
+            };
+
+            let actual_h = (laid.size_in_lpxs.height * scale) as f64;
+            if (self.line_heights[i] - actual_h).abs() > 1.0 {
+                self.line_heights[i] = actual_h;
+                heights_updated = true;
             }
 
-            let draw_rect = draw.draw_walk_laidout(
-                cx,
-                Walk {
-                    abs_pos: Some(dvec2(rect.pos.x + pad_x + x_shift, cur_y)),
-                    width: Size::Fixed((max_w - x_shift as f32).max(60.0) as f64),
-                    height: Size::Fixed(actual_h),
-                    margin: Margin::default(),
-                },
-                &laid,
-            );
+            let pill_pad_y = if self.compact { 5.0 } else { 12.0 };
+            let pill_rect = Rect {
+                pos: dvec2(rect.pos.x + 2.0, draw_y - pill_pad_y),
+                size: dvec2((rect.size.x - 10.0).max(24.0), actual_h + pill_pad_y * 2.0),
+            };
+
+            // 1. Frosted interactive glass hover pill (fullscreen) OR subtle active accent pill (compact)
+            if !self.compact && hover_v > 0.015 {
+                let mx_norm = ((self.mouse_abs.x - pill_rect.pos.x) / pill_rect.size.x.max(1.0))
+                    .clamp(0.0, 1.0) as f32;
+                self.draw_pill.accent = accent;
+                self.draw_pill.hover_mode = 1.0;
+                self.draw_pill.mouse_x = mx_norm;
+                self.draw_pill.alpha = hover_v * edge_fade;
+                self.draw_pill.draw_abs(cx, pill_rect);
+            } else if self.compact && (focus > 0.03 || hover_v > 0.03) {
+                self.draw_pill.accent = accent;
+                self.draw_pill.hover_mode = if focus > 0.25 { 0.0 } else { 1.0 };
+                self.draw_pill.mouse_x = 0.5;
+                self.draw_pill.alpha = focus.max(hover_v * 0.7) * edge_fade;
+                self.draw_pill.draw_abs(cx, pill_rect);
+            }
+
+            // 2. Compute smooth sub-pixel word-by-word karaoke sweep across wrapped rows on active line
+            let (karaoke_on, sweep_x, sweep_y_min, sweep_y_max) =
+                if focus > 0.45 && !laid.rows.is_empty() {
+                    let next_ts = self
+                        .lines
+                        .get(i + 1)
+                        .map(|(t, _)| *t)
+                        .unwrap_or(ts_ms + 3_500);
+                    let span_ms = next_ts.saturating_sub(ts_ms).clamp(900, 12_000) as f64;
+                    let raw_t = ((est_pos_ms - ts_ms as f64) / (span_ms * 0.90)).clamp(0.0, 1.0);
+                    // Smooth natural phrasing easing
+                    let prog = (0.04 + raw_t * 0.96).clamp(0.0, 1.0) as f32;
+                    let total_w: f32 = laid
+                        .rows
+                        .iter()
+                        .map(|r| r.width_in_lpxs.max(1.0))
+                        .sum::<f32>()
+                        .max(1.0);
+                    let mut target_w = prog * total_w;
+                    let mut chosen = laid.rows.last().unwrap();
+                    for r in &laid.rows {
+                        let rw = r.width_in_lpxs.max(1.0);
+                        if target_w <= rw {
+                            chosen = r;
+                            break;
+                        }
+                        target_w -= rw;
+                    }
+                    let local_x = target_w.clamp(0.0, chosen.width_in_lpxs.max(1.0));
+                    let sx = draw_x as f32 + (chosen.origin_in_lpxs.x + local_x) * scale;
+                    let sy_min =
+                        draw_y as f32 + (chosen.origin_in_lpxs.y - chosen.ascender_in_lpxs) * scale;
+                    let sy_max = draw_y as f32
+                        + (chosen.origin_in_lpxs.y - chosen.descender_in_lpxs) * scale
+                        + 2.0;
+                    (1.0_f32, sx, sy_min, sy_max)
+                } else {
+                    (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)
+                };
+
+            let bright_col = vec4(1.0, 1.0, 1.0, alpha);
+            let dim_active_col = vec4(0.92, 0.93, 0.96, (0.44 * edge_fade).clamp(0.0, 1.0));
+
+            let draw_rect = if use_active_draw {
+                self.draw_active.blur_amt = 0.0;
+                self.draw_active.karaoke_on = karaoke_on;
+                self.draw_active.sweep_x = sweep_x;
+                self.draw_active.sweep_y_min = sweep_y_min;
+                self.draw_active.sweep_y_max = sweep_y_max;
+                self.draw_active.dim_col = dim_active_col;
+                self.draw_active.glow_amt = focus * edge_fade;
+                self.draw_active.color = bright_col;
+                self.draw_active.draw_walk_laidout(
+                    cx,
+                    Walk {
+                        abs_pos: Some(dvec2(draw_x, draw_y)),
+                        width: Size::Fixed((max_w - x_shift as f32).max(60.0) as f64),
+                        height: Size::Fixed(actual_h),
+                        margin: Margin::default(),
+                    },
+                    &laid,
+                )
+            } else {
+                self.draw_line.blur_amt = blur_amt;
+                self.draw_line.karaoke_on = 0.0;
+                self.draw_line.glow_amt = 0.0;
+                self.draw_line.color = if hover_v > 0.05 {
+                    vec4(0.96, 0.97, 1.0, alpha)
+                } else {
+                    vec4(0.88, 0.90, 0.94, alpha)
+                };
+                self.draw_line.draw_walk_laidout(
+                    cx,
+                    Walk {
+                        abs_pos: Some(dvec2(draw_x, draw_y)),
+                        width: Size::Fixed((max_w - x_shift as f32).max(60.0) as f64),
+                        height: Size::Fixed(actual_h),
+                        margin: Margin::default(),
+                    },
+                    &laid,
+                )
+            };
+
+            // 3. Subtle timestamp badge on hover in fullscreen mode so users can seek precisely
+            if !self.compact && hover_v > 0.05 {
+                let ts_txt = format_lyric_ts(ts_ms);
+                self.draw_ts.text_style.font_size = 8.4 * z;
+                self.draw_ts.color = vec4(1.0, 1.0, 1.0, 0.48 * hover_v * edge_fade);
+                self.draw_ts.draw_abs(
+                    cx,
+                    dvec2(
+                        (pill_rect.pos.x + pill_rect.size.x - 42.0).max(draw_x + 20.0),
+                        draw_y + (actual_h * 0.5) - 6.0,
+                    ),
+                    &ts_txt,
+                );
+            }
 
             self.line_rects.push((
                 i,
                 Rect {
-                    pos: dvec2(rect.pos.x, cur_y - pill_pad_y),
+                    pos: pill_rect.pos,
                     size: dvec2(
-                        rect.size.x,
-                        (actual_h + pill_pad_y * 2.0).max(draw_rect.size.y),
+                        pill_rect.size.x,
+                        pill_rect.size.y.max(draw_rect.size.y + pill_pad_y),
                     ),
                 },
             ));
 
-            let gap = if self.compact {
-                12.0 * z as f64
-            } else {
-                18.0 * z as f64
-            };
             cur_y += actual_h + gap;
+        }
+
+        if heights_updated && self.manual_scroll_until == 0.0 {
+            self.recompute_target_scroll();
         }
 
         cx.end_turtle_with_area(&mut self.area);
@@ -1720,6 +2362,10 @@ impl FerricLyricsViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.lines.clear();
             inner.focus_vals.clear();
+            inner.hover_vals.clear();
+            inner.cascade_y.clear();
+            inner.cascade_vel.clear();
+            inner.line_heights.clear();
             inner.empty_msg = msg.to_string();
             inner.active_idx = 0;
             inner.scroll_y = 0.0;
@@ -1734,6 +2380,10 @@ impl FerricLyricsViewRef {
             let n = items.len();
             inner.lines = items;
             inner.focus_vals = vec![0.0; n];
+            inner.hover_vals = vec![0.0; n];
+            inner.cascade_y = vec![0.0; n];
+            inner.cascade_vel = vec![0.0; n];
+            inner.line_heights = vec![0.0; n];
             if n > 0 {
                 inner.focus_vals[0] = 1.0;
             }
@@ -1754,11 +2404,25 @@ impl FerricLyricsViewRef {
             }
             let clamped = idx.min(inner.lines.len() - 1);
             if clamped != inner.active_idx {
+                let old_idx = inner.active_idx;
                 inner.active_idx = clamped;
+                inner.trigger_bottom_up_cascade(old_idx, clamped);
                 if inner.last_time >= inner.manual_scroll_until {
                     inner.recompute_target_scroll();
                 }
                 inner.wake_anim(cx);
+            }
+        }
+    }
+
+    pub fn set_playback_state(&self, cx: &mut Cx, pos_ms: u64, is_playing: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let was_playing = inner.is_playing;
+            inner.playback_pos_ms = pos_ms;
+            inner.playback_sync_time = inner.last_time;
+            inner.is_playing = is_playing;
+            if is_playing && (!was_playing || !inner.lines.is_empty()) {
+                inner.anim_frame = cx.new_next_frame();
             }
         }
     }
@@ -1772,6 +2436,7 @@ impl FerricLyricsViewRef {
             inner.accent = accent;
             inner.ui_zoom = ui_zoom.clamp(0.65, 1.40);
             if changed {
+                inner.line_heights.fill(0.0);
                 inner.recompute_target_scroll();
                 inner.area.redraw(cx);
             }

@@ -2198,234 +2198,285 @@ live_design! {
                     }
 
                     // ================================================================
-                    // OVERLAY 1: FULLSCREEN 60 FPS SPRING LYRICS & INTEGRATED VIDEO STAGE
+                    // OVERLAY 1: IMMERSIVE FULL-BLEED INTERACTIVE LYRICS & VIDEO STAGE
                     // ================================================================
                     fullscreen_overlay = <View> {
                         visible: false,
                         width: Fill,
                         height: Fill,
-                        padding: { left: 22, right: 22, top: 14, bottom: 16 }
-                        flow: Down,
-                        spacing: 12,
-                        show_bg: true,
-                        draw_bg: {
-                            uniform accent_col: #A882FF
-                            uniform acrylic_on: 0.0
-                            fn pixel(self) -> vec4 {
-                                let d1 = length((self.pos - vec2(0.22, 0.36)) * vec2(0.95, 1.15));
-                                let d2 = length((self.pos - vec2(0.80, 0.70)) * vec2(1.05, 1.25));
-                                let glow1 = exp(-d1 * d1 * 2.5) * 0.22;
-                                let glow2 = exp(-d2 * d2 * 3.0) * 0.10;
-                                let base = mix(vec3(0.015, 0.017, 0.025), vec3(0.044, 0.048, 0.068), self.acrylic_on);
-                                let rgb = base + self.accent_col.xyz * glow1 + vec3(0.18, 0.38, 0.82) * glow2;
-                                return vec4(clamp(rgb, 0.0, 1.0), 1.0);
-                            }
+                        flow: Overlay,
+
+                        // Animated full-bleed blurred album artwork backdrop with cursor spotlight
+                        fs_backdrop = <FerricAmbientStage> {
+                            width: Fill,
+                            height: Fill,
                         }
 
-                        // ZONE 1: Top Precision Header Strip (32px)
-                        <View> {
-                            width: Fill, height: 32, flow: Right, align: { y: 0.5 }, spacing: 8,
-                            <Label> { padding: 0, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 13.0 } }, text: "Now Playing" }
-                            signal_path_lbl = <Label> { width: Fill, padding: 0, draw_text: { color: #8E92A4, text_style: <THEME_FONT_MEDIUM> { font_size: 8.5 } }, text: "Signal Path: WASAPI 48.0 kHz · 6.0s Bass-Swap" }
-                            fs_radio_btn = <FerricBtn> { height: 26, text: "Start Radio" }
-                            fs_close_btn = <FerricBtn> { height: 26, text: "Close (Esc)" }
-                        }
+                        fs_stage_content = <View> {
+                            width: Fill,
+                            height: Fill,
+                            padding: { left: 48, right: 38, top: 14, bottom: 18 }
+                            flow: Down,
+                            spacing: 4,
 
-                        // ZONE 2: Symmetrical Split Stage (Left Art/Video Card | Right 60 FPS Spring Lyrics)
-                        <View> {
-                            width: Fill, height: Fill, flow: Right, spacing: 14,
-
-                            // LEFT STAGE CARD (Cover Art OR Native In-App Video Clip + Metadata + Live Spectrum)
-                            fs_left_card = <FerricCard> {
-                                width: 372,
-                                height: Fill,
-                                padding: { left: 16, right: 16, top: 14, bottom: 14 }
-                                flow: Down,
-                                spacing: 10,
-
-                                // Mode Switcher: [ Cover Art ] [ Video Clip ] + Like Heart
-                                <View> {
-                                    width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 5,
-                                    fs_mode_art_btn = <FerricChipBtn> {
-                                        height: 24, text: "Cover Art",
-                                        draw_bg: { active: 1.0 },
-                                        draw_text: { active: 1.0 }
+                            // TOP ULTRA-MINIMAL FLOATING STRIP (zero heavy chrome)
+                            <View> {
+                                width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                signal_path_lbl = <Label> {
+                                    width: Fill, padding: 0,
+                                    draw_text: { color: #FFFFFF4C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
+                                    text: "Signal Path: WASAPI 48.0 kHz · 6.0s Bass-Swap"
+                                }
+                                fs_close_btn = <Button> {
+                                    width: Fit, height: 24, padding: { left: 10, right: 10 },
+                                    text: "Close (Esc)"
+                                    draw_text: { color: #FFFFFFA6, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }
+                                    draw_bg: {
+                                        instance hover: 0.0
+                                        fn pixel(self) -> vec4 {
+                                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                            let r = (self.rect_size.y - 1.0) * 0.25;
+                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                                            sdf.fill_keep(vec4(1.0, 1.0, 1.0, 0.055 + 0.095 * self.hover));
+                                            sdf.stroke(vec4(1.0, 1.0, 1.0, 0.10 + 0.14 * self.hover), 1.0);
+                                            return sdf.result;
+                                        }
                                     }
-                                    fs_mode_video_btn = <FerricChipBtn> { height: 24, text: "Video Clip" }
-                                    <View> { width: Fill, height: 1 }
-                                    fs_like_btn = <FerricIconBtn> {
-                                        width: 26, height: 26,
-                                        draw_icon: {
-                                            svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
-                                            color: #707382
+                                    animator: {
+                                        hover = {
+                                            default: off,
+                                            off = { from: { all: Forward { duration: 0.16 } } apply: { draw_bg: { hover: 0.0 }, draw_text: { hover: 0.0 } } }
+                                            on = { from: { all: Forward { duration: 0.10 } } apply: { draw_bg: { hover: 1.0 }, draw_text: { hover: 1.0 } } }
                                         }
                                     }
                                 }
+                            }
 
-                                // Visual Card Slot (Cover Art OR Docked Native 16:9 Video Stage in the exact same slot)
-                                <View> {
-                                    width: Fill,
+                            // MAIN FULL-BLEED IMMERSIVE SPLIT STAGE (Left Floating Cover+Controls | Right Interactive Lyrics)
+                            <View> {
+                                width: Fill, height: Fill, flow: Right, spacing: 52,
+
+                                // LEFT FLOATING PLAYER STAGE (transparent, no heavy card outline)
+                                fs_left_card = <View> {
+                                    width: 410,
                                     height: Fill,
-                                    flow: Overlay,
+                                    padding: { left: 12, right: 12, top: 8, bottom: 8 }
+                                    flow: Down,
                                     align: { x: 0.5, y: 0.5 }
+                                    spacing: 12,
 
-                                    fs_art_wrap = <View> {
-                                        visible: true,
-                                        width: Fill,
-                                        height: Fill,
+                                    // Hero Cover Art (304x304 rounded with cursor-tracked hover glare & zoom) OR Docked 16:9 Native Video
+                                    <View> {
+                                        width: 316,
+                                        height: 316,
+                                        flow: Overlay,
                                         align: { x: 0.5, y: 0.5 }
-                                        fs_art = <FerricCoverArt> {
-                                            width: 226,
-                                            height: 226,
-                                            draw_bg: { radius: 12.0 }
-                                        }
-                                    }
 
-                                    fs_video_wrap = <View> {
-                                        visible: false,
-                                        width: Fill,
-                                        height: Fill,
-                                        flow: Down,
-                                        align: { x: 0.5, y: 0.5 }
-                                        spacing: 8,
-
-                                        video_stage_slot = <View> {
+                                        fs_art_wrap = <View> {
+                                            visible: true,
                                             width: Fill,
-                                            height: 196,
+                                            height: Fill,
                                             align: { x: 0.5, y: 0.5 }
-                                            show_bg: true,
-                                            draw_bg: { color: #050508 }
-                                            vid_stage_hint_lbl = <Label> {
-                                                padding: 0,
-                                                draw_text: { color: #8A8E9E, text_style: <THEME_FONT_MEDIUM> { font_size: 9.0 } }
-                                                text: "Loading native in-app video clip..."
+                                            fs_art = <FerricCoverArt> {
+                                                width: 304,
+                                                height: 304,
+                                                draw_bg: { radius: 28.0, hero: 1.0 }
                                             }
                                         }
 
-                                        <View> {
-                                            width: Fill, height: Fit, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 4,
-                                            vq_auto_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "Auto", draw_text: { text_style: { font_size: 8.0 } } }
-                                            vq_360_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "360p", draw_text: { text_style: { font_size: 8.0 } } }
-                                            vq_480_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "480p", draw_text: { text_style: { font_size: 8.0 } } }
-                                            vq_720_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "720p", draw_text: { text_style: { font_size: 8.0 } } }
-                                            vq_1080_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "1080p", draw_text: { text_style: { font_size: 8.0 } } }
-                                        }
+                                        fs_video_wrap = <View> {
+                                            visible: false,
+                                            width: Fill,
+                                            height: Fill,
+                                            flow: Down,
+                                            align: { x: 0.5, y: 0.5 }
+                                            spacing: 8,
 
-                                        vid_status_lbl = <Label> {
+                                            video_stage_slot = <View> {
+                                                width: Fill,
+                                                height: 196,
+                                                align: { x: 0.5, y: 0.5 }
+                                                show_bg: true,
+                                                draw_bg: { color: #050508 }
+                                                vid_stage_hint_lbl = <Label> {
+                                                    padding: 0,
+                                                    draw_text: { color: #8A8E9E, text_style: <THEME_FONT_MEDIUM> { font_size: 9.0 } }
+                                                    text: "Loading native in-app video clip..."
+                                                }
+                                            }
+
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 4,
+                                                vq_auto_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "Auto", draw_text: { text_style: { font_size: 8.0 } } }
+                                                vq_360_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "360p", draw_text: { text_style: { font_size: 8.0 } } }
+                                                vq_480_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "480p", draw_text: { text_style: { font_size: 8.0 } } }
+                                                vq_720_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "720p", draw_text: { text_style: { font_size: 8.0 } } }
+                                                vq_1080_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "1080p", draw_text: { text_style: { font_size: 8.0 } } }
+                                            }
+
+                                            vid_status_lbl = <Label> {
+                                                width: Fill,
+                                                padding: 0,
+                                                align: { x: 0.5, y: 0.5 }
+                                                draw_text: { color: #FFFFFF7A, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
+                                                text: "Synced to WASAPI"
+                                            }
+                                        }
+                                    }
+
+                                    // Clean Centered Title + Like Heart & Artist directly below Cover Art
+                                    <View> {
+                                        width: 312, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3,
+                                        <View> {
+                                            width: Fit, height: Fit, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 6,
+                                            fs_title_lbl = <Label> {
+                                                padding: 0,
+                                                align: { x: 0.5, y: 0.5 }
+                                                draw_text: { color: #FFFFFF, text_style: <THEME_FONT_DISPLAY> { font_size: 14.5, line_spacing: 1.05 } }
+                                                text: "No track playing"
+                                            }
+                                            fs_like_btn = <FerricIconBtn> {
+                                                width: 24, height: 24,
+                                                draw_icon: {
+                                                    svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
+                                                    color: #FFFFFF70
+                                                }
+                                            }
+                                        }
+                                        fs_artist_lbl = <Label> {
                                             width: Fill,
                                             padding: 0,
                                             align: { x: 0.5, y: 0.5 }
-                                            draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
-                                            text: "Synced to WASAPI"
+                                            draw_text: { color: #FFFFFF8C, text_style: <THEME_FONT_REGULAR> { font_size: 9.6, line_spacing: 1.05 } }
+                                            text: ""
                                         }
                                     }
-                                }
 
-                                // Tight Metadata Block
-                                <View> {
-                                    width: Fill, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 2,
-                                    fs_title_lbl = <Label> {
-                                        width: Fill,
-                                        padding: 0,
-                                        align: { x: 0.5, y: 0.5 }
-                                        draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 14.0, line_spacing: 1.02 } }
-                                        text: "No track playing"
+                                    // Minimalist Crisp White Progress Scrubber directly under Artist
+                                    <View> {
+                                        width: 312, height: 22, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                        fs_pos_lbl = <Label> {
+                                            width: 34, padding: 0, align: { x: 0.0, y: 0.5 }
+                                            draw_text: { color: #FFFFFF80, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
+                                            text: "00:00"
+                                        }
+                                        fs_seek_slider = <FerricBarSlider> {
+                                            width: Fill, height: 18, min: 0.0, max: 1.0, value: 0.0
+                                            draw_bg: {
+                                                track_col: #FFFFFF2A
+                                                fill_col: #FFFFFF
+                                                thumb_col: #FFFFFF
+                                            }
+                                        }
+                                        fs_dur_lbl = <Label> {
+                                            width: 34, padding: 0, align: { x: 1.0, y: 0.5 }
+                                            draw_text: { color: #FFFFFF80, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
+                                            text: "00:00"
+                                        }
                                     }
-                                    fs_artist_lbl = <Label> {
-                                        width: Fill,
-                                        padding: 0,
-                                        align: { x: 0.5, y: 0.5 }
-                                        draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 9.2, line_spacing: 1.02 } }
-                                        text: ""
+
+                                    // Minimalist Centered Transport Controls + Volume right beneath Scrubber
+                                    <View> {
+                                        width: 312, height: 36, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 6,
+                                        fs_shuffle_btn = <FerricIconBtn> {
+                                            width: 28, height: 28,
+                                            draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z", color: #FFFFFF90 }
+                                        }
+                                        fs_prev_btn = <FerricIconBtn> {
+                                            width: 30, height: 30,
+                                            draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z", color: #FFFFFFCC }
+                                        }
+                                        fs_play_pause_btn = <FerricPlayBtn> {
+                                            width: 34, height: 34,
+                                        }
+                                        fs_next_btn = <FerricIconBtn> {
+                                            width: 30, height: 30,
+                                            draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z", color: #FFFFFFCC }
+                                        }
+                                        fs_repeat_btn = <FerricIconBtn> {
+                                            width: 28, height: 28,
+                                            draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z", color: #FFFFFF90 }
+                                        }
+                                        <View> { width: 6, height: 1 }
+                                        fs_vol_mute_btn = <FerricIconBtn> {
+                                            width: 26, height: 26,
+                                            draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z", color: #FFFFFF90 }
+                                        }
+                                        fs_vol_slider = <FerricBarSlider> {
+                                            width: 56, height: 18, min: 0.0, max: 1.0, value: 0.85
+                                            draw_bg: {
+                                                track_col: #FFFFFF28
+                                                fill_col: #FFFFFF
+                                                thumb_col: #FFFFFF
+                                            }
+                                        }
+                                    }
+
+                                    // Compact Ambient Spectrum Accent (subtle audio motion pulse)
+                                    np_canvas = <FerricNowPlayingCanvas> {
+                                        width: 256,
+                                        height: 24,
                                     }
                                 }
 
-                                // Live 24-Bar Centered Capsule Spectrum
-                                np_canvas = <FerricNowPlayingCanvas> {
-                                    width: Fill,
-                                    height: 48,
-                                }
-                            }
-
-                            // RIGHT LYRICS PANEL (60 FPS GPU Spring-Animated Synced Lyrics, click any line to seek)
-                            fs_right_card = <FerricCard> {
-                                width: Fill,
-                                height: Fill,
-                                padding: { left: 20, right: 20, top: 14, bottom: 14 }
-                                flow: Down,
-                                spacing: 10,
-
-                                <View> {
-                                    width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 5,
-                                    fs_lyr_source = <Label> { width: Fill, padding: 0, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Synced Lyrics" }
-                                    fs_lyr_minus = <FerricBtn> { height: 23, padding: { left: 8, right: 8 }, text: "-0.5s", draw_text: { text_style: { font_size: 8.2 } } }
-                                    fs_lyr_plus = <FerricBtn> { height: 23, padding: { left: 8, right: 8 }, text: "+0.5s", draw_text: { text_style: { font_size: 8.2 } } }
-                                    fs_lyr_copy = <FerricBtn> { height: 23, padding: { left: 9, right: 9 }, text: "Copy", draw_text: { text_style: { font_size: 8.2 } } }
-                                }
-
-                                <FerricDividerH> {}
-
-                                fs_lyrics_scroll = <FerricLyricsView> {
+                                // RIGHT FULL-BLEED INTERACTIVE SYNCED LYRICS STAGE (zero box border, pure typography + SDF blur + karaoke sweep)
+                                fs_right_card = <View> {
                                     width: Fill,
                                     height: Fill,
-                                    compact: false,
+                                    padding: { left: 4, right: 16, top: 4, bottom: 4 }
+                                    flow: Down,
+
+                                    fs_lyrics_scroll = <FerricLyricsView> {
+                                        width: Fill,
+                                        height: Fill,
+                                        compact: false,
+                                    }
                                 }
                             }
-                        }
 
-                        // ZONE 3: Integrated Bottom Transport Dock (52px)
-                        fs_transport_card = <FerricCard> {
-                            width: Fill,
-                            height: 52,
-                            padding: { left: 14, right: 14, top: 6, bottom: 6 }
-                            flow: Right,
-                            align: { y: 0.5 }
-                            spacing: 8,
+                            // BOTTOM FLOATING GLASS PILL DOCK (minimal controls tucked bottom-right)
+                            fs_transport_card = <View> {
+                                width: Fill,
+                                height: 34,
+                                flow: Right,
+                                align: { y: 0.5 }
+                                spacing: 8,
 
-                            fs_shuffle_btn = <FerricIconBtn> {
-                                width: 26, height: 26,
-                                draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z" }
-                            }
-                            fs_prev_btn = <FerricIconBtn> {
-                                width: 26, height: 26,
-                                draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z" }
-                            }
-                            fs_play_pause_btn = <FerricPlayBtn> {
-                                width: 32, height: 32,
-                            }
-                            fs_next_btn = <FerricIconBtn> {
-                                width: 26, height: 26,
-                                draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z" }
-                            }
-                            fs_repeat_btn = <FerricIconBtn> {
-                                width: 26, height: 26,
-                                draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z" }
-                            }
+                                fs_lyr_source = <Label> {
+                                    width: Fill, padding: 0,
+                                    draw_text: { color: #FFFFFF45, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
+                                    text: "Synced Lyrics"
+                                }
 
-                            <View> { width: 6, height: 1 }
-
-                            fs_pos_lbl = <Label> {
-                                width: 40, padding: 0, align: { x: 0.5, y: 0.5 }
-                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }
-                                text: "00:00"
-                            }
-                            fs_seek_slider = <FerricBarSlider> {
-                                width: Fill, height: 18, min: 0.0, max: 1.0, value: 0.0
-                            }
-                            fs_dur_lbl = <Label> {
-                                width: 40, padding: 0, align: { x: 0.5, y: 0.5 }
-                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }
-                                text: "00:00"
-                            }
-
-                            <View> { width: 6, height: 1 }
-
-                            fs_vol_mute_btn = <FerricIconBtn> {
-                                width: 26, height: 26,
-                                draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" }
-                            }
-                            fs_vol_slider = <FerricBarSlider> {
-                                width: 72, height: 18, min: 0.0, max: 1.0, value: 0.85
+                                <View> {
+                                    width: Fit,
+                                    height: 30,
+                                    padding: { left: 8, right: 8, top: 3, bottom: 3 }
+                                    flow: Right,
+                                    align: { y: 0.5 }
+                                    spacing: 5,
+                                    show_bg: true,
+                                    draw_bg: {
+                                        fn pixel(self) -> vec4 {
+                                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                            let r = (self.rect_size.y - 1.0) * 0.25;
+                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                                            sdf.fill_keep(vec4(1.0, 1.0, 1.0, 0.055));
+                                            sdf.stroke(vec4(1.0, 1.0, 1.0, 0.11), 1.0);
+                                            return sdf.result;
+                                        }
+                                    }
+                                    fs_mode_art_btn = <FerricChipBtn> {
+                                        height: 22, padding: { left: 8, right: 8 }, text: "Cover",
+                                        draw_bg: { active: 1.0 },
+                                        draw_text: { active: 1.0, text_style: { font_size: 8.0 } }
+                                    }
+                                    fs_mode_video_btn = <FerricChipBtn> { height: 22, padding: { left: 8, right: 8 }, text: "Video", draw_text: { text_style: { font_size: 8.0 } } }
+                                    fs_lyr_minus = <FerricBtn> { height: 22, padding: { left: 7, right: 7 }, text: "-0.5s", draw_text: { text_style: { font_size: 8.0 } } }
+                                    fs_lyr_plus = <FerricBtn> { height: 22, padding: { left: 7, right: 7 }, text: "+0.5s", draw_text: { text_style: { font_size: 8.0 } } }
+                                    fs_lyr_copy = <FerricBtn> { height: 22, padding: { left: 8, right: 8 }, text: "Copy", draw_text: { text_style: { font_size: 8.0 } } }
+                                    fs_radio_btn = <FerricBtn> { height: 22, padding: { left: 8, right: 8 }, text: "Radio", draw_text: { text_style: { font_size: 8.0 } } }
+                                }
                             }
                         }
                     }
@@ -2809,9 +2860,9 @@ impl App {
                 active = true;
             }
             let top_pad = 14.0 + 18.0 * (1.0 - f64::from(self.fs_reveal_t));
-            self.ui.view(id!(fullscreen_overlay)).apply_over(
+            self.ui.view(id!(fs_stage_content)).apply_over(
                 cx,
-                live! { padding: { left: 22.0, right: 22.0, top: (top_pad), bottom: 16.0 } },
+                live! { padding: { left: 48.0, right: 38.0, top: (top_pad), bottom: 18.0 } },
             );
         }
 
@@ -2998,10 +3049,10 @@ impl App {
         );
         self.ui
             .view(id!(fs_left_card))
-            .apply_over(cx, live! { width: (372.0 * z) });
+            .apply_over(cx, live! { width: (410.0 * z) });
         self.ui
             .ferric_cover_art(id!(fs_art))
-            .apply_over(cx, live! { width: (226.0 * z), height: (226.0 * z) });
+            .apply_over(cx, live! { width: (304.0 * z), height: (304.0 * z) });
 
         for nid in [
             id!(nav_home),
@@ -3812,7 +3863,21 @@ impl App {
         self.fullscreen_open = open;
         self.ui.view(id!(shell_col)).set_visible(cx, !open);
         self.ui.view(id!(fullscreen_overlay)).set_visible(cx, open);
+        let accent = self.current_accent();
+        let acr = if self.theme.acrylic_enabled {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        let is_playing = self
+            .audio
+            .as_ref()
+            .is_some_and(|a| a.telemetry().is_playing);
+        self.ui
+            .ferric_ambient_stage(id!(fs_backdrop))
+            .set_state(cx, open, is_playing, accent, acr);
         if open {
+            self.sync_fullscreen_backdrop_artwork(cx);
             self.fs_reveal_t = 0.0;
             self.ui
                 .view(id!(fs_art_wrap))
@@ -3943,7 +4008,20 @@ impl App {
                 false,
             );
         }
+        self.sync_fullscreen_backdrop_artwork(cx);
         self.ui.redraw(cx);
+    }
+
+    fn sync_fullscreen_backdrop_artwork(&self, cx: &mut Cx) {
+        let tex = self.queue.current().and_then(|cur| {
+            let key = ArtworkCache::key_for_track(cur)?;
+            self.artwork_snapshot
+                .get(&key)
+                .map(|cached| cached.texture.clone())
+        });
+        self.ui
+            .ferric_ambient_stage(id!(fs_backdrop))
+            .set_texture(cx, tex);
     }
 
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
@@ -3954,6 +4032,10 @@ impl App {
             0.0_f32
         };
         let z = self.theme.ui_zoom.clamp(0.65, 1.40);
+        let is_playing = self
+            .audio
+            .as_ref()
+            .is_some_and(|a| a.telemetry().is_playing);
         self.ui.view(id!(body)).apply_over(
             cx,
             live! { draw_bg: { accent_col: (accent), acrylic_on: (acr) } },
@@ -3968,26 +4050,14 @@ impl App {
                 }
             },
         );
-        self.ui.view(id!(fullscreen_overlay)).apply_over(
+        self.ui.ferric_ambient_stage(id!(fs_backdrop)).set_state(
             cx,
-            live! { draw_bg: { accent_col: (accent), acrylic_on: (acr) } },
+            self.fullscreen_open,
+            is_playing,
+            accent,
+            acr,
         );
-        for fs_card in [
-            id!(fs_left_card),
-            id!(fs_right_card),
-            id!(fs_transport_card),
-        ] {
-            self.ui.view(fs_card).apply_over(
-                cx,
-                live! { draw_bg: { accent_col: (accent), acrylic_on: (acr) } },
-            );
-        }
-        for slider_id in [
-            id!(seek_slider),
-            id!(vol_slider),
-            id!(fs_seek_slider),
-            id!(fs_vol_slider),
-        ] {
+        for slider_id in [id!(seek_slider), id!(vol_slider)] {
             self.ui
                 .ferric_bar_slider(slider_id)
                 .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
@@ -5300,9 +5370,6 @@ impl App {
             id!(card_conn_main),
             id!(card_cmdk),
             id!(card_update_popup),
-            id!(fs_left_card),
-            id!(fs_right_card),
-            id!(fs_transport_card),
             id!(qp_0),
             id!(qp_1),
             id!(qp_2),
@@ -5476,7 +5543,6 @@ impl App {
             id!(rs_watch_video),
             id!(codec_pill_btn),
             id!(fs_radio_btn),
-            id!(fs_close_btn),
             id!(fs_lyr_minus),
             id!(fs_lyr_plus),
             id!(fs_lyr_copy),
@@ -5929,6 +5995,7 @@ impl App {
             0.55,
             false,
         );
+        self.sync_fullscreen_backdrop_artwork(cx);
         self.apply_adaptive_accent_live(cx);
 
         if let Some(smtc) = &mut self.smtc {
@@ -6030,18 +6097,21 @@ impl App {
             return;
         }
         let shifted = (raw_pos_ms as i64 + self.lyrics_offset_ms).max(0) as u64;
+        let is_playing = self
+            .audio
+            .as_ref()
+            .is_some_and(|a| a.telemetry().is_playing);
         let lines = &self.synced_lyrics.lines;
         let idx = match lines.binary_search_by_key(&shifted, |l| l.timestamp_ms) {
             Ok(i) => i,
             Err(0) => 0,
             Err(i) => i - 1,
         };
-        self.ui
-            .ferric_lyrics_view(id!(rs_lyrics_scroll))
-            .set_active_index(cx, idx);
-        self.ui
-            .ferric_lyrics_view(id!(fs_lyrics_scroll))
-            .set_active_index(cx, idx);
+        for vid in [id!(rs_lyrics_scroll), id!(fs_lyrics_scroll)] {
+            let lv = self.ui.ferric_lyrics_view(vid);
+            lv.set_playback_state(cx, shifted, is_playing);
+            lv.set_active_index(cx, idx);
+        }
     }
 
     fn load_and_play_demo_suite(&mut self, cx: &mut Cx) {

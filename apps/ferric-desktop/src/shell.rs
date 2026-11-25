@@ -83,12 +83,12 @@ mod win_impl {
         Shell_NotifyIconW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetCursorPos, GetDpiForWindow,
-        IDI_APPLICATION, LoadIconW, MF_SEPARATOR, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS,
-        PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
-        TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
-        WM_CLOSE, WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE,
-        WM_NCCALCSIZE, WM_RBUTTONUP, WM_SIZE, WM_SYSCOMMAND,
+        AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetCursorPos, IDI_APPLICATION,
+        LoadIconW, MF_SEPARATOR, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, SW_HIDE,
+        SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+        TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_DESTROY,
+        WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE, WM_NCCALCSIZE, WM_RBUTTONUP,
+        WM_SIZE, WM_SYSCOMMAND,
     };
     use windows::core::{PCWSTR, w};
 
@@ -138,6 +138,7 @@ mod win_impl {
         fn IsWindowVisible(hwnd: *mut c_void) -> i32;
         fn IsIconic(hwnd: *mut c_void) -> i32;
         fn IsZoomed(hwnd: *mut c_void) -> i32;
+        fn GetDpiForWindow(hwnd: *mut c_void) -> u32;
     }
 
     fn push_event(ev: TrayEvent) {
@@ -280,7 +281,7 @@ mod win_impl {
                 y: rc.top,
             };
             let _ = ClientToScreen(hwnd, &mut tl);
-            let dpi = GetDpiForWindow(hwnd);
+            let dpi = GetDpiForWindow(hwnd.0);
             let dpi_scale = if dpi >= 96 { dpi as f32 / 96.0 } else { 1.0 };
             Some(WindowClientScreenRect {
                 left: tl.x,

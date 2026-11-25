@@ -76,7 +76,7 @@ mod win_impl {
         BLACK_BRUSH, ClientToScreen, GetMonitorInfoW, GetStockObject, HBRUSH,
         MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
     };
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
     use windows::Win32::System::Threading::GetCurrentProcess;
     use windows::Win32::UI::Shell::{
@@ -94,7 +94,7 @@ mod win_impl {
         WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED, WNDCLASSW,
         WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
     };
-    use windows::core::{PCWSTR, w};
+    use windows::core::{PCWSTR, s, w};
 
     const SUBCLASS_ID: usize = 0xFE11_C001;
     const TRAY_ICON_ID: u32 = 1;
@@ -194,8 +194,6 @@ mod win_impl {
         fn GetWindowLongW(hwnd: HWND, n_index: i32) -> i32;
         fn SetWindowLongW(hwnd: HWND, n_index: i32, dw_new_long: i32) -> i32;
         fn SetLayeredWindowAttributes(hwnd: HWND, cr_key: u32, b_alpha: u8, dw_flags: u32) -> i32;
-        fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttribData)
-        -> i32;
     }
 
     unsafe extern "system" fn backdrop_wnd_proc(
@@ -283,19 +281,27 @@ mod win_impl {
                 std::mem::size_of::<i32>() as u32,
             );
             if hr != 0 {
-                // Windows 10 fallback: SetWindowCompositionAttribute ACCENT_ENABLE_ACRYLICBLURBEHIND
-                let mut policy = AccentPolicy {
-                    accent_state: 4,
-                    accent_flags: 2,
-                    gradient_color: 0xB810_1116,
-                    animation_id: 0,
-                };
-                let mut data = WindowCompositionAttribData {
-                    attrib: 19,
-                    pv_data: (&raw mut policy).cast(),
-                    cb_data: std::mem::size_of::<AccentPolicy>(),
-                };
-                let _ = SetWindowCompositionAttribute(bh, &raw mut data);
+                // Windows 10 fallback: dynamically resolve SetWindowCompositionAttribute from user32.dll
+                if let Ok(user32) = GetModuleHandleW(w!("user32.dll"))
+                    && let Some(proc_fn) =
+                        GetProcAddress(user32, s!("SetWindowCompositionAttribute"))
+                {
+                    type SetWcaFn =
+                        unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
+                    let set_wca: SetWcaFn = std::mem::transmute(proc_fn);
+                    let mut policy = AccentPolicy {
+                        accent_state: 4,
+                        accent_flags: 2,
+                        gradient_color: 0xB810_1116,
+                        animation_id: 0,
+                    };
+                    let mut data = WindowCompositionAttribData {
+                        attrib: 19,
+                        pv_data: (&raw mut policy).cast(),
+                        cb_data: std::mem::size_of::<AccentPolicy>(),
+                    };
+                    let _ = set_wca(bh, &raw mut data);
+                }
             }
             BACKDROP_HWND.store(bh.0 as isize, Ordering::Release);
             Some(bh)

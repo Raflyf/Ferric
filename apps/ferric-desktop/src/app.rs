@@ -2135,7 +2135,7 @@ live_design! {
                                     }
 
                                     <View> {
-                                        width: Fill, height: Fit, margin: { left: 4, right: 4, top: 6, bottom: 1 },
+                                        width: Fill, height: Fit, margin: { left: 4, right: 12, top: 6, bottom: 1 },
                                         flow: Right, align: { y: 0.5 },
                                         q_upnext_header = <Label> {
                                             width: Fill,
@@ -4086,6 +4086,8 @@ impl App {
         );
         self.start_motion(cx);
         self.sync_video_bounds(cx);
+        let pos_ms = self.audio.as_ref().map_or(0, |a| a.telemetry().position_ms);
+        self.update_lyrics_display(cx, pos_ms);
         self.ui.redraw(cx);
     }
 
@@ -4102,13 +4104,17 @@ impl App {
         } else {
             0.0_f32
         };
-        let is_playing = self
-            .audio
-            .as_ref()
-            .is_some_and(|a| a.telemetry().is_playing);
-        self.ui
-            .ferric_ambient_stage(id!(fs_backdrop))
-            .set_state(cx, open, is_playing, accent, acr);
+        let (is_playing, pos_ms) = self.audio.as_ref().map_or((false, 0), |a| {
+            let t = a.telemetry();
+            (t.is_playing, t.position_ms)
+        });
+        self.ui.ferric_ambient_stage(id!(fs_backdrop)).set_state(
+            cx,
+            open,
+            open && is_playing,
+            accent,
+            acr,
+        );
         if open {
             self.sync_fullscreen_backdrop_artwork(cx);
             self.fs_reveal_t = 0.0;
@@ -4121,7 +4127,16 @@ impl App {
             self.style_chip_btn(cx, id!(fs_mode_art_btn), !self.video_open);
             self.style_chip_btn(cx, id!(fs_mode_video_btn), self.video_open);
             self.start_motion(cx);
+        } else {
+            self.ui
+                .ferric_lyrics_view(id!(fs_lyrics_scroll))
+                .set_playback_state(cx, pos_ms, false);
+            if let Some(db) = &self.db {
+                db.shrink_memory();
+            }
+            win32_trim_working_set();
         }
+        self.update_lyrics_display(cx, pos_ms);
         self.sync_video_bounds(cx);
         self.ui.redraw(cx);
     }
@@ -6221,7 +6236,8 @@ impl App {
         // removes generated demo `.wav` only for `demo:` tracks).
         if target.id.starts_with("demo:")
             && let Some(p) = target.path.as_ref()
-            && p.starts_with(app_data_dir().join("demo"))
+            && (p.starts_with(app_data_dir().join("demo_tracks"))
+                || p.starts_with(app_data_dir().join("demo")))
         {
             let _ = std::fs::remove_file(p);
         }
@@ -6273,6 +6289,7 @@ impl App {
             self.all_tracks.retain(|t| !t.id.starts_with("demo:"));
             before.saturating_sub(self.all_tracks.len())
         };
+        clear_flat_cache_files(&app_data_dir().join("demo_tracks"));
         clear_flat_cache_files(&app_data_dir().join("demo"));
         self.session_state
             .recent_track_ids
@@ -6666,10 +6683,21 @@ impl App {
             Err(0) => 0,
             Err(i) => i - 1,
         };
-        for vid in [id!(rs_lyrics_scroll), id!(fs_lyrics_scroll)] {
-            let lv = self.ui.ferric_lyrics_view(vid);
-            lv.set_playback_state(cx, shifted, is_playing);
-            lv.set_active_index(cx, idx);
+        let rs_active = !self.window_hidden_or_minimized
+            && !self.fullscreen_open
+            && self.right_sidebar_open
+            && self.right_lyrics_tab;
+        let fs_active = !self.window_hidden_or_minimized && self.fullscreen_open;
+
+        let rs = self.ui.ferric_lyrics_view(id!(rs_lyrics_scroll));
+        rs.set_playback_state(cx, shifted, is_playing && rs_active);
+        if rs_active {
+            rs.set_active_index(cx, idx);
+        }
+        let fs = self.ui.ferric_lyrics_view(id!(fs_lyrics_scroll));
+        fs.set_playback_state(cx, shifted, is_playing && fs_active);
+        if fs_active {
+            fs.set_active_index(cx, idx);
         }
     }
 
@@ -7104,13 +7132,13 @@ impl App {
             } else if self.startup_trim_stage >= 2
                 && !self.window_hidden_or_minimized
                 && self.page_reveal_t >= 0.995
-                && ((self.artwork_uploads_since_trim >= 4
+                && ((self.artwork_uploads_since_trim >= 3
                     && self
                         .last_trim_at
                         .is_none_or(|t| t.elapsed() >= Duration::from_secs(3)))
                     || self
                         .last_trim_at
-                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(20)))
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(8)))
             {
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
@@ -7129,6 +7157,22 @@ impl App {
                     if self.video_open {
                         self.close_native_video_stage(cx);
                     }
+                    // Immediately halt hidden 60 FPS lyrics/ambient GPU frames so DX11 stays completely asleep in tray
+                    let accent = self.current_accent();
+                    let acr = if self.theme.acrylic_enabled {
+                        1.0_f32
+                    } else {
+                        0.0_f32
+                    };
+                    self.ui
+                        .ferric_ambient_stage(id!(fs_backdrop))
+                        .set_state(cx, false, false, accent, acr);
+                    self.ui
+                        .ferric_lyrics_view(id!(rs_lyrics_scroll))
+                        .set_playback_state(cx, 0, false);
+                    self.ui
+                        .ferric_lyrics_view(id!(fs_lyrics_scroll))
+                        .set_playback_state(cx, 0, false);
                     if let Some(cache) = &mut self.artwork {
                         cache.clear_all_for_tray();
                         self.artwork_snapshot = Rc::new(HashMap::new());
@@ -7150,6 +7194,22 @@ impl App {
                     {
                         cache.pin_active_track(Some(&cur));
                     }
+                    let (is_playing, pos_ms) = self.audio.as_ref().map_or((false, 0), |a| {
+                        let t = a.telemetry();
+                        (t.is_playing, t.position_ms)
+                    });
+                    if self.fullscreen_open {
+                        let accent = self.current_accent();
+                        let acr = if self.theme.acrylic_enabled {
+                            1.0_f32
+                        } else {
+                            0.0_f32
+                        };
+                        self.ui
+                            .ferric_ambient_stage(id!(fs_backdrop))
+                            .set_state(cx, true, is_playing, accent, acr);
+                    }
+                    self.update_lyrics_display(cx, pos_ms);
                     self.refresh_all_artwork_slots(cx);
                     self.sync_video_bounds(cx);
                     cx.redraw_all();
@@ -7620,6 +7680,11 @@ impl App {
                     } else {
                         self.sync_next_deck_to_engine();
                     }
+                    // Release TLS/stream download scratch pages immediately so active playback stays <100 MB
+                    if let Some(db) = &self.db {
+                        db.shrink_memory();
+                    }
+                    win32_trim_working_set();
                 }
                 BgMessage::StreamFailed {
                     track_id,

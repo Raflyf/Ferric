@@ -18,7 +18,7 @@ const WEB_REMIX_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 const VISIONOS_VERSION: &str = "1.02";
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 const STREAM_CHUNK_BYTES: u64 = 512 * 1024;
-const STREAM_CONCURRENCY: usize = 6;
+const STREAM_CONCURRENCY: usize = 3;
 
 #[derive(Debug, Clone, Default)]
 pub struct YtmSession {

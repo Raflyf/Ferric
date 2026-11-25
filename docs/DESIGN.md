@@ -1,51 +1,93 @@
-# Design System & Visual Direction (`DESIGN.md`) — Ferric Music Player
+# Design System & Visual Direction (`DESIGN.md`) — Ferric Desktop
 
-- **Versi:** 2.0.0 (Strict 3-Color Identity + Unlimited Open Theme Studio)
-- **Tanggal:** 24 November 2026
-- **Mode Permukaan (Impeccable Mode):** `Operate` (Presisi instrumen audio, keterbacaan instan, nol dekorasi pelangi).
-- **Design Read (`antislop`):** Aplikasi pemutar musik lintas platform (Windows Desktop & Android Mobile) dengan identitas default ketat **3 Warna LivelyDesk-Family di atas Pure OLED Pitch Black** (`#000000` / `#111111`, `#F3EEE3` Cream, `#D9541E` Burnt Orange), ditambah **Open Theme Studio** tanpa batas di menu Appearance agar pengguna bebas berkreasi sepenuhnya. Dial: **`ENERGY 2 / RHYTHM 2 / MOTION 2`**.
-- **File Desain Live (FigCraft):** `MusicPlayer UI UX` (backup lokal: [ferric-ui-ux.figcraft](file:///d:/code/project/music%20player/ferric-ui-ux.figcraft)).
-- **Aset Logo & App Icon Produksi (Terkunci):** Folder [assets/brand/](file:///d:/code/project/music%20player/assets/brand) — **Ferric Oxide Cassette** (ikon kaset pita magnetik *Type-I Ferric Oxide* 3D miring `-10°` berbezel tembaga `#AE7D57 -> #63321F`, sasis grafit `#443B35 -> #111111`, jendela reel kaca buram, gelombang sutra krem `#FFF1D1`, dan dua kumparan pita tembaga `#D9541E`, tanpa huruf agar 100% menyatu dengan lini `LivelyDesk`, `WallpaperLive`, dan `TransparentBar`). File siap produksi: [ferric.svg](file:///d:/code/project/music%20player/assets/brand/ferric.svg), [ferric.png](file:///d:/code/project/music%20player/assets/brand/ferric.png) (`512px` RGBA transparan), [ferric.ico](file:///d:/code/project/music%20player/assets/brand/ferric.ico) (multi-resolusi Windows `16/24/32/48/64/128/256px`), [ferric-icon-mono.svg](file:///d:/code/project/music%20player/assets/brand/ferric-icon-mono.svg) (Android 13+ Themed Icon), serta [ferric-wordmark-amoled.svg](file:///d:/code/project/music%20player/assets/brand/ferric-wordmark-amoled.svg) & [ferric-wordmark-cream.svg](file:///d:/code/project/music%20player/assets/brand/ferric-wordmark-cream.svg).
+- **Versi Dokumen:** 3.0.0 (Diselaraskan dengan UI Produksi Aktual `v0.1.0`)
+- **Tanggal Pembaruan:** 25 November 2026
+- **Implementasi Sumber:** [theme.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-core/src/theme.rs), [app.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/app.rs), [widgets.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/widgets.rs), [track_list.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/track_list.rs)
+- **Ikon Produk Resmi (Terkunci):** **Ferric Oxide Cassette** di [assets/brand/](file:///d:/code/project/music%20player/ferric/assets/brand) (`ferric.svg`, `ferric.png`, `ferric.ico`, `ferric-icon-mono.svg`, wordmark).
 
 ---
 
-## 1. Identitas Default: Ketat 3 Warna (Anti-Slop R-29)
+## 1. Sistem Tema Aktual (4 Preset + Import/Export JSON)
 
-Seluruh layar default aplikasi (**tidak ada hijau neon, biru cyan, merah menyala, maupun merah muda di chrome UI**) hanya memakai **3 warna identitas produk** selaras dengan lini desain `LivelyDesk`:
+Ferric menggunakan **4 preset tema** yang didefinisikan langsung di `crates/ferric-core/src/theme.rs` dan dapat diekspor/diimpor melalui `.ferric-theme.json`:
 
-| Peran | Nama Warna | Kode HEX Default | Turunan Netral / Aksen | Fungsi & Rasio Kontras (WCAG) |
-| :--- | :--- | :--- | :--- | :--- |
-| **1. Canvas & Ink Black** | **Pure OLED Black / Deep Charcoal** | **`#000000`** *(Base)*<br>**`#111111`** *(Surface 1)* | `#1A1A1A` *(Surface 2)*<br>`#262626` *(Hairline 1px)* | Latar utama AMOLED hemat daya (0% piksel menyala pada `#000000`), panel samping, kartu lagu, dan batas tipis tanpa *drop shadow* berlebihan. |
-| **2. Cream (Sand White)** | **Warm Cream Ink** | **`#F3EEE3`** *(Primary)* | `#ADA79C` *(Secondary)*<br>`#8A847A` *(Muted)* | Judul lagu, heading editorial, ikon vektor, metadata sekunder, dan latar utama saat mode *Cream Light* dipilih. Kontras `#F3EEE3` di atas `#000000` = **17.9 : 1** (AAA); `#ADA79C` di atas `#111111` = **7.9 : 1** (AAA); `#8A847A` di atas `#1A1A1A` = **4.8 : 1** (AA). |
-| **3. Burnt Orange** | **Vibrant Copper Accent** | **`#D9541E`** *(Accent)* | `#2A1309` *(Tinted Active Surface)* | **Satu-satunya warna aksen kromatik.** Digunakan terbatas hanya untuk titik fokus utama: tombol *Play/Pause*, garis progres *seekbar*, judul lagu yang sedang diputar, indikator perangkat aktif *Ferric Connect*, dan kurva Parametric EQ. Kontras `#D9541E` di atas `#000000` = **5.23 : 1** (AA); ikon `#000000` di atas `#D9541E` = **5.23 : 1** (AA). |
+| Preset | Canvas | Surface | Border | Teks Utama / Sekunder | Aksen Default | Catatan Perilaku |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`AMOLED Black` (Default)** | `#000000` | `#09090D` | `#1C1D25` | `#F4F4F7` / `#9A9CA8` | `#A882FF` (Soft Violet) | Kontras > 19:1 (WCAG AAA), `0%` GPU saat idle, mendukung **Adaptive Artwork Accent** aktif bawaan. |
+| **`Native Acrylic`** | `#0B0C11` *(per-pixel alpha)* | `#11131B` *(frosted glass)* | `#252836` | `#F4F4F7` / `#9A9CA8` | `#A882FF` (+ Adaptive) | Mengaktifkan blur OS Windows 11 nyata (`DWMSBT_TRANSIENTWINDOW`) via DirectComposition premultiplied-alpha. Opacity diatur `18%–94%` (`default 72%`). |
+| **`Obsidian Studio`** | `#0D0E12` | `#14151C` | `#232530` | `#F4F4F7` / `#9A9CA8` | `#A882FF` (+ Adaptive) | Mode gelap studio berkontras lembut tanpa transparansi OS. |
+| **`Warm Cream Light`** | `#F3EEE3` | `#EAE3D4` | `#D5CCB9` | `#111111` / `#524B42` | `#D9541E` (Burnt Orange) | Mode terang kertas hangat LivelyDesk-family (Adaptive Accent dimatikan bawaan). |
 
-### Disiplin Anti-Slop pada Identitas Default (R-31)
-- **Nol Badge Warna-Warni:** Tag `SPOTIFY`, `YT MUSIC`, `LOCAL FLAC`, `P2P HOME`, maupun `Connect` memakai **monokrom hangat** (`#1A1A1A` dengan hairline `#2A2A2A` dan teks `#ADA79C` / `#F3EEE3`). Warna `#D9541E` hanya menyala pada elemen yang benar-benar sedang aktif (*playing*, *selected*, atau *primary CTA*).
-- **Tipografi Berkarakter:** `Nunito Sans` (keterbacaan tinggi pada ukuran `12–15px` lintas Windows & Android) + `Liberation Mono` (`tnum`) khusus data telemetri (`03:42`, `24-bit / 96 kHz`, `+3.5 dB`, `LAN 2 ms`).
-- **Hierarki Radius Konsisten (R-11):** `4px` badge teknis, `8px` tombol sekunder & artwork kecil, `12px–16px` panel & sheet, *pill* (`999px`) khusus tombol Play/Pause utama & thumb slider.
+### Penyeragaman Permukaan Kaca di Mode `Native Acrylic`
+- **Teks & Konten 100% Opaque:** Karena transparansi bekerja per-piksel pada swapchain DirectComposition (`WS_EX_NOREDIRECTIONBITMAP` + `DXGI_ALPHA_MODE_PREMULTIPLIED`, bukan `SetLayeredWindowAttributes`), menurunkan opacity latar **tidak pernah** membuat teks, ikon, tombol, atau sampul lagu menjadi pudar.
+- **Keseragaman Kartu & Input:** Seluruh permukaan interaktif (`TrackRow`, `QuickPickTile`, `ShelfCard`, `GridCard`, `FerricCard`, `QueueMiniRow`, `top_search_box`, dan seluruh `FerricInput`) menggunakan resep kaca tipis yang seragam:
+  - Idle: `rgba(255, 255, 255, 0.024 .. 0.036)` dengan border halus `rgba(255, 255, 255, 0.055 .. 0.095)`
+  - Hover: `rgba(255, 255, 255, 0.090 .. 0.095)` + sheen atas halus
+  - Active / Playing: tint aksen `mix(vec3(0.14, 0.14, 0.22), accent, 0.34)` alpha `0.36` + border aksen.
+- **Catatan Arsitektur:** Tema lama *Liquid Glass refraction shader* (`IOR`/`Dispersion`/`Rim`) dan tombol *Compact Mini-Mode* telah **dihapus sepenuhnya** agar antarmuka tetap bersih, ringan, dan bebas konflik visual.
 
 ---
 
-## 2. Unlimited User Theme Studio (`Settings > Appearance`)
+## 2. Tipografi & Skala Antarmuka
 
-Identitas 3 warna di atas adalah **tampilan bawaan (default)** yang bersih dan berkarakter. Di dalam menu **Appearance Studio**, pengguna diberi **kebebasan penuh tanpa batas** untuk merancang ulang tampilan aplikasinya sendiri:
+- **Font Tertanam:** **Inter v4.1** (`Inter-Regular.ttf`, `Inter-Medium.ttf`, `Inter-SemiBold.ttf`, `Inter-Bold.ttf` di `apps/ferric-desktop/resources/fonts/`).
+- **Skala Dasar (`ui_zoom = 1.0`):**
+  - Display / Judul Halaman: `15.5–16.0 pt` Bold
+  - Judul Kartu / Baris Lagu: `9.0–9.4 pt` Bold
+  - Subjudul / Metadata: `8.0–8.6 pt` Regular/Medium
+  - Lirik Fullscreen: skala dinamis dengan fokus baris aktif, sapuan karaoke putih murni (`#FFFFFF` di atas teks belum tersapu alpha `0.58`), serta baris tetangga ber-alpha `0.28–0.64` dan blur kedalaman halus (`0.0–0.48`).
+- **Live UI Zoom:** Mendukung `65%–140%` (`Ctrl -`, `Ctrl +`, `Ctrl 0`, atau kontrol di `Settings > Appearance`) yang menskalakan seluruh tinggi baris, sidebar, kartu, dan ukuran font secara proporsional.
 
-1. **Per-Token Full Color & Opacity Editor:**
-   - Pengguna dapat memilih warna apa pun (HSV Color Wheel + HEX/RGB/HSL input + Alpha/Opacity) secara terpisah untuk: `Canvas Background`, `Panel Surface`, `Elevated Card`, `Hairline Border`, `Primary Text`, `Secondary Text`, dan `Accent Color`.
-   - Dilengkapi **Live WCAG Contrast Guard** (menampilkan skor kontras real-time seperti `17.9:1 AAA` dan peringatan lembut bila kombinasi buatan user sulit terbaca).
-2. **Custom Background, Wallpaper, Translucency & Liquid Glass Toggle (`OFF` Default / `ON` Opsional):**
-   - Pilihan latar belakang bebas: **Solid Pure OLED (`#000000`)**, **Custom Gradient** (atur arah & stop warna bebas), **Custom Image / Wallpaper Lokal** (dengan slider *Dim Overlay* & *Blur `0–32px`*), atau **Windows 11 Mica / Acrylic Native Translucency** dengan kontrol *Panel Opacity `0%–100%`*.
-   - **Toggle `Liquid Glass Theme (Refractive UI)` (`OFF` default / `ON` opsional di seluruh UI/UX Windows & Android):**
-     - Saat **OFF (Default):** 100% Pure AMOLED `#000000`, `0%` GPU idle, ~28–32 MB RAM, hemat baterai OLED maksimal.
-     - Saat **ON:** Mengaktifkan **Makepad SDF Optical Liquid Glass Fragment Shader** (kompilasi native ke HLSL DX11 di Windows & GLSL ES/Vulkan di Android) pada seluruh elemen mengambang lintas UI/UX: *floating sidebar rail*, *top search pill*, *floating bottom player dock*, *always-on-top mini-player widget*, panel *Ferric Connect* & *EQ*, *Android Now Playing transport deck*, *Android floating mini-player & bottom navigation capsule*, serta *Command Palette (`Ctrl+K`)*.
-     - **6 Parameter Optik Bebas Diatur Real-Time:** `Refraction Index (IOR 1.00–2.00, default 1.48)`, `Chromatic Edge Dispersion (0%–100%, default 42%)`, `Interior Frost Blur (0–32px, default 10px)`, `Bevel Curvature Radius (8–36px, default 24px)`, `Specular Rim Catchlight (0%–100%, default 78%)`, dan `WCAG Readability Scrim (0%–60%, default 28% dengan penjaga kontras AA+ >= 4.5:1)`.
-     - **Zero-GPU Safeguard Otomatis:** Shader hanya melakukan *pass* saat ada *dirty frame* (scroll, drag, hover, animasi -> `0.0%` GPU saat statis, tambahan VRAM ~3–4 MB) dan otomatis mundur ke mode AMOLED solid saat jendela diminimalkan, layar Android terkunci, atau *Battery Saver* aktif.
-     - Lihat demonstrasi lengkap layar Desktop & Android mode ON pada **Page `05 Liquid Glass Mode (ON)`** di [ferric-ui-ux.figcraft](file:///d:/code/project/music%20player/ferric-ui-ux.figcraft) serta pratinjau visual di [assets/ui_previews/](file:///d:/code/project/music%20player/assets/ui_previews).
-   - Opsional toggle **Adaptive Accent from Album Art** (ekstraksi warna otomatis dari sampul lagu aktif).
-3. **Typography & Geometry Customizer:**
-   - **Font Picker Bebas:** Pilih font sistem apa pun yang terinstal di Windows/Android, atau impor file `.ttf` / `.otf` kustom.
-   - **Slider Geometri Penuh:** `Font Scale (85%–130%)`, `Corner Radius (0px Sharp – 24px Soft)`, `Track Row Height (36px – 72px)`, `Border Weight (0px – 2px)`, dan `Content Padding`.
-4. **Modular Layout & Chrome Controls:**
-   - Posisi Sidebar (`Left` / `Right` / `Collapsed` / `Hidden`), Gaya Player Bar (`Full Docked` / `Floating Bar` / `Minimal`), visibilitas Panel Kanan (`Connect & Queue`), dan visibilitas *Engine Telemetry Strip*.
-5. **Theme Pack Import/Export & Sync Lintas Perangkat:**
-   - Simpan preset buatan sendiri tanpa batas, **Export / Import `.ferric-theme.json`** untuk berbagi dengan komunitas, sinkronkan tema kustom otomatis antara PC Windows dan HP Android via `Ferric Connect`, dan tombol 1-klik **Reset to 3-Color Default**.
+---
+
+## 3. Tata Letak 3-Pane Desktop Shell
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ [Icon Ferric] [|< > ↻]        [ Search music... (Ctrl+K) ]     [Sign in][⚙][◫] [—][❐][×] │  36px Top Chrome
+├───────────┬──────────────────────────────────────────────────────┬───────────┤
+│ Home      │  Main Stage (9 Halaman)                              │ [Queue][Lyrics] [📻][↻][🗑]
+│ Search    │  - Home (Mood Chips + Quick Picks 2x4 + 8 Shelves)   │ HISTORY   │
+│ Recents   │  - Search (Filters + Cards + Songs)                  │ (3 items) │
+│           │  - Recents / Songs (Virtualized TrackList)           │ NOW PLAY  │
+│ LIBRARY   │  - Albums / Artists / Playlists (Grid 5x4 = 20/hal)  │ UP NEXT   │
+│ Songs     │  - Detail View (Hero + Actions + TrackList)          │ (10 rows  │
+│ Albums    │  - Settings (6 Tabs)                                 │  + ↑ / ×) │
+│ Artists   │                                                      │           │
+│ Playlists │                                                      │           │
+│ PINNED    │                                                      │           │
+│ Settings  │                                                      │           │
+├───────────┴──────────────────────────────────────────────────────┴───────────┤
+│ [Art] Title/Artist [♡][+]    [🔀][⏮]( ▶ )[⏭][🔁]       [CODEC][🎬][🎤][☰][🔊 ━━○][⛶] │  74px Stacked 2-Row
+│                              0:11 ━━━━━━━━○────────── 4:31                   │       Bottom Bar
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Rincian Geometri & Aturan Chrome
+- **Top Bar (`36px`):** Logo + nama `Ferric` di pojok paling kiri; area drag jendela Windows 11 + Aero Snap di ruang kosong; input pencarian inline di tengah; tombol akun, Settings, toggle sidebar kanan, dan tepat satu set tombol jendela kustom (`—`, `❐`, `×`) di kanan.
+- **Win32 Window Style:** Selalu menggunakan `WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU` (**tanpa `WS_CAPTION`**) agar Windows 11 DWM tidak pernah menggambar tombol caption native ganda di atas mode Acrylic, sekaligus memotong ukuran maximize presisi ke `rcWork` (di atas Taskbar, nol kliping sisi kanan/bawah).
+- **Bottom Player Bar (`74px`):** Grup kiri (`272px` fixed) dan grup kanan (`272px` fixed) simetris agar blok tengah (`[Shuffle][Prev](Play)[Next][Repeat]` di baris atas, `Elapsed ━━━○─── Duration` di baris bawah) selalu presisi di tengah layar. Volume slider mendukung drag maupun **scroll roda mouse**.
+- **Fullscreen Lyrics Overlay (`F` / `F11`):**
+  - Latar `FerricAmbientStage` menggunakan **21-tap ultra-wide blur** (`r1=0.14`, `r2=0.28`, `r3=0.42`) + scrim gelap halus (`0.28 -> 0.145` di kolom lirik) sehingga tekstur/teks sampul album melebur sempurna menjadi awan warna tenang tanpa mengganggu keterbacaan lirik.
+  - Kolom kiri menampilkan Cover Art besar (atau Video Klip HD WebView2 saat mode `Video` dipilih) + transport; kolom kanan menampilkan `FerricLyricsView` interaktif (hover pill kaca, stempel waktu saat hover, klik untuk seek).
+
+---
+
+## 4. Pintasan Keyboard Aktual (`apps/ferric-desktop/src/app.rs`)
+
+| Pintasan | Aksi |
+| :--- | :--- |
+| `Space` | Play / Pause (saat tidak mengetik di input teks) |
+| `Left` / `Right` | Seek mundur / maju 5 detik |
+| `Shift + Left` / `Shift + Right` | Lagu sebelumnya / berikutnya |
+| `Ctrl + Up` / `Ctrl + Down` | Naikkan / turunkan volume 5% (juga mendukung scroll di area volume) |
+| `M` | Mute / Unmute |
+| `S` / `R` / `L` | Toggle Shuffle / siklus Repeat (`Off -> All -> One`) / Like lagu aktif |
+| `F` / `F11` | Buka / tutup Fullscreen Lyrics Mode |
+| `Q` / `Ctrl + Q` | Tampilkan / sembunyikan Right Sidebar (`Queue`) |
+| `Ctrl + L` | Buka / toggle tab `Lyrics` di Right Sidebar |
+| `Ctrl + K` / `Ctrl + F` | Fokus pencarian inline / buka halaman Search |
+| `Ctrl + ,` / `Ctrl + E` | Buka Settings / langsung ke tab Equalizer |
+| `Alt + Left` / `Alt + Right` | Navigasi Riwayat Halaman Mundur / Maju |
+| `Ctrl + -` / `Ctrl + +` / `Ctrl + 0` | Perkecil / perbesar / reset UI Zoom (`65%–140%`) |
+| `Esc` | Tutup menu konteks / video klip / Fullscreen Lyrics / popup update |

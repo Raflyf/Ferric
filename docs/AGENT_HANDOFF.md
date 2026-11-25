@@ -1,59 +1,68 @@
-# Panduan Handoff untuk AI Agent Berikutnya (`AGENT_HANDOFF.md`)
+# Panduan Handoff & Pemeliharaan (`AGENT_HANDOFF.md`) — Ferric
 
-Selamat datang di direktori kerja proyek pemutar musik lintas platform **Full Native Rust** (Windows + Android), Codename **Ferric**. Dokumen ini disiapkan agar AI agent mana pun (Claude Code, Codex, Cursor, Gemini, Antigravity, Hermes, OpenCode) dapat langsung melanjutkan eksekusi kode dari tahap riset tanpa harus mengulang analisis dari nol.
+- **Versi Dokumen:** 2.0.0 (Pre-Release `v0.1.0` Stabilization)
+- **Tanggal Pembaruan:** 25 November 2026
+- **Repositori:** `d:\code\project\music player\ferric` (branch `main`, remote `https://github.com/Raflyf/Ferric.git`)
+- **Binary Terpasang:** `C:\Users\RaflyF\AppData\Local\Programs\Ferric\ferric.exe`
+- **Database Pengguna:** `C:\Users\RaflyF\AppData\Local\LivelyDesk\Ferric\data\ferric.db`
 
 ---
 
-## 1. Peta Dokumen di Folder Ini
+## 1. Status Proyek Saat Ini
 
-| File | Isi & Kapan Harus Dibaca |
+**Aplikasi desktop Windows Ferric sudah hampir rampung (`~95%` untuk `v0.1.0`).** Fase scaffolding awal sudah lama selesai; seluruh fitur inti, paket installer MSI, dan pipeline CI sudah berjalan hijau. Pekerjaan selanjutnya berfokus pada **perbaikan bug spesifik, penyempurnaan UX/performa, dan persiapan rilis `v0.1.0` setelah persetujuan pengguna**.
+
+---
+
+## 2. Peta Dokumen & Kode Sumber Kunci
+
+### Dokumen
+- [README.md](file:///d:/code/project/music%20player/ferric/README.md) — ringkasan produk, fitur, dan perintah build lokal.
+- [CHANGELOG.md](file:///d:/code/project/music%20player/ferric/CHANGELOG.md) — riwayat perubahan terverifikasi `v0.1.0`.
+- [PRD.md](file:///d:/code/project/music%20player/ferric/docs/PRD.md) — cakupan fitur aktual, metrik terukur, skema SQLite, dan batas roadmap pasca-`v0.1.0`.
+- [DESIGN.md](file:///d:/code/project/music%20player/ferric/docs/DESIGN.md) — 4 preset tema aktual, resep kaca Acrylic seragam, tata letak 3-pane, dan pintasan keyboard.
+- [SYNC_AND_AUDIO_SPEC.md](file:///d:/code/project/music%20player/ferric/docs/SYNC_AND_AUDIO_SPEC.md) — detail implementasi `ferric-audio`, `ferric-providers`, `ferric-sync`, dan Win32 DirectComposition.
+- [RESEARCH_AND_RE_FINDINGS.md](file:///d:/code/project/music%20player/ferric/docs/RESEARCH_AND_RE_FINDINGS.md) — alasan stack Rust dan benchmark aktual.
+
+### Kode Sumber Utama
+| Berkas | Tanggung Jawab |
 | :--- | :--- |
-| [PRD.md](file:///d:/code/project/music%20player/PRD.md) | **Dokumen Utama (Wajib Baca Pertama):** Visi produk, batasan kepatuhan legal (*Metadata-Audio Decoupling* tanpa pembobolan DRM), target efisiensi RAM/CPU/GPU, struktur Cargo workspace, daftar crate Rust (akhir 2026), fitur lengkap, inovasi di atas kompetitor, skema SQLite, dan roadmap 5 fase. |
-| [DESIGN.md](file:///d:/code/project/music%20player/DESIGN.md) | **Panduan Sistem Desain UI/UX & Brand:** Arah visual **3 Warna LivelyDesk-Family di atas Pure OLED Pitch Black (`#000000`)** + **Open Theme Studio** tanpa batas + toggle **Liquid Glass Theme (`OFF` default / `ON` Makepad SDF Refraction Shader)** di seluruh UI/UX Windows & Android, ikon resmi **Ferric Oxide Cassette** ([ferric.svg](file:///d:/code/project/music%20player/assets/brand/ferric.svg), [ferric.png](file:///d:/code/project/music%20player/assets/brand/ferric.png), [ferric.ico](file:///d:/code/project/music%20player/assets/brand/ferric.ico)), tipografi `Nunito Sans` + `Liberation Mono`, dan peta 6 halaman desain FigCraft ([ferric-ui-ux.figcraft](file:///d:/code/project/music%20player/ferric-ui-ux.figcraft)). |
-| [RESEARCH_AND_RE_FINDINGS.md](file:///d:/code/project/music%20player/RESEARCH_AND_RE_FINDINGS.md) | **Bukti Riset & Reverse Engineering:** Hasil bedah statis `desktop-ref-installer.exe` (`v0.50.3` — Rust + `GPUI` desktop) dan `mobile-ref.apk` (`v4.1.0` — fork Kotlin/Compose `Metrolist`), alasan teknis kelemahan masing-masing, serta benchmark komparatif toolkit GUI Rust (`Makepad 1.0.0`, `Slint 1.19.0`, `Dioxus 0.7.10`, `Iced 0.14.0`, `GPUI 0.2.2`). |
-| [SYNC_AND_AUDIO_SPEC.md](file:///d:/code/project/music%20player/SYNC_AND_AUDIO_SPEC.md) | **Spesifikasi Implementasi Teknis:** Protokol biner `iroh 1.4.1` + `mdns-sd` + `postcard` untuk kontrol bolak-balik PC <-> HP (*Ferric Connect*), rumus *gapless/equal-power crossfade* pada `symphonia 0.6.1` + `rubato 5.1.0` + `rtrb`, kontrak trait `AudioResolver`, dan manajemen *Zero-GPU Background Mode* di Android & Windows. |
-| `desktop-ref-installer.exe` & `mobile-ref.apk` | Dua file biner referensi yang diberikan pengguna (jangan dihapus atau dimodifikasi; hasil bedah lengkapnya sudah didokumentasikan di `RESEARCH_AND_RE_FINDINGS.md`). |
+| [apps/ferric-desktop/src/app.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/app.rs) | Layout `live_design!`, 9 halaman UI, 6 tab Settings, handler aksi, theme live propagation, zoom, shortcut |
+| [apps/ferric-desktop/src/widgets.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/widgets.rs) | Widget kustom: `FerricAmbientStage` (21-tap blur), `FerricLyricsView` (karaoke spring), `FerricCoverArt`, `FerricBarSlider`, `FerricPlayBtn`, `FerricWinBtn`, `FerricEqGraph`, `FerricQrCanvas` |
+| [apps/ferric-desktop/src/track_list.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/track_list.rs) | `PortalList` daftar lagu tervirtualisasi dengan frosted glass `TrackRow` |
+| [apps/ferric-desktop/src/shell.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/shell.rs) | Win32 subclass (`WM_GETMINMAXINFO`, `WM_NCCALCSIZE`, `WM_NCHITTEST`, `WM_SIZE`, `WM_CLOSE`), DWM Acrylic, System Tray, single-instance guard, RAM trim |
+| [apps/ferric-desktop/src/artwork.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/artwork.rs) | Cache tekstur sampul LRU (`MAX_CACHED_TEXTURES = 128`) + ekstraksi warna aksen adaptif |
+| [apps/ferric-desktop/src/state.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/state.rs) | Enum halaman/filter/sort (`SortField::Recent` default), `BgMessage`, grouping Album/Artis |
+| [vendor/makepad-platform/src/os/windows/](file:///d:/code/project/music%20player/ferric/vendor/makepad-platform/src/os/windows) | Patch lokal `d3d11.rs` (DirectComposition premultiplied-alpha) & `win32_window.rs` (`WM_NCCALCSIZE` + `get_inner_size()`) |
+| [crates/ferric-providers/src/ytmusic.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-providers/src/ytmusic.rs) | Home/Search/Detail/Stream YouTube Music + Smart Multi-Artist Radio Queue |
+| [crates/ferric-core/src/db.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-core/src/db.rs) | SQLite WAL, CRUD lagu/playlist, migrasi pembersihan `prune_ephemeral_discovery_bloat` |
+| [crates/ferric-audio/src/engine.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-audio/src/engine.rs) & [dsp.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-audio/src/dsp.rs) | Dual-deck playback, Bass-Swap 140 Hz, 10-band Biquad EQ, spectrum analyzer |
 
 ---
 
-## 2. Keputusan Arsitektur Kunci yang Sudah Final
+## 3. Invarian Kritis (Jangan Rusak Saat Memperbaiki Bug)
 
-1. **Jangan Pakai Electron, Tauri/WebView, Flutter, maupun `GPUI`:**
-   - WebView/Chromium melanggar target hemat RAM (< 45 MB aktif, < 20 MB background).
-   - `GPUI` (yang dipakai Desktop Reference) tidak memiliki backend Android resmi.
-   - Gunakan **`makepad-widgets = "1.0.0"`** (MIT/Apache-2.0, DirectX 11 di Windows + OpenGL ES/Vulkan di Android, `PortalList` virtualisasi list, 0% CPU/GPU saat idle) — atau `slint = "1.19.0"` (`renderer-femtovg-wgpu`) hanya jika pengguna secara eksplisit meminta bahasa markup `.slint`.
-2. **Jangan Pakai C `libopus` (`symphonia-adapter-libopus`) atau `rodio`/`kira`:**
-   - Gunakan **`symphonia = "0.6.1"` + `symphonia-opus`** (100% safe pure-Rust Opus decoder sehingga cross-compile ke Android NDK bebas masalah C toolchain) + `rubato = "5.1.0"` + `rtrb = "0.3.1"`.
-   - Output audio: `cpal = "0.18.2"` (+ opsional `wasapi = "0.27.0"` Exclusive Mode) di Windows, dan **`oboe = "0.6.1"` dengan `PerformanceMode::PowerSaving`** di Android.
-3. **Sinkronisasi Desktop <-> Mobile Tanpa Biaya Server:**
-   - Gunakan **`iroh = "1.4.1"` + `iroh-blobs` + `mdns-sd = "0.22.0"` + `postcard`**. Satu protokol menangani penemuan instan di Wi-Fi lokal maupun kontrol jarak jauh / streaming koleksi lagu PC rumah ke HP via 4G/5G.
-4. **Kepatuhan Ketat Terkait Spotify, YouTube / YouTube Music, & DRM:**
-   - **Dilarang keras** mengimplementasikan dekripsi Widevine/DRM, pencurian kunci CDM, spoofing `clienttoken` internal Spotify, pembajakan cipher `QuickJS`/`youtubei/v1/player`, bypass anti-bot `po_token`, maupun penghapusan iklan dari stream server terproteksi Spotify/YouTube.
-   - Login akun mendukung **Multi-Akun Resmi via OAuth 2.0 PKCE** dengan skema BYO Client ID:
-     1. **Spotify (Free & Premium):** Menggunakan **Official Spotify Web API (`rspotify = "0.16.1"`)** + sinkronisasi inkremental `snapshot_id`.
-     2. **Google untuk YouTube & YouTube Music (Free & Premium):** Menggunakan **Official YouTube Data API v3 (`oauth2 = "5.0"` + klien REST `reqwest` ringan tanpa crate `google-youtube3` yang berat)** + sinkronisasi inkremental header `ETag` (`304 Not Modified`), playlist `LL` (*Liked Songs*), filter `videoCategoryId = 10`, pembersih judul `yt_metadata_cleaner`, dan jembatan migrasi/sinkronisasi 2 arah **Spotify <-> YouTube Music**.
-   - Seluruh katalog dari kedua akun dipetakan melalui trait `AudioResolver` ke file lokal, streaming P2P dari PC rumah (`iroh-blobs`), server `OpenSubsonic`/`Jellyfin`, katalog musik terbuka bebas royalti, atau plugin resolver eksternal berpasir WASM.
+1. **Jangan tambahkan `WS_CAPTION` di `shell.rs` dan jangan jatuh ke `DefWindowProcW` pada `WM_NCCALCSIZE`:** Penambahan `WS_CAPTION` bersama `DWMSBT_TRANSIENTWINDOW` menyebabkan Windows 11 DWM menggambar tombol caption native ganda (`—`, `❐`, `×`) di atas chrome kustom Ferric.
+2. **Pertahankan patch `vendor/makepad-platform` dan `[patch.crates-io]` di `Cargo.toml`:** Jangan kembali ke `SetLayeredWindowAttributes` (memudarkan teks) atau `get_outer_size()` saat maximize (memotong 18px sisi kanan/bawah).
+3. **Anti-Kedip Kartu:** Pertahankan `MAX_CACHED_TEXTURES = 128` di `artwork.rs` serta setter idempoten di `widgets.rs` dan diff string di `handle_tick`.
+4. **Kebersihan Tabel `Songs`:** Jangan memanggil `db.upsert_tracks` pada `YtmRichHomeLoaded`, `YtmHomeMoreLoaded`, `YtmBrowseDetailLoaded`, `YtmRichSearchCompleted`, atau `RadioLoaded`. Hanya simpan lagu ke SQLite saat dipindai lokal, diputar (`persist_track_to_library`), di-like (`toggle_track_like`), atau dimasukkan ke playlist/sync akun.
+5. **Anggaran RAM (< 100 MB terbuka, < 20 MB tray/minimized):** Jangan menambah loop redraw 60 FPS permanen saat jendela tersembunyi atau idle; pertahankan pemangkasan memori di `WM_SIZE`/`WM_CLOSE` dan pasca-`StreamReady`.
+6. **Zero Nama Merek Kompetitor & Aturan Tag Rilis:** Jangan tulis nama aplikasi kompetitor di kode, UI, commit, atau dokumentasi. Selalu dorong ke `origin main` saja; **jangan buat atau push git tag rilis (`v*`)** tanpa persetujuan eksplisit pengguna setelah mencoba build terpasang.
+7. **Keamanan Penghapusan File:** Jangan gunakan `rm -rf` atau `Remove-Item -Recurse -Force`; gunakan Recycle Bin (`safe-delete.ps1`).
 
 ---
 
-## 3. Langkah Eksekusi Selanjutnya (Siap Dijalankan Agent Berikutnya)
+## 4. Alur Build, Verifikasi & Audit Standar
 
-Jika pengguna meminta untuk **mulai menulis kode (Fase 1)**, jalankan urutan berikut:
-
-1. **Verifikasi Toolchain Lokal:**
-   - Periksa `rustc --version`, `cargo --version`, target `aarch64-linux-android`, serta ketersediaan Android SDK/NDK dan `cargo-makepad`.
-2. **Scaffold Cargo Workspace di `d:\code\project\music player\` (atau subfolder `ferric/`):**
-   ```text
-   Cargo.toml                  # Workspace root dengan [profile.release] lto="fat", codegen-units=1, strip="symbols"
-   crates/
-     ferric-core/              # SQLite WAL, model domain multi-akun, queue, ISRC & YT metadata matcher, event bus
-     ferric-audio/             # Dual-deck symphonia 0.6.1 + rubato 5.1 + biquad EQ + rtrb + cpal/oboe
-     ferric-sync/              # Protokol Ferric Connect (iroh 1.4.1 + mdns-sd + postcard + QR pairing)
-     ferric-providers/         # Spotify & YouTube/YT Music OAuth PKCE, playlist bridge, lofty, OpenSubsonic, LRCLIB, AudioResolver
-     ferric-ui/                # Komponen UI lintas platform Makepad 1.0 (adaptive desktop 3-pane & mobile sheet)
-   apps/
-     ferric-desktop/           # Entrypoint Windows + souvlaki SMTC + tray-icon + minimize VRAM saver
-     ferric-mobile/            # Entrypoint Android + thin Kotlin MediaSessionService + JNI bridge
+1. Format & cek lockfile lokal sebelum push:
+   ```powershell
+   cargo fmt --all
+   cargo fmt --all -- --check
+   cargo metadata --locked --format-version 1 > $null
    ```
-3. **Bangun & Uji Vertikal Slice Pertama (Fase 1):**
-   - Pemindaian folder musik lokal -> simpan di SQLite -> tampilkan di `PortalList` -> putar dengan *gapless + crossfade + 10-band EQ* -> ukur penggunaan RAM di Task Manager Windows (< 35 MB).
+   *(Catatan: `ci-desktop.yml` memiliki `paths-ignore` untuk `docs/**` dan `**.md`, sehingga commit dokumentasi murni tidak memicu rebuild MSI; commit kode Rust otomatis menjalankan full check, Clippy `-D warnings`, unit tests, MSI, ZIP, dan `SHA256SUMS.txt`.)*
+2. Setelah CI hijau (`gh run watch <run_id> --exit-status`):
+   - Unduh artefak (`gh run download <run_id> -D <scratch_dir>`).
+   - Verifikasi **SHA-256 3/3** (`.msi`, `.zip`, dan `ferric.exe` terpasang vs isi ZIP).
+   - Pasang diam-diam: `msiexec /i ferricsetup-v0.1.0.msi /qn /norestart`.
+   - Jalankan verifikasi visual langsung (`--page home/songs/albums/artists/settings`, `--play-first`, RAM open/minimized, `SHADER_ERROR_COUNT=0`) dan inspeksi hasil tangkapan layar sebelum melapor ke pengguna.

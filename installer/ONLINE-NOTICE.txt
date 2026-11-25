@@ -1,16 +1,16 @@
 Ferric — Native Rust Hi-Fi Music Player
 
-Ferric plays your local lossless and lossy audio library (FLAC, MP3, AAC/M4A, ALAC, Ogg, Opus, WAV, AIFF) using 100% native Rust audio decoding (Symphonia + pure-Rust Opus + Rubato resampler + 10-band parametric Biquad EQ).
+Ferric plays your local lossless and lossy audio library (FLAC, MP3, AAC/M4A, ALAC, Ogg, Opus, WAV, AIFF) alongside optional online music discovery using 100% native Rust audio decoding (Symphonia + pure-Rust Opus + Rubato resampler + dual-deck Bass-Swap Automix + 10-band parametric Biquad EQ).
 
 Per-user Windows installation:
-Install Ferric for your Windows user under %LOCALAPPDATA%\Programs\Ferric. No administrator rights are requested. Setup adds a Start menu shortcut, an Add/Remove Programs entry, and an option to launch Ferric on finish. Upgrading preserves your local SQLite library database, equalizer presets, and Appearance/Liquid Glass theme settings.
+Install Ferric for your Windows user under %LOCALAPPDATA%\Programs\Ferric. No administrator rights are requested. Setup adds a Start menu shortcut, an Add/Remove Programs entry, and an option to launch Ferric on finish. Upgrading preserves your local SQLite library database (%LOCALAPPDATA%\LivelyDesk\Ferric\data\ferric.db), equalizer presets, and Appearance / Native Acrylic theme settings.
 
 Network & Privacy Notice:
 - Setup itself makes no network requests.
-- By default, Ferric performs one lightweight HTTPS request on startup to https://api.github.com/repos/Raflyf/Ferric/releases/latest to check for newer stable releases (User-Agent includes only the app version, never library paths or preferences). You can disable automatic startup checks at any time from the update popup or inside Appearance & Updates settings.
+- By default, Ferric performs one lightweight HTTPS request on startup to https://api.github.com/repos/Raflyf/Ferric/releases/latest to check for newer stable releases (User-Agent includes only the app version, never library paths or preferences). You can disable automatic startup checks at any time from the update popup or inside Settings > Storage.
 - Updates are never downloaded or installed silently without your click. When you click Update Now, Ferric downloads SHA256SUMS.txt and ferricsetup-vX.Y.Z.msi exclusively from official GitHub hosts, verifies the exact SHA-256 digest before launching Windows Installer, and deletes temporary files on any mismatch.
-- Optional synced lyrics lookup queries the open community database at lrclib.net only when no local sidecar .lrc file is found.
-- Optional Spotify / YouTube Data API v3 integration uses official Bring-Your-Own OAuth 2.0 PKCE client credentials configured by you.
+- Optional synced lyrics lookup queries open lyrics services (lrclib.net / lyrics.ovh) only when no local sidecar .lrc file or embedded tag lyrics are found.
+- Optional music discovery, OpenSubsonic/Navidrome sync, or Google sign-in operate strictly on user action and store settings locally on your machine.
 
 Unsigned builds prior to code signing activation:
 Keep Windows security protections enabled and obtain releases only from https://github.com/Raflyf/Ferric/releases verified against SHA256SUMS.txt.

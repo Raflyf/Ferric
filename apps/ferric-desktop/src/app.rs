@@ -1107,7 +1107,11 @@ live_design! {
                                 div_top_l = <SolidView> { width: 1, height: 13, margin: { left: 1, right: 4 }, draw_bg: { color: #242634 } }
                                 toggle_left_btn = <FerricIconBtn> {
                                     width: 26, height: 26,
-                                    draw_icon: { svg_path: "M3 5H21V19H3V5ZM5 7V17H9V7H5ZM11 7V17H19V7H11Z" }
+                                    draw_bg: { active: 1.0 }
+                                    draw_icon: {
+                                        svg_path: "M3 5H21V19H3V5ZM5 7V17H9V7H5ZM11 7V17H19V7H11Z"
+                                        color: #F4F4F7
+                                    }
                                 }
                                 nav_back_btn = <FerricIconBtn> {
                                     width: 26, height: 26,
@@ -2827,8 +2831,8 @@ live_design! {
                                     align: { x: 0.5, y: 0.5 }
                                     spacing: 12,
 
-                                    // Hero Cover Art (304x304 rounded with cursor-tracked hover glare & zoom) OR Docked 16:9 Native Video
-                                    <View> {
+                                    // Hero Cover Art (304x304 rounded with cursor-tracked hover glare & zoom) OR Docked 16:9 Rounded Native Video Theater
+                                    fs_media_box = <View> {
                                         width: 316,
                                         height: 316,
                                         flow: Overlay,
@@ -2852,18 +2856,33 @@ live_design! {
                                             height: Fill,
                                             flow: Down,
                                             align: { x: 0.5, y: 0.5 }
-                                            spacing: 8,
+                                            spacing: 10,
 
-                                            video_stage_slot = <View> {
+                                            video_stage_frame = <View> {
                                                 width: Fill,
-                                                height: 196,
+                                                height: 323,
+                                                padding: 4,
                                                 align: { x: 0.5, y: 0.5 }
                                                 show_bg: true,
-                                                draw_bg: { color: #050508 }
-                                                vid_stage_hint_lbl = <Label> {
-                                                    padding: 0,
-                                                    draw_text: { color: #8A8E9E, text_style: <THEME_FONT_MEDIUM> { font_size: 9.0 } }
-                                                    text: "Loading native in-app video clip..."
+                                                draw_bg: {
+                                                    fn pixel(self) -> vec4 {
+                                                        let p = self.pos * self.rect_size;
+                                                        let sdf = Sdf2d::viewport(p);
+                                                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 18.0);
+                                                        sdf.fill_keep(vec4(0.04, 0.05, 0.08, 0.42));
+                                                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.16), 1.0);
+                                                        return sdf.result;
+                                                    }
+                                                }
+                                                video_stage_slot = <View> {
+                                                    width: Fill,
+                                                    height: Fill,
+                                                    align: { x: 0.5, y: 0.5 }
+                                                    vid_stage_hint_lbl = <Label> {
+                                                        padding: 0,
+                                                        draw_text: { color: #D2D6E4, text_style: <THEME_FONT_MEDIUM> { font_size: 9.2 } }
+                                                        text: "Loading native in-app video clip..."
+                                                    }
                                                 }
                                             }
 
@@ -2901,9 +2920,12 @@ live_design! {
                                             }
                                             fs_like_btn = <FerricIconBtn> {
                                                 width: 24, height: 24,
+                                                draw_bg: { acrylic_on: 1.0, light_mode: 0.0 }
                                                 draw_icon: {
                                                     svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
-                                                    color: #FFFFFF70
+                                                    color: #FFFFFFB8,
+                                                    color_hover: #FFFFFF,
+                                                    color_focus: #FFFFFF
                                                 }
                                             }
                                         }
@@ -2939,35 +2961,42 @@ live_design! {
                                         }
                                     }
 
-                                    // Minimalist Centered Transport Controls + Volume right beneath Scrubber
+                                    // Row 1: Symmetrical Centered Transport Controls (Play/Pause dead-center)
                                     <View> {
-                                        width: 312, height: 36, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 6,
+                                        width: 312, height: 38, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 14,
                                         fs_shuffle_btn = <FerricIconBtn> {
                                             width: 28, height: 28,
-                                            draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z", color: #FFFFFF90 }
+                                            draw_bg: { acrylic_on: 1.0, light_mode: 0.0 }
+                                            draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z", color: #FFFFFFB8, color_hover: #FFFFFF, color_focus: #FFFFFF }
                                         }
                                         fs_prev_btn = <FerricIconBtn> {
                                             width: 30, height: 30,
-                                            draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z", color: #FFFFFFCC }
+                                            draw_bg: { acrylic_on: 1.0, light_mode: 0.0 }
+                                            draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z", color: #FFFFFFC8, color_hover: #FFFFFF, color_focus: #FFFFFF }
                                         }
                                         fs_play_pause_btn = <FerricPlayBtn> {
-                                            width: 34, height: 34,
+                                            width: 36, height: 36,
                                         }
                                         fs_next_btn = <FerricIconBtn> {
                                             width: 30, height: 30,
-                                            draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z", color: #FFFFFFCC }
+                                            draw_bg: { acrylic_on: 1.0, light_mode: 0.0 }
+                                            draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z", color: #FFFFFFC8, color_hover: #FFFFFF, color_focus: #FFFFFF }
                                         }
                                         fs_repeat_btn = <FerricRepeatBtn> {
                                             width: 28, height: 28,
-                                            draw_bg: { fg_col: #FFFFFF90, fg_hover: #FFFFFF, acrylic_on: 1.0 }
+                                            draw_bg: { fg_col: #FFFFFFB8, fg_hover: #FFFFFF, acrylic_on: 1.0, light_mode: 0.0 }
                                         }
-                                        <View> { width: 6, height: 1 }
+                                    }
+
+                                    // Row 2: Dedicated Centered Volume Bar directly beneath Transport for exact symmetry
+                                    <View> {
+                                        width: 232, height: 26, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 8,
                                         fs_vol_mute_btn = <FerricVolumeBtn> {
                                             width: 26, height: 26,
-                                            draw_bg: { fg_col: #FFFFFF90, fg_hover: #FFFFFF, acrylic_on: 1.0 }
+                                            draw_bg: { fg_col: #FFFFFFB8, fg_hover: #FFFFFF, acrylic_on: 1.0, light_mode: 0.0 }
                                         }
                                         fs_vol_slider = <FerricBarSlider> {
-                                            width: 56, height: 18, min: 0.0, max: 1.0, value: 0.85,
+                                            width: Fill, height: 18, min: 0.0, max: 1.0, value: 0.85,
                                             wheel_adjust: true,
                                             wheel_step: 0.05
                                             draw_bg: {
@@ -3870,12 +3899,7 @@ impl App {
             cx,
             live! { draw_text: { text_style: { font_size: ((8.2 * z).max(6.8)) } } },
         );
-        self.ui
-            .view(id!(fs_left_card))
-            .apply_over(cx, live! { width: (410.0 * z) });
-        self.ui
-            .ferric_cover_art(id!(fs_art))
-            .apply_over(cx, live! { width: (304.0 * z), height: (304.0 * z) });
+        self.sync_fullscreen_media_layout(cx);
 
         for nid in [
             id!(nav_home),
@@ -4118,16 +4142,16 @@ impl App {
                 height: (slot.size.y as f32 * scale).round() as i32,
             })
         } else {
-            // Fallback geometry matching fs_left_card's 16:9 video_stage_slot inside Fullscreen Lyrics Mode
-            let left_px = (48.0 * scale).round() as i32;
+            // Fallback geometry matching fs_left_card's expanded 16:9 video theater inside Fullscreen Lyrics Mode
+            let left_px = (64.0 * scale).round() as i32;
             let top_px = (128.0 * scale).round() as i32;
-            let width_px = (412.0 * scale).round() as i32;
-            let height_px = (234.0 * scale).round() as i32;
+            let width_px = (560.0 * scale).round() as i32;
+            let height_px = (315.0 * scale).round() as i32;
             Some(VideoViewportRect {
                 x: client.left + left_px,
                 y: client.top + top_px,
-                width: width_px.min((client.width - left_px * 2).max(240)),
-                height: height_px.min((client.height - top_px - 160).max(160)),
+                width: width_px.min((client.width - left_px * 2).max(280)),
+                height: height_px.min((client.height - top_px - 180).max(160)),
             })
         }
     }
@@ -4228,6 +4252,35 @@ impl App {
         }
     }
 
+    fn sync_fullscreen_media_layout(&self, cx: &mut Cx) {
+        let z = self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
+        if self.video_open {
+            let card_w = (600.0 * z).min(680.0);
+            let box_w = (568.0 * z).min(640.0);
+            let frame_h = (box_w * 9.0 / 16.0).round() + 8.0;
+            let box_h = frame_h + 64.0;
+            self.ui
+                .view(id!(fs_left_card))
+                .apply_over(cx, live! { width: (card_w) });
+            self.ui
+                .view(id!(fs_media_box))
+                .apply_over(cx, live! { width: (box_w), height: (box_h) });
+            self.ui
+                .view(id!(video_stage_frame))
+                .apply_over(cx, live! { height: (frame_h) });
+        } else {
+            self.ui
+                .view(id!(fs_left_card))
+                .apply_over(cx, live! { width: (410.0 * z) });
+            self.ui
+                .view(id!(fs_media_box))
+                .apply_over(cx, live! { width: (316.0 * z), height: (316.0 * z) });
+            self.ui
+                .ferric_cover_art(id!(fs_art))
+                .apply_over(cx, live! { width: (304.0 * z), height: (304.0 * z) });
+        }
+    }
+
     fn open_native_video_stage(&mut self, cx: &mut Cx) {
         let Some(cur) = self.queue.current().cloned() else {
             self.show_toast(cx, "Play a song first to watch its video clip");
@@ -4238,6 +4291,7 @@ impl App {
             self.set_fullscreen(cx, true);
         }
         self.video_open = true;
+        self.sync_fullscreen_media_layout(cx);
         self.ui.view(id!(fs_art_wrap)).set_visible(cx, false);
         self.ui.view(id!(fs_video_wrap)).set_visible(cx, true);
         self.style_chip_btn(cx, id!(fs_mode_art_btn), false);
@@ -4253,6 +4307,7 @@ impl App {
         if self.video_track_id.as_deref() == Some(cur.id.as_str()) && !self.video_streams.is_empty()
         {
             self.load_selected_video_quality(cx);
+            self.last_video_sync = None;
             self.ui.redraw(cx);
             return;
         }
@@ -4331,6 +4386,7 @@ impl App {
 
     fn close_native_video_stage(&mut self, cx: &mut Cx) {
         self.video_open = false;
+        self.sync_fullscreen_media_layout(cx);
         self.ui.view(id!(fs_video_wrap)).set_visible(cx, false);
         self.ui.view(id!(fs_art_wrap)).set_visible(cx, true);
         self.style_chip_btn(cx, id!(fs_mode_art_btn), true);
@@ -4726,6 +4782,26 @@ impl App {
         self.ui.redraw(cx);
     }
 
+    fn sync_sidebar_toggle_buttons(&self, cx: &mut Cx) {
+        let pal = self.adaptive_palette();
+        let muted = rgba_to_vec4(pal.icon_idle);
+        let bright = rgba_to_vec4(pal.text_primary);
+        self.ui.button(id!(toggle_left_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (if self.left_sidebar_open { 1.0 } else { 0.0 }) }
+                draw_icon: { color: (if self.left_sidebar_open { bright } else { muted }) }
+            },
+        );
+        self.ui.button(id!(toggle_right_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (if self.right_sidebar_open { 1.0 } else { 0.0 }) }
+                draw_icon: { color: (if self.right_sidebar_open { bright } else { muted }) }
+            },
+        );
+    }
+
     fn set_right_sidebar(&mut self, cx: &mut Cx, open: bool, lyrics_tab: bool) {
         let z = self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
         self.right_sidebar_open = open;
@@ -4748,14 +4824,7 @@ impl App {
         let pal = self.adaptive_palette();
         let accent = rgba_to_vec4(pal.accent);
         let muted = rgba_to_vec4(pal.icon_idle);
-        let bright = rgba_to_vec4(pal.text_primary);
-        self.ui.button(id!(toggle_right_btn)).apply_over(
-            cx,
-            live! {
-                draw_bg: { active: (if open { 1.0 } else { 0.0 }) }
-                draw_icon: { color: (if open { bright } else { muted }) }
-            },
-        );
+        self.sync_sidebar_toggle_buttons(cx);
         self.ui.button(id!(bar_lyrics_btn)).apply_over(
             cx,
             live! { draw_icon: { color: (if open && lyrics_tab { accent } else { muted }) } },
@@ -4798,6 +4867,7 @@ impl App {
             acr,
         );
         if open {
+            self.sync_fullscreen_media_layout(cx);
             self.sync_fullscreen_backdrop_artwork(cx);
             self.fs_reveal_t = 0.0;
             self.ui
@@ -4951,8 +5021,10 @@ impl App {
         } else {
             0.0_f32
         };
-        let fs_muted = vec4(0.604, 0.612, 0.659, 1.0);
-        let fs_hover = vec4(0.957, 0.957, 0.969, 1.0);
+        // Fullscreen always sits over its luminous liquid-aurora backdrop -> unified translucent white
+        // idle icons and frosted-glass active pills across Shuffle, Prev, Next, Repeat, Volume, and Like.
+        let fs_muted = vec4(1.0, 1.0, 1.0, 0.72);
+        let fs_hover = vec4(1.0, 1.0, 1.0, 1.0);
 
         let is_muted = self.session_state.volume < 0.01;
         let vol_level_mode = if is_muted {
@@ -5011,7 +5083,7 @@ impl App {
         self.ui.button(id!(fs_shuffle_btn)).apply_over(
             cx,
             live! {
-                draw_bg: { active: (shuf_act) }
+                draw_bg: { active: (shuf_act), acrylic_on: 1.0, light_mode: 0.0 }
                 draw_icon: { color: (fs_shuf_col), color_hover: (fs_shuf_hov), color_focus: (fs_shuf_hov) }
             },
         );
@@ -5156,14 +5228,18 @@ impl App {
         let fs_like_col = if is_liked {
             raw_accent
         } else {
-            vec4(0.439, 0.451, 0.510, 1.0)
+            vec4(1.0, 1.0, 1.0, 0.72)
         };
         self.ui
             .button(id!(np_like_btn))
             .apply_over(cx, live! { draw_icon: { color: (like_col) } });
-        self.ui
-            .button(id!(fs_like_btn))
-            .apply_over(cx, live! { draw_icon: { color: (fs_like_col) } });
+        self.ui.button(id!(fs_like_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { acrylic_on: 1.0, light_mode: 0.0 }
+                draw_icon: { color: (fs_like_col), color_hover: #FFFFFF, color_focus: #FFFFFF }
+            },
+        );
         self.sync_transport_mode_icons(cx);
         self.ui.button(id!(rs_radio_btn)).apply_over(
             cx,
@@ -7471,10 +7547,7 @@ impl App {
             cx,
             live! { draw_icon: { color: (if can_f { text_primary } else { disabled_nav }) } },
         );
-        self.ui.button(id!(toggle_right_btn)).apply_over(
-            cx,
-            live! { draw_icon: { color: (if self.right_sidebar_open { text_primary } else { icon_idle }) } },
-        );
+        self.sync_sidebar_toggle_buttons(cx);
 
         // Window chrome controls (min / max / close) & Play/Pause button
         for win_btn_id in [id!(win_min_btn), id!(win_max_btn), id!(win_close_btn)] {
@@ -8336,21 +8409,13 @@ impl App {
         let Some(audio) = &self.audio else {
             return;
         };
-        let currently_playing = audio.telemetry().is_playing;
-        if currently_playing && self.dsp.crossfade_ms >= 500 {
-            audio.send(EngineCommand::CrossfadeToTrack {
-                path,
-                replay_gain_db,
-                fallback_duration_ms,
-                overlap_ms: self.dsp.crossfade_ms.clamp(1_200, 3_000),
-            });
-        } else {
-            audio.send(EngineCommand::LoadAndPlayTrack {
-                path,
-                replay_gain_db,
-                fallback_duration_ms,
-            });
-        }
+        // Manual track switches always start cleanly without crossfade; crossfade is exclusively
+        // triggered automatically by the dual-deck engine when a track finishes naturally.
+        audio.send(EngineCommand::LoadAndPlayTrack {
+            path,
+            replay_gain_db,
+            fallback_duration_ms,
+        });
     }
 
     fn play_track(&mut self, cx: &mut Cx, track: Track) {
@@ -8467,17 +8532,26 @@ impl App {
         }
         self.queue.set_track_liked(&saved.id, next_liked);
         if self.queue.current().map(|t| t.id.as_str()) == Some(saved.id.as_str()) {
-            let accent = self.current_accent();
+            let pal = self.adaptive_palette();
+            let accent = rgba_to_vec4(pal.accent);
+            let raw_accent = self.current_accent();
             let like_col = if next_liked {
                 accent
             } else {
-                vec4(0.439, 0.451, 0.510, 1.0)
+                rgba_to_vec4(pal.icon_muted)
             };
-            for lbtn in [id!(np_like_btn), id!(fs_like_btn)] {
-                self.ui
-                    .button(lbtn)
-                    .apply_over(cx, live! { draw_icon: { color: (like_col) } });
-            }
+            let fs_like_col = if next_liked {
+                raw_accent
+            } else {
+                vec4(1.0, 1.0, 1.0, 0.72)
+            };
+            self.ui
+                .button(id!(np_like_btn))
+                .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+            self.ui.button(id!(fs_like_btn)).apply_over(
+                cx,
+                live! { draw_bg: { acrylic_on: 1.0, light_mode: 0.0 }, draw_icon: { color: (fs_like_col) } },
+            );
         }
         self.rebuild_library_views(cx);
         next_liked
@@ -8521,7 +8595,9 @@ impl App {
             .button(id!(codec_pill_btn))
             .set_text(cx, &track.quality_badge());
 
-        let accent = self.current_accent();
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
+        let raw_accent = self.current_accent();
         let is_liked = self
             .all_tracks
             .iter()
@@ -8530,13 +8606,20 @@ impl App {
         let like_col = if is_liked {
             accent
         } else {
-            vec4(0.439, 0.451, 0.510, 1.0)
+            rgba_to_vec4(pal.icon_muted)
         };
-        for lbtn in [id!(np_like_btn), id!(fs_like_btn)] {
-            self.ui
-                .button(lbtn)
-                .apply_over(cx, live! { draw_icon: { color: (like_col) } });
-        }
+        let fs_like_col = if is_liked {
+            raw_accent
+        } else {
+            vec4(1.0, 1.0, 1.0, 0.72)
+        };
+        self.ui
+            .button(id!(np_like_btn))
+            .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+        self.ui.button(id!(fs_like_btn)).apply_over(
+            cx,
+            live! { draw_bg: { acrylic_on: 1.0, light_mode: 0.0 }, draw_icon: { color: (fs_like_col) } },
+        );
         self.ui
             .ferric_play_btn(id!(play_pause_btn))
             .set_playing(cx, true);
@@ -10160,10 +10243,14 @@ impl App {
                         .set_text(cx, "Sleep Timer: Stopped after song");
                 } else if let Some(next) = self.queue.next_track().cloned() {
                     if snap.auto_transitioned {
+                        self.last_pos_txt.clear();
+                        self.last_dur_txt.clear();
+                        self.last_codec_txt.clear();
                         self.sync_next_deck_to_engine();
                         self.prefetch_next_online_track();
                         self.maybe_fetch_radio_for_track(&next, false);
                         self.update_now_playing_metadata(cx, &next);
+                        self.update_lyrics_display(cx, snap.position_ms);
                     } else {
                         self.play_track(cx, next);
                     }
@@ -10398,6 +10485,7 @@ impl App {
                 self.ui.view(id!(left_sidebar)).set_visible(cx, true);
                 self.ui.view(id!(left_divider)).set_visible(cx, true);
             }
+            self.sync_sidebar_toggle_buttons(cx);
             self.start_motion(cx);
             self.sync_video_bounds(cx);
             self.ui.redraw(cx);

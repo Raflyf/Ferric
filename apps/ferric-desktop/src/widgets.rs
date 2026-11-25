@@ -2498,11 +2498,12 @@ pub struct DrawLyricsText {
     accent_col: Vec4,
 }
 
-/// 60 FPS GPU interactive synced lyrics stage:
-/// - Staggered bottom-to-top critically-damped wave cascade on line change
-/// - True SDF optical depth-of-field blur on inactive lines, smoothly un-blurring on hover
+/// Smooth GPU interactive synced lyrics stage:
+/// - Unified C1-continuous critically-damped glide (zero bounce, zero stutter, native VSync)
+/// - Pre-measured invariant line heights so lines never jump or clip mid-scroll
+/// - Smooth optical SDF depth-of-field softening on inactive lines, un-blurring on hover
 /// - Frosted cursor-tracked glass hover pill + timestamp hint + click-any-line-to-seek
-/// - Continuous 60 FPS sub-pixel word-by-word karaoke highlight sweep across wrapped rows
+/// - Continuous sub-pixel word-by-word karaoke highlight sweep across wrapped rows
 #[derive(Live, LiveHook, Widget)]
 pub struct FerricLyricsView {
     #[walk]
@@ -2533,12 +2534,6 @@ pub struct FerricLyricsView {
     focus_vals: Vec<f32>,
     #[rust]
     hover_vals: Vec<f32>,
-    #[rust]
-    line_scroll_y: Vec<f64>,
-    #[rust]
-    line_scroll_vel: Vec<f64>,
-    #[rust]
-    line_delay: Vec<f64>,
     #[rust]
     scroll_y: f64,
     #[rust]
@@ -2573,6 +2568,10 @@ pub struct FerricLyricsView {
     line_rects: Vec<(usize, Rect)>,
     #[rust]
     line_heights: Vec<f64>,
+    #[rust]
+    heights_measured_w: f32,
+    #[rust]
+    heights_measured_fs: f32,
     #[rust]
     last_viewport_h: f64,
     #[rust]
@@ -2628,29 +2627,6 @@ impl FerricLyricsView {
         self.target_scroll_y = desired.min(max_scroll);
     }
 
-    fn trigger_bottom_up_cascade(&mut self, old_idx: usize, new_idx: usize) {
-        if self.lines.is_empty() || old_idx == new_idx {
-            return;
-        }
-        let step_delay = if self.compact { 0.018_f64 } else { 0.032_f64 };
-        let moving_down = new_idx > old_idx;
-        for i in 0..self.line_delay.len() {
-            let rel = i as isize - new_idx as isize;
-            if (-4..=8).contains(&rel) {
-                // True staggered wave: lines keep their exact position and peel smoothly into place
-                // one by one without any downward teleport kick.
-                let rank = if moving_down {
-                    (rel + 2).clamp(0, 7) as f64
-                } else {
-                    (5 - rel).clamp(0, 7) as f64
-                };
-                self.line_delay[i] = rank * step_delay;
-            } else {
-                self.line_delay[i] = 0.0;
-            }
-        }
-    }
-
     fn wake_anim(&mut self, cx: &mut Cx) {
         self.anim_frame = cx.new_next_frame();
         self.area.redraw(cx);
@@ -2690,8 +2666,8 @@ impl Widget for FerricLyricsView {
                 self.recompute_target_scroll();
             }
 
-            // Analytical critically-damped spring (C1-continuous, zero overshoot, zero jitter)
-            let omega = if self.compact { 10.5_f64 } else { 7.8_f64 };
+            // Pure analytical critically-damped glide (C1-continuous, monotonic, zero overshoot/bounce)
+            let omega = if self.compact { 8.8_f64 } else { 6.4_f64 };
             let exp_k = (-omega * dt).exp();
             {
                 let x = self.scroll_y - self.target_scroll_y;
@@ -2702,40 +2678,14 @@ impl Widget for FerricLyricsView {
                 self.scroll_vel = next_v;
             }
 
-            let mut max_line_err = 0.0_f64;
-            let mut any_delay = false;
-            for i in 0..self.line_scroll_y.len() {
-                if self.line_delay[i] > 0.0 {
-                    any_delay = true;
-                    self.line_delay[i] = (self.line_delay[i] - dt).max(0.0);
-                    // Preserve momentum smoothly during stagger lead-in
-                    self.line_scroll_y[i] += self.line_scroll_vel[i] * dt * 0.45;
-                    self.line_scroll_vel[i] *= (-omega * dt * 0.5).exp();
-                } else {
-                    let x = self.line_scroll_y[i] - self.target_scroll_y;
-                    let v = self.line_scroll_vel[i];
-                    let next_x = (x + (v + omega * x) * dt) * exp_k;
-                    let next_v = (v - omega * (v + omega * x) * dt) * exp_k;
-                    self.line_scroll_y[i] = self.target_scroll_y + next_x;
-                    self.line_scroll_vel[i] = next_v;
-                }
-                let err = (self.line_scroll_y[i] - self.target_scroll_y).abs();
-                if err < 0.08 && self.line_scroll_vel[i].abs() < 0.35 && self.line_delay[i] == 0.0 {
-                    self.line_scroll_y[i] = self.target_scroll_y;
-                    self.line_scroll_vel[i] = 0.0;
-                } else {
-                    max_line_err = max_line_err.max(err);
-                }
-            }
-
-            let focus_k = (1.0 - (-9.5 * dt).exp()) as f32;
-            let hover_k = (1.0 - (-14.0 * dt).exp()) as f32;
+            let focus_k = (1.0 - (-8.5 * dt).exp()) as f32;
+            let hover_k = (1.0 - (-13.0 * dt).exp()) as f32;
             let mut max_err = 0.0_f32;
             for (i, fv) in self.focus_vals.iter_mut().enumerate() {
                 let target = if i == self.active_idx { 1.0 } else { 0.0 };
                 let diff = target - *fv;
                 *fv += diff * focus_k;
-                if diff.abs() < 0.003 {
+                if diff.abs() < 0.002 {
                     *fv = target;
                 } else {
                     max_err = max_err.max(diff.abs());
@@ -2749,7 +2699,7 @@ impl Widget for FerricLyricsView {
                 };
                 let diff = target - *hv;
                 *hv += diff * hover_k;
-                if diff.abs() < 0.003 {
+                if diff.abs() < 0.002 {
                     *hv = target;
                 } else {
                     max_err = max_err.max(diff.abs());
@@ -2758,11 +2708,8 @@ impl Widget for FerricLyricsView {
 
             let scroll_err = (self.target_scroll_y - self.scroll_y).abs();
             let waiting_manual = self.manual_scroll_until > nf.time;
-            let in_transition = any_delay
-                || scroll_err >= 0.15
-                || self.scroll_vel.abs() >= 0.5
-                || max_line_err >= 0.12
-                || max_err >= 0.004;
+            let in_transition =
+                scroll_err >= 0.12 || self.scroll_vel.abs() >= 0.4 || max_err >= 0.003;
             let keep_alive = self.is_playing || waiting_manual || in_transition;
             if !keep_alive {
                 self.scroll_y = self.target_scroll_y;
@@ -2770,12 +2717,12 @@ impl Widget for FerricLyricsView {
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
-            // Pace redraws cleanly on high-Hz monitors: ~60 FPS during active line/hover motion,
-            // ~30 FPS for steady-state karaoke word sweep (zero visual loss, ~75% less GPU work on 144 Hz).
-            let min_draw_dt = if in_transition { 0.0155 } else { 0.033 };
-            if !keep_alive
+            // Native VSync redraws during scroll/focus transitions eliminate 144 Hz frame-pacing judder;
+            // gentle 60 Hz pacing during static karaoke sweep keeps GPU overhead minimal.
+            if in_transition
+                || !keep_alive
                 || self.last_draw_time <= 0.0
-                || (nf.time - self.last_draw_time) >= min_draw_dt
+                || (nf.time - self.last_draw_time) >= 0.016
             {
                 self.last_draw_time = nf.time;
                 self.area.redraw(cx);
@@ -2789,7 +2736,6 @@ impl Widget for FerricLyricsView {
                 self.target_scroll_y =
                     (self.target_scroll_y + fs.scroll.y * 1.15).clamp(0.0, max_s);
                 self.manual_scroll_until = fs.time + 3.6;
-                self.line_delay.fill(0.0);
                 self.wake_anim(cx);
             }
             Hit::FingerHoverIn(fh) | Hit::FingerHoverOver(fh) => {
@@ -2834,12 +2780,10 @@ impl Widget for FerricLyricsView {
                     .find(|(_, r)| r.contains(fe.abs))
                     .and_then(|(idx, _)| self.lines.get(*idx).map(|(ts_ms, _)| (*idx, *ts_ms)));
                 if let Some((idx, ts_ms)) = clicked {
-                    let old_idx = self.active_idx;
                     self.active_idx = idx;
                     self.playback_pos_ms = ts_ms;
                     self.playback_sync_time = self.last_time;
                     self.manual_scroll_until = 0.0;
-                    self.trigger_bottom_up_cascade(old_idx, idx);
                     self.recompute_target_scroll();
                     self.wake_anim(cx);
                     cx.widget_action(uid, &scope.path, FerricLyricsAction::SeekMs(ts_ms));
@@ -2927,23 +2871,45 @@ impl Widget for FerricLyricsView {
         let stable_wrap_w = ((max_w - max_x_shift) / max_scale).max(52.0);
         let est_pos_ms = self.estimated_pos_ms();
         let line_count = self.lines.len();
-        if self.line_heights.len() != line_count {
-            self.line_heights = vec![0.0; line_count];
-        }
-        if self.line_scroll_y.len() != line_count {
-            self.line_scroll_y = vec![self.scroll_y; line_count];
-            self.line_scroll_vel = vec![0.0; line_count];
-            self.line_delay = vec![0.0; line_count];
+        let needs_measure = self.line_heights.len() != line_count
+            || (self.heights_measured_w - stable_wrap_w).abs() > 1.5
+            || (self.heights_measured_fs - base_fs).abs() > 0.1;
+        if needs_measure {
+            let was_empty = self.heights_measured_w <= 1.0;
+            self.line_heights.resize(line_count, 0.0);
+            self.draw_line.text_style.font_size = base_fs;
+            self.draw_line.font_scale = 1.0;
+            for ((_, raw), slot) in self.lines.iter().zip(self.line_heights.iter_mut()) {
+                let txt = raw.trim();
+                let s = if txt.is_empty() { "···" } else { txt };
+                let laid = self.draw_line.layout(
+                    cx,
+                    0.0,
+                    0.0,
+                    Some(stable_wrap_w),
+                    true,
+                    Align::default(),
+                    s,
+                );
+                *slot = (laid.size_in_lpxs.height * max_scale) as f64;
+            }
+            self.heights_measured_w = stable_wrap_w;
+            self.heights_measured_fs = base_fs;
+            if self.manual_scroll_until == 0.0 {
+                self.recompute_target_scroll();
+                if was_empty {
+                    self.scroll_y = self.target_scroll_y;
+                    self.scroll_vel = 0.0;
+                }
+            }
         }
 
         let mut base_y = 0.0_f64;
-        let mut heights_updated = false;
 
         for i in 0..line_count {
             let (ts_ms, ref text) = self.lines[i];
             let focus = self.focus_vals.get(i).copied().unwrap_or(0.0);
             let hover_v = self.hover_vals.get(i).copied().unwrap_or(0.0);
-            let line_scroll = self.line_scroll_y.get(i).copied().unwrap_or(self.scroll_y);
             let is_pressed = self.pressed_idx == Some(i);
 
             let cached_h = self.line_heights[i];
@@ -2952,7 +2918,7 @@ impl Widget for FerricLyricsView {
             } else {
                 base_step - gap
             };
-            let draw_y = rect.pos.y + top_pad + base_y - line_scroll;
+            let draw_y = rect.pos.y + top_pad + base_y - self.scroll_y;
 
             // Cull lines far outside viewport while preserving exact cumulative height
             if draw_y + est_h < rect.pos.y - 120.0 {
@@ -3042,12 +3008,12 @@ impl Widget for FerricLyricsView {
                 )
             };
 
-            let stable_h = (laid.size_in_lpxs.height * max_scale) as f64;
+            let stable_h = if cached_h > 1.0 {
+                cached_h
+            } else {
+                (laid.size_in_lpxs.height * max_scale) as f64
+            };
             let actual_h = (laid.size_in_lpxs.height * scale) as f64;
-            if (self.line_heights[i] - stable_h).abs() > 1.0 {
-                self.line_heights[i] = stable_h;
-                heights_updated = true;
-            }
             let text_y = draw_y + (stable_h - actual_h) * 0.5;
 
             let pill_pad_y = if self.compact { 5.0 } else { 12.0 };
@@ -3119,12 +3085,22 @@ impl Widget for FerricLyricsView {
             } else {
                 vec4(1.0, 1.0, 1.0, alpha)
             };
-            let dim_active_col = if use_dark_ink {
-                vec4(0.09, 0.11, 0.17, (0.76 * edge_fade).clamp(0.0, 1.0))
+            // Smoothly blend dim karaoke alpha from inactive alpha into focused dim alpha so there is zero pop
+            let k_blend = ((focus - 0.35) / 0.45).clamp(0.0, 1.0);
+            let target_dim_a = if use_dark_ink {
+                0.76 * edge_fade
             } else if self.compact {
-                vec4(0.96, 0.97, 1.0, (0.78 * edge_fade).clamp(0.0, 1.0))
+                0.78 * edge_fade
             } else {
-                vec4(0.94, 0.95, 1.0, (0.48 * edge_fade).clamp(0.0, 1.0))
+                0.50 * edge_fade
+            };
+            let smooth_dim_a = (alpha + (target_dim_a - alpha) * k_blend).clamp(0.0, 1.0);
+            let dim_active_col = if use_dark_ink {
+                vec4(0.09, 0.11, 0.17, smooth_dim_a)
+            } else if self.compact {
+                vec4(0.96, 0.97, 1.0, smooth_dim_a)
+            } else {
+                vec4(0.94, 0.95, 1.0, smooth_dim_a)
             };
 
             let draw_rect = if use_active_draw {
@@ -3134,7 +3110,11 @@ impl Widget for FerricLyricsView {
                 self.draw_active.sweep_y_min = sweep_y_min;
                 self.draw_active.sweep_y_max = sweep_y_max;
                 self.draw_active.dim_col = dim_active_col;
-                self.draw_active.glow_amt = if use_dark_ink { 0.0 } else { focus * edge_fade };
+                self.draw_active.glow_amt = if use_dark_ink {
+                    0.0
+                } else {
+                    k_blend * edge_fade
+                };
                 self.draw_active.accent_col = accent;
                 self.draw_active.color = bright_col;
                 self.draw_active.draw_walk_laidout(
@@ -3203,10 +3183,6 @@ impl Widget for FerricLyricsView {
             base_y += stable_h + gap;
         }
 
-        if heights_updated && self.manual_scroll_until == 0.0 {
-            self.recompute_target_scroll();
-        }
-
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
@@ -3226,10 +3202,9 @@ impl FerricLyricsViewRef {
             inner.lines.clear();
             inner.focus_vals.clear();
             inner.hover_vals.clear();
-            inner.line_scroll_y.clear();
-            inner.line_scroll_vel.clear();
-            inner.line_delay.clear();
             inner.line_heights.clear();
+            inner.heights_measured_w = 0.0;
+            inner.heights_measured_fs = 0.0;
             inner.empty_msg = msg.to_string();
             inner.active_idx = 0;
             inner.scroll_y = 0.0;
@@ -3245,10 +3220,9 @@ impl FerricLyricsViewRef {
             inner.lines = items;
             inner.focus_vals = vec![0.0; n];
             inner.hover_vals = vec![0.0; n];
-            inner.line_scroll_y = vec![0.0; n];
-            inner.line_scroll_vel = vec![0.0; n];
-            inner.line_delay = vec![0.0; n];
-            inner.line_heights = vec![0.0; n];
+            inner.line_heights.clear();
+            inner.heights_measured_w = 0.0;
+            inner.heights_measured_fs = 0.0;
             if n > 0 {
                 inner.focus_vals[0] = 1.0;
             }
@@ -3257,9 +3231,6 @@ impl FerricLyricsViewRef {
             inner.scroll_vel = 0.0;
             inner.target_scroll_y = 0.0;
             inner.manual_scroll_until = 0.0;
-            inner.recompute_target_scroll();
-            inner.scroll_y = inner.target_scroll_y;
-            inner.line_scroll_y = vec![inner.scroll_y; n];
             inner.wake_anim(cx);
         }
     }
@@ -3271,9 +3242,7 @@ impl FerricLyricsViewRef {
             }
             let clamped = idx.min(inner.lines.len() - 1);
             if clamped != inner.active_idx {
-                let old_idx = inner.active_idx;
                 inner.active_idx = clamped;
-                inner.trigger_bottom_up_cascade(old_idx, clamped);
                 if inner.last_time >= inner.manual_scroll_until {
                     inner.recompute_target_scroll();
                 }
@@ -3305,8 +3274,7 @@ impl FerricLyricsViewRef {
             inner.ui_zoom = ui_zoom.clamp(0.65, 1.40);
             inner.light_mode = light_mode;
             if changed {
-                inner.line_heights.fill(0.0);
-                inner.recompute_target_scroll();
+                inner.heights_measured_fs = 0.0;
                 inner.area.redraw(cx);
             }
         }

@@ -24,6 +24,11 @@ const OP_PONG: u32 = 4;
 /// Enables zero-config 1-toggle Rich Presence out of the box without manual setup.
 pub const BUILTIN_DISCORD_APP_ID: &str = "1575176866413940806";
 
+/// Public HTTPS URL for Ferric's brand icon used as the Rich Presence badge (`small_image`)
+/// and local-track cover fallback (`large_image`).
+pub const FERRIC_BRAND_ICON_URL: &str =
+    "https://raw.githubusercontent.com/Raflyf/Ferric/main/apps/ferric-desktop/resources/ferric.png";
+
 pub fn effective_client_id(cfg: &DiscordRpcSettings) -> &str {
     let custom = cfg.client_id.trim();
     if is_valid_client_id(custom) {
@@ -192,7 +197,13 @@ pub fn build_set_activity_payload(
                     "type": 2,
                     "status_display_type": 0,
                     "details": if track.is_playing { "Listening to music" } else { "Paused" },
-                    "state": "Ferric Hi-Fi Player"
+                    "state": "Ferric Hi-Fi Player",
+                    "assets": {
+                        "large_image": FERRIC_BRAND_ICON_URL,
+                        "large_text": "Ferric Hi-Fi",
+                        "small_image": FERRIC_BRAND_ICON_URL,
+                        "small_text": if track.is_playing { "Ferric Hi-Fi" } else { "Paused · Ferric" }
+                    }
                 }
             },
             "nonce": format!("ferric-{nonce}")
@@ -264,17 +275,21 @@ pub fn build_set_activity_payload(
     }
 
     let mut assets = serde_json::Map::new();
-    if cfg.show_cover_art
+    let cover_img = if cfg.show_cover_art
         && let Some(raw_url) = track.cover_url.as_deref()
         && let Some(clean_url) = normalize_cover_url(raw_url)
     {
-        assets.insert("large_image".to_string(), json!(clean_url));
-    }
-    if !album.is_empty() && album.len() >= 2 {
+        clean_url
+    } else {
+        FERRIC_BRAND_ICON_URL.to_string()
+    };
+    assets.insert("large_image".to_string(), json!(cover_img));
+    if !album.is_empty() && album.len() >= 2 && !album.eq_ignore_ascii_case(track.title.trim()) {
         assets.insert("large_text".to_string(), json!(album));
     } else {
-        assets.insert("large_text".to_string(), json!("Ferric"));
+        assets.insert("large_text".to_string(), json!("Ferric Hi-Fi"));
     }
+    assets.insert("small_image".to_string(), json!(FERRIC_BRAND_ICON_URL));
     assets.insert(
         "small_text".to_string(),
         json!(if track.is_playing {
@@ -283,9 +298,7 @@ pub fn build_set_activity_payload(
             "Paused · Ferric"
         }),
     );
-    if !assets.is_empty() {
-        activity.insert("assets".to_string(), Value::Object(assets));
-    }
+    activity.insert("assets".to_string(), Value::Object(assets));
 
     json!({
         "cmd": "SET_ACTIVITY",
@@ -594,6 +607,10 @@ mod tests {
         assert_eq!(
             payload["args"]["activity"]["assets"]["large_image"],
             "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj"
+        );
+        assert_eq!(
+            payload["args"]["activity"]["assets"]["small_image"],
+            FERRIC_BRAND_ICON_URL
         );
     }
 

@@ -326,6 +326,7 @@ struct ActiveCrossfade {
     total_frames: u64,
     curve: FadeCurve,
     is_manual_switch: bool,
+    ui_handed_off: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1074,6 +1075,7 @@ impl DecodeRuntime {
                     total_frames: ms_to_frames(overlap_ms.min(6_000), out_rate).max(1),
                     curve: self.dsp.fade_curve,
                     is_manual_switch: true,
+                    ui_handed_off: true,
                 });
                 telemetry.is_crossfading.store(true, Ordering::Relaxed);
                 telemetry.is_playing.store(true, Ordering::Release);
@@ -1096,7 +1098,8 @@ impl DecodeRuntime {
     ) {
         match path {
             Some(p) => {
-                if let Some(existing_b) = &self.deck_b
+                if self.crossfade_state.is_none()
+                    && let Some(existing_b) = &self.deck_b
                     && existing_b.path == p
                 {
                     self.deck_b_same_album = same_album_consecutive;
@@ -1270,6 +1273,12 @@ fn decode_loop(
                     rt.bass_swap.reset();
                 }
                 EngineCommand::SeekMs(ms) => {
+                    if rt
+                        .crossfade_state
+                        .is_some_and(|xf| xf.ui_handed_off || xf.is_manual_switch)
+                    {
+                        rt.promote_deck_b(&telemetry, false);
+                    }
                     if let Some(deck) = &mut rt.deck_a
                         && let Ok(actual) = deck.seek_ms(ms)
                     {
@@ -1279,6 +1288,7 @@ fn decode_loop(
                         if rt.crossfade_state.is_some() {
                             rt.crossfade_state = None;
                             rt.deck_b = None;
+                            telemetry.is_crossfading.store(false, Ordering::Relaxed);
                             rt.bass_swap.reset();
                         }
                         if rt.dsp.fade_in_play_ms > 0 {
@@ -1418,6 +1428,7 @@ fn decode_loop(
                     total_frames: ms_to_frames(overlap_ms, out_rate).max(1),
                     curve: rt.dsp.fade_curve,
                     is_manual_switch: false,
+                    ui_handed_off: false,
                 });
                 telemetry.is_crossfading.store(true, Ordering::Relaxed);
             }
@@ -1465,8 +1476,28 @@ fn decode_loop(
                             .clamp(0.0, 1.0);
                         let (ml, mr) = rt.bass_swap.mix_frame(sample_a, sb, progress, xfade.curve);
                         xfade.elapsed_frames += 1;
+                        // Adaptively hand off UI metadata & clock to incoming Deck B once it enters
+                        // (~15% into the user's chosen crossfade duration) instead of waiting until
+                        // the full crossfade tail finishes.
+                        if !xfade.is_manual_switch && !xfade.ui_handed_off && progress >= 0.15 {
+                            xfade.ui_handed_off = true;
+                            if let Some(db) = &rt.deck_b {
+                                telemetry
+                                    .duration_ms
+                                    .store(db.duration_ms, Ordering::Relaxed);
+                                telemetry
+                                    .sample_rate
+                                    .store(db.sample_rate, Ordering::Relaxed);
+                                telemetry
+                                    .position_ms
+                                    .store(db.current_pos_ms(), Ordering::Relaxed);
+                            }
+                            telemetry.auto_transitioned.store(true, Ordering::Release);
+                            telemetry.track_finished_seq.fetch_add(1, Ordering::AcqRel);
+                        }
                         if xfade.elapsed_frames >= xfade.total_frames {
-                            rt.promote_deck_b(&telemetry, !xfade.is_manual_switch);
+                            let emit_now = !xfade.is_manual_switch && !xfade.ui_handed_off;
+                            rt.promote_deck_b(&telemetry, emit_now);
                         } else {
                             rt.crossfade_state = Some(xfade);
                         }
@@ -1548,7 +1579,7 @@ fn decode_loop(
         }
 
         if let Some(xf) = rt.crossfade_state
-            && xf.is_manual_switch
+            && (xf.is_manual_switch || xf.ui_handed_off)
             && let Some(db) = &rt.deck_b
         {
             telemetry
@@ -1678,13 +1709,21 @@ mod tests {
         engine.send(EngineCommand::SeekMs(seek_target));
 
         let mut saw_auto_xfade = false;
+        let mut handed_off_during_xfade = false;
         let mut promoted = false;
         for _ in 0..450 {
             let s = engine.telemetry();
             if s.is_crossfading {
                 saw_auto_xfade = true;
+                if s.track_finished_seq == 1 && s.auto_transitioned {
+                    handed_off_during_xfade = true;
+                }
             }
-            if s.track_finished_seq >= 1 && s.auto_transitioned {
+            if saw_auto_xfade
+                && !s.is_crossfading
+                && s.track_finished_seq == 1
+                && s.auto_transitioned
+            {
                 promoted = true;
                 break;
             }
@@ -1695,8 +1734,12 @@ mod tests {
             "automatic end-of-track crossfade must start overlapping before Deck A ends"
         );
         assert!(
+            handed_off_during_xfade,
+            "UI must adaptively hand off to incoming Deck B during crossfade without waiting for tail completion"
+        );
+        assert!(
             promoted,
-            "Deck B must auto-promote with zero gap (auto_transitioned=true)"
+            "Deck B must finish promoting cleanly with exactly one track_finished_seq increment"
         );
 
         engine.send(EngineCommand::Shutdown);

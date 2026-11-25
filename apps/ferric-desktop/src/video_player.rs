@@ -45,6 +45,51 @@ mod imp {
 
     const WM_WAKE_VIDEO_CMD: u32 = WM_APP + 77;
     const CMD_POLL_TIMER: usize = 2001;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_ROUND: u32 = 2;
+
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: *mut c_void,
+            dw_attribute: u32,
+            pv_attribute: *const c_void,
+            cb_attribute: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        fn CreateRoundRectRgn(x1: i32, y1: i32, x2: i32, y2: i32, w: i32, h: i32) -> *mut c_void;
+        fn DeleteObject(ho: *mut c_void) -> i32;
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetWindowRgn(hwnd: *mut c_void, hrgn: *mut c_void, redraw: i32) -> i32;
+    }
+
+    /// Clip the docked WebView2 surface with smooth 16px rounded corners so it blends seamlessly
+    /// into Ferric's ambient aurora stage instead of showing sharp rectangular edges.
+    fn apply_rounded_video_corners(hwnd: HWND, width: i32, height: i32) {
+        let w = width.max(2);
+        let h = height.max(2);
+        let radius = ((w.min(h) as f32) * 0.055).clamp(14.0, 22.0).round() as i32;
+        // SAFETY: Valid owned popup HWND on the video STA thread; Windows owns the HRGN once SetWindowRgn succeeds.
+        unsafe {
+            let pref = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd.0,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                (&raw const pref).cast(),
+                std::mem::size_of::<u32>() as u32,
+            );
+            let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2);
+            if !rgn.is_null() && SetWindowRgn(hwnd.0, rgn, 1) == 0 {
+                let _ = DeleteObject(rgn);
+            }
+        }
+    }
 
     enum VideoCmd {
         LoadStream {
@@ -201,18 +246,24 @@ mod imp {
 <style>
   html, body {{
     margin: 0; padding: 0; width: 100%; height: 100%;
-    background: #000000; overflow: hidden;
+    background: #0A0C12; overflow: hidden;
     display: flex; align-items: center; justify-content: center;
-    user-select: none;
+    user-select: none; position: relative;
   }}
   video {{
-    width: 100%; height: 100%; object-fit: contain;
-    background: #000000; opacity: 0;
-    transition: opacity 220ms ease-out;
+    width: 100%; height: 100%; object-fit: cover;
+    background: #0A0C12; opacity: 0;
+    transition: opacity 260ms ease-out;
   }}
+  video.contain {{ object-fit: contain; }}
   video.ready {{ opacity: 1; }}
+  #vignette {{
+    position: absolute; inset: 0; pointer-events: none;
+    box-shadow: inset 0 0 28px rgba(0, 0, 0, 0.42), inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+    border-radius: 16px;
+  }}
   #msg {{
-    position: absolute; color: #9A9CA8; font: 500 13px/1.4 "Segoe UI", sans-serif;
+    position: absolute; color: #B4B8C8; font: 500 13px/1.4 "Segoe UI", sans-serif;
     letter-spacing: 0.2px; pointer-events: none;
   }}
 </style>
@@ -220,12 +271,17 @@ mod imp {
 <body>
   <div id="msg">Loading video stream...</div>
   <video id="v" muted playsinline autoplay preload="auto"></video>
+  <div id="vignette"></div>
   <script>
     const v = document.getElementById('v');
     const msg = document.getElementById('msg');
     let desiredPos = {initial_pos:.3};
     let desiredPlaying = {init_play};
     const reveal = () => {{
+      if (v.videoWidth > 0 && v.videoHeight > 0) {{
+        const ar = v.videoWidth / v.videoHeight;
+        v.classList.toggle('contain', ar < 1.25);
+      }}
       msg.style.display = 'none';
       v.classList.add('ready');
       try {{
@@ -340,15 +396,18 @@ mod imp {
 
         // SAFETY: Show docked stage directly on top of Ferric's viewport without stealing keyboard focus.
         unsafe {
+            let init_w = rect.width.max(160);
+            let init_h = rect.height.max(90);
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOP),
                 rect.x,
                 rect.y,
-                rect.width.max(160),
-                rect.height.max(90),
+                init_w,
+                init_h,
                 SWP_NOACTIVATE,
             );
+            apply_rounded_video_corners(hwnd, init_w, init_h);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let _ = UpdateWindow(hwnd);
         }
@@ -497,17 +556,13 @@ mod imp {
                     }
                 }
                 VideoCmd::SetBounds(r) => {
-                    // SAFETY: Keep docked video surface locked to Ferric's viewport rect.
+                    // SAFETY: Keep docked video surface locked to Ferric's viewport rect with smooth rounded corners.
                     unsafe {
-                        let _ = SetWindowPos(
-                            hwnd,
-                            None,
-                            r.x,
-                            r.y,
-                            r.width.max(120),
-                            r.height.max(80),
-                            SWP_NOZORDER | SWP_NOACTIVATE,
-                        );
+                        let w = r.width.max(120);
+                        let h = r.height.max(80);
+                        let _ =
+                            SetWindowPos(hwnd, None, r.x, r.y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+                        apply_rounded_video_corners(hwnd, w, h);
                         let mut client = RECT::default();
                         let _ = GetClientRect(hwnd, &mut client);
                         let _ = st.controller.SetBounds(client);
@@ -548,6 +603,7 @@ mod imp {
                     if !ptr.is_null() {
                         let mut rc = RECT::default();
                         let _ = GetClientRect(hwnd, &mut rc);
+                        apply_rounded_video_corners(hwnd, rc.right - rc.left, rc.bottom - rc.top);
                         let _ = (*ptr).controller.SetBounds(rc);
                     }
                     LRESULT(0)

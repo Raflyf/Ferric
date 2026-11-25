@@ -1035,8 +1035,8 @@ mod win_impl {
 
         enum PendingAction {
             None,
-            Add(ITaskbarList3, [THUMBBUTTON; 3]),
-            Update(ITaskbarList3, THUMBBUTTON),
+            Add(ITaskbarList3, Box<[THUMBBUTTON; 3]>),
+            Update(ITaskbarList3, Box<THUMBBUTTON>),
         }
 
         let (need_set_title, action) = TASKBAR_STATE.with(|cell| {
@@ -1061,7 +1061,7 @@ mod win_impl {
                     st.ico_next,
                     is_playing,
                 );
-                PendingAction::Add(st.tb.clone(), buttons)
+                PendingAction::Add(st.tb.clone(), Box::new(buttons))
             } else if st.buttons_added && st.last_playing != Some(is_playing) {
                 st.last_playing = Some(is_playing);
                 let btn = THUMBBUTTON {
@@ -1076,7 +1076,7 @@ mod win_impl {
                     szTip: fill_tip_buf(if is_playing { "Pause" } else { "Play" }),
                     dwFlags: THBF_ENABLED,
                 };
-                PendingAction::Update(st.tb.clone(), btn)
+                PendingAction::Update(st.tb.clone(), Box::new(btn))
             } else {
                 PendingAction::None
             };
@@ -1095,7 +1095,7 @@ mod win_impl {
             PendingAction::None => {}
             PendingAction::Add(tb, buttons) => {
                 // SAFETY: UI-thread COM retry when Explorer taskbar button finishes registering.
-                if unsafe { tb.ThumbBarAddButtons(hwnd, &buttons) }.is_ok() {
+                if unsafe { tb.ThumbBarAddButtons(hwnd, buttons.as_slice()) }.is_ok() {
                     TASKBAR_STATE.with(|cell| {
                         if let Ok(mut guard) = cell.try_borrow_mut()
                             && let Some(st) = guard.as_mut()
@@ -1109,7 +1109,7 @@ mod win_impl {
             PendingAction::Update(tb, btn) => {
                 // SAFETY: UI-thread COM call updating center Play/Pause thumbnail toolbar button.
                 unsafe {
-                    let _ = tb.ThumbBarUpdateButtons(hwnd, &[btn]);
+                    let _ = tb.ThumbBarUpdateButtons(hwnd, std::slice::from_ref(btn.as_ref()));
                 }
             }
         }

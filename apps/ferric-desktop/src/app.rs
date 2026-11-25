@@ -62,53 +62,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BRAND_ICON_PNG: &[u8] = include_bytes!("../resources/ferric.png");
-
-const SVG_REPEAT_ALL: &str =
-    "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z";
-const SVG_REPEAT_ONE: &str = "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17ZM13 15V9H12L10 10V11H11.5V15H13Z";
-const SVG_VOL_HIGH: &str = "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z";
-const SVG_VOL_LOW: &str = "M18.5 12C18.5 10.23 17.48 8.71 16 7.97V16.02C17.48 15.29 18.5 13.77 18.5 12ZM5 9V15H9L14 20V4L9 9H5Z";
-const SVG_VOL_MUTE: &str = "M3 9V15H7L12 20V4L7 9H3ZM15.57 8.03L18.20 10.66L20.83 8.03L22.17 9.37L19.54 12.00L22.17 14.63L20.83 15.97L18.20 13.34L15.57 15.97L14.23 14.63L16.86 12.00L14.23 9.37Z";
-
-/// Immortal `Arc<String>` singletons for dynamic SVG icons.
-/// Makepad's `CxIconAtlas` caches parsed paths by `Arc::as_ptr()`, so keeping these 5 `Arc`s
-/// alive permanently guarantees zero heap ABA pointer collisions and zero per-click allocations.
-fn immortal_svg_arc(slot: &OnceLock<Arc<String>>, raw: &'static str) -> Arc<String> {
-    Arc::clone(slot.get_or_init(|| Arc::new(raw.to_string())))
-}
-
-fn svg_arc_repeat_all() -> Arc<String> {
-    static CELL: OnceLock<Arc<String>> = OnceLock::new();
-    immortal_svg_arc(&CELL, SVG_REPEAT_ALL)
-}
-
-fn svg_arc_repeat_one() -> Arc<String> {
-    static CELL: OnceLock<Arc<String>> = OnceLock::new();
-    immortal_svg_arc(&CELL, SVG_REPEAT_ONE)
-}
-
-fn svg_arc_vol_high() -> Arc<String> {
-    static CELL: OnceLock<Arc<String>> = OnceLock::new();
-    immortal_svg_arc(&CELL, SVG_VOL_HIGH)
-}
-
-fn svg_arc_vol_low() -> Arc<String> {
-    static CELL: OnceLock<Arc<String>> = OnceLock::new();
-    immortal_svg_arc(&CELL, SVG_VOL_LOW)
-}
-
-fn svg_arc_vol_mute() -> Arc<String> {
-    static CELL: OnceLock<Arc<String>> = OnceLock::new();
-    immortal_svg_arc(&CELL, SVG_VOL_MUTE)
-}
 
 live_design! {
     use link::theme::*;
@@ -2714,10 +2675,8 @@ live_design! {
                                         icon_walk: { width: Fit, height: 15 }
                                         draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z" }
                                     }
-                                    repeat_btn = <FerricIconBtn> {
+                                    repeat_btn = <FerricRepeatBtn> {
                                         width: 28, height: 28,
-                                        icon_walk: { width: Fit, height: 15 }
-                                        draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z" }
                                     }
                                 }
 
@@ -2781,10 +2740,8 @@ live_design! {
                                     icon_walk: { width: Fit, height: 15 }
                                     draw_icon: { svg_path: "M3 10H14V12H3V10ZM3 6H14V8H3V6ZM3 14H10V16H3V14ZM16 13V21L22 17L16 13Z" }
                                 }
-                                vol_mute_btn = <FerricIconBtn> {
+                                vol_mute_btn = <FerricVolumeBtn> {
                                     width: 28, height: 28,
-                                    icon_walk: { width: Fit, height: 15 }
-                                    draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" }
                                 }
                                 vol_slider = <FerricBarSlider> {
                                     width: 62,
@@ -3000,14 +2957,14 @@ live_design! {
                                             width: 30, height: 30,
                                             draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z", color: #FFFFFFCC }
                                         }
-                                        fs_repeat_btn = <FerricIconBtn> {
+                                        fs_repeat_btn = <FerricRepeatBtn> {
                                             width: 28, height: 28,
-                                            draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z", color: #FFFFFF90 }
+                                            draw_bg: { fg_col: #FFFFFF90, fg_hover: #FFFFFF, acrylic_on: 1.0 }
                                         }
                                         <View> { width: 6, height: 1 }
-                                        fs_vol_mute_btn = <FerricIconBtn> {
+                                        fs_vol_mute_btn = <FerricVolumeBtn> {
                                             width: 26, height: 26,
-                                            draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z", color: #FFFFFF90 }
+                                            draw_bg: { fg_col: #FFFFFF90, fg_hover: #FFFFFF, acrylic_on: 1.0 }
                                         }
                                         fs_vol_slider = <FerricBarSlider> {
                                             width: 56, height: 18, min: 0.0, max: 1.0, value: 0.85,
@@ -3874,11 +3831,9 @@ impl App {
             id!(shuffle_btn),
             id!(prev_btn),
             id!(next_btn),
-            id!(repeat_btn),
             id!(bar_video_btn),
             id!(bar_lyrics_btn),
             id!(bar_queue_btn),
-            id!(vol_mute_btn),
             id!(bar_fullscreen_btn),
         ] {
             self.ui.button(b_id).apply_over(
@@ -3890,6 +3845,12 @@ impl App {
                 },
             );
         }
+        self.ui
+            .ferric_repeat_btn(id!(repeat_btn))
+            .apply_over(cx, live! { width: (btn_sz), height: (btn_sz) });
+        self.ui
+            .ferric_volume_btn(id!(vol_mute_btn))
+            .apply_over(cx, live! { width: (btn_sz), height: (btn_sz) });
         self.ui
             .ferric_bar_slider(id!(vol_slider))
             .apply_over(cx, live! { width: ((62.0 * z).max(46.0)) });
@@ -4984,37 +4945,43 @@ impl App {
         let accent = rgba_to_vec4(pal.accent);
         let muted = rgba_to_vec4(pal.icon_idle);
         let icon_hover = rgba_to_vec4(pal.icon_hover);
+        let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
+        let acr = if self.theme.acrylic_enabled {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
         let fs_muted = vec4(0.604, 0.612, 0.659, 1.0);
         let fs_hover = vec4(0.957, 0.957, 0.969, 1.0);
 
         let is_muted = self.session_state.volume < 0.01;
-        let vol_svg = if is_muted {
-            svg_arc_vol_mute()
+        let vol_level_mode = if is_muted {
+            0.0_f32
         } else if self.session_state.volume < 0.50 {
-            svg_arc_vol_low()
+            1.0_f32
         } else {
-            svg_arc_vol_high()
+            2.0_f32
         };
-        let vol_svg_fs = Arc::clone(&vol_svg);
         let mute_col = if is_muted { accent } else { muted };
         let mute_hov = if is_muted { accent } else { icon_hover };
         let fs_mute_col = if is_muted { raw_accent } else { fs_muted };
         let fs_mute_hov = if is_muted { raw_accent } else { fs_hover };
-        let mute_act = if is_muted { 1.0_f32 } else { 0.0_f32 };
 
-        self.ui.button(id!(vol_mute_btn)).apply_over(
+        self.ui.ferric_volume_btn(id!(vol_mute_btn)).set_state(
             cx,
-            live! {
-                draw_bg: { active: (mute_act) }
-                draw_icon: { svg_path: (vol_svg), color: (mute_col), color_hover: (mute_hov), color_focus: (mute_hov) }
-            },
+            vol_level_mode,
+            mute_col,
+            mute_hov,
+            lm,
+            acr,
         );
-        self.ui.button(id!(fs_vol_mute_btn)).apply_over(
+        self.ui.ferric_volume_btn(id!(fs_vol_mute_btn)).set_state(
             cx,
-            live! {
-                draw_bg: { active: (mute_act) }
-                draw_icon: { svg_path: (vol_svg_fs), color: (fs_mute_col), color_hover: (fs_mute_hov), color_focus: (fs_mute_hov) }
-            },
+            vol_level_mode,
+            fs_mute_col,
+            fs_mute_hov,
+            0.0,
+            1.0,
         );
 
         let shuf_act = if self.queue.shuffle { 1.0_f32 } else { 0.0_f32 };
@@ -5050,13 +5017,11 @@ impl App {
         );
 
         let rep_active = self.queue.repeat != RepeatMode::Off;
-        let rep_act = if rep_active { 1.0_f32 } else { 0.0_f32 };
-        let rep_svg = if self.queue.repeat == RepeatMode::One {
-            svg_arc_repeat_one()
-        } else {
-            svg_arc_repeat_all()
+        let rep_mode = match self.queue.repeat {
+            RepeatMode::Off => 0.0_f32,
+            RepeatMode::All => 1.0_f32,
+            RepeatMode::One => 2.0_f32,
         };
-        let rep_svg_fs = Arc::clone(&rep_svg);
         let rep_col = match self.queue.repeat {
             RepeatMode::Off => muted,
             RepeatMode::All => accent,
@@ -5075,20 +5040,12 @@ impl App {
             RepeatMode::One => vec4(0.95, 0.78, 0.36, 1.0),
         };
         let fs_rep_hov = if rep_active { fs_rep_col } else { fs_hover };
-        self.ui.button(id!(repeat_btn)).apply_over(
-            cx,
-            live! {
-                draw_bg: { active: (rep_act) }
-                draw_icon: { svg_path: (rep_svg), color: (rep_col), color_hover: (rep_hov), color_focus: (rep_hov) }
-            },
-        );
-        self.ui.button(id!(fs_repeat_btn)).apply_over(
-            cx,
-            live! {
-                draw_bg: { active: (rep_act) }
-                draw_icon: { svg_path: (rep_svg_fs), color: (fs_rep_col), color_hover: (fs_rep_hov), color_focus: (fs_rep_hov) }
-            },
-        );
+        self.ui
+            .ferric_repeat_btn(id!(repeat_btn))
+            .set_state(cx, rep_mode, rep_col, rep_hov, lm, acr);
+        self.ui
+            .ferric_repeat_btn(id!(fs_repeat_btn))
+            .set_state(cx, rep_mode, fs_rep_col, fs_rep_hov, 0.0, 1.0);
     }
 
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
@@ -7483,11 +7440,9 @@ impl App {
             id!(shuffle_btn),
             id!(prev_btn),
             id!(next_btn),
-            id!(repeat_btn),
             id!(bar_video_btn),
             id!(bar_lyrics_btn),
             id!(bar_queue_btn),
-            id!(vol_mute_btn),
             id!(bar_fullscreen_btn),
         ] {
             self.ui.button(icon_btn_id).apply_over(
@@ -11579,8 +11534,11 @@ impl App {
             self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
             self.refresh_right_sidebar(cx);
         }
-        if self.ui.button(id!(repeat_btn)).clicked(actions)
-            || self.ui.button(id!(fs_repeat_btn)).clicked(actions)
+        if self.ui.ferric_repeat_btn(id!(repeat_btn)).clicked(actions)
+            || self
+                .ui
+                .ferric_repeat_btn(id!(fs_repeat_btn))
+                .clicked(actions)
         {
             self.queue.repeat = self.queue.repeat.next();
             self.session_state.repeat = self.queue.repeat;
@@ -11589,8 +11547,10 @@ impl App {
             }
             self.sync_next_deck_to_engine();
             self.sync_controls_from_state(cx);
-            self.trigger_icon_pulse(cx, id!(repeat_btn), 1.0);
-            self.trigger_icon_pulse(cx, id!(fs_repeat_btn), 1.0);
+            self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
+            self.ui
+                .ferric_repeat_btn(id!(fs_repeat_btn))
+                .trigger_anim(cx);
             self.show_toast(
                 cx,
                 match self.queue.repeat {
@@ -11669,12 +11629,22 @@ impl App {
             }
             self.sync_controls_from_state(cx);
             if was_muted != now_muted {
-                self.trigger_icon_pulse(cx, id!(vol_mute_btn), 2.0);
-                self.trigger_icon_pulse(cx, id!(fs_vol_mute_btn), 2.0);
+                self.ui
+                    .ferric_volume_btn(id!(vol_mute_btn))
+                    .trigger_anim(cx);
+                self.ui
+                    .ferric_volume_btn(id!(fs_vol_mute_btn))
+                    .trigger_anim(cx);
             }
         }
-        if self.ui.button(id!(vol_mute_btn)).clicked(actions)
-            || self.ui.button(id!(fs_vol_mute_btn)).clicked(actions)
+        if self
+            .ui
+            .ferric_volume_btn(id!(vol_mute_btn))
+            .clicked(actions)
+            || self
+                .ui
+                .ferric_volume_btn(id!(fs_vol_mute_btn))
+                .clicked(actions)
         {
             if self.session_state.volume > 0.01 {
                 self.pre_mute_volume = self.session_state.volume;
@@ -11689,8 +11659,12 @@ impl App {
                 let _ = db.save_session_state(&self.session_state);
             }
             self.sync_controls_from_state(cx);
-            self.trigger_icon_pulse(cx, id!(vol_mute_btn), 2.0);
-            self.trigger_icon_pulse(cx, id!(fs_vol_mute_btn), 2.0);
+            self.ui
+                .ferric_volume_btn(id!(vol_mute_btn))
+                .trigger_anim(cx);
+            self.ui
+                .ferric_volume_btn(id!(fs_vol_mute_btn))
+                .trigger_anim(cx);
             self.ui.redraw(cx);
         }
 
@@ -12803,25 +12777,27 @@ impl AppMain for App {
         {
             let on_bottom_vol = self
                 .ui
-                .button(id!(vol_mute_btn))
+                .ferric_volume_btn(id!(vol_mute_btn))
                 .area()
                 .rect(cx)
                 .contains(se.abs);
             let on_fs_vol = self.fullscreen_open
                 && self
                     .ui
-                    .button(id!(fs_vol_mute_btn))
+                    .ferric_volume_btn(id!(fs_vol_mute_btn))
                     .area()
                     .rect(cx)
                     .contains(se.abs);
             if on_bottom_vol || on_fs_vol {
                 se.handled_y.set(true);
+                let was_muted = self.session_state.volume < 0.01;
                 let delta = if se.scroll.y < 0.0 {
                     0.05_f32
                 } else {
                     -0.05_f32
                 };
                 self.session_state.volume = (self.session_state.volume + delta).clamp(0.0, 1.0);
+                let now_muted = self.session_state.volume < 0.01;
                 if self.session_state.volume > 0.02 {
                     self.pre_mute_volume = self.session_state.volume;
                 }
@@ -12832,6 +12808,14 @@ impl AppMain for App {
                     let _ = db.save_session_state(&self.session_state);
                 }
                 self.sync_controls_from_state(cx);
+                if was_muted != now_muted {
+                    self.ui
+                        .ferric_volume_btn(id!(vol_mute_btn))
+                        .trigger_anim(cx);
+                    self.ui
+                        .ferric_volume_btn(id!(fs_vol_mute_btn))
+                        .trigger_anim(cx);
+                }
                 return;
             }
         }
@@ -12977,8 +12961,12 @@ impl AppMain for App {
                         audio.send(EngineCommand::SetVolume(self.session_state.volume));
                     }
                     self.sync_controls_from_state(cx);
-                    self.trigger_icon_pulse(cx, id!(vol_mute_btn), 2.0);
-                    self.trigger_icon_pulse(cx, id!(fs_vol_mute_btn), 2.0);
+                    self.ui
+                        .ferric_volume_btn(id!(vol_mute_btn))
+                        .trigger_anim(cx);
+                    self.ui
+                        .ferric_volume_btn(id!(fs_vol_mute_btn))
+                        .trigger_anim(cx);
                     return;
                 }
                 if ke.key_code == KeyCode::KeyS {
@@ -13001,8 +12989,10 @@ impl AppMain for App {
                     self.session_state.repeat = next_r;
                     self.queue.repeat = next_r;
                     self.sync_controls_from_state(cx);
-                    self.trigger_icon_pulse(cx, id!(repeat_btn), 1.0);
-                    self.trigger_icon_pulse(cx, id!(fs_repeat_btn), 1.0);
+                    self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
+                    self.ui
+                        .ferric_repeat_btn(id!(fs_repeat_btn))
+                        .trigger_anim(cx);
                     self.show_toast(
                         cx,
                         match next_r {

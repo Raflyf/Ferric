@@ -9,6 +9,8 @@ live_design! {
     pub DrawFerricToggle = {{DrawFerricToggle}} {}
     pub DrawFerricWinBtn = {{DrawFerricWinBtn}} {}
     pub DrawFerricPlayBtn = {{DrawFerricPlayBtn}} {}
+    pub DrawFerricRepeatBtn = {{DrawFerricRepeatBtn}} {}
+    pub DrawFerricVolumeBtn = {{DrawFerricVolumeBtn}} {}
     pub DrawFerricEqGraph = {{DrawFerricEqGraph}} {}
     pub DrawFerricCoverArt = {{DrawFerricCoverArt}} {}
     pub DrawLyricsPill = {{DrawLyricsPill}} {}
@@ -427,6 +429,189 @@ live_design! {
                     sdf.fill(vec4(self.glyph_col.xyz, self.glyph_col.w * clamp(0.35 + 0.65 * ease, 0.0, 1.0)));
                 }
                 return sdf.result;
+            }
+        }
+    }
+
+    pub FerricRepeatBtn = {{FerricRepeatBtn}} {
+        width: 28,
+        height: 28,
+        draw_bg: {
+            fg_col: #9A9CA8
+            fg_hover: #F4F4F7
+
+            fn pixel(self) -> vec4 {
+                let p = self.pos * self.rect_size;
+                let c = self.rect_size * 0.5;
+                let u = min(self.rect_size.x, self.rect_size.y) / 28.0;
+
+                // Button pill & ripple ring (matches FerricIconBtn chrome)
+                let sdf_bg = Sdf2d::viewport(p);
+                let inset = 1.0 + self.down * 0.85;
+                sdf_bg.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0 * u);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let hov = mix(mix(#212432, vec4(0.05, 0.06, 0.10, 0.09), self.light_mode), vec4(ink, 0.13), self.acrylic_on);
+                let act = mix(mix(#321E14, vec4(0.05, 0.06, 0.10, 0.14), self.light_mode), vec4(ink, 0.18), self.acrylic_on);
+                let is_act = step(0.5, self.mode);
+                let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, is_act);
+                sdf_bg.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.25));
+                let rim = vec4(ink, 0.12 * self.hover + 0.16 * is_act);
+                sdf_bg.stroke(rim, 1.0);
+
+                let pt = clamp(self.pulse, 0.0, 1.0);
+                if (pt > 0.001 && pt < 0.999) {
+                    let max_r = min(c.x, c.y) - 1.2;
+                    let ring_r = mix(max_r * 0.42, max_r, 1.0 - pow(1.0 - pt, 2.5));
+                    sdf_bg.circle(c.x, c.y, ring_r);
+                    sdf_bg.stroke(vec4(ink, 0.34 * (1.0 - pt)), 1.25);
+                }
+
+                // Crisp 180-deg spring spin settle on mode switch
+                let mut scale = 1.0 - 0.07 * self.down;
+                let mut ang = 0.0;
+                if (pt > 0.001 && pt < 0.999) {
+                    let env = sin(pt * 3.14159265);
+                    let ease = 1.0 - pow(1.0 - pt, 3.0);
+                    scale = 1.0 + 0.16 * env;
+                    ang = (1.0 - ease) * 3.14159265;
+                }
+                let d = (p - c) / max(scale, 0.45);
+                let ca = cos(ang);
+                let sa = sin(ang);
+                let rp = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) + c;
+                let sdf_ic = Sdf2d::viewport(rp);
+                let col = mix(self.fg_col, self.fg_hover, self.hover);
+                let sw = 1.65 * u;
+
+                // Top loop arrow (left vertical stub -> top horizontal -> right arrowhead)
+                sdf_ic.move_to(c.x - 6.0 * u, c.y - 1.3 * u);
+                sdf_ic.line_to(c.x - 6.0 * u, c.y - 5.0 * u);
+                sdf_ic.line_to(c.x + 4.8 * u, c.y - 5.0 * u);
+                sdf_ic.stroke(col, sw);
+
+                sdf_ic.move_to(c.x + 3.5 * u, c.y - 7.6 * u);
+                sdf_ic.line_to(c.x + 7.2 * u, c.y - 5.0 * u);
+                sdf_ic.line_to(c.x + 3.5 * u, c.y - 2.4 * u);
+                sdf_ic.close_path();
+                sdf_ic.fill(col);
+
+                // Bottom loop arrow (right vertical stub -> bottom horizontal -> left arrowhead)
+                sdf_ic.move_to(c.x + 6.0 * u, c.y + 1.3 * u);
+                sdf_ic.line_to(c.x + 6.0 * u, c.y + 5.0 * u);
+                sdf_ic.line_to(c.x - 4.8 * u, c.y + 5.0 * u);
+                sdf_ic.stroke(col, sw);
+
+                sdf_ic.move_to(c.x - 3.5 * u, c.y + 2.4 * u);
+                sdf_ic.line_to(c.x - 7.2 * u, c.y + 5.0 * u);
+                sdf_ic.line_to(c.x - 3.5 * u, c.y + 7.6 * u);
+                sdf_ic.close_path();
+                sdf_ic.fill(col);
+
+                // Repeat-One bold centered '1' badge when mode == 2.0
+                if (self.mode > 1.5) {
+                    sdf_ic.box(c.x - 0.75 * u, c.y - 3.0 * u, 1.55 * u, 5.9 * u, 0.45 * u);
+                    sdf_ic.fill(col);
+                    sdf_ic.move_to(c.x - 2.35 * u, c.y - 1.55 * u);
+                    sdf_ic.line_to(c.x + 0.05 * u, c.y - 2.75 * u);
+                    sdf_ic.stroke(col, 1.35 * u);
+                    sdf_ic.box(c.x - 2.1 * u, c.y + 1.9 * u, 4.25 * u, 1.25 * u, 0.4 * u);
+                    sdf_ic.fill(col);
+                }
+
+                let bg_r = sdf_bg.result;
+                let ic_r = sdf_ic.result;
+                return ic_r + bg_r * (1.0 - ic_r.w);
+            }
+        }
+    }
+
+    pub FerricVolumeBtn = {{FerricVolumeBtn}} {
+        width: 28,
+        height: 28,
+        draw_bg: {
+            fg_col: #9A9CA8
+            fg_hover: #F4F4F7
+
+            fn pixel(self) -> vec4 {
+                let p = self.pos * self.rect_size;
+                let c = self.rect_size * 0.5;
+                let u = min(self.rect_size.x, self.rect_size.y) / 28.0;
+
+                // Button pill & ripple ring (matches FerricIconBtn chrome)
+                let sdf_bg = Sdf2d::viewport(p);
+                let inset = 1.0 + self.down * 0.85;
+                sdf_bg.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0 * u);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let hov = mix(mix(#212432, vec4(0.05, 0.06, 0.10, 0.09), self.light_mode), vec4(ink, 0.13), self.acrylic_on);
+                let act = mix(mix(#321E14, vec4(0.05, 0.06, 0.10, 0.14), self.light_mode), vec4(ink, 0.18), self.acrylic_on);
+                let is_muted = 1.0 - step(0.5, self.level_mode);
+                let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, is_muted);
+                sdf_bg.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.25));
+                let rim = vec4(ink, 0.12 * self.hover + 0.16 * is_muted);
+                sdf_bg.stroke(rim, 1.0);
+
+                let pt = clamp(self.pulse, 0.0, 1.0);
+                if (pt > 0.001 && pt < 0.999) {
+                    let max_r = min(c.x, c.y) - 1.2;
+                    let ring_r = mix(max_r * 0.42, max_r, 1.0 - pow(1.0 - pt, 2.5));
+                    sdf_bg.circle(c.x, c.y, ring_r);
+                    sdf_bg.stroke(vec4(ink, 0.34 * (1.0 - pt)), 1.25);
+                }
+
+                // Tactile mute/unmute shake + elastic pop
+                let mut scale = 1.0 - 0.07 * self.down;
+                let mut ang = 0.0;
+                if (pt > 0.001 && pt < 0.999) {
+                    let env = sin(pt * 3.14159265);
+                    scale = 1.0 + 0.16 * env;
+                    ang = sin(pt * 15.707963) * 0.24 * (1.0 - pt);
+                }
+                let d = (p - c) / max(scale, 0.45);
+                let ca = cos(ang);
+                let sa = sin(ang);
+                let rp = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) + c;
+                let sdf_ic = Sdf2d::viewport(rp);
+                let col = mix(self.fg_col, self.fg_hover, self.hover);
+
+                // Speaker housing + flared cone (seamless box + 3-vertex triangle)
+                sdf_ic.box(c.x - 7.0 * u, c.y - 2.6 * u, 3.6 * u, 5.2 * u, 0.75 * u);
+                sdf_ic.fill(col);
+                sdf_ic.move_to(c.x - 6.0 * u, c.y);
+                sdf_ic.line_to(c.x - 0.3 * u, c.y - 5.9 * u);
+                sdf_ic.line_to(c.x - 0.3 * u, c.y + 5.9 * u);
+                sdf_ic.close_path();
+                sdf_ic.fill(col);
+
+                if (self.level_mode < 0.5) {
+                    // Muted: crisp bold 'X' beside speaker cone
+                    sdf_ic.move_to(c.x + 2.0 * u, c.y - 2.6 * u);
+                    sdf_ic.line_to(c.x + 6.9 * u, c.y + 2.6 * u);
+                    sdf_ic.move_to(c.x + 6.9 * u, c.y - 2.6 * u);
+                    sdf_ic.line_to(c.x + 2.0 * u, c.y + 2.6 * u);
+                    sdf_ic.stroke(col, 1.75 * u);
+                } else {
+                    // Low/High: inner curved sound wave
+                    sdf_ic.move_to(c.x + 1.74 * u, c.y - 3.0 * u);
+                    sdf_ic.line_to(c.x + 2.82 * u, c.y - 1.66 * u);
+                    sdf_ic.line_to(c.x + 3.20 * u, c.y);
+                    sdf_ic.line_to(c.x + 2.82 * u, c.y + 1.66 * u);
+                    sdf_ic.line_to(c.x + 1.74 * u, c.y + 3.0 * u);
+                    sdf_ic.stroke(col, 1.55 * u);
+
+                    if (self.level_mode > 1.5) {
+                        // High: outer curved sound wave
+                        sdf_ic.move_to(c.x + 3.71 * u, c.y - 5.52 * u);
+                        sdf_ic.line_to(c.x + 5.69 * u, c.y - 3.07 * u);
+                        sdf_ic.line_to(c.x + 6.40 * u, c.y);
+                        sdf_ic.line_to(c.x + 5.69 * u, c.y + 3.07 * u);
+                        sdf_ic.line_to(c.x + 3.71 * u, c.y + 5.52 * u);
+                        sdf_ic.stroke(col, 1.55 * u);
+                    }
+                }
+
+                let bg_r = sdf_bg.result;
+                let ic_r = sdf_ic.result;
+                return ic_r + bg_r * (1.0 - ic_r.w);
             }
         }
     }
@@ -1533,6 +1718,314 @@ impl FerricPlayBtnRef {
                 inner.playing_target = next;
                 inner.anim_frame = cx.new_next_frame();
             }
+        }
+    }
+}
+
+#[derive(Clone, Debug, DefaultNone)]
+pub enum FerricRepeatBtnAction {
+    Clicked,
+    None,
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawFerricRepeatBtn {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live(0.0_f32)]
+    mode: f32,
+    #[live(0.0_f32)]
+    hover: f32,
+    #[live(0.0_f32)]
+    down: f32,
+    #[live(0.0_f32)]
+    pulse: f32,
+    #[live(0.0_f32)]
+    light_mode: f32,
+    #[live(0.0_f32)]
+    acrylic_on: f32,
+    #[live]
+    fg_col: Vec4,
+    #[live]
+    fg_hover: Vec4,
+}
+
+#[derive(Live, LiveHook, Widget)]
+pub struct FerricRepeatBtn {
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawFerricRepeatBtn,
+    #[rust]
+    hover_target: f32,
+    #[rust]
+    down_target: f32,
+    #[rust]
+    pulse_active: bool,
+    #[rust]
+    pulse_last_t: f64,
+    #[rust]
+    anim_frame: NextFrame,
+}
+
+impl Widget for FerricRepeatBtn {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Some(nf) = self.anim_frame.is_event(event) {
+            let dt = if self.pulse_last_t > 0.0 {
+                (nf.time - self.pulse_last_t).clamp(0.004, 0.045) as f32
+            } else {
+                0.016
+            };
+            self.pulse_last_t = nf.time;
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
+            self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
+            if self.pulse_active {
+                self.draw_bg.pulse += dt / 0.26_f32;
+                if self.draw_bg.pulse >= 1.0 {
+                    self.draw_bg.pulse = 0.0;
+                    self.pulse_active = false;
+                    self.pulse_last_t = 0.0;
+                }
+            }
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
+                && (self.down_target - self.draw_bg.down).abs() < 0.008
+                && !self.pulse_active;
+            if done {
+                self.draw_bg.hover = self.hover_target;
+                self.draw_bg.down = self.down_target;
+                self.pulse_last_t = 0.0;
+            } else {
+                self.anim_frame = cx.new_next_frame();
+            }
+            self.draw_bg.redraw(cx);
+        }
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.hover_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerHoverOut(_) => {
+                self.hover_target = 0.0;
+                self.down_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerDown(_) => {
+                self.down_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerUp(fe) => {
+                self.down_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
+                if fe.is_over {
+                    cx.widget_action(uid, &scope.path, FerricRepeatBtnAction::Clicked);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let _ = self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+}
+
+impl FerricRepeatBtnRef {
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).cast(),
+            FerricRepeatBtnAction::Clicked
+        )
+    }
+
+    pub fn set_state(
+        &self,
+        cx: &mut Cx,
+        mode: f32,
+        fg_col: Vec4,
+        fg_hover: Vec4,
+        light_mode: f32,
+        acrylic_on: f32,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.draw_bg.mode = mode;
+            inner.draw_bg.fg_col = fg_col;
+            inner.draw_bg.fg_hover = fg_hover;
+            inner.draw_bg.light_mode = light_mode;
+            inner.draw_bg.acrylic_on = acrylic_on;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn trigger_anim(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.draw_bg.pulse = 0.005;
+            inner.pulse_active = true;
+            inner.pulse_last_t = 0.0;
+            inner.anim_frame = cx.new_next_frame();
+            inner.draw_bg.redraw(cx);
+        }
+    }
+}
+
+#[derive(Clone, Debug, DefaultNone)]
+pub enum FerricVolumeBtnAction {
+    Clicked,
+    None,
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawFerricVolumeBtn {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live(2.0_f32)]
+    level_mode: f32,
+    #[live(0.0_f32)]
+    hover: f32,
+    #[live(0.0_f32)]
+    down: f32,
+    #[live(0.0_f32)]
+    pulse: f32,
+    #[live(0.0_f32)]
+    light_mode: f32,
+    #[live(0.0_f32)]
+    acrylic_on: f32,
+    #[live]
+    fg_col: Vec4,
+    #[live]
+    fg_hover: Vec4,
+}
+
+#[derive(Live, LiveHook, Widget)]
+pub struct FerricVolumeBtn {
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawFerricVolumeBtn,
+    #[rust]
+    hover_target: f32,
+    #[rust]
+    down_target: f32,
+    #[rust]
+    pulse_active: bool,
+    #[rust]
+    pulse_last_t: f64,
+    #[rust]
+    anim_frame: NextFrame,
+}
+
+impl Widget for FerricVolumeBtn {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Some(nf) = self.anim_frame.is_event(event) {
+            let dt = if self.pulse_last_t > 0.0 {
+                (nf.time - self.pulse_last_t).clamp(0.004, 0.045) as f32
+            } else {
+                0.016
+            };
+            self.pulse_last_t = nf.time;
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
+            self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
+            if self.pulse_active {
+                self.draw_bg.pulse += dt / 0.26_f32;
+                if self.draw_bg.pulse >= 1.0 {
+                    self.draw_bg.pulse = 0.0;
+                    self.pulse_active = false;
+                    self.pulse_last_t = 0.0;
+                }
+            }
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
+                && (self.down_target - self.draw_bg.down).abs() < 0.008
+                && !self.pulse_active;
+            if done {
+                self.draw_bg.hover = self.hover_target;
+                self.draw_bg.down = self.down_target;
+                self.pulse_last_t = 0.0;
+            } else {
+                self.anim_frame = cx.new_next_frame();
+            }
+            self.draw_bg.redraw(cx);
+        }
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.hover_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerHoverOut(_) => {
+                self.hover_target = 0.0;
+                self.down_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerDown(_) => {
+                self.down_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerUp(fe) => {
+                self.down_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
+                if fe.is_over {
+                    cx.widget_action(uid, &scope.path, FerricVolumeBtnAction::Clicked);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let _ = self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+}
+
+impl FerricVolumeBtnRef {
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).cast(),
+            FerricVolumeBtnAction::Clicked
+        )
+    }
+
+    pub fn set_state(
+        &self,
+        cx: &mut Cx,
+        level_mode: f32,
+        fg_col: Vec4,
+        fg_hover: Vec4,
+        light_mode: f32,
+        acrylic_on: f32,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.draw_bg.level_mode = level_mode;
+            inner.draw_bg.fg_col = fg_col;
+            inner.draw_bg.fg_hover = fg_hover;
+            inner.draw_bg.light_mode = light_mode;
+            inner.draw_bg.acrylic_on = acrylic_on;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn trigger_anim(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.draw_bg.pulse = 0.005;
+            inner.pulse_active = true;
+            inner.pulse_last_t = 0.0;
+            inner.anim_frame = cx.new_next_frame();
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn area(&self) -> Area {
+        if let Some(inner) = self.borrow() {
+            inner.draw_bg.area()
+        } else {
+            Area::Empty
         }
     }
 }

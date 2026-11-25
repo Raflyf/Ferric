@@ -170,12 +170,8 @@ live_design! {
         draw_line: {
             color: #FFFFFF,
             blur_amt: 0.0,
-            karaoke_on: 0.0,
-            sweep_x: 0.0,
-            sweep_y_min: 0.0,
-            sweep_y_max: 0.0,
-            dim_col: #FFFFFF6E,
             glow_amt: 0.0,
+            accent_col: #E86A2C,
             text_style: <THEME_FONT_DISPLAY> {
                 font_size: 19.5,
                 line_spacing: 1.22
@@ -198,22 +194,7 @@ live_design! {
                         let s_soft = self.sdf(soft_scale, self.t.xy) * quad_fade;
                         s = mix(s_sharp, s_soft * (1.0 - blur * 0.22), blur);
                     }
-                    let mut c = self.get_color();
-                    if (self.karaoke_on > 0.5) {
-                        let mut lit = 0.0;
-                        if (self.world.y < self.sweep_y_min) {
-                            lit = 1.0;
-                        } else if (self.world.y <= self.sweep_y_max) {
-                            let lo = self.sweep_x - 24.0;
-                            let hi = self.sweep_x + 14.0;
-                            lit = 1.0 - smoothstep(lo, hi, self.world.x);
-                        }
-                        c = mix(self.dim_col, c, lit);
-                        if (self.glow_amt > 0.01 && lit > 0.05) {
-                            let halo = clamp(((sample2d(self.grayscale_texture, self.t.xy).x - (1.0 - self.cutoff)) * self.radius / (base_scale * 2.15) + 0.5), 0.0, 1.0);
-                            s = max(s, halo * 0.18 * lit * self.glow_amt * quad_fade);
-                        }
-                    }
+                    let c = self.get_color();
                     return s * vec4(c.rgb * c.a, c.a);
                 } else {
                     let c = sample2d(self.color_texture, self.t);
@@ -224,12 +205,7 @@ live_design! {
         draw_active: {
             color: #FFFFFF,
             blur_amt: 0.0,
-            karaoke_on: 1.0,
-            sweep_x: 0.0,
-            sweep_y_min: 0.0,
-            sweep_y_max: 0.0,
-            dim_col: #FFFFFF6E,
-            glow_amt: 1.0,
+            glow_amt: 0.0,
             accent_col: #E86A2C,
             text_style: <THEME_FONT_DISPLAY> {
                 font_size: 20.5,
@@ -246,25 +222,14 @@ live_design! {
                     let quad_fade = smoothstep(0.0, 0.18, edge_d);
                     let mut s = self.sdf(base_scale, self.t.xy);
                     let mut c = self.get_color();
-                    if (self.karaoke_on > 0.5) {
-                        let mut lit = 0.0;
-                        if (self.world.y < self.sweep_y_min) {
-                            lit = 1.0;
-                        } else if (self.world.y <= self.sweep_y_max) {
-                            let lo = self.sweep_x - 24.0;
-                            let hi = self.sweep_x + 14.0;
-                            lit = 1.0 - smoothstep(lo, hi, self.world.x);
-                        }
-                        c = mix(self.dim_col, c, lit);
-                        if (self.glow_amt > 0.01 && lit > 0.05) {
-                            let halo = clamp(((sample2d(self.grayscale_texture, self.t.xy).x - (1.0 - self.cutoff)) * self.radius / (base_scale * 2.1) + 0.5), 0.0, 1.0);
-                            let halo_a = halo * 0.26 * lit * self.glow_amt * quad_fade;
-                            if (halo_a > s) {
-                                let aura_rgb = mix(vec3(1.0, 1.0, 1.0), self.accent_col.xyz, 0.45);
-                                let mix_t = clamp((halo_a - s) / max(halo_a, 0.001), 0.0, 1.0);
-                                c = vec4(mix(c.rgb, aura_rgb, mix_t), c.a);
-                                s = halo_a;
-                            }
+                    if (self.glow_amt > 0.01) {
+                        let halo = clamp(((sample2d(self.grayscale_texture, self.t.xy).x - (1.0 - self.cutoff)) * self.radius / (base_scale * 2.1) + 0.5), 0.0, 1.0);
+                        let halo_a = halo * 0.22 * self.glow_amt * quad_fade;
+                        if (halo_a > s) {
+                            let aura_rgb = mix(vec3(1.0, 1.0, 1.0), self.accent_col.xyz, 0.42);
+                            let mix_t = clamp((halo_a - s) / max(halo_a, 0.001), 0.0, 1.0);
+                            c = vec4(mix(c.rgb, aura_rgb, mix_t), c.a);
+                            s = halo_a;
                         }
                     }
                     return s * vec4(c.rgb * c.a, c.a);
@@ -2483,16 +2448,6 @@ pub struct DrawLyricsText {
     #[live(0.0_f32)]
     blur_amt: f32,
     #[live(0.0_f32)]
-    karaoke_on: f32,
-    #[live(0.0_f32)]
-    sweep_x: f32,
-    #[live(0.0_f32)]
-    sweep_y_min: f32,
-    #[live(0.0_f32)]
-    sweep_y_max: f32,
-    #[live]
-    dim_col: Vec4,
-    #[live(0.0_f32)]
     glow_amt: f32,
     #[live]
     accent_col: Vec4,
@@ -2501,9 +2456,9 @@ pub struct DrawLyricsText {
 /// Smooth GPU interactive synced lyrics stage:
 /// - Unified C1-continuous critically-damped glide (zero bounce, zero stutter, native VSync)
 /// - Pre-measured invariant line heights so lines never jump or clip mid-scroll
+/// - Smooth uniform full-line active illumination across all wrapped rows (zero broken half-row splits)
 /// - Smooth optical SDF depth-of-field softening on inactive lines, un-blurring on hover
 /// - Frosted cursor-tracked glass hover pill + timestamp hint + click-any-line-to-seek
-/// - Continuous sub-pixel word-by-word karaoke highlight sweep across wrapped rows
 #[derive(Live, LiveHook, Widget)]
 pub struct FerricLyricsView {
     #[walk]
@@ -2543,12 +2498,6 @@ pub struct FerricLyricsView {
     #[rust]
     manual_scroll_until: f64,
     #[rust]
-    playback_pos_ms: u64,
-    #[rust]
-    playback_sync_time: f64,
-    #[rust]
-    is_playing: bool,
-    #[rust]
     accent: Vec4,
     #[rust]
     ui_zoom: f32,
@@ -2574,8 +2523,6 @@ pub struct FerricLyricsView {
     heights_measured_fs: f32,
     #[rust]
     last_viewport_h: f64,
-    #[rust]
-    last_draw_time: f64,
 }
 
 impl FerricLyricsView {
@@ -2630,18 +2577,6 @@ impl FerricLyricsView {
     fn wake_anim(&mut self, cx: &mut Cx) {
         self.anim_frame = cx.new_next_frame();
         self.area.redraw(cx);
-    }
-
-    fn estimated_pos_ms(&self) -> f64 {
-        if self.is_playing
-            && self.playback_sync_time > 0.0
-            && self.last_time >= self.playback_sync_time
-        {
-            let extra_ms = ((self.last_time - self.playback_sync_time) * 1000.0).clamp(0.0, 1200.0);
-            self.playback_pos_ms as f64 + extra_ms
-        } else {
-            self.playback_pos_ms as f64
-        }
     }
 }
 
@@ -2710,23 +2645,15 @@ impl Widget for FerricLyricsView {
             let waiting_manual = self.manual_scroll_until > nf.time;
             let in_transition =
                 scroll_err >= 0.12 || self.scroll_vel.abs() >= 0.4 || max_err >= 0.003;
-            let keep_alive = self.is_playing || waiting_manual || in_transition;
+            let keep_alive = waiting_manual || in_transition;
             if !keep_alive {
                 self.scroll_y = self.target_scroll_y;
                 self.scroll_vel = 0.0;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
-            // Native VSync redraws during scroll/focus transitions eliminate 144 Hz frame-pacing judder;
-            // gentle 60 Hz pacing during static karaoke sweep keeps GPU overhead minimal.
-            if in_transition
-                || !keep_alive
-                || self.last_draw_time <= 0.0
-                || (nf.time - self.last_draw_time) >= 0.016
-            {
-                self.last_draw_time = nf.time;
-                self.area.redraw(cx);
-            }
+            // Native VSync redraw during active transitions; drops to 0 FPS once settled.
+            self.area.redraw(cx);
         }
 
         let uid = self.widget_uid();
@@ -2781,8 +2708,6 @@ impl Widget for FerricLyricsView {
                     .and_then(|(idx, _)| self.lines.get(*idx).map(|(ts_ms, _)| (*idx, *ts_ms)));
                 if let Some((idx, ts_ms)) = clicked {
                     self.active_idx = idx;
-                    self.playback_pos_ms = ts_ms;
-                    self.playback_sync_time = self.last_time;
                     self.manual_scroll_until = 0.0;
                     self.recompute_target_scroll();
                     self.wake_anim(cx);
@@ -2831,7 +2756,6 @@ impl Widget for FerricLyricsView {
             self.draw_line.text_style.font_size = fs;
             self.draw_line.font_scale = 1.0;
             self.draw_line.blur_amt = 0.0;
-            self.draw_line.karaoke_on = 0.0;
             self.draw_line.glow_amt = 0.0;
             self.draw_line.color = if self.compact && self.light_mode {
                 vec4(0.14, 0.17, 0.24, 0.78)
@@ -2869,7 +2793,6 @@ impl Widget for FerricLyricsView {
         let max_x_shift = 6.0_f32;
         // Divide wrapping width by max_scale so scaled active text NEVER overflows pill/panel right edge!
         let stable_wrap_w = ((max_w - max_x_shift) / max_scale).max(52.0);
-        let est_pos_ms = self.estimated_pos_ms();
         let line_count = self.lines.len();
         let needs_measure = self.line_heights.len() != line_count
             || (self.heights_measured_w - stable_wrap_w).abs() > 1.5
@@ -3039,81 +2962,20 @@ impl Widget for FerricLyricsView {
                 self.draw_pill.draw_abs(cx, pill_rect);
             }
 
-            // 2. Compute smooth sub-pixel word-by-word karaoke sweep across wrapped rows on active line
-            let (karaoke_on, sweep_x, sweep_y_min, sweep_y_max) =
-                if focus > 0.45 && !laid.rows.is_empty() {
-                    let next_ts = self
-                        .lines
-                        .get(i + 1)
-                        .map(|(t, _)| *t)
-                        .unwrap_or(ts_ms + 3_500);
-                    let span_ms = next_ts.saturating_sub(ts_ms).clamp(900, 12_000) as f64;
-                    let raw_t = ((est_pos_ms - ts_ms as f64) / (span_ms * 0.90)).clamp(0.0, 1.0);
-                    // Smooth natural phrasing easing
-                    let prog = (0.04 + raw_t * 0.96).clamp(0.0, 1.0) as f32;
-                    let total_w: f32 = laid
-                        .rows
-                        .iter()
-                        .map(|r| r.width_in_lpxs.max(1.0))
-                        .sum::<f32>()
-                        .max(1.0);
-                    let mut target_w = prog * total_w;
-                    let mut chosen = laid.rows.last().unwrap();
-                    for r in &laid.rows {
-                        let rw = r.width_in_lpxs.max(1.0);
-                        if target_w <= rw {
-                            chosen = r;
-                            break;
-                        }
-                        target_w -= rw;
-                    }
-                    let local_x = target_w.clamp(0.0, chosen.width_in_lpxs.max(1.0));
-                    let sx = draw_x as f32 + (chosen.origin_in_lpxs.x + local_x) * scale;
-                    let sy_min =
-                        text_y as f32 + (chosen.origin_in_lpxs.y - chosen.ascender_in_lpxs) * scale;
-                    let sy_max = text_y as f32
-                        + (chosen.origin_in_lpxs.y - chosen.descender_in_lpxs) * scale
-                        + 2.0;
-                    (1.0_f32, sx, sy_min, sy_max)
-                } else {
-                    (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)
-                };
-
+            // 2. Smooth uniform full-line illumination across ALL wrapped rows (zero broken half-row karaoke splits)
             let use_dark_ink = self.compact && self.light_mode;
             let bright_col = if use_dark_ink {
                 vec4(0.055, 0.067, 0.098, alpha)
             } else {
                 vec4(1.0, 1.0, 1.0, alpha)
             };
-            // Smoothly blend dim karaoke alpha from inactive alpha into focused dim alpha so there is zero pop
-            let k_blend = ((focus - 0.35) / 0.45).clamp(0.0, 1.0);
-            let target_dim_a = if use_dark_ink {
-                0.76 * edge_fade
-            } else if self.compact {
-                0.78 * edge_fade
-            } else {
-                0.50 * edge_fade
-            };
-            let smooth_dim_a = (alpha + (target_dim_a - alpha) * k_blend).clamp(0.0, 1.0);
-            let dim_active_col = if use_dark_ink {
-                vec4(0.09, 0.11, 0.17, smooth_dim_a)
-            } else if self.compact {
-                vec4(0.96, 0.97, 1.0, smooth_dim_a)
-            } else {
-                vec4(0.94, 0.95, 1.0, smooth_dim_a)
-            };
 
             let draw_rect = if use_active_draw {
                 self.draw_active.blur_amt = 0.0;
-                self.draw_active.karaoke_on = karaoke_on;
-                self.draw_active.sweep_x = sweep_x;
-                self.draw_active.sweep_y_min = sweep_y_min;
-                self.draw_active.sweep_y_max = sweep_y_max;
-                self.draw_active.dim_col = dim_active_col;
-                self.draw_active.glow_amt = if use_dark_ink {
+                self.draw_active.glow_amt = if self.compact || use_dark_ink {
                     0.0
                 } else {
-                    k_blend * edge_fade
+                    focus * edge_fade
                 };
                 self.draw_active.accent_col = accent;
                 self.draw_active.color = bright_col;
@@ -3129,7 +2991,6 @@ impl Widget for FerricLyricsView {
                 )
             } else {
                 self.draw_line.blur_amt = blur_amt;
-                self.draw_line.karaoke_on = 0.0;
                 self.draw_line.glow_amt = 0.0;
                 self.draw_line.color = if use_dark_ink {
                     if hover_v > 0.05 {
@@ -3251,17 +3112,7 @@ impl FerricLyricsViewRef {
         }
     }
 
-    pub fn set_playback_state(&self, cx: &mut Cx, pos_ms: u64, is_playing: bool) {
-        if let Some(mut inner) = self.borrow_mut() {
-            let was_playing = inner.is_playing;
-            inner.playback_pos_ms = pos_ms;
-            inner.playback_sync_time = inner.last_time;
-            inner.is_playing = is_playing;
-            if is_playing && (!was_playing || !inner.lines.is_empty()) {
-                inner.anim_frame = cx.new_next_frame();
-            }
-        }
-    }
+    pub fn set_playback_state(&self, _cx: &mut Cx, _pos_ms: u64, _is_playing: bool) {}
 
     pub fn set_style(&self, cx: &mut Cx, accent: Vec4, ui_zoom: f32, light_mode: bool) {
         if let Some(mut inner) = self.borrow_mut() {

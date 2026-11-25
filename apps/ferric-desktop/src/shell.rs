@@ -129,6 +129,7 @@ mod win_impl {
     static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
     static TRAY_ADDED: AtomicBool = AtomicBool::new(false);
     static MINI_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static WINDOW_HIDDEN_OR_MIN: AtomicBool = AtomicBool::new(false);
     static TRAY_EVENTS: OnceLock<Mutex<Vec<TrayEvent>>> = OnceLock::new();
 
     #[repr(C)]
@@ -576,11 +577,23 @@ mod win_impl {
         MINI_MODE_ACTIVE.store(mini, Ordering::Release);
     }
 
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetProcessWorkingSetSizeEx(
+            h_process: *mut c_void,
+            dw_minimum_working_set_size: usize,
+            dw_maximum_working_set_size: usize,
+            flags: u32,
+        ) -> i32;
+    }
+
     pub fn trim_working_set() {
-        // SAFETY: Official Win32 API that trims idle/scratch pages (such as startup DX11 shader
-        // compiler scratch buffers) cleanly back to the OS without affecting live allocations.
+        // SAFETY: Official Win32 APIs that trim idle/scratch pages cleanly back to the OS
+        // without affecting any live allocations or audio buffers.
         unsafe {
-            let _ = K32EmptyWorkingSet(GetCurrentProcess());
+            let proc_handle = GetCurrentProcess();
+            let _ = SetProcessWorkingSetSizeEx(proc_handle.0, usize::MAX, usize::MAX, 0);
+            let _ = K32EmptyWorkingSet(proc_handle);
         }
     }
 
@@ -768,7 +781,21 @@ mod win_impl {
                         }
                     }
                 }
-                WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED | WM_SHOWWINDOW => {
+                WM_SIZE => {
+                    sync_acrylic_backdrop_geometry(hwnd);
+                    if wparam.0 == 1 {
+                        // SIZE_MINIMIZED -> release GPU/UI artwork buffers & trim working set
+                        if !WINDOW_HIDDEN_OR_MIN.swap(true, Ordering::AcqRel) {
+                            trim_working_set();
+                            push_event(TrayEvent::HiddenToTray);
+                        }
+                    } else if WINDOW_HIDDEN_OR_MIN.swap(false, Ordering::AcqRel) {
+                        push_event(TrayEvent::ShowWindow);
+                    } else {
+                        push_event(TrayEvent::WindowMovedOrResized);
+                    }
+                }
+                WM_MOVE | WM_WINDOWPOSCHANGED | WM_SHOWWINDOW => {
                     sync_acrylic_backdrop_geometry(hwnd);
                     push_event(TrayEvent::WindowMovedOrResized);
                 }
@@ -777,6 +804,7 @@ mod win_impl {
                     {
                         ensure_tray_icon(hwnd, "Ferric — Playing in background");
                         let _ = ShowWindow(hwnd, SW_HIDE);
+                        WINDOW_HIDDEN_OR_MIN.store(true, Ordering::Release);
                         sync_acrylic_backdrop_geometry(hwnd);
                         trim_working_set();
                         push_event(TrayEvent::HiddenToTray);
@@ -790,6 +818,7 @@ mod win_impl {
                         let _ = ShowWindow(hwnd, SW_SHOW);
                         let _ = ShowWindow(hwnd, SW_RESTORE);
                         let _ = SetForegroundWindow(hwnd);
+                        WINDOW_HIDDEN_OR_MIN.store(false, Ordering::Release);
                         sync_acrylic_backdrop_geometry(hwnd);
                         push_event(TrayEvent::ShowWindow);
                         return LRESULT(0);

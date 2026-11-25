@@ -223,6 +223,28 @@ impl LibraryDb {
         Ok(())
     }
 
+    pub fn delete_track(&mut self, track_id: &str) -> CoreResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE track_id = ?1",
+            [track_id],
+        )?;
+        tx.execute("DELETE FROM tracks WHERE id = ?1", [track_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_demo_tracks(&mut self) -> CoreResult<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE track_id LIKE 'demo:%'",
+            [],
+        )?;
+        let removed = tx.execute("DELETE FROM tracks WHERE id LIKE 'demo:%'", [])?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn upsert_playlist(&mut self, playlist: &Playlist, track_ids: &[String]) -> CoreResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -271,6 +293,30 @@ impl LibraryDb {
         self.conn.execute(
             "INSERT OR IGNORE INTO playlist_tracks (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
             params![playlist_id, next_pos, track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_track_from_playlist(
+        &mut self,
+        playlist_id: &str,
+        track_id: &str,
+    ) -> CoreResult<()> {
+        self.conn.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+            params![playlist_id, track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_playlist(&mut self, playlist_id: &str, new_name: &str) -> CoreResult<()> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE playlists SET name = ?1, updated_at = strftime('%s','now') WHERE id = ?2",
+            params![trimmed, playlist_id],
         )?;
         Ok(())
     }
@@ -500,6 +546,25 @@ impl LibraryDb {
             out.push(PathBuf::from(p?));
         }
         Ok(out)
+    }
+
+    pub fn clear_music_folders_and_local_tracks(&mut self) -> CoreResult<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM music_folders", [])?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE track_id IN (SELECT id FROM tracks WHERE source = 'Local')",
+            [],
+        )?;
+        let removed = tx.execute("DELETE FROM tracks WHERE source = 'Local'", [])?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Release idle SQLite page cache & checkpoint WAL to minimize RAM in tray and idle states.
+    pub fn shrink_memory(&self) {
+        let _ = self
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA shrink_memory;");
     }
 
     pub fn save_theme(&self, theme: &ThemeConfig) -> CoreResult<()> {

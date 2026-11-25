@@ -5,7 +5,7 @@ use crate::yt_cleaner::clean_youtube_metadata;
 use crate::{ProviderError, ProviderResult};
 use ferric_core::models::{AudioQuality, Playlist, Track, TrackSource, VideoQuality};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -460,17 +460,181 @@ fn post_ytm_json_fast(endpoint: &str, body: &Value, session: &YtmSession) -> Pro
     post_ytm_json_with_opts(endpoint, body, session, 2, 14)
 }
 
-fn web_remix_context(session: &YtmSession) -> Value {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MusicLocale {
+    GlobalEn,
+    Indonesian,
+    Japanese,
+    Korean,
+}
+
+/// Detect the musical language/locale of a track from its title, artist, and album
+/// so Radio recommendations stay language- and vibe-coherent instead of injecting random regional charts.
+pub fn detect_track_locale(title: &str, artist: &str, album: &str) -> MusicLocale {
+    let combined = format!("{title} {artist} {album}");
+    let mut has_jp = false;
+    let mut has_kr = false;
+    for ch in combined.chars() {
+        let cp = ch as u32;
+        if (0x3040..=0x30FF).contains(&cp) {
+            has_jp = true;
+        } else if (0xAC00..=0xD7AF).contains(&cp) || (0x1100..=0x11FF).contains(&cp) {
+            has_kr = true;
+        }
+    }
+    if has_kr {
+        return MusicLocale::Korean;
+    }
+    if has_jp {
+        return MusicLocale::Japanese;
+    }
+
+    // Check title + album tokens (and genre hints) for Indonesian language signals.
+    // Deliberately avoids classifying English songs by Indonesian-born international artists as ID.
+    const ID_WORDS: &[&str] = &[
+        "aku",
+        "kamu",
+        "kau",
+        "cinta",
+        "rindu",
+        "hati",
+        "bukan",
+        "yang",
+        "untuk",
+        "untukmu",
+        "dengan",
+        "dalam",
+        "malam",
+        "hujan",
+        "senja",
+        "kisah",
+        "patah",
+        "selalu",
+        "berdua",
+        "pergi",
+        "pergilah",
+        "tidak",
+        "jangan",
+        "bila",
+        "saat",
+        "sampai",
+        "telah",
+        "lagi",
+        "saja",
+        "cuma",
+        "terlalu",
+        "dirimu",
+        "diriku",
+        "tentang",
+        "seperti",
+        "bersama",
+        "bahagia",
+        "terindah",
+        "sial",
+        "tak",
+        "di",
+        "ke",
+        "dari",
+        "dan",
+        "atau",
+        "jalan",
+        "koplo",
+        "dangdut",
+        "galau",
+        "melayu",
+        "lagu",
+        "indonesia",
+        "nanti",
+        "kita",
+        "hari",
+        "ini",
+        "itu",
+        "semua",
+        "kembali",
+        "menunggu",
+        "mengapa",
+        "kenapa",
+        "sendiri",
+        "sepi",
+        "luka",
+        "rasa",
+        "janji",
+        "mimpi",
+        "jiwa",
+        "tuhan",
+        "indah",
+        "manusia",
+        "komang",
+        "monokrom",
+        "sepatu",
+    ];
+    let title_alb = format!("{title} {album}").to_ascii_lowercase();
+    let mut id_hits = 0usize;
+    for tok in title_alb.split(|c: char| !c.is_ascii_alphabetic()) {
+        if tok.len() >= 2 && ID_WORDS.contains(&tok) {
+            id_hits += 1;
+            if matches!(
+                tok,
+                "koplo" | "dangdut" | "galau" | "melayu" | "indonesia" | "lagu"
+            ) {
+                return MusicLocale::Indonesian;
+            }
+        }
+    }
+    if id_hits >= 1 {
+        let en_hits = title_alb
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|w| {
+                matches!(
+                    *w,
+                    "the"
+                        | "you"
+                        | "your"
+                        | "love"
+                        | "with"
+                        | "from"
+                        | "that"
+                        | "this"
+                        | "have"
+                        | "don"
+                        | "can"
+                        | "stay"
+                        | "night"
+                        | "heart"
+                        | "world"
+                        | "feat"
+                        | "remix"
+                )
+            })
+            .count();
+        if id_hits > en_hits {
+            return MusicLocale::Indonesian;
+        }
+    }
+    MusicLocale::GlobalEn
+}
+
+fn web_remix_context_for_locale(session: &YtmSession, locale: MusicLocale) -> Value {
+    let (hl, gl) = match locale {
+        MusicLocale::GlobalEn => ("en", "US"),
+        MusicLocale::Indonesian => ("en", "ID"),
+        MusicLocale::Japanese => ("ja", "JP"),
+        MusicLocale::Korean => ("ko", "KR"),
+    };
     let mut client = json!({
         "clientName": "WEB_REMIX",
         "clientVersion": WEB_REMIX_VERSION,
-        "hl": "en",
-        "gl": "ID"
+        "hl": hl,
+        "gl": gl
     });
     if !session.visitor_data.is_empty() {
         client["visitorData"] = json!(session.visitor_data);
     }
     json!({ "client": client })
+}
+
+fn web_remix_context(session: &YtmSession) -> Value {
+    web_remix_context_for_locale(session, MusicLocale::GlobalEn)
 }
 
 fn extract_visitor_data(root: &Value, fallback: &str) -> String {
@@ -973,29 +1137,187 @@ pub fn fetch_browse_detail(
     })
 }
 
-/// Fetch infinite Radio / Up Next recommendations for a playing YouTube Music song via `youtubei/v1/next`.
-pub fn fetch_radio_up_next(
+fn is_low_quality_radio_candidate(title: &str, artist: &str) -> bool {
+    let t = title.to_ascii_lowercase();
+    let a = artist.to_ascii_lowercase();
+    for bad in [
+        "karaoke",
+        "sped up",
+        "speed up",
+        "slowed",
+        "reverb",
+        "nightcore",
+        "8d audio",
+        "1 hour",
+        "10 hours",
+        "podcast",
+        "episode",
+        "reaction",
+        "interview",
+        "trailer",
+        "teaser",
+        "tutorial",
+        "ringtone",
+        "dj tiktok",
+        "full bass",
+        "jedag jedug",
+        "parody",
+    ] {
+        if t.contains(bad) || a.contains(bad) {
+            return true;
+        }
+    }
+    false
+}
+
+fn filter_coherent_radio_tracks(
+    seed_locale: MusicLocale,
+    seed_artist: &str,
+    candidates: Vec<Track>,
+    limit: usize,
+) -> Vec<Track> {
+    let seed_artist_low = seed_artist.trim().to_ascii_lowercase();
+    let mut artist_counts: HashMap<String, usize> = HashMap::new();
+    let mut out = Vec::with_capacity(limit);
+    let mut overflow = Vec::new();
+
+    for t in candidates {
+        if is_low_quality_radio_candidate(&t.title, &t.artist) {
+            continue;
+        }
+        let cand_locale = detect_track_locale(&t.title, &t.artist, &t.album);
+        let artist_low = t.artist.trim().to_ascii_lowercase();
+        let same_artist = !seed_artist_low.is_empty()
+            && !artist_low.is_empty()
+            && (artist_low.contains(&seed_artist_low) || seed_artist_low.contains(&artist_low));
+        if seed_locale == MusicLocale::GlobalEn
+            && cand_locale == MusicLocale::Indonesian
+            && !same_artist
+        {
+            continue;
+        }
+
+        let artist_key = artist_low
+            .split(&[',', '&', '•'][..])
+            .next()
+            .unwrap_or(&artist_low)
+            .trim()
+            .to_string();
+        let count = artist_counts.entry(artist_key).or_insert(0);
+        if *count < 2 {
+            *count += 1;
+            out.push(t);
+            if out.len() >= limit {
+                break;
+            }
+        } else if overflow.len() < limit {
+            overflow.push(t);
+        }
+    }
+
+    if out.len() < limit {
+        for t in overflow {
+            out.push(t);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Fetch locale- and vibe-coherent Radio / Up Next recommendations for a playing YouTube Music
+/// song via `youtubei/v1/next` so English songs queue matching international tracks and Indonesian
+/// songs queue matching Indonesian tracks.
+pub fn fetch_radio_up_next_for_track(
     session: &YtmSession,
     video_id: &str,
+    seed_title: &str,
+    seed_artist: &str,
+    seed_album: &str,
     limit: usize,
+    force_fresh: bool,
 ) -> ProviderResult<Vec<Track>> {
     if !is_valid_video_id(video_id) {
         return Err(ProviderError::Metadata(
             "Invalid videoId for radio".to_string(),
         ));
     }
-    let body = json!({
+    let seed_locale = detect_track_locale(seed_title, seed_artist, seed_album);
+    let radio_session = if !session.is_signed_in() {
+        YtmSession::guest(String::new())
+    } else {
+        session.clone()
+    };
+    let mut body = json!({
         "videoId": video_id,
         "playlistId": format!("RDAMVM{video_id}"),
         "isAudioOnly": true,
-        "context": web_remix_context(session),
+        "enablePersistentPlaylistPanel": true,
+        "tunerSettingValue": "AUTOMIX_SETTING_NORMAL",
+        "context": web_remix_context_for_locale(&radio_session, seed_locale),
     });
-    let root = post_ytm_json("next", &body, session)?;
-    let mut tracks = Vec::new();
+    if force_fresh {
+        body["params"] = json!("wAEB8gECKAE%3D");
+    }
+    let root = post_ytm_json("next", &body, &radio_session)?;
+    let mut raw_tracks = Vec::new();
     let mut seen = HashSet::new();
     seen.insert(video_id.to_string());
-    collect_radio_panel_items(&root, limit.max(1), &mut seen, &mut tracks);
-    Ok(tracks)
+    collect_radio_panel_items(
+        &root,
+        (limit.max(1) * 2).max(24),
+        &mut seen,
+        &mut raw_tracks,
+    );
+
+    let mut coherent =
+        filter_coherent_radio_tracks(seed_locale, seed_artist, raw_tracks, limit.max(1));
+
+    if coherent.len() < 8 && !seed_artist.trim().is_empty() {
+        let search_body = json!({
+            "query": seed_artist.trim(),
+            "params": "EgWKAQIIAWoMEAMQBBAJEAoQBRAV",
+            "context": web_remix_context_for_locale(&radio_session, seed_locale),
+        });
+        if let Ok(search_root) = post_ytm_json_fast("search", &search_body, &radio_session) {
+            let mut extra = Vec::new();
+            collect_music_items(
+                &search_root,
+                "YouTube Music Radio",
+                16,
+                &mut seen,
+                &mut extra,
+            );
+            let mut filtered_extra =
+                filter_coherent_radio_tracks(seed_locale, seed_artist, extra, limit.max(1));
+            if force_fresh && filtered_extra.len() > 2 {
+                fastrand::shuffle(&mut filtered_extra);
+            }
+            for t in filtered_extra {
+                if coherent.len() >= limit.max(1) {
+                    break;
+                }
+                if !coherent.iter().any(|c| c.id == t.id) {
+                    coherent.push(t);
+                }
+            }
+        }
+    }
+
+    if force_fresh && coherent.len() > 3 {
+        fastrand::shuffle(&mut coherent);
+    }
+    Ok(coherent)
+}
+
+/// Fetch infinite Radio / Up Next recommendations for a playing YouTube Music song via `youtubei/v1/next`.
+pub fn fetch_radio_up_next(
+    session: &YtmSession,
+    video_id: &str,
+    limit: usize,
+) -> ProviderResult<Vec<Track>> {
+    fetch_radio_up_next_for_track(session, video_id, "", "", "", limit, false)
 }
 
 /// Search YouTube Music returning both playable studio songs (with full Artist, Album & Duration)
@@ -2514,5 +2836,56 @@ mod tests {
         assert_eq!(tracks[0].title, "STAY");
         assert_eq!(tracks[0].artist, "Justin Bieber & The Kid LAROI");
         assert_eq!(tracks[0].album, "Music Video");
+    }
+
+    #[test]
+    fn radio_locale_and_coherence_filter_keeps_english_queues_clean() {
+        assert_eq!(
+            detect_track_locale("STAY", "The Kid LAROI & Justin Bieber", "F*CK LOVE 3"),
+            MusicLocale::GlobalEn
+        );
+        assert_eq!(
+            detect_track_locale("Hati-Hati di Jalan", "Tulus", "Manusia"),
+            MusicLocale::Indonesian
+        );
+        assert_eq!(
+            detect_track_locale("Runaway", "AURORA", "All My Demons Greeting Me as a Friend"),
+            MusicLocale::GlobalEn
+        );
+
+        let make = |id: &str, title: &str, artist: &str, album: &str| Track {
+            id: id.to_string(),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: album.to_string(),
+            duration_ms: 200_000,
+            path: None,
+            source: TrackSource::YouTubeMusic,
+            codec: "YT AAC".to_string(),
+            sample_rate: 44_100,
+            bit_depth: 16,
+            bitrate_kbps: 128,
+            isrc: None,
+            spotify_id: None,
+            youtube_video_id: Some(id.to_string()),
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked: false,
+        };
+        let mixed = vec![
+            make("a", "Blinding Lights", "The Weeknd", "After Hours"),
+            make("b", "Hati-Hati di Jalan", "Tulus", "Manusia"),
+            make("c", "STAY (Sped Up)", "TikTok Remix", "Single"),
+            make("d", "As It Was", "Harry Styles", "Harry's House"),
+        ];
+        let out = filter_coherent_radio_tracks(
+            MusicLocale::GlobalEn,
+            "The Kid LAROI & Justin Bieber",
+            mixed,
+            10,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].title, "Blinding Lights");
+        assert_eq!(out[1].title, "As It Was");
     }
 }

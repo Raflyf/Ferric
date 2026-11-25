@@ -44,6 +44,70 @@ impl PlayQueue {
         self.order.insert(insert_pos, idx);
     }
 
+    /// Append a single track to the end of the active queue (allowing explicit re-queueing).
+    pub fn append_single_to_end(&mut self, track: Track) {
+        let idx = self.tracks.len();
+        self.tracks.push(track);
+        self.order.push(idx);
+    }
+
+    /// Remove the `offset`-th upcoming track from Up Next (`0` = very next song).
+    pub fn remove_upcoming(&mut self, offset: usize) -> Option<Track> {
+        let pos = self.cursor?;
+        let target = pos + 1 + offset;
+        if target >= self.order.len() {
+            return None;
+        }
+        let track_idx = self.order.remove(target);
+        self.tracks.get(track_idx).cloned()
+    }
+
+    /// Move the `offset`-th upcoming track one slot higher in Up Next (`offset >= 1`).
+    pub fn move_upcoming_up(&mut self, offset: usize) -> bool {
+        let Some(pos) = self.cursor else {
+            return false;
+        };
+        if offset == 0 {
+            return false;
+        }
+        let target = pos + 1 + offset;
+        if target >= self.order.len() || target <= pos + 1 {
+            return false;
+        }
+        self.order.swap(target - 1, target);
+        true
+    }
+
+    /// Remove all queued occurrences of a deleted track ID while keeping current cursor valid.
+    pub fn remove_track_by_id(&mut self, track_id: &str) -> bool {
+        let mut removed_any = false;
+        let cur_pos = self.cursor;
+        let mut new_order = Vec::with_capacity(self.order.len());
+        let mut new_cursor = cur_pos;
+        for (ord_pos, &track_idx) in self.order.iter().enumerate() {
+            let matches = self.tracks.get(track_idx).is_some_and(|t| t.id == track_id);
+            if matches {
+                removed_any = true;
+                if let Some(cp) = new_cursor
+                    && ord_pos < cp
+                {
+                    new_cursor = Some(cp.saturating_sub(1));
+                }
+            } else {
+                new_order.push(track_idx);
+            }
+        }
+        if removed_any {
+            self.order = new_order;
+            self.cursor = if self.order.is_empty() {
+                None
+            } else {
+                new_cursor.map(|c| c.min(self.order.len() - 1))
+            };
+        }
+        removed_any
+    }
+
     /// Jump directly to the `offset`-th upcoming track (0 = very next song in Up Next).
     pub fn jump_to_upcoming(&mut self, offset: usize) -> Option<&Track> {
         let pos = self.cursor?;

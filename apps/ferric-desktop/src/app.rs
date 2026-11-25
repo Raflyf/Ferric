@@ -44,9 +44,10 @@ use ferric_providers::updater::{
 };
 use ferric_providers::ytmusic::{
     VideoStreamOption, YtmCardKind, YtmRichHome, YtmRichSearch, YtmSession, YtmShelfCard,
-    fetch_account_library, fetch_browse_detail, fetch_home_continuation, fetch_radio_up_next,
-    fetch_rich_home, fetch_rich_search, fetch_video_streams, normalize_ytm_thumbnail_url,
-    resolve_and_cache_audio_stream_with_quality, resolve_best_video_id_for_track,
+    fetch_account_library, fetch_browse_detail, fetch_home_continuation,
+    fetch_radio_up_next_for_track, fetch_rich_home, fetch_rich_search, fetch_video_streams,
+    normalize_ytm_thumbnail_url, resolve_and_cache_audio_stream_with_quality,
+    resolve_best_video_id_for_track,
 };
 use ferric_sync::{
     ActiveSpeakerLease, LanDiscoveryBeacon, PairingPayload, QrMatrix, detect_local_lan_ip,
@@ -834,6 +835,66 @@ live_design! {
             draw_text: { color: #888CA0, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0, line_spacing: 1.0 } }
             text: ""
         }
+        up_btn = <Button> {
+            visible: false,
+            width: 18, height: 18, padding: 0, spacing: 0,
+            align: { x: 0.5, y: 0.5 }
+            text: ""
+            label_walk: { width: 0, height: 0 }
+            icon_walk: { width: 10, height: 10 }
+            draw_icon: {
+                svg_path: "M7.41 15.41L12 10.83L16.59 15.41L18 14L12 8L6 14L7.41 15.41Z"
+                color: #6B6F82
+                color_hover: #F4F4F7
+                color_down: #A882FF
+            }
+            draw_bg: {
+                instance hover: 0.0
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
+                    sdf.fill(vec4(1.0, 1.0, 1.0, 0.12 * self.hover));
+                    return sdf.result;
+                }
+            }
+            animator: {
+                hover = {
+                    default: off,
+                    off = { from: { all: Forward { duration: 0.14 } } apply: { draw_bg: { hover: 0.0 }, draw_icon: { hover: 0.0 } } }
+                    on = { from: { all: Forward { duration: 0.10 } } apply: { draw_bg: { hover: 1.0 }, draw_icon: { hover: 1.0 } } }
+                }
+            }
+        }
+        rm_btn = <Button> {
+            visible: false,
+            width: 18, height: 18, padding: 0, spacing: 0,
+            align: { x: 0.5, y: 0.5 }
+            text: ""
+            label_walk: { width: 0, height: 0 }
+            icon_walk: { width: 10, height: 10 }
+            draw_icon: {
+                svg_path: "M19 6.41L17.59 5L12 10.59L6.41 5L5 6.41L10.59 12L5 17.59L6.41 19L12 13.41L17.59 19L19 17.59L13.41 12L19 6.41Z"
+                color: #6B6F82
+                color_hover: #FF6B7A
+                color_down: #FF4D5E
+            }
+            draw_bg: {
+                instance hover: 0.0
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0);
+                    sdf.fill(vec4(0.86, 0.22, 0.26, 0.24 * self.hover));
+                    return sdf.result;
+                }
+            }
+            animator: {
+                hover = {
+                    default: off,
+                    off = { from: { all: Forward { duration: 0.14 } } apply: { draw_bg: { hover: 0.0 }, draw_icon: { hover: 0.0 } } }
+                    on = { from: { all: Forward { duration: 0.10 } } apply: { draw_bg: { hover: 1.0 }, draw_icon: { hover: 1.0 } } }
+                }
+            }
+        }
     }
 
     App = {{App}} {
@@ -1422,6 +1483,11 @@ live_design! {
                                         }
                                         hero_shuffle_btn = <FerricBtn> { text: "Shuffle" }
                                         add_folder_btn = <FerricBtn> { text: "Add Folder" }
+                                        songs_clear_demo_btn = <FerricBtn> {
+                                            visible: false,
+                                            text: "Clear Demo"
+                                            draw_text: { color: #FF7885, color_hover: #FFA3AC }
+                                        }
                                     }
 
                                     <View> {
@@ -1432,6 +1498,13 @@ live_design! {
                                         flt_spotify_btn = <FerricChipBtn> { text: "Spotify" }
                                         flt_youtube_btn = <FerricChipBtn> { text: "YouTube" }
                                         <View> { width: Fill, height: 1 }
+                                        songs_filter_input = <FerricInput> {
+                                            width: 176,
+                                            height: 24,
+                                            padding: { left: 9, right: 9, top: 0, bottom: 0 }
+                                            empty_text: "Filter songs..."
+                                            draw_text: { text_style: <THEME_FONT_REGULAR> { font_size: 8.4, line_spacing: 1.0 } }
+                                        }
                                         sort_cycle_btn = <FerricBtn> { height: 24, text: "Sort: Artist" }
                                     }
 
@@ -1579,6 +1652,24 @@ live_design! {
                                                 detail_radio_btn = <FerricBtn> { height: 28, text: "Start Radio" }
                                                 detail_pin_btn = <FerricBtn> { height: 28, text: "Pin" }
                                                 detail_queue_btn = <FerricBtn> { height: 28, text: "+ Queue" }
+                                                detail_export_btn = <FerricBtn> { height: 28, text: "Export M3U" }
+                                                detail_delete_btn = <FerricBtn> {
+                                                    visible: false,
+                                                    height: 28,
+                                                    text: "Delete"
+                                                    draw_text: { color: #FF7885, color_hover: #FFA3AC }
+                                                }
+                                            }
+                                            detail_rename_row = <View> {
+                                                visible: false,
+                                                width: Fill, height: Fit, margin: { top: 4 }, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                detail_rename_input = <FerricInput> {
+                                                    width: 220,
+                                                    height: 26,
+                                                    empty_text: "Rename playlist..."
+                                                    draw_text: { text_style: <THEME_FONT_REGULAR> { font_size: 8.5, line_spacing: 1.0 } }
+                                                }
+                                                detail_rename_btn = <FerricBtn> { height: 26, text: "Rename" }
                                             }
                                         }
                                     }
@@ -1913,6 +2004,14 @@ live_design! {
                                                 clear_audio_cache_btn = <FerricBtn> { text: "Clear Audio Cache" }
                                                 clear_art_cache_btn = <FerricBtn> { text: "Clear Artwork Cache" }
                                                 load_demo_btn = <FerricBtn> { text: "Load Offline Demo Tracks" }
+                                                remove_demo_btn = <FerricBtn> {
+                                                    text: "Remove Demo Tracks"
+                                                    draw_text: { color: #FF7885, color_hover: #FFA3AC }
+                                                }
+                                                clear_local_btn = <FerricBtn> {
+                                                    text: "Clear Local Folders"
+                                                    draw_text: { color: #FF7885, color_hover: #FFA3AC }
+                                                }
                                             }
                                         }
 
@@ -2135,6 +2234,13 @@ live_design! {
                                     width: 26, height: 26,
                                     draw_icon: {
                                         svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
+                                        color: #707382
+                                    }
+                                }
+                                np_add_pl_btn = <FerricIconBtn> {
+                                    width: 24, height: 24,
+                                    draw_icon: {
+                                        svg_path: "M19 13H13V19H11V13H5V11H11V5H13V11H19V13Z"
                                         color: #707382
                                     }
                                 }
@@ -2627,6 +2733,84 @@ live_design! {
                             }
                         }
                     }
+
+                    // ================================================================
+                    // OVERLAY 5: TRACK ACTIONS & ADD-TO-PLAYLIST POPOVER (Right-Click / +)
+                    // ================================================================
+                    track_menu_modal = <View> {
+                        visible: false,
+                        width: Fill,
+                        height: Fill,
+                        align: { x: 0.5, y: 0.45 }
+                        show_bg: true,
+                        draw_bg: { color: #000000A4 }
+
+                        card_track_menu = <FerricCard> {
+                            width: 440,
+                            padding: 16,
+                            flow: Down,
+                            spacing: 10,
+
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                <View> {
+                                    width: Fill, height: Fit, flow: Down, spacing: 2,
+                                    tm_title_lbl = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 11.2 } }, text: "Track Actions" }
+                                    tm_sub_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "" }
+                                }
+                                tm_close_btn = <FerricBtn> { height: 24, text: "Esc" }
+                            }
+
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                tm_play_btn = <FerricPrimaryBtn> { height: 26, text: "Play Now" }
+                                tm_play_next_btn = <FerricBtn> { height: 26, text: "Play Next" }
+                                tm_add_queue_btn = <FerricBtn> { height: 26, text: "+ Queue" }
+                                tm_radio_btn = <FerricBtn> { height: 26, text: "Start Radio" }
+                            }
+
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                tm_like_btn = <FerricBtn> { height: 26, text: "Like" }
+                                tm_artist_btn = <FerricBtn> { height: 26, text: "Go to Artist" }
+                                tm_album_btn = <FerricBtn> { height: 26, text: "Go to Album" }
+                                tm_copy_btn = <FerricBtn> { height: 26, text: "Copy Info" }
+                            }
+
+                            <FerricDividerH> {}
+
+                            <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_BOLD> { font_size: 8.2 } }, text: "ADD TO PLAYLIST" }
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, spacing: 5,
+                                tm_pl_0 = <FerricChipBtn> { visible: false, text: "Playlist 1" }
+                                tm_pl_1 = <FerricChipBtn> { visible: false, text: "Playlist 2" }
+                                tm_pl_2 = <FerricChipBtn> { visible: false, text: "Playlist 3" }
+                            }
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, spacing: 5,
+                                tm_pl_3 = <FerricChipBtn> { visible: false, text: "Playlist 4" }
+                                tm_pl_4 = <FerricChipBtn> { visible: false, text: "Playlist 5" }
+                                tm_pl_5 = <FerricChipBtn> { visible: false, text: "Playlist 6" }
+                            }
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                tm_new_pl_input = <FerricInput> { width: Fill, height: 28, empty_text: "Create new playlist & add track..." }
+                                tm_new_pl_btn = <FerricPrimaryBtn> { height: 28, text: "+ Create" }
+                            }
+
+                            <FerricDividerH> {}
+
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                <View> { width: Fill, height: 1 }
+                                tm_remove_btn = <FerricBtn> {
+                                    height: 26,
+                                    text: "Remove from Library"
+                                    draw_text: { color: #FF7885, color_hover: #FFA3AC }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2783,6 +2967,16 @@ pub struct App {
     pre_mute_volume: f32,
     #[rust]
     cmdk_open: bool,
+    #[rust]
+    track_menu_open: bool,
+    #[rust]
+    track_menu_target: Option<Track>,
+    #[rust]
+    songs_filter_query: String,
+    #[rust]
+    window_hidden_or_minimized: bool,
+    #[rust]
+    tray_second_trim_at: Option<Instant>,
     #[rust]
     toast_until: Option<Instant>,
     #[rust]
@@ -3378,6 +3572,7 @@ impl App {
         }
         let obstructed = !self.fullscreen_open
             || self.cmdk_open
+            || self.track_menu_open
             || self.update_popup_visible
             || win32_is_window_hidden_or_minimized();
         if obstructed {
@@ -4136,6 +4331,20 @@ impl App {
                 .collect(),
         };
 
+        let q_filter = self.songs_filter_query.trim().to_ascii_lowercase();
+        if !q_filter.is_empty() {
+            list.retain(|t| {
+                t.title.to_ascii_lowercase().contains(&q_filter)
+                    || t.artist.to_ascii_lowercase().contains(&q_filter)
+                    || t.album.to_ascii_lowercase().contains(&q_filter)
+            });
+        }
+
+        let has_demo = self.all_tracks.iter().any(|t| t.id.starts_with("demo:"));
+        self.ui
+            .button(id!(songs_clear_demo_btn))
+            .set_visible(cx, has_demo);
+
         match self.sort_field {
             SortField::Artist => list.sort_by(|a, b| {
                 a.artist
@@ -4613,6 +4822,8 @@ impl App {
                         String::new()
                     },
                 );
+                rv.button(id!(up_btn)).set_visible(cx, false);
+                rv.button(id!(rm_btn)).set_visible(cx, false);
                 self.bind_cover_art_url(
                     cx,
                     rv.ferric_cover_art(id!(art)),
@@ -4728,9 +4939,9 @@ impl App {
                     },
                 );
                 rv.label(id!(title))
-                    .set_text(cx, &clip_text(&clean_display_text(&t.title), 16));
+                    .set_text(cx, &clip_text(&clean_display_text(&t.title), 14));
                 rv.label(id!(sub))
-                    .set_text(cx, &clip_text(&clean_display_text(&t.artist), 18));
+                    .set_text(cx, &clip_text(&clean_display_text(&t.artist), 16));
                 rv.label(id!(dur)).set_text(
                     cx,
                     &if t.duration_ms > 0 {
@@ -4739,6 +4950,8 @@ impl App {
                         String::new()
                     },
                 );
+                rv.button(id!(up_btn)).set_visible(cx, i > 0);
+                rv.button(id!(rm_btn)).set_visible(cx, true);
                 self.bind_cover_art_url(
                     cx,
                     rv.ferric_cover_art(id!(art)),
@@ -5024,6 +5237,22 @@ impl App {
         self.ui
             .button(id!(detail_pin_btn))
             .set_text(cx, if is_pinned { "Pinned" } else { "Pin" });
+        let is_saved_pl = self.detail_state.kind == YtmCardKind::Playlist
+            && self.playlists.iter().any(|p| p.id == self.detail_state.id);
+        self.ui
+            .button(id!(detail_delete_btn))
+            .set_visible(cx, is_saved_pl);
+        self.ui
+            .view(id!(detail_rename_row))
+            .set_visible(cx, is_saved_pl);
+        if is_saved_pl {
+            self.ui
+                .text_input(id!(detail_rename_input))
+                .set_text(cx, &self.detail_state.title);
+        }
+        self.ui
+            .button(id!(detail_export_btn))
+            .set_visible(cx, !self.detail_state.tracks.is_empty());
         self.bind_cover_art_url(
             cx,
             self.ui.ferric_cover_art(id!(detail_art)),
@@ -5514,12 +5743,16 @@ impl App {
             id!(recents_clear_btn),
             id!(hero_shuffle_btn),
             id!(add_folder_btn),
+            id!(songs_clear_demo_btn),
             id!(sort_cycle_btn),
             id!(pl_import_btn),
             id!(detail_shuffle_btn),
             id!(detail_radio_btn),
             id!(detail_pin_btn),
             id!(detail_queue_btn),
+            id!(detail_export_btn),
+            id!(detail_delete_btn),
+            id!(detail_rename_btn),
             id!(yt_sync_btn),
             id!(yt_logout_btn),
             id!(guest_refresh_btn),
@@ -5556,6 +5789,8 @@ impl App {
             id!(clear_audio_cache_btn),
             id!(clear_art_cache_btn),
             id!(load_demo_btn),
+            id!(remove_demo_btn),
+            id!(clear_local_btn),
             id!(check_updates_btn),
             id!(open_releases_btn),
             id!(connect_gen_pair_btn),
@@ -5570,6 +5805,15 @@ impl App {
             id!(fs_lyr_minus),
             id!(fs_lyr_plus),
             id!(fs_lyr_copy),
+            id!(tm_close_btn),
+            id!(tm_play_next_btn),
+            id!(tm_add_queue_btn),
+            id!(tm_radio_btn),
+            id!(tm_like_btn),
+            id!(tm_artist_btn),
+            id!(tm_album_btn),
+            id!(tm_copy_btn),
+            id!(tm_remove_btn),
         ] {
             self.ui.button(btn_id).apply_over(
                 cx,
@@ -5650,7 +5894,14 @@ impl App {
             id!(bar_video_btn),
             id!(bar_lyrics_btn),
             id!(bar_queue_btn),
+            id!(np_add_pl_btn),
             id!(vol_mute_btn),
+            id!(tm_pl_0),
+            id!(tm_pl_1),
+            id!(tm_pl_2),
+            id!(tm_pl_3),
+            id!(tm_pl_4),
+            id!(tm_pl_5),
             id!(bar_fullscreen_btn),
             id!(fs_like_btn),
             id!(fs_shuffle_btn),
@@ -5794,9 +6045,18 @@ impl App {
         let session = self.current_ytm_session();
         let seed_track_id = track.id.clone();
         let seed_title = track.title.clone();
+        let seed_artist = track.artist.clone();
+        let seed_album = track.album.clone();
         thread::spawn(move || {
-            if let Ok(tracks) = fetch_radio_up_next(&session, &vid, 15)
-                && !tracks.is_empty()
+            if let Ok(tracks) = fetch_radio_up_next_for_track(
+                &session,
+                &vid,
+                &seed_title,
+                &seed_artist,
+                &seed_album,
+                15,
+                force,
+            ) && !tracks.is_empty()
             {
                 let _ = tx.send(BgMessage::RadioLoaded {
                     seed_track_id,
@@ -5805,6 +6065,280 @@ impl App {
                 });
             }
         });
+    }
+
+    fn is_text_input_focused(&self, cx: &Cx) -> bool {
+        for input_id in [
+            id!(top_search_input),
+            id!(search_page_input),
+            id!(songs_filter_input),
+            id!(pl_new_input),
+            id!(detail_rename_input),
+            id!(quick_sync_input),
+            id!(sub_url_input),
+            id!(sub_user_input),
+            id!(sub_pass_input),
+            id!(autoeq_input),
+            id!(cmdk_input),
+            id!(tm_new_pl_input),
+        ] {
+            if cx.has_key_focus(self.ui.widget(input_id).area()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn open_track_menu(&mut self, cx: &mut Cx, track: Track) {
+        self.ui
+            .label(id!(tm_title_lbl))
+            .set_text(cx, &clip_text(&clean_display_text(&track.title), 44));
+        self.ui.label(id!(tm_sub_lbl)).set_text(
+            cx,
+            &clip_text(
+                &clean_display_text(&format!("{} · {}", track.artist, track.album)),
+                54,
+            ),
+        );
+        self.ui
+            .button(id!(tm_like_btn))
+            .set_text(cx, if track.liked { "Unlike" } else { "Like" });
+        let in_saved_pl = self.active_page == MainPage::Detail
+            && self.detail_state.kind == YtmCardKind::Playlist
+            && self.playlists.iter().any(|p| p.id == self.detail_state.id);
+        let remove_lbl = if in_saved_pl {
+            "Remove from Playlist"
+        } else if self.active_page == MainPage::Recents {
+            "Remove from Recents"
+        } else {
+            "Remove from Library"
+        };
+        self.ui.button(id!(tm_remove_btn)).set_text(cx, remove_lbl);
+
+        for (i, pid) in [
+            id!(tm_pl_0),
+            id!(tm_pl_1),
+            id!(tm_pl_2),
+            id!(tm_pl_3),
+            id!(tm_pl_4),
+            id!(tm_pl_5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(pl) = self.playlists.get(i) {
+                self.ui.button(pid).set_visible(cx, true);
+                self.ui.button(pid).set_text(cx, &clip_text(&pl.name, 16));
+            } else {
+                self.ui.button(pid).set_visible(cx, false);
+            }
+        }
+        self.ui.text_input(id!(tm_new_pl_input)).set_text(cx, "");
+        self.track_menu_target = Some(track);
+        self.track_menu_open = true;
+        self.ui.view(id!(track_menu_modal)).set_visible(cx, true);
+        self.sync_video_bounds(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_track_menu(&mut self, cx: &mut Cx) {
+        self.track_menu_open = false;
+        self.track_menu_target = None;
+        self.ui.view(id!(track_menu_modal)).set_visible(cx, false);
+        self.sync_video_bounds(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn add_track_to_saved_playlist(
+        &mut self,
+        cx: &mut Cx,
+        playlist_id: &str,
+        playlist_name: &str,
+        track: &Track,
+    ) {
+        if let Some(db) = &mut self.db {
+            let _ = db.upsert_tracks(std::slice::from_ref(track));
+            let _ = db.add_track_to_playlist(playlist_id, &track.id);
+            self.all_tracks = db.list_tracks("").unwrap_or_default();
+            self.playlists = db.list_playlists().unwrap_or_default();
+        }
+        if self.active_page == MainPage::Detail
+            && self.detail_state.id == playlist_id
+            && let Some(db) = &self.db
+            && let Ok(updated) = db.list_playlist_tracks(playlist_id)
+        {
+            self.detail_state.tracks = updated.clone();
+            self.detail_tracks = Rc::new(updated);
+            self.refresh_detail_hero(cx);
+        }
+        self.refresh_playlists_grid(cx);
+        self.rebuild_library_views(cx);
+        self.show_toast(
+            cx,
+            &format!(
+                "Added '{}' to '{}'",
+                clip_text(&track.title, 22),
+                playlist_name
+            ),
+        );
+    }
+
+    fn remove_track_contextually(&mut self, cx: &mut Cx, target: &Track) {
+        let title = clip_text(&target.title, 24);
+        let in_saved_pl = self.active_page == MainPage::Detail
+            && self.detail_state.kind == YtmCardKind::Playlist
+            && self.playlists.iter().any(|p| p.id == self.detail_state.id);
+
+        if in_saved_pl {
+            let pl_id = self.detail_state.id.clone();
+            if let Some(db) = &mut self.db {
+                let _ = db.remove_track_from_playlist(&pl_id, &target.id);
+                self.playlists = db.list_playlists().unwrap_or_default();
+                let updated = db.list_playlist_tracks(&pl_id).unwrap_or_default();
+                self.detail_state.tracks = updated.clone();
+                self.detail_tracks = Rc::new(updated);
+            }
+            self.refresh_detail_hero(cx);
+            self.refresh_playlists_grid(cx);
+            self.show_toast(cx, &format!("Removed '{title}' from playlist"));
+            return;
+        }
+
+        if self.active_page == MainPage::Recents {
+            self.session_state
+                .recent_track_ids
+                .retain(|id| id != &target.id);
+            if let Some(db) = &self.db {
+                let _ = db.save_session_state(&self.session_state);
+            }
+            self.rebuild_library_views(cx);
+            self.refresh_right_sidebar(cx);
+            self.show_toast(cx, &format!("Removed '{title}' from Recents"));
+            return;
+        }
+
+        // Remove from Ferric SQLite library (never deletes user's own music files on disk;
+        // removes generated demo `.wav` only for `demo:` tracks).
+        if target.id.starts_with("demo:")
+            && let Some(p) = target.path.as_ref()
+            && p.starts_with(app_data_dir().join("demo"))
+        {
+            let _ = std::fs::remove_file(p);
+        }
+        if let Some(db) = &mut self.db {
+            let _ = db.delete_track(&target.id);
+            self.all_tracks = db.list_tracks("").unwrap_or_default();
+            self.playlists = db.list_playlists().unwrap_or_default();
+        } else {
+            self.all_tracks.retain(|t| t.id != target.id);
+        }
+        self.session_state
+            .recent_track_ids
+            .retain(|id| id != &target.id);
+        if let Some(db) = &self.db {
+            let _ = db.save_session_state(&self.session_state);
+        }
+        let was_playing_target = self.queue.current().is_some_and(|cur| cur.id == target.id);
+        let _ = self.queue.remove_track_by_id(&target.id);
+        if was_playing_target {
+            if let Some(next) = self.queue.current().cloned() {
+                self.play_track(cx, next);
+            } else if let Some(audio) = &self.audio {
+                audio.send(EngineCommand::Stop);
+            }
+        }
+        if self.active_page == MainPage::Search {
+            let mut next_search: Vec<Track> = (*self.search_tracks).clone();
+            next_search.retain(|t| t.id != target.id);
+            self.search_tracks = Rc::new(next_search);
+        } else if self.active_page == MainPage::Detail {
+            self.detail_state.tracks.retain(|t| t.id != target.id);
+            self.detail_tracks = Rc::new(self.detail_state.tracks.clone());
+            self.refresh_detail_hero(cx);
+        }
+        self.sync_next_deck_to_engine();
+        self.rebuild_library_views(cx);
+        self.refresh_right_sidebar(cx);
+        self.show_toast(cx, &format!("Removed '{title}' from library"));
+    }
+
+    fn remove_all_demo_tracks(&mut self, cx: &mut Cx) {
+        let removed = if let Some(db) = &mut self.db {
+            let n = db.delete_demo_tracks().unwrap_or(0);
+            self.all_tracks = db.list_tracks("").unwrap_or_default();
+            self.playlists = db.list_playlists().unwrap_or_default();
+            n
+        } else {
+            let before = self.all_tracks.len();
+            self.all_tracks.retain(|t| !t.id.starts_with("demo:"));
+            before.saturating_sub(self.all_tracks.len())
+        };
+        clear_flat_cache_files(&app_data_dir().join("demo"));
+        self.session_state
+            .recent_track_ids
+            .retain(|id| !id.starts_with("demo:"));
+        if let Some(db) = &self.db {
+            let _ = db.save_session_state(&self.session_state);
+        }
+        let demo_ids: Vec<String> = self
+            .queue
+            .tracks()
+            .iter()
+            .filter(|t| t.id.starts_with("demo:"))
+            .map(|t| t.id.clone())
+            .collect();
+        for did in demo_ids {
+            let _ = self.queue.remove_track_by_id(&did);
+        }
+        self.rebuild_library_views(cx);
+        self.refresh_right_sidebar(cx);
+        self.show_toast(
+            cx,
+            if removed > 0 {
+                "Removed offline demo tracks"
+            } else {
+                "No demo tracks in library"
+            },
+        );
+    }
+
+    fn export_detail_m3u(&mut self, cx: &mut Cx) {
+        if self.detail_state.tracks.is_empty() {
+            return;
+        }
+        let safe_name: String = self
+            .detail_state
+            .title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let default_file = format!("{}.m3u8", safe_name.trim());
+        if let Some(dest) = rfd::FileDialog::new()
+            .set_title("Export Playlist (.m3u8)")
+            .set_file_name(&default_file)
+            .add_filter("M3U8 Playlist", &["m3u8", "m3u"])
+            .save_file()
+        {
+            let mut out = String::from("#EXTM3U\n");
+            for t in &self.detail_state.tracks {
+                let secs = (t.duration_ms / 1000) as i64;
+                out.push_str(&format!("#EXTINF:{secs},{} - {}\n", t.artist, t.title));
+                if let Some(p) = &t.path {
+                    out.push_str(&format!("{}\n", p.to_string_lossy()));
+                } else if let Some(vid) = &t.youtube_video_id {
+                    out.push_str(&format!("https://music.youtube.com/watch?v={vid}\n"));
+                }
+            }
+            if std::fs::write(&dest, out).is_ok() {
+                self.show_toast(cx, &format!("Exported '{}'", self.detail_state.title));
+            }
+        }
     }
 
     fn spawn_stream_resolve(&self, track: Track, auto_play: bool) {
@@ -6538,28 +7072,51 @@ impl App {
         // (no-op single atomic load once installed).
         win32_install_window_hooks();
 
-        // 0b. Multi-stage working-set trim (releases DX11 shader scratch + artwork decode staging
-        // pages so Ferric stays consistently <= 100 MB across every page).
+        // 0b. Multi-stage & idle working-set trim (releases DX11 shader scratch, SQLite cache,
+        // and artwork decode staging pages so Ferric stays strictly <100 MB open and even lower in tray).
+        if let Some(due) = self.tray_second_trim_at
+            && Instant::now() >= due
+        {
+            self.tray_second_trim_at = None;
+            if let Some(db) = &self.db {
+                db.shrink_memory();
+            }
+            win32_trim_working_set();
+        }
         if let Some(started) = self.started_at {
             let elapsed = started.elapsed();
             if self.startup_trim_stage == 0 && elapsed >= Duration::from_millis(1_600) {
                 self.startup_trim_stage = 1;
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
+                if let Some(db) = &self.db {
+                    db.shrink_memory();
+                }
                 win32_trim_working_set();
             } else if self.startup_trim_stage == 1 && elapsed >= Duration::from_millis(3_400) {
                 self.startup_trim_stage = 2;
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
+                if let Some(db) = &self.db {
+                    db.shrink_memory();
+                }
                 win32_trim_working_set();
             } else if self.startup_trim_stage >= 2
-                && self.artwork_uploads_since_trim >= 4
-                && self
-                    .last_trim_at
-                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
+                && !self.window_hidden_or_minimized
+                && self.page_reveal_t >= 0.995
+                && ((self.artwork_uploads_since_trim >= 4
+                    && self
+                        .last_trim_at
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(3)))
+                    || self
+                        .last_trim_at
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(20)))
             {
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
+                if let Some(db) = &self.db {
+                    db.shrink_memory();
+                }
                 win32_trim_working_set();
             }
         }
@@ -6568,16 +7125,31 @@ impl App {
         for tray_ev in win32_poll_tray_events() {
             match tray_ev {
                 TrayEvent::HiddenToTray => {
+                    self.window_hidden_or_minimized = true;
                     if self.video_open {
                         self.close_native_video_stage(cx);
                     }
                     if let Some(cache) = &mut self.artwork {
-                        cache.trim_non_active();
-                        self.artwork_snapshot = Rc::new(cache.snapshot());
+                        cache.clear_all_for_tray();
+                        self.artwork_snapshot = Rc::new(HashMap::new());
+                    }
+                    self.missing_art_queue.borrow_mut().clear();
+                    self.missing_art_queue.borrow_mut().shrink_to_fit();
+                    if let Some(db) = &self.db {
+                        db.shrink_memory();
                     }
                     win32_trim_working_set();
+                    // Schedule a second pass after DX11 finishes retiring frame buffers
+                    self.tray_second_trim_at = Some(Instant::now() + Duration::from_millis(900));
                 }
                 TrayEvent::ShowWindow => {
+                    self.window_hidden_or_minimized = false;
+                    self.tray_second_trim_at = None;
+                    if let Some(cur) = self.queue.current().cloned()
+                        && let Some(cache) = &mut self.artwork
+                    {
+                        cache.pin_active_track(Some(&cur));
+                    }
                     self.refresh_all_artwork_slots(cx);
                     self.sync_video_bounds(cx);
                     cx.redraw_all();
@@ -7666,9 +8238,17 @@ impl App {
                 let pool = self.home_quick_picks_pool();
                 let idx = self.qp_page * 8 + slot;
                 if let Some(track) = pool.get(idx).cloned() {
-                    self.queue_context = "Quick picks".to_string();
-                    self.queue.set_tracks(pool, Some(idx));
-                    self.play_track(cx, track);
+                    if track.youtube_video_id.is_some() && self.session_state.autoplay_radio {
+                        self.queue_context = format!("{} radio", track.title);
+                        self.queue.set_tracks(vec![track.clone()], Some(0));
+                        self.last_radio_seed_id = None;
+                        self.play_track(cx, track.clone());
+                        self.maybe_fetch_radio_for_track(&track, true);
+                    } else {
+                        self.queue_context = "Quick picks".to_string();
+                        self.queue.set_tracks(pool, Some(idx));
+                        self.play_track(cx, track);
+                    }
                 }
             }
         }
@@ -7906,6 +8486,13 @@ impl App {
                 self.rebuild_library_views(cx);
             }
         }
+        if let Some(filter_txt) = self.ui.text_input(id!(songs_filter_input)).changed(actions) {
+            self.songs_filter_query = filter_txt;
+            self.rebuild_library_views(cx);
+        }
+        if self.ui.button(id!(songs_clear_demo_btn)).clicked(actions) {
+            self.remove_all_demo_tracks(cx);
+        }
         if self.ui.button(id!(sort_cycle_btn)).clicked(actions) {
             self.sort_field = self.sort_field.next();
             self.rebuild_library_views(cx);
@@ -8001,7 +8588,12 @@ impl App {
         }
 
         // Playlists grid + Create + Import
-        if self.ui.button(id!(pl_create_btn)).clicked(actions) {
+        let create_pl_submitted = self
+            .ui
+            .text_input(id!(pl_new_input))
+            .returned(actions)
+            .is_some();
+        if self.ui.button(id!(pl_create_btn)).clicked(actions) || create_pl_submitted {
             let name = self
                 .ui
                 .text_input(id!(pl_new_input))
@@ -8156,6 +8748,56 @@ impl App {
             self.refresh_right_sidebar(cx);
             self.show_toast(cx, &format!("Added {added} songs to Up next"));
         }
+        if self.ui.button(id!(detail_export_btn)).clicked(actions) {
+            self.export_detail_m3u(cx);
+        }
+        let rename_submitted = self
+            .ui
+            .text_input(id!(detail_rename_input))
+            .returned(actions)
+            .is_some();
+        if (self.ui.button(id!(detail_rename_btn)).clicked(actions) || rename_submitted)
+            && self.detail_state.kind == YtmCardKind::Playlist
+            && !self.detail_state.id.is_empty()
+        {
+            let next_name = self
+                .ui
+                .text_input(id!(detail_rename_input))
+                .text()
+                .trim()
+                .to_string();
+            if !next_name.is_empty() && next_name != self.detail_state.title {
+                let pl_id = self.detail_state.id.clone();
+                if let Some(db) = &mut self.db {
+                    let _ = db.rename_playlist(&pl_id, &next_name);
+                    self.playlists = db.list_playlists().unwrap_or_default();
+                }
+                self.detail_state.title = next_name.clone();
+                self.refresh_detail_hero(cx);
+                self.refresh_playlists_grid(cx);
+                self.rebuild_library_views(cx);
+                self.show_toast(cx, &format!("Renamed playlist to '{next_name}'"));
+            }
+        }
+        if self.ui.button(id!(detail_delete_btn)).clicked(actions)
+            && self.detail_state.kind == YtmCardKind::Playlist
+            && !self.detail_state.id.is_empty()
+        {
+            let pl_id = self.detail_state.id.clone();
+            let pl_title = self.detail_state.title.clone();
+            if let Some(db) = &mut self.db {
+                let _ = db.delete_playlist(&pl_id);
+                self.playlists = db.list_playlists().unwrap_or_default();
+            }
+            self.session_state.pinned_ids.retain(|id| id != &pl_id);
+            if let Some(db) = &self.db {
+                let _ = db.save_session_state(&self.session_state);
+            }
+            self.refresh_playlists_grid(cx);
+            self.rebuild_library_views(cx);
+            self.navigate_to(cx, MainPage::Playlists, false);
+            self.show_toast(cx, &format!("Deleted playlist '{pl_title}'"));
+        }
 
         // Add Local Music Folder
         if (self.ui.button(id!(add_folder_btn)).clicked(actions)
@@ -8177,14 +8819,25 @@ impl App {
             match action.as_widget_action().cast() {
                 TrackListAction::PlayIndex(idx) => {
                     if let Some(clicked) = active_list.get(idx).cloned() {
-                        self.queue_context = match self.active_page {
-                            MainPage::Search => "Search".to_string(),
-                            MainPage::Recents => "Recents".to_string(),
-                            MainPage::Detail => self.detail_state.title.clone(),
-                            _ => "Library".to_string(),
-                        };
-                        self.queue.set_tracks((*active_list).clone(), Some(idx));
-                        self.play_track(cx, clicked);
+                        if self.active_page == MainPage::Search
+                            && clicked.youtube_video_id.is_some()
+                            && self.session_state.autoplay_radio
+                        {
+                            self.queue_context = format!("{} radio", clicked.title);
+                            self.queue.set_tracks(vec![clicked.clone()], Some(0));
+                            self.last_radio_seed_id = None;
+                            self.play_track(cx, clicked.clone());
+                            self.maybe_fetch_radio_for_track(&clicked, true);
+                        } else {
+                            self.queue_context = match self.active_page {
+                                MainPage::Search => "Search".to_string(),
+                                MainPage::Recents => "Recents".to_string(),
+                                MainPage::Detail => self.detail_state.title.clone(),
+                                _ => "Library".to_string(),
+                            };
+                            self.queue.set_tracks((*active_list).clone(), Some(idx));
+                            self.play_track(cx, clicked);
+                        }
                     }
                 }
                 TrackListAction::ToggleLike(idx) => {
@@ -8216,6 +8869,16 @@ impl App {
                         self.prefetch_next_online_track();
                         self.refresh_right_sidebar(cx);
                         self.show_toast(cx, &format!("Playing next: '{title}'"));
+                    }
+                }
+                TrackListAction::AddToPlaylist(idx) | TrackListAction::ContextMenu(idx) => {
+                    if let Some(target) = active_list.get(idx).cloned() {
+                        self.open_track_menu(cx, target);
+                    }
+                }
+                TrackListAction::RemoveTrack(idx) => {
+                    if let Some(target) = active_list.get(idx).cloned() {
+                        self.remove_track_contextually(cx, &target);
                     }
                 }
                 TrackListAction::LoadDiscoverFeed => {
@@ -8358,7 +9021,7 @@ impl App {
                 }
             }
         }
-        // Up next clicks in Right Sidebar (jump directly!)
+        // Up next clicks in Right Sidebar (reorder up, remove, or jump directly!)
         for (i, rid) in [
             id!(qu_0),
             id!(qu_1),
@@ -8375,6 +9038,24 @@ impl App {
         .enumerate()
         {
             let rv = self.ui.view(rid);
+            if rv.button(id!(up_btn)).clicked(actions) {
+                if self.queue.move_upcoming_up(i) {
+                    self.sync_next_deck_to_engine();
+                    self.refresh_right_sidebar(cx);
+                }
+                continue;
+            }
+            if rv.button(id!(rm_btn)).clicked(actions) {
+                if let Some(removed) = self.queue.remove_upcoming(i) {
+                    self.sync_next_deck_to_engine();
+                    self.refresh_right_sidebar(cx);
+                    self.show_toast(
+                        cx,
+                        &format!("Removed '{}' from queue", clip_text(&removed.title, 22)),
+                    );
+                }
+                continue;
+            }
             if (rv.ferric_cover_art(id!(art)).clicked(actions)
                 || rv
                     .finger_up(actions)
@@ -8383,6 +9064,12 @@ impl App {
             {
                 self.play_track(cx, target);
             }
+        }
+
+        if self.ui.button(id!(np_add_pl_btn)).clicked(actions)
+            && let Some(cur) = self.queue.current().cloned()
+        {
+            self.open_track_menu(cx, cur);
         }
 
         // 7. BOTTOM PLAYER BAR & FULLSCREEN OVERLAY
@@ -9161,6 +9848,25 @@ impl App {
         if self.ui.button(id!(load_demo_btn)).clicked(actions) {
             self.load_and_play_demo_suite(cx);
         }
+        if self.ui.button(id!(remove_demo_btn)).clicked(actions) {
+            self.remove_all_demo_tracks(cx);
+        }
+        if self.ui.button(id!(clear_local_btn)).clicked(actions) {
+            let removed = if let Some(db) = &mut self.db {
+                let n = db.clear_music_folders_and_local_tracks().unwrap_or(0);
+                self.all_tracks = db.list_tracks("").unwrap_or_default();
+                self.playlists = db.list_playlists().unwrap_or_default();
+                n
+            } else {
+                0
+            };
+            self.rebuild_library_views(cx);
+            self.refresh_right_sidebar(cx);
+            self.show_toast(
+                cx,
+                &format!("Cleared local folders ({removed} tracks removed)"),
+            );
+        }
         if self.ui.button(id!(connect_gen_pair_btn)).clicked(actions) {
             self.regenerate_pairing_qr(cx);
         }
@@ -9197,6 +9903,177 @@ impl App {
         }
         if self.ui.button(id!(update_popup_close_btn)).clicked(actions) {
             self.dismiss_update_popup(cx);
+        }
+
+        // Track Actions & Add-to-Playlist Popover Modal (Right-Click / +)
+        if self.ui.button(id!(tm_close_btn)).clicked(actions) {
+            self.close_track_menu(cx);
+        }
+        if let Some(target) = self.track_menu_target.clone() {
+            if self.ui.button(id!(tm_play_btn)).clicked(actions) {
+                self.close_track_menu(cx);
+                self.queue_context = format!("{} radio", target.title);
+                self.queue.set_tracks(vec![target.clone()], Some(0));
+                self.last_radio_seed_id = None;
+                self.play_track(cx, target.clone());
+                if self.session_state.autoplay_radio {
+                    self.maybe_fetch_radio_for_track(&target, true);
+                }
+            } else if self.ui.button(id!(tm_play_next_btn)).clicked(actions) {
+                self.close_track_menu(cx);
+                let title = clip_text(&target.title, 22);
+                self.queue.insert_play_next(target);
+                self.sync_next_deck_to_engine();
+                self.prefetch_next_online_track();
+                self.refresh_right_sidebar(cx);
+                self.show_toast(cx, &format!("Playing next: '{title}'"));
+            } else if self.ui.button(id!(tm_add_queue_btn)).clicked(actions) {
+                self.close_track_menu(cx);
+                let title = clip_text(&target.title, 22);
+                self.queue.append_single_to_end(target);
+                self.sync_next_deck_to_engine();
+                self.refresh_right_sidebar(cx);
+                self.show_toast(cx, &format!("Added '{title}' to end of queue"));
+            } else if self.ui.button(id!(tm_radio_btn)).clicked(actions) {
+                self.close_track_menu(cx);
+                self.queue_context = format!("{} radio", target.title);
+                self.queue.set_tracks(vec![target.clone()], Some(0));
+                self.last_radio_seed_id = None;
+                self.play_track(cx, target.clone());
+                self.maybe_fetch_radio_for_track(&target, true);
+                self.show_toast(
+                    cx,
+                    &format!("Started radio for '{}'", clip_text(&target.title, 22)),
+                );
+            } else if self.ui.button(id!(tm_like_btn)).clicked(actions) {
+                let next_liked = !target.liked;
+                if let Some(db) = &self.db {
+                    let _ = db.set_track_liked(&target.id, next_liked);
+                }
+                if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == target.id) {
+                    t.liked = next_liked;
+                }
+                self.rebuild_library_views(cx);
+                self.close_track_menu(cx);
+                self.show_toast(
+                    cx,
+                    if next_liked {
+                        "Added to Liked Songs"
+                    } else {
+                        "Removed from Liked"
+                    },
+                );
+            } else if self.ui.button(id!(tm_artist_btn)).clicked(actions) {
+                let artist = target.artist.clone();
+                self.close_track_menu(cx);
+                if let Some(g) = self
+                    .artist_groups
+                    .iter()
+                    .find(|g| g.title.eq_ignore_ascii_case(&artist))
+                    .cloned()
+                {
+                    self.open_local_detail(cx, g);
+                } else if !artist.trim().is_empty() {
+                    self.spawn_rich_search(cx, artist);
+                }
+            } else if self.ui.button(id!(tm_album_btn)).clicked(actions) {
+                let album = target.album.clone();
+                let query = if album.is_empty()
+                    || album.eq_ignore_ascii_case("single")
+                    || album.eq_ignore_ascii_case("youtube music")
+                {
+                    format!("{} {}", target.artist, target.title)
+                } else {
+                    format!("{} {}", target.artist, album)
+                };
+                self.close_track_menu(cx);
+                if let Some(g) = self
+                    .album_groups
+                    .iter()
+                    .find(|g| g.title.eq_ignore_ascii_case(&album))
+                    .cloned()
+                {
+                    self.open_local_detail(cx, g);
+                } else {
+                    self.spawn_rich_search(cx, query);
+                }
+            } else if self.ui.button(id!(tm_copy_btn)).clicked(actions) {
+                let info = if let Some(vid) = &target.youtube_video_id {
+                    format!(
+                        "{} - {} (https://music.youtube.com/watch?v={vid})",
+                        target.artist, target.title
+                    )
+                } else {
+                    format!("{} - {}", target.artist, target.title)
+                };
+                let _ = copy_text_to_clipboard(&info);
+                self.close_track_menu(cx);
+                self.show_toast(cx, "Copied track info to clipboard");
+            } else if self.ui.button(id!(tm_remove_btn)).clicked(actions) {
+                self.close_track_menu(cx);
+                self.remove_track_contextually(cx, &target);
+            } else {
+                let mut handled_pl = false;
+                for (i, pid) in [
+                    id!(tm_pl_0),
+                    id!(tm_pl_1),
+                    id!(tm_pl_2),
+                    id!(tm_pl_3),
+                    id!(tm_pl_4),
+                    id!(tm_pl_5),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if self.ui.button(pid).clicked(actions)
+                        && let Some(pl) = self.playlists.get(i).cloned()
+                    {
+                        self.add_track_to_saved_playlist(cx, &pl.id, &pl.name, &target);
+                        self.close_track_menu(cx);
+                        handled_pl = true;
+                        break;
+                    }
+                }
+                let new_pl_enter = self
+                    .ui
+                    .text_input(id!(tm_new_pl_input))
+                    .returned(actions)
+                    .is_some();
+                if !handled_pl
+                    && (self.ui.button(id!(tm_new_pl_btn)).clicked(actions) || new_pl_enter)
+                {
+                    let name = self
+                        .ui
+                        .text_input(id!(tm_new_pl_input))
+                        .text()
+                        .trim()
+                        .to_string();
+                    if !name.is_empty() {
+                        let pl = Playlist {
+                            id: format!("local:pl:{}", fastrand::u32(..)),
+                            name: name.clone(),
+                            source: TrackSource::Local,
+                            etag: None,
+                            track_count: 1,
+                            description: "Custom playlist".to_string(),
+                            thumbnail_url: target.thumbnail_url.clone(),
+                        };
+                        if let Some(db) = &mut self.db {
+                            let _ = db.upsert_tracks(std::slice::from_ref(&target));
+                            let _ = db.upsert_playlist(&pl, std::slice::from_ref(&target.id));
+                            self.all_tracks = db.list_tracks("").unwrap_or_default();
+                            self.playlists = db.list_playlists().unwrap_or_default();
+                        }
+                        self.refresh_playlists_grid(cx);
+                        self.rebuild_library_views(cx);
+                        self.close_track_menu(cx);
+                        self.show_toast(
+                            cx,
+                            &format!("Created '{name}' with '{}'", clip_text(&target.title, 20)),
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -9377,23 +10254,109 @@ impl AppMain for App {
                 self.sync_controls_from_state(cx);
                 return;
             }
-            if ke.key_code == KeyCode::Space
-                && !ke.modifiers.control
-                && !ke.modifiers.alt
-                && !self.cmdk_open
-                && (self.fullscreen_open
-                    || self.video_open
-                    || !matches!(
-                        self.active_page,
-                        MainPage::Search | MainPage::Playlists | MainPage::Settings
-                    ))
-                && let Some(audio) = &self.audio
-            {
-                audio.send(EngineCommand::TogglePlayPause);
-                return;
+            let typing = self.is_text_input_focused(cx);
+            if !typing && !ke.modifiers.control && !ke.modifiers.alt && !ke.modifiers.shift {
+                if ke.key_code == KeyCode::Space
+                    && !self.cmdk_open
+                    && !self.track_menu_open
+                    && let Some(audio) = &self.audio
+                {
+                    audio.send(EngineCommand::TogglePlayPause);
+                    return;
+                }
+                if ke.key_code == KeyCode::ArrowRight
+                    && let Some(audio) = &self.audio
+                {
+                    let snap = audio.telemetry();
+                    let next_ms = snap.position_ms.saturating_add(5_000).min(snap.duration_ms);
+                    audio.send(EngineCommand::SeekMs(next_ms));
+                    self.update_lyrics_display(cx, next_ms);
+                    return;
+                }
+                if ke.key_code == KeyCode::ArrowLeft
+                    && let Some(audio) = &self.audio
+                {
+                    let snap = audio.telemetry();
+                    let next_ms = snap.position_ms.saturating_sub(5_000);
+                    audio.send(EngineCommand::SeekMs(next_ms));
+                    self.update_lyrics_display(cx, next_ms);
+                    return;
+                }
+                if ke.key_code == KeyCode::KeyM {
+                    if self.session_state.volume > 0.01 {
+                        self.pre_mute_volume = self.session_state.volume;
+                        self.session_state.volume = 0.0;
+                    } else {
+                        self.session_state.volume = self.pre_mute_volume.max(0.5);
+                    }
+                    if let Some(audio) = &self.audio {
+                        audio.send(EngineCommand::SetVolume(self.session_state.volume));
+                    }
+                    self.sync_controls_from_state(cx);
+                    return;
+                }
+                if ke.key_code == KeyCode::KeyS {
+                    let next_s = !self.session_state.shuffle;
+                    self.session_state.shuffle = next_s;
+                    self.queue.set_shuffle(next_s);
+                    self.sync_controls_from_state(cx);
+                    self.refresh_right_sidebar(cx);
+                    self.show_toast(cx, if next_s { "Shuffle On" } else { "Shuffle Off" });
+                    return;
+                }
+                if ke.key_code == KeyCode::KeyR {
+                    let next_r = match self.session_state.repeat {
+                        RepeatMode::Off => RepeatMode::All,
+                        RepeatMode::All => RepeatMode::One,
+                        RepeatMode::One => RepeatMode::Off,
+                    };
+                    self.session_state.repeat = next_r;
+                    self.queue.repeat = next_r;
+                    self.sync_controls_from_state(cx);
+                    self.show_toast(
+                        cx,
+                        match next_r {
+                            RepeatMode::Off => "Repeat Off",
+                            RepeatMode::All => "Repeat All",
+                            RepeatMode::One => "Repeat One",
+                        },
+                    );
+                    return;
+                }
+                if ke.key_code == KeyCode::KeyL
+                    && let Some(cur) = self.queue.current().cloned()
+                {
+                    let next_liked = !cur.liked;
+                    if let Some(db) = &self.db {
+                        let _ = db.set_track_liked(&cur.id, next_liked);
+                    }
+                    if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == cur.id) {
+                        t.liked = next_liked;
+                    }
+                    self.rebuild_library_views(cx);
+                    self.show_toast(
+                        cx,
+                        if next_liked {
+                            "Added to Liked Songs"
+                        } else {
+                            "Removed from Liked"
+                        },
+                    );
+                    return;
+                }
+                if ke.key_code == KeyCode::KeyF && !self.track_menu_open {
+                    self.set_fullscreen(cx, !self.fullscreen_open);
+                    return;
+                }
+                if ke.key_code == KeyCode::KeyQ && !self.fullscreen_open {
+                    self.set_right_sidebar(cx, !self.right_sidebar_open, false);
+                    return;
+                }
             }
             if ke.key_code == KeyCode::Escape {
-                if self.cmdk_open {
+                if self.track_menu_open {
+                    self.close_track_menu(cx);
+                } else if self.cmdk_open {
                     self.cmdk_open = false;
                     self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
                     self.sync_video_bounds(cx);

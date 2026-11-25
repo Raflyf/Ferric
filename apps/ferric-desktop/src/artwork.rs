@@ -9,15 +9,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-/// Three lightweight worker threads decode visible cover art fast with minimal RAM overhead.
-const WORKER_THREADS: usize = 3;
-/// Hard LRU cap: 96 covers x 128x128 BGRA (64 KB) = ~6.0 MB CPU + ~6.0 MB VRAM max.
-/// Holds Home's 8 Quick Picks + 40 Shelf cards + Search cards + visible TrackList + Queue simultaneously.
-const MAX_CACHED_TEXTURES: usize = 96;
-/// Standard cover art thumbnail size (crisp for 40..160 px cards, 56x smaller than 1280x720).
-const THUMB_MAX_DIM: usize = 128;
-/// Higher detail size reserved solely for the currently playing hero/fullscreen artwork (256 KB).
-const HERO_MAX_DIM: usize = 256;
+/// Two lightweight worker threads decode visible cover art fast while minimizing peak decode RAM.
+const WORKER_THREADS: usize = 2;
+/// Hard LRU cap: 48 covers x 112x112 BGRA (~49 KB) = ~2.4 MB CPU + ~2.4 MB VRAM max.
+/// Holds active Quick Picks, visible Shelf cards, Queue, and Hero artwork smoothly under 100 MB RAM.
+const MAX_CACHED_TEXTURES: usize = 48;
+/// Crisp card thumbnail size (sharp for 32..120 px slots, 65x smaller than 1280x720).
+const THUMB_MAX_DIM: usize = 112;
+/// Higher detail size reserved solely for the currently playing hero/fullscreen artwork (~225 KB).
+const HERO_MAX_DIM: usize = 240;
 
 #[derive(Clone)]
 pub struct CachedArtwork {
@@ -282,14 +282,13 @@ impl ArtworkCache {
         }
     }
 
-    /// Release all non-active cover textures when minimized / hidden in System Tray to keep RAM minimal.
-    pub fn trim_non_active(&mut self) {
-        if let Some(pin) = self.pinned_key.clone() {
-            self.entries.retain(|k, _| k == &pin);
-        } else {
-            self.entries.clear();
-        }
-        self.entries.shrink_to(8);
+    /// Release every decoded cover texture while hidden in System Tray / minimized;
+    /// disk cache stays intact so reopening reloads visible covers instantaneously.
+    pub fn clear_all_for_tray(&mut self) {
+        self.entries.clear();
+        self.entries.shrink_to_fit();
+        self.in_flight.clear();
+        self.in_flight.shrink_to_fit();
     }
 
     pub fn get(&self, key: &str) -> Option<&CachedArtwork> {

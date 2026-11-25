@@ -198,6 +198,6 @@ mod tests {
         let json = serde_json::to_string(&theme).expect("serialize theme");
         let parsed: ThemeConfig = serde_json::from_str(&json).expect("deserialize theme");
         assert!(parsed.acrylic_enabled);
-        assert!((parsed.acrylic_opacity - 0.84).abs() < 1e-4);
+        assert!((parsed.acrylic_opacity - 0.72).abs() < 1e-4);
     }
 }

@@ -176,8 +176,8 @@ live_design! {
         }
 
         like_btn = <Button> {
-            width: 28,
-            height: 28,
+            width: 26,
+            height: 26,
             padding: 0,
             spacing: 0,
             align: { x: 0.5, y: 0.5 }
@@ -204,6 +204,72 @@ live_design! {
                     default: off,
                     off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 }, draw_icon: { hover: 0.0 } } }
                     on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 }, draw_icon: { hover: 1.0 } } }
+                }
+            }
+        }
+
+        pl_add_btn = <Button> {
+            width: 26,
+            height: 26,
+            padding: 0,
+            spacing: 0,
+            align: { x: 0.5, y: 0.5 }
+            text: ""
+            label_walk: { width: 0, height: 0 }
+            icon_walk: { width: 13, height: 13 }
+            draw_icon: {
+                svg_path: "M19 13H13V19H11V13H5V11H11V5H13V11H19V13Z"
+                color: #6E7180
+                color_hover: #F4F4F7
+                color_down: #A882FF
+            }
+            draw_bg: {
+                instance hover: 0.0
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
+                    sdf.fill(vec4(0.18, 0.19, 0.25, 0.80 * self.hover));
+                    return sdf.result;
+                }
+            }
+            animator: {
+                hover = {
+                    default: off,
+                    off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 }, draw_icon: { hover: 0.0 } } }
+                    on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 }, draw_icon: { hover: 1.0 } } }
+                }
+            }
+        }
+
+        delete_btn = <Button> {
+            width: 26,
+            height: 26,
+            padding: 0,
+            spacing: 0,
+            align: { x: 0.5, y: 0.5 }
+            text: ""
+            label_walk: { width: 0, height: 0 }
+            icon_walk: { width: 12, height: 12 }
+            draw_icon: {
+                svg_path: "M6 19C6 20.1 6.9 21 8 21H16C17.1 21 18 20.1 18 19V7H6V19ZM19 4H15.5L14.5 3H9.5L8.5 4H5V6H19V4Z"
+                color: #646778
+                color_hover: #FF6B7A
+                color_down: #FF4D5E
+            }
+            draw_bg: {
+                instance hover: 0.0
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
+                    sdf.fill(vec4(0.86, 0.22, 0.26, 0.24 * self.hover));
+                    return sdf.result;
+                }
+            }
+            animator: {
+                hover = {
+                    default: off,
+                    off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 }, draw_icon: { hover: 0.0 } } }
+                    on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0 }, draw_icon: { hover: 1.0 } } }
                 }
             }
         }
@@ -444,6 +510,9 @@ pub enum TrackListAction {
     PlayIndex(usize),
     ToggleLike(usize),
     AddToQueue(usize),
+    AddToPlaylist(usize),
+    RemoveTrack(usize),
+    ContextMenu(usize),
     LoadDiscoverFeed,
     AddLocalFolder,
     OpenYouTubeLogin,
@@ -560,6 +629,14 @@ impl Widget for TrackList {
                 cx.widget_action(uid, &scope.path, TrackListAction::ToggleLike(item_id));
                 continue;
             }
+            if item.button(id!(pl_add_btn)).clicked(&actions) {
+                cx.widget_action(uid, &scope.path, TrackListAction::AddToPlaylist(item_id));
+                continue;
+            }
+            if item.button(id!(delete_btn)).clicked(&actions) {
+                cx.widget_action(uid, &scope.path, TrackListAction::RemoveTrack(item_id));
+                continue;
+            }
             if item.ferric_cover_art(id!(art_tile)).clicked(&actions) {
                 cx.widget_action(uid, &scope.path, TrackListAction::PlayIndex(item_id));
                 break;
@@ -568,7 +645,11 @@ impl Widget for TrackList {
                 && fe.is_over
                 && (fe.abs - fe.abs_start).length() < 16.0
             {
-                cx.widget_action(uid, &scope.path, TrackListAction::PlayIndex(item_id));
+                if fe.device.mouse_button() == Some(MouseButton::SECONDARY) {
+                    cx.widget_action(uid, &scope.path, TrackListAction::ContextMenu(item_id));
+                } else {
+                    cx.widget_action(uid, &scope.path, TrackListAction::PlayIndex(item_id));
+                }
                 break;
             }
         }

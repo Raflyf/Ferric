@@ -485,36 +485,36 @@ live_design! {
 
                 // Top loop arrow (left vertical stub -> top horizontal -> right arrowhead)
                 sdf_ic.move_to(c.x - 6.0 * u, c.y - 1.3 * u);
-                sdf_ic.line_to(c.x - 6.0 * u, c.y - 5.0 * u);
-                sdf_ic.line_to(c.x + 4.8 * u, c.y - 5.0 * u);
+                sdf_ic.line_to(c.x - 6.0 * u, c.y - 5.2 * u);
+                sdf_ic.line_to(c.x + 4.8 * u, c.y - 5.2 * u);
                 sdf_ic.stroke(col, sw);
 
-                sdf_ic.move_to(c.x + 3.5 * u, c.y - 7.6 * u);
-                sdf_ic.line_to(c.x + 7.2 * u, c.y - 5.0 * u);
-                sdf_ic.line_to(c.x + 3.5 * u, c.y - 2.4 * u);
+                sdf_ic.move_to(c.x + 3.5 * u, c.y - 7.8 * u);
+                sdf_ic.line_to(c.x + 7.2 * u, c.y - 5.2 * u);
+                sdf_ic.line_to(c.x + 3.5 * u, c.y - 2.6 * u);
                 sdf_ic.close_path();
                 sdf_ic.fill(col);
 
-                // Bottom loop arrow (right vertical stub -> bottom horizontal -> left arrowhead)
+                // Bottom loop arrow (right vertical stub -> bottom horizontal -> left arrowhead, clockwise winding)
                 sdf_ic.move_to(c.x + 6.0 * u, c.y + 1.3 * u);
-                sdf_ic.line_to(c.x + 6.0 * u, c.y + 5.0 * u);
-                sdf_ic.line_to(c.x - 4.8 * u, c.y + 5.0 * u);
+                sdf_ic.line_to(c.x + 6.0 * u, c.y + 5.2 * u);
+                sdf_ic.line_to(c.x - 4.8 * u, c.y + 5.2 * u);
                 sdf_ic.stroke(col, sw);
 
-                sdf_ic.move_to(c.x - 3.5 * u, c.y + 2.4 * u);
-                sdf_ic.line_to(c.x - 7.2 * u, c.y + 5.0 * u);
-                sdf_ic.line_to(c.x - 3.5 * u, c.y + 7.6 * u);
+                sdf_ic.move_to(c.x - 3.5 * u, c.y + 7.8 * u);
+                sdf_ic.line_to(c.x - 7.2 * u, c.y + 5.2 * u);
+                sdf_ic.line_to(c.x - 3.5 * u, c.y + 2.6 * u);
                 sdf_ic.close_path();
                 sdf_ic.fill(col);
 
-                // Repeat-One bold centered '1' badge when mode == 2.0
+                // Repeat-One crisp solid centered '1' badge when mode == 2.0
                 if (self.mode > 1.5) {
-                    sdf_ic.box(c.x - 0.75 * u, c.y - 3.0 * u, 1.55 * u, 5.9 * u, 0.45 * u);
+                    sdf_ic.box(c.x - 0.9 * u, c.y - 2.75 * u, 1.95 * u, 5.2 * u, 0.35 * u);
                     sdf_ic.fill(col);
-                    sdf_ic.move_to(c.x - 2.35 * u, c.y - 1.55 * u);
-                    sdf_ic.line_to(c.x + 0.05 * u, c.y - 2.75 * u);
-                    sdf_ic.stroke(col, 1.35 * u);
-                    sdf_ic.box(c.x - 2.1 * u, c.y + 1.9 * u, 4.25 * u, 1.25 * u, 0.4 * u);
+                    sdf_ic.move_to(c.x - 2.4 * u, c.y - 1.2 * u);
+                    sdf_ic.line_to(c.x + 0.1 * u, c.y - 2.45 * u);
+                    sdf_ic.stroke(col, 1.6 * u);
+                    sdf_ic.box(c.x - 2.15 * u, c.y + 1.45 * u, 4.4 * u, 1.45 * u, 0.35 * u);
                     sdf_ic.fill(col);
                 }
 

@@ -472,7 +472,7 @@ impl Win32App {
     
     pub fn start_signal_poll(&mut self) {
         let slot = self.get_free_timer_slot();
-        let win32_id = unsafe {SetTimer(None, 0, 8 as u32, Some(Self::timer_proc))};
+        let win32_id = unsafe {SetTimer(None, 0, 40 as u32, Some(Self::timer_proc))};
         self.timers[slot] = Win32Timer::SignalPoll {win32_id: win32_id};
     }
     

@@ -14,7 +14,7 @@
         InstallScope="perUser"
         Platform="x64"
         Description="Ferric $(var.AppVersion) Setup"
-        Comments="Native Rust Hi-Fi music player with Pure AMOLED and Liquid Glass UI" />
+        Comments="Ferric — Hi-Fi Desktop Music Player" />
 
     <MajorUpgrade
         AllowSameVersionUpgrades="yes"

@@ -1065,7 +1065,7 @@ impl FerricBarSliderRef {
             && !inner.dragging
         {
             let clamped = val.clamp(inner.min, inner.max);
-            if (inner.value - clamped).abs() > 1e-4 {
+            if (inner.value - clamped).abs() > 1.2e-3 {
                 inner.value = clamped;
                 inner.draw_bg.redraw(cx);
             }
@@ -1170,7 +1170,7 @@ impl FerricVertSliderRef {
             && !inner.dragging
         {
             let clamped = val.clamp(inner.min, inner.max);
-            if (inner.value - clamped).abs() > 1e-4 {
+            if (inner.value - clamped).abs() > 1.2e-3 {
                 inner.value = clamped;
                 inner.draw_bg.redraw(cx);
             }
@@ -1839,6 +1839,8 @@ pub struct FerricAmbientStage {
     #[rust]
     last_time: f64,
     #[rust]
+    last_draw_time: f64,
+    #[rust]
     anim_frame: NextFrame,
 }
 
@@ -1862,12 +1864,25 @@ impl Widget for FerricAmbientStage {
             if !self.active {
                 return;
             }
+            let moving = (self.target_mx - self.draw_bg.mouse_x).abs() > 0.003
+                || (self.target_my - self.draw_bg.mouse_y).abs() > 0.003
+                || (self.target_hover - self.draw_bg.hover_amt).abs() > 0.005;
+            // Pace ambient aurora smoothly (~30 FPS steady drift, ~60 FPS on hover) so 144 Hz panels
+            // do not run redundant full-screen fragment shader passes.
+            let min_interval = if moving { 0.016 } else { 0.033 };
+            if self.last_draw_time > 0.0 && (nf.time - self.last_draw_time) < min_interval {
+                if self.playing || moving {
+                    self.anim_frame = cx.new_next_frame();
+                }
+                return;
+            }
             let dt = if self.last_time > 0.0 {
-                (nf.time - self.last_time).clamp(0.004, 0.045) as f32
+                (nf.time - self.last_time).clamp(0.004, 0.065) as f32
             } else {
-                0.016
+                0.033
             };
             self.last_time = nf.time;
+            self.last_draw_time = nf.time;
             let k = 1.0 - (-8.0 * dt).exp();
             self.draw_bg.mouse_x += (self.target_mx - self.draw_bg.mouse_x) * k;
             self.draw_bg.mouse_y += (self.target_my - self.draw_bg.mouse_y) * k;
@@ -1875,10 +1890,10 @@ impl Widget for FerricAmbientStage {
             if self.playing {
                 self.draw_bg.phase = (self.draw_bg.phase + dt * 0.65) % 628.3;
             }
-            let moving = (self.target_mx - self.draw_bg.mouse_x).abs() > 0.003
+            let still_moving = (self.target_mx - self.draw_bg.mouse_x).abs() > 0.003
                 || (self.target_my - self.draw_bg.mouse_y).abs() > 0.003
                 || (self.target_hover - self.draw_bg.hover_amt).abs() > 0.005;
-            if self.playing || moving {
+            if self.playing || still_moving {
                 self.anim_frame = cx.new_next_frame();
             }
             self.draw_bg.redraw(cx);
@@ -2041,6 +2056,8 @@ pub struct FerricLyricsView {
     line_heights: Vec<f64>,
     #[rust]
     last_viewport_h: f64,
+    #[rust]
+    last_draw_time: f64,
 }
 
 impl FerricLyricsView {
@@ -2222,20 +2239,28 @@ impl Widget for FerricLyricsView {
 
             let scroll_err = (self.target_scroll_y - self.scroll_y).abs();
             let waiting_manual = self.manual_scroll_until > nf.time;
-            let keep_alive = self.is_playing
-                || waiting_manual
-                || any_delay
+            let in_transition = any_delay
                 || scroll_err >= 0.15
                 || self.scroll_vel.abs() >= 0.5
                 || max_line_err >= 0.12
                 || max_err >= 0.004;
+            let keep_alive = self.is_playing || waiting_manual || in_transition;
             if !keep_alive {
                 self.scroll_y = self.target_scroll_y;
                 self.scroll_vel = 0.0;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
-            self.area.redraw(cx);
+            // Pace redraws cleanly on high-Hz monitors: ~60 FPS during active line/hover motion,
+            // ~30 FPS for steady-state karaoke word sweep (zero visual loss, ~75% less GPU work on 144 Hz).
+            let min_draw_dt = if in_transition { 0.0155 } else { 0.033 };
+            if !keep_alive
+                || self.last_draw_time <= 0.0
+                || (nf.time - self.last_draw_time) >= min_draw_dt
+            {
+                self.last_draw_time = nf.time;
+                self.area.redraw(cx);
+            }
         }
 
         let uid = self.widget_uid();
@@ -2378,7 +2403,7 @@ impl Widget for FerricLyricsView {
         let pad_x = if self.compact { 11.0 } else { 20.0 };
         let right_margin = if self.compact { 18.0 } else { 40.0 };
         let max_w = (rect.size.x - pad_x - right_margin).max(72.0) as f32;
-        let max_x_shift = if self.compact { 6.0_f32 } else { 6.0_f32 };
+        let max_x_shift = 6.0_f32;
         // Divide wrapping width by max_scale so scaled active text NEVER overflows pill/panel right edge!
         let stable_wrap_w = ((max_w - max_x_shift) / max_scale).max(52.0);
         let est_pos_ms = self.estimated_pos_ms();

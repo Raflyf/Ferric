@@ -1148,8 +1148,10 @@ fn decode_loop(
     let mut smoothed_volume = 0.85_f32;
     let mut dsp_scratch = Vec::with_capacity(2048);
 
+    let mut pending_cmd: Option<EngineCommand> = None;
+
     loop {
-        while let Ok(cmd) = cmd_rx.try_recv() {
+        while let Some(cmd) = pending_cmd.take().or_else(|| cmd_rx.try_recv().ok()) {
             match cmd {
                 EngineCommand::LoadAndPlay(path) => {
                     rt.load_primary(&path, 0, 0, out_rate, &telemetry);
@@ -1318,8 +1320,18 @@ fn decode_loop(
 
         let is_playing = telemetry.is_playing.load(Ordering::Relaxed);
         if !is_playing || rt.deck_a.is_none() {
-            telemetry.store_spectrum(rt.spectrum.decay_idle());
-            thread::sleep(Duration::from_millis(12));
+            let idle_bins = rt.spectrum.decay_idle();
+            telemetry.store_spectrum(idle_bins);
+            if idle_bins == [0; 8] {
+                // Zero-CPU idle wait: wakes instantaneously (<0.1 ms) on next command instead of polling at 83 Hz.
+                match cmd_rx.recv_timeout(Duration::from_millis(120)) {
+                    Ok(cmd) => pending_cmd = Some(cmd),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            } else {
+                thread::sleep(Duration::from_millis(16));
+            }
             continue;
         }
 

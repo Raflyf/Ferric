@@ -165,6 +165,7 @@ mod win_impl {
     static ACRYLIC_ENABLED: AtomicBool = AtomicBool::new(false);
     static ACRYLIC_TINT_RGB: AtomicU32 = AtomicU32::new(0x000B_0D14);
     static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+    static MUI_CACHE_SYNCED: AtomicBool = AtomicBool::new(false);
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
     static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
     static TRAY_ADDED: AtomicBool = AtomicBool::new(false);
@@ -290,7 +291,151 @@ mod win_impl {
     /// Ensure only one Ferric desktop instance runs per user session.
     /// If Ferric is already running (even minimized or hidden in System Tray),
     /// signal the existing instance to restore and focus itself, then return `false`.
+    /// Overwrite any stale Windows Shell MuiCache friendly-name entry for `ferric.exe`
+    /// so Windows Task Manager immediately displays `Ferric` instead of an outdated description.
+    fn refresh_windows_mui_cache() {
+        if MUI_CACHE_SYNCED.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn RegOpenKeyExW(
+                h_key: isize,
+                lp_sub_key: *const u16,
+                ul_options: u32,
+                sam_desired: u32,
+                phk_result: *mut isize,
+            ) -> i32;
+            fn RegEnumValueW(
+                h_key: isize,
+                dw_index: u32,
+                lp_value_name: *mut u16,
+                lpcch_value_name: *mut u32,
+                lp_reserved: *mut u32,
+                lp_type: *mut u32,
+                lp_data: *mut u8,
+                lpcb_data: *mut u32,
+            ) -> i32;
+            fn RegSetValueExW(
+                h_key: isize,
+                lp_value_name: *const u16,
+                reserved: u32,
+                dw_type: u32,
+                lp_data: *const u8,
+                cb_data: u32,
+            ) -> i32;
+            fn RegCloseKey(h_key: isize) -> i32;
+        }
+
+        const HKEY_CURRENT_USER: isize = 0x8000_0001_u32 as i32 as isize;
+        const KEY_QUERY_VALUE: u32 = 0x0001;
+        const KEY_SET_VALUE: u32 = 0x0002;
+        const REG_SZ: u32 = 1;
+        const ERROR_SUCCESS: i32 = 0;
+        const ERROR_MORE_DATA: i32 = 234;
+
+        let subkey: Vec<u16> =
+            "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache\0"
+                .encode_utf16()
+                .collect();
+        let clean_name: Vec<u16> = "Ferric\0".encode_utf16().collect();
+        let clean_bytes = clean_name.len() * std::mem::size_of::<u16>();
+
+        // SAFETY: Opens user-owned MuiCache key, scans only `ferric.exe.FriendlyAppName` values,
+        // updates stale descriptions to `"Ferric"`, and closes the handle cleanly.
+        unsafe {
+            let mut hkey: isize = 0;
+            if RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                KEY_QUERY_VALUE | KEY_SET_VALUE,
+                &mut hkey,
+            ) != ERROR_SUCCESS
+                || hkey == 0
+            {
+                return;
+            }
+
+            let mut to_fix: Vec<Vec<u16>> = Vec::new();
+            let mut idx = 0u32;
+            let mut name_buf = [0u16; 1024];
+            let mut data_buf = [0u8; 1024];
+            loop {
+                let mut name_len = name_buf.len() as u32;
+                let mut data_len = data_buf.len() as u32;
+                let mut val_type = 0u32;
+                let res = RegEnumValueW(
+                    hkey,
+                    idx,
+                    name_buf.as_mut_ptr(),
+                    &mut name_len,
+                    ptr::null_mut(),
+                    &mut val_type,
+                    data_buf.as_mut_ptr(),
+                    &mut data_len,
+                );
+                if res == ERROR_MORE_DATA {
+                    idx = idx.saturating_add(1);
+                    continue;
+                }
+                if res != ERROR_SUCCESS {
+                    break;
+                }
+                idx = idx.saturating_add(1);
+                if val_type != REG_SZ {
+                    continue;
+                }
+                let val_name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+                if val_name
+                    .to_ascii_lowercase()
+                    .ends_with("ferric.exe.friendlyappname")
+                {
+                    let words: Vec<u16> = data_buf[..(data_len as usize).min(data_buf.len())]
+                        .chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .take_while(|&w| w != 0)
+                        .collect();
+                    let cur_val = String::from_utf16_lossy(&words);
+                    if cur_val != "Ferric" {
+                        let mut wide: Vec<u16> = name_buf[..name_len as usize].to_vec();
+                        wide.push(0);
+                        to_fix.push(wide);
+                    }
+                }
+            }
+
+            for val_wide in to_fix {
+                let _ = RegSetValueExW(
+                    hkey,
+                    val_wide.as_ptr(),
+                    0,
+                    REG_SZ,
+                    clean_name.as_ptr().cast(),
+                    clean_bytes as u32,
+                );
+            }
+
+            if let Ok(exe_path) = std::env::current_exe() {
+                let cur_val_name: Vec<u16> = format!("{}.FriendlyAppName\0", exe_path.display())
+                    .encode_utf16()
+                    .collect();
+                let _ = RegSetValueExW(
+                    hkey,
+                    cur_val_name.as_ptr(),
+                    0,
+                    REG_SZ,
+                    clean_name.as_ptr().cast(),
+                    clean_bytes as u32,
+                );
+            }
+
+            let _ = RegCloseKey(hkey);
+        }
+    }
+
     pub fn acquire_single_instance_or_activate() -> bool {
+        refresh_windows_mui_cache();
         let msg_id = activate_message_id();
         let mutex_name: Vec<u16> = "Local\\FerricMusicPlayerSingleInstance_v1\0"
             .encode_utf16()
@@ -563,6 +708,7 @@ mod win_impl {
             if CLOSE_TO_TRAY.load(Ordering::Acquire) {
                 ensure_tray_icon(hwnd, "Ferric — Music Player");
             }
+            refresh_windows_mui_cache();
             apply_window_icon(hwnd);
             init_taskbar_thumbbar(hwnd);
             let acr_on = ACRYLIC_ENABLED.load(Ordering::Acquire);
@@ -886,10 +1032,19 @@ mod win_impl {
                 return;
             };
             let res_id = std::ptr::without_provenance::<u16>(1);
-            let big_w = GetSystemMetrics(SM_CXICON).max(32);
-            let big_h = GetSystemMetrics(SM_CYICON).max(32);
-            let sm_w = GetSystemMetrics(SM_CXSMICON).max(16);
-            let sm_h = GetSystemMetrics(SM_CYSMICON).max(16);
+            let dpi = GetDpiForWindow(hwnd.0).max(96) as i32;
+            let big_w = ((32 * dpi + 48) / 96)
+                .max(GetSystemMetrics(SM_CXICON))
+                .max(32);
+            let big_h = ((32 * dpi + 48) / 96)
+                .max(GetSystemMetrics(SM_CYICON))
+                .max(32);
+            let sm_w = ((16 * dpi + 48) / 96)
+                .max(GetSystemMetrics(SM_CXSMICON))
+                .max(16);
+            let sm_h = ((16 * dpi + 48) / 96)
+                .max(GetSystemMetrics(SM_CYSMICON))
+                .max(16);
             let h_big = LoadImageW(
                 hmod.0,
                 res_id,

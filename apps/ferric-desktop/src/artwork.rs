@@ -11,12 +11,12 @@ use std::thread;
 
 /// Two lightweight worker threads decode visible cover art fast while minimizing peak decode RAM.
 const WORKER_THREADS: usize = 2;
-/// Hard LRU cap: 128 covers x 112x112 BGRA (~49 KB) = ~6.2 MB max CPU/VRAM.
-/// Exceeds total simultaneous visible Home (48) + Queue/History (14) + Search/Library slots
-/// so LRU eviction NEVER thrashes visible cards during playback.
-const MAX_CACHED_TEXTURES: usize = 128;
-/// Crisp card thumbnail size (sharp for 32..120 px slots, 65x smaller than 1280x720).
-const THUMB_MAX_DIM: usize = 112;
+/// Hard LRU cap: 72 covers x 96x96 BGRA (~36 KB) = ~2.6 MB max CPU/VRAM.
+/// Exceeds total simultaneous visible Home + Queue/History + Search/Library slots
+/// so LRU eviction NEVER thrashes visible cards during playback while minimizing RAM.
+const MAX_CACHED_TEXTURES: usize = 72;
+/// Crisp card thumbnail size (sharp for 32..120 px slots, cuts memory ~60% vs 128x112).
+const THUMB_MAX_DIM: usize = 96;
 /// Higher detail size reserved solely for the currently playing hero/fullscreen artwork (~225 KB).
 const HERO_MAX_DIM: usize = 240;
 

@@ -59,8 +59,7 @@ impl Cx {
                 cx.win32_event_callback(event, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
-        // the signal poll timer
-        with_win32_app(|app| app.start_timer(0, 0.008, true));
+        // Single signal poll timer (relaxed interval in win32_app.rs to avoid 125 Hz idle wakeups)
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
         with_win32_app(|app| app.start_signal_poll());
@@ -251,13 +250,11 @@ impl Cx {
             }
         }
         
-        return EventFlow::Poll;
-        /*
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+        if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
             EventFlow::Poll
         } else {
             EventFlow::Wait
-        }*/
+        }
         
     }
     
@@ -274,7 +271,7 @@ impl Cx {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
                         //let dpi_factor = window.window_geom.dpi_factor;                        
                         window.resize_buffers(&d3d11_cx);
-                        self.draw_pass_to_window(*pass_id, false, window, d3d11_cx);
+                        self.draw_pass_to_window(*pass_id, !window.is_in_resize, window, d3d11_cx);
                     }
                 }
                 CxPassParent::Pass(_) => {

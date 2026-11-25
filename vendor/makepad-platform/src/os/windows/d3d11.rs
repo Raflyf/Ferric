@@ -372,44 +372,12 @@ impl Cx {
             }
         }
         
-        // attach/clear depth buffers, if any
-        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
-            let cxtexture = &mut self.textures[depth_texture.texture_id()];
-            let size = pass_rect.size * dpi_factor;
-            cxtexture.update_depth_stencil(d3d11_cx, size.x as usize, size.y as usize);
-            let is_initial = cxtexture.take_initial();
-                        
-            match self.passes[pass_id].clear_depth {
-                PassClearDepth::InitWith(depth_clear) => {
-                    if is_initial {
-                        unsafe {d3d11_cx.context.ClearDepthStencilView(
-                            cxtexture.os.depth_stencil_view.as_ref().unwrap(),
-                            D3D11_CLEAR_DEPTH.0 as u32 | D3D11_CLEAR_STENCIL.0 as u32,
-                            depth_clear,
-                            0
-                        )}
-                    }
-                },
-                PassClearDepth::ClearWith(depth_clear) => {
-                    unsafe {d3d11_cx.context.ClearDepthStencilView(
-                        cxtexture.os.depth_stencil_view.as_ref().unwrap(),
-                        D3D11_CLEAR_DEPTH.0 as u32 | D3D11_CLEAR_STENCIL.0 as u32,
-                        depth_clear,
-                        0
-                    )}
-                }
-            }
-            unsafe {d3d11_cx.context.OMSetRenderTargets(
-                Some(&color_textures),
-                None, //cxtexture.os.depth_stencil_view.as_ref().unwrap()
-            )}
-        }
-        else {
-            unsafe {d3d11_cx.context.OMSetRenderTargets(
-                Some(&color_textures),
-                None
-            )}
-        }
+        // D3D11 backend renders 2D passes with OMSetRenderTargets(..., None); skip allocating and
+        // clearing an unbound fullscreen D32 depth buffer (~8.3 MB VRAM/RAM saved at 1080p).
+        unsafe {d3d11_cx.context.OMSetRenderTargets(
+            Some(&color_textures),
+            None
+        )}
         
         // create depth, blend and raster states
         self.passes[pass_id].os.set_states(d3d11_cx);

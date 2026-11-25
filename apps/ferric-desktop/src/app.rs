@@ -71,6 +71,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BRAND_ICON_PNG: &[u8] = include_bytes!("../resources/ferric.png");
 
+const SVG_REPEAT_ALL: &str =
+    "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z";
+const SVG_REPEAT_ONE: &str = "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17ZM13 15V9H12L10 10V11H11.5V15H13Z";
+const SVG_VOL_HIGH: &str = "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z";
+const SVG_VOL_LOW: &str = "M18.5 12C18.5 10.23 17.48 8.71 16 7.97V16.02C17.48 15.29 18.5 13.77 18.5 12ZM5 9V15H9L14 20V4L9 9H5Z";
+const SVG_VOL_MUTE: &str = "M3 9V15H7L12 20V4L7 9H3ZM15.57 8.03L18.20 10.66L20.83 8.03L22.17 9.37L19.54 12.00L22.17 14.63L20.83 15.97L18.20 13.34L15.57 15.97L14.23 14.63L16.86 12.00L14.23 9.37Z";
+
 live_design! {
     use link::theme::*;
     use link::shaders::*;
@@ -3404,6 +3411,20 @@ pub struct App {
     #[rust]
     last_dur_txt: String,
     #[rust]
+    tick_counter: u64,
+    #[rust]
+    last_discord_tick_at: Option<Instant>,
+    #[rust]
+    last_discord_track_id: String,
+    #[rust]
+    last_discord_playing: Option<bool>,
+    #[rust]
+    last_taskbar_track_key: String,
+    #[rust]
+    last_taskbar_playing: Option<bool>,
+    #[rust]
+    last_win_max_check_at: Option<Instant>,
+    #[rust]
     last_codec_txt: String,
     #[rust]
     sleep_timer: SleepTimerMode,
@@ -4346,7 +4367,7 @@ impl App {
         self.refresh_home_ui(cx);
         self.refresh_right_sidebar(cx);
         self.refresh_storage_stats(cx);
-        self.tick_timer = cx.start_interval(0.05);
+        self.tick_timer = cx.start_interval(0.10);
 
         if startup_load_demo() {
             self.load_and_play_demo_suite(cx);
@@ -4818,6 +4839,117 @@ impl App {
             .set_texture(cx, tex);
     }
 
+    fn sync_transport_mode_icons(&self, cx: &mut Cx) {
+        let raw_accent = self.current_accent();
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
+        let muted = rgba_to_vec4(pal.icon_idle);
+        let icon_hover = rgba_to_vec4(pal.icon_hover);
+        let fs_muted = vec4(0.604, 0.612, 0.659, 1.0);
+        let fs_hover = vec4(0.957, 0.957, 0.969, 1.0);
+
+        let is_muted = self.session_state.volume < 0.01;
+        let vol_svg = if is_muted {
+            SVG_VOL_MUTE
+        } else if self.session_state.volume < 0.50 {
+            SVG_VOL_LOW
+        } else {
+            SVG_VOL_HIGH
+        };
+        let mute_col = if is_muted { accent } else { muted };
+        let mute_hov = if is_muted { accent } else { icon_hover };
+        let fs_mute_col = if is_muted { raw_accent } else { fs_muted };
+        let fs_mute_hov = if is_muted { raw_accent } else { fs_hover };
+        let mute_act = if is_muted { 1.0_f32 } else { 0.0_f32 };
+
+        self.ui.button(id!(vol_mute_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (mute_act) }
+                draw_icon: { svg_path: (vol_svg), color: (mute_col), color_hover: (mute_hov), color_focus: (mute_hov) }
+            },
+        );
+        self.ui.button(id!(fs_vol_mute_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (mute_act) }
+                draw_icon: { svg_path: (vol_svg), color: (fs_mute_col), color_hover: (fs_mute_hov), color_focus: (fs_mute_hov) }
+            },
+        );
+
+        let shuf_act = if self.queue.shuffle { 1.0_f32 } else { 0.0_f32 };
+        let shuf_col = if self.queue.shuffle { accent } else { muted };
+        let shuf_hov = if self.queue.shuffle {
+            accent
+        } else {
+            icon_hover
+        };
+        let fs_shuf_col = if self.queue.shuffle {
+            raw_accent
+        } else {
+            fs_muted
+        };
+        let fs_shuf_hov = if self.queue.shuffle {
+            raw_accent
+        } else {
+            fs_hover
+        };
+        self.ui.button(id!(shuffle_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (shuf_act) }
+                draw_icon: { color: (shuf_col), color_hover: (shuf_hov), color_focus: (shuf_hov) }
+            },
+        );
+        self.ui.button(id!(fs_shuffle_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (shuf_act) }
+                draw_icon: { color: (fs_shuf_col), color_hover: (fs_shuf_hov), color_focus: (fs_shuf_hov) }
+            },
+        );
+
+        let rep_active = self.queue.repeat != RepeatMode::Off;
+        let rep_act = if rep_active { 1.0_f32 } else { 0.0_f32 };
+        let rep_svg = if self.queue.repeat == RepeatMode::One {
+            SVG_REPEAT_ONE
+        } else {
+            SVG_REPEAT_ALL
+        };
+        let rep_col = match self.queue.repeat {
+            RepeatMode::Off => muted,
+            RepeatMode::All => accent,
+            RepeatMode::One => {
+                if pal.is_light {
+                    vec4(0.62, 0.42, 0.04, 1.0)
+                } else {
+                    vec4(0.95, 0.78, 0.36, 1.0)
+                }
+            }
+        };
+        let rep_hov = if rep_active { rep_col } else { icon_hover };
+        let fs_rep_col = match self.queue.repeat {
+            RepeatMode::Off => fs_muted,
+            RepeatMode::All => raw_accent,
+            RepeatMode::One => vec4(0.95, 0.78, 0.36, 1.0),
+        };
+        let fs_rep_hov = if rep_active { fs_rep_col } else { fs_hover };
+        self.ui.button(id!(repeat_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (rep_act) }
+                draw_icon: { svg_path: (rep_svg), color: (rep_col), color_hover: (rep_hov), color_focus: (rep_hov) }
+            },
+        );
+        self.ui.button(id!(fs_repeat_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (rep_act) }
+                draw_icon: { svg_path: (rep_svg), color: (fs_rep_col), color_hover: (fs_rep_hov), color_focus: (fs_rep_hov) }
+            },
+        );
+    }
+
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
         let raw_accent = self.current_accent();
         let pal = self.adaptive_palette();
@@ -4916,7 +5048,6 @@ impl App {
         }
         let muted = rgba_to_vec4(pal.icon_idle);
         let icon_muted = rgba_to_vec4(pal.icon_muted);
-        let fs_muted = vec4(0.604, 0.612, 0.659, 1.0);
         let is_liked = self.queue.current().is_some_and(|cur| {
             self.all_tracks
                 .iter()
@@ -4935,52 +5066,7 @@ impl App {
         self.ui
             .button(id!(fs_like_btn))
             .apply_over(cx, live! { draw_icon: { color: (fs_like_col) } });
-        self.ui.button(id!(shuffle_btn)).apply_over(
-            cx,
-            live! { draw_icon: { color: (if self.queue.shuffle { accent } else { muted }) } },
-        );
-        self.ui.button(id!(fs_shuffle_btn)).apply_over(
-            cx,
-            live! { draw_icon: { color: (if self.queue.shuffle { raw_accent } else { fs_muted }) } },
-        );
-        let rep_col = match self.queue.repeat {
-            RepeatMode::Off => muted,
-            RepeatMode::All => accent,
-            RepeatMode::One => {
-                if pal.is_light {
-                    vec4(0.62, 0.42, 0.04, 1.0)
-                } else {
-                    vec4(0.95, 0.78, 0.36, 1.0)
-                }
-            }
-        };
-        let fs_rep_col = match self.queue.repeat {
-            RepeatMode::Off => fs_muted,
-            RepeatMode::All => raw_accent,
-            RepeatMode::One => vec4(0.95, 0.78, 0.36, 1.0),
-        };
-        self.ui
-            .button(id!(repeat_btn))
-            .apply_over(cx, live! { draw_icon: { color: (rep_col) } });
-        self.ui
-            .button(id!(fs_repeat_btn))
-            .apply_over(cx, live! { draw_icon: { color: (fs_rep_col) } });
-        let mute_col = if self.session_state.volume < 0.01 {
-            accent
-        } else {
-            muted
-        };
-        let fs_mute_col = if self.session_state.volume < 0.01 {
-            raw_accent
-        } else {
-            fs_muted
-        };
-        self.ui
-            .button(id!(vol_mute_btn))
-            .apply_over(cx, live! { draw_icon: { color: (mute_col) } });
-        self.ui
-            .button(id!(fs_vol_mute_btn))
-            .apply_over(cx, live! { draw_icon: { color: (fs_mute_col) } });
+        self.sync_transport_mode_icons(cx);
         self.ui.button(id!(rs_radio_btn)).apply_over(
             cx,
             live! {
@@ -6318,9 +6404,6 @@ impl App {
     }
 
     fn sync_controls_from_state(&self, cx: &mut Cx) {
-        let accent = self.current_accent();
-        let muted = vec4(0.604, 0.612, 0.659, 1.0);
-
         self.ui
             .ferric_bar_slider(id!(xfade_slider))
             .set_value(cx, f64::from(self.dsp.crossfade_ms) / 1_000.0);
@@ -6531,40 +6614,7 @@ impl App {
         self.ui
             .ferric_bar_slider(id!(fs_vol_slider))
             .set_value(cx, f64::from(self.session_state.volume));
-        let mute_col = if self.session_state.volume < 0.01 {
-            accent
-        } else {
-            muted
-        };
-        for mbtn in [id!(vol_mute_btn), id!(fs_vol_mute_btn)] {
-            self.ui
-                .button(mbtn)
-                .apply_over(cx, live! { draw_icon: { color: (mute_col) } });
-        }
-        for sbtn in [id!(shuffle_btn), id!(fs_shuffle_btn)] {
-            self.ui.button(sbtn).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: (if self.queue.shuffle { 1.0 } else { 0.0 }) }
-                    draw_icon: { color: (if self.queue.shuffle { accent } else { muted }) }
-                },
-            );
-        }
-        let rep_active = self.queue.repeat != RepeatMode::Off;
-        let rep_col = match self.queue.repeat {
-            RepeatMode::Off => muted,
-            RepeatMode::All => accent,
-            RepeatMode::One => vec4(0.95, 0.78, 0.36, 1.0),
-        };
-        for rbtn in [id!(repeat_btn), id!(fs_repeat_btn)] {
-            self.ui.button(rbtn).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: (if rep_active { 1.0 } else { 0.0 }) }
-                    draw_icon: { color: (rep_col) }
-                },
-            );
-        }
+        self.sync_transport_mode_icons(cx);
 
         self.ui
             .text_input(id!(sub_url_input))
@@ -9169,7 +9219,7 @@ impl App {
         }
         if let Some(started) = self.started_at {
             let elapsed = started.elapsed();
-            if self.startup_trim_stage == 0 && elapsed >= Duration::from_millis(1_600) {
+            if self.startup_trim_stage == 0 && elapsed >= Duration::from_millis(1_800) {
                 self.startup_trim_stage = 1;
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
@@ -9177,7 +9227,7 @@ impl App {
                     db.shrink_memory();
                 }
                 win32_trim_working_set();
-            } else if self.startup_trim_stage == 1 && elapsed >= Duration::from_millis(3_400) {
+            } else if self.startup_trim_stage == 1 && elapsed >= Duration::from_millis(4_200) {
                 self.startup_trim_stage = 2;
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
@@ -9188,13 +9238,13 @@ impl App {
             } else if self.startup_trim_stage >= 2
                 && !self.window_hidden_or_minimized
                 && self.page_reveal_t >= 0.995
-                && ((self.artwork_uploads_since_trim >= 3
+                && ((self.artwork_uploads_since_trim >= 6
                     && self
                         .last_trim_at
-                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(3)))
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(6)))
                     || self
                         .last_trim_at
-                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(8)))
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(30)))
             {
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
@@ -9204,6 +9254,7 @@ impl App {
                 win32_trim_working_set();
             }
         }
+        self.tick_counter = self.tick_counter.wrapping_add(1);
 
         // 0b. Poll System Tray & Win32 subclass events
         for tray_ev in win32_poll_tray_events() {
@@ -9985,8 +10036,13 @@ impl App {
             }
         }
 
-        // 5. Sync Window Maximize / Restore Glyph
-        if !window_hidden {
+        // 5. Sync Window Maximize / Restore Glyph (throttled to 1 Hz; instant on WM_SIZE/click)
+        if !window_hidden
+            && self
+                .last_win_max_check_at
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+        {
+            self.last_win_max_check_at = Some(Instant::now());
             self.ui
                 .ferric_win_btn(id!(win_max_btn))
                 .set_maximized(cx, win32_is_active_window_maximized());
@@ -10045,30 +10101,53 @@ impl App {
             if let Some(smtc) = &mut self.smtc {
                 smtc.set_playing(snap.is_playing);
             }
-            if let Some(cur) = self.queue.current() {
-                win32_update_taskbar_playback(&cur.title, &cur.artist, snap.is_playing);
-                if let Some(rpc) = &mut self.discord_rpc {
-                    rpc.update_playback(Some(DiscordTrackSnapshot {
-                        title: cur.title.clone(),
-                        artist: cur.artist.clone(),
-                        album: cur.album.clone(),
-                        cover_url: cur.thumbnail_url.clone(),
-                        position_ms: snap.position_ms,
-                        duration_ms: snap.duration_ms.max(cur.duration_ms),
-                        is_playing: snap.is_playing,
-                    }));
-                }
-            } else {
-                win32_update_taskbar_playback("", "", false);
-                if let Some(rpc) = &mut self.discord_rpc {
-                    rpc.update_playback(None);
+            let cur_track_key = self
+                .queue
+                .current()
+                .map(|c| c.id.as_str())
+                .unwrap_or_default();
+            let taskbar_changed = self.last_taskbar_track_key != cur_track_key
+                || self.last_taskbar_playing != Some(snap.is_playing);
+            if taskbar_changed {
+                self.last_taskbar_track_key = cur_track_key.to_string();
+                self.last_taskbar_playing = Some(snap.is_playing);
+                if let Some(cur) = self.queue.current() {
+                    win32_update_taskbar_playback(&cur.title, &cur.artist, snap.is_playing);
+                } else {
+                    win32_update_taskbar_playback("", "", false);
                 }
             }
-            if let Some(rpc) = &self.discord_rpc {
-                let st = rpc.status_text();
-                if st != self.last_discord_status {
-                    self.last_discord_status = st.clone();
-                    self.ui.label(id!(discord_status_lbl)).set_text(cx, &st);
+            let discord_changed = self.last_discord_track_id != cur_track_key
+                || self.last_discord_playing != Some(snap.is_playing);
+            if discord_changed
+                || self
+                    .last_discord_tick_at
+                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+            {
+                self.last_discord_tick_at = Some(Instant::now());
+                self.last_discord_track_id = cur_track_key.to_string();
+                self.last_discord_playing = Some(snap.is_playing);
+                if let Some(cur) = self.queue.current() {
+                    if let Some(rpc) = &mut self.discord_rpc {
+                        rpc.update_playback(Some(DiscordTrackSnapshot {
+                            title: cur.title.clone(),
+                            artist: cur.artist.clone(),
+                            album: cur.album.clone(),
+                            cover_url: cur.thumbnail_url.clone(),
+                            position_ms: snap.position_ms,
+                            duration_ms: snap.duration_ms.max(cur.duration_ms),
+                            is_playing: snap.is_playing,
+                        }));
+                    }
+                } else if let Some(rpc) = &mut self.discord_rpc {
+                    rpc.update_playback(None);
+                }
+                if let Some(rpc) = &self.discord_rpc {
+                    let st = rpc.status_text();
+                    if st != self.last_discord_status {
+                        self.last_discord_status = st.clone();
+                        self.ui.label(id!(discord_status_lbl)).set_text(cx, &st);
+                    }
                 }
             }
 
@@ -10140,17 +10219,9 @@ impl App {
 
             let accent = self.current_accent();
             if snap.is_playing {
-                self.canvas_phase = (self.canvas_phase + 0.08) % 628.0;
                 let norm = |i: usize| (snap.spectrum_bins[i] as f32 / 1_000.0).clamp(0.05, 1.0);
-                let avg = (norm(0) + norm(1) + norm(2)) / 3.0;
-                self.ui
-                    .ferric_cover_art(id!(np_art))
-                    .set_state(cx, true, avg, accent, false);
-                self.ui
-                    .view(id!(q_now_row))
-                    .ferric_cover_art(id!(art))
-                    .set_state(cx, true, avg, accent, false);
                 if self.fullscreen_open {
+                    self.canvas_phase = (self.canvas_phase + 0.14) % 628.0;
                     self.ui.view(id!(np_canvas)).apply_over(
                         cx,
                         live! {
@@ -10162,6 +10233,20 @@ impl App {
                             }
                         },
                     );
+                } else if self.tick_counter.is_multiple_of(3) {
+                    // Calm ~3.3 Hz musical equalizer bar pulse strictly on visible cover slots
+                    // to avoid triggering 10-20 Hz full-window D3D11 repaints while reading/browsing.
+                    let raw_avg = (norm(0) + norm(1) + norm(2)) / 3.0;
+                    let q_avg = (raw_avg * 16.0).round() / 16.0;
+                    self.ui
+                        .ferric_cover_art(id!(np_art))
+                        .set_state(cx, true, q_avg, accent, false);
+                    if self.right_sidebar_open && !self.right_lyrics_tab {
+                        self.ui
+                            .view(id!(q_now_row))
+                            .ferric_cover_art(id!(art))
+                            .set_state(cx, true, q_avg, accent, false);
+                    }
                 }
             } else {
                 self.ui
@@ -11354,6 +11439,15 @@ impl App {
             }
             self.sync_next_deck_to_engine();
             self.sync_controls_from_state(cx);
+            self.show_toast(
+                cx,
+                match self.queue.repeat {
+                    RepeatMode::Off => "Repeat Off",
+                    RepeatMode::All => "Repeat All",
+                    RepeatMode::One => "Repeat One",
+                },
+            );
+            self.ui.redraw(cx);
         }
         if self.ui.button(id!(dur_btn)).clicked(actions) {
             self.show_remaining_time = !self.show_remaining_time;
@@ -11435,6 +11529,7 @@ impl App {
                 let _ = db.save_session_state(&self.session_state);
             }
             self.sync_controls_from_state(cx);
+            self.ui.redraw(cx);
         }
 
         // Lyrics & Video Clip actions (Right Sidebar + Integrated Fullscreen Lyrics/Video Stage)

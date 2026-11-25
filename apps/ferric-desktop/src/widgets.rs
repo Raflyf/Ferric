@@ -245,11 +245,16 @@ live_design! {
                 if (self.has_image > 0.5) {
                     let box_aspect = self.rect_size.x / max(self.rect_size.y, 1.0);
                     let mut uv = self.pos;
-                    // Smooth interactive zoom + cursor-tracked micro-parallax on hero cover hover
-                    if (self.hero > 0.5 && self.hover > 0.005) {
-                        let zoom_s = mix(1.0, 0.962, self.hover);
-                        let par = (vec2(self.hover_x, self.hover_y) - 0.5) * (0.022 * self.hover);
-                        uv = (uv - 0.5) * zoom_s + 0.5 - par;
+                    // Smooth interactive zoom + cursor-tracked micro-parallax on cover hover
+                    if (self.hover > 0.005) {
+                        if (self.hero > 0.5) {
+                            let zoom_s = mix(1.0, 0.962, self.hover);
+                            let par = (vec2(self.hover_x, self.hover_y) - 0.5) * (0.022 * self.hover);
+                            uv = (uv - 0.5) * zoom_s + 0.5 - par;
+                        } else {
+                            let zoom_s = mix(1.0, 0.968, self.hover);
+                            uv = (uv - 0.5) * zoom_s + 0.5;
+                        }
                     }
                     if (self.img_aspect > box_aspect) {
                         let scale = box_aspect / max(self.img_aspect, 0.01);
@@ -281,11 +286,10 @@ live_design! {
                 }
 
                 sdf.fill_keep(vec4(clamp(rgb, 0.0, 1.0), 1.0));
-                let rim_col = if (self.hero > 0.5) {
-                    mix(vec4(1.0, 1.0, 1.0, 0.12), vec4(1.0, 1.0, 1.0, 0.30), self.hover)
-                } else {
-                    mix(self.border_col, vec4(self.accent.xyz, 0.75), self.playing)
-                };
+                let mut rim_col = mix(self.border_col, vec4(self.accent.xyz, 0.75), self.playing);
+                if (self.hero > 0.5) {
+                    rim_col = mix(vec4(1.0, 1.0, 1.0, 0.12), vec4(1.0, 1.0, 1.0, 0.30), self.hover);
+                }
                 sdf.stroke(rim_col, 1.0);
 
                 if (self.playing > 0.5) {

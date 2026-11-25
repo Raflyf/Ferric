@@ -347,16 +347,21 @@ mod win_impl {
             let is_max = IsZoomed(main_hwnd.0) != 0;
             apply_dwm_corner_pref(main_hwnd, is_max);
             apply_dwm_corner_pref(bh, is_max);
-            let mut rc = RECT::default();
-            if GetWindowRect(main_hwnd, &mut rc).is_ok() {
-                let w = (rc.right - rc.left).max(1);
-                let h = (rc.bottom - rc.top).max(1);
+            let mut crc = RECT::default();
+            if GetClientRect(main_hwnd, &mut crc).is_ok() {
+                let mut tl = POINT {
+                    x: crc.left,
+                    y: crc.top,
+                };
+                let _ = ClientToScreen(main_hwnd, &mut tl);
+                let w = (crc.right - crc.left).max(1);
+                let h = (crc.bottom - crc.top).max(1);
                 let _ = ShowWindow(bh, SW_SHOWNOACTIVATE);
                 let _ = SetWindowPos(
                     bh,
                     Some(main_hwnd),
-                    rc.left,
-                    rc.top,
+                    tl.x,
+                    tl.y,
                     w,
                     h,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
@@ -765,8 +770,8 @@ mod win_impl {
                 }
                 WM_NCCALCSIZE => {
                     // When maximized, clamp client area strictly to monitor rcWork (stops above taskbar,
-                    // eliminates the 8px border overshoot that clipped bottom controls).
-                    if wparam.0 != 0 && IsZoomed(hwnd.0) != 0 {
+                    // eliminates the WS_THICKFRAME ~9px border overshoot on all 4 sides).
+                    if wparam.0 != 0 {
                         let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
                         if !params.is_null() {
                             let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -775,8 +780,14 @@ mod win_impl {
                                 ..Default::default()
                             };
                             if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-                                (*params).rgrc[0] = mi.rcWork;
-                                return LRESULT(0);
+                                let r = (*params).rgrc[0];
+                                let overshoots_work = r.left < mi.rcWork.left
+                                    && r.right > mi.rcWork.right
+                                    && r.top < mi.rcWork.top;
+                                if IsZoomed(hwnd.0) != 0 || overshoots_work {
+                                    (*params).rgrc[0] = mi.rcWork;
+                                    return LRESULT(0);
+                                }
                             }
                         }
                     }

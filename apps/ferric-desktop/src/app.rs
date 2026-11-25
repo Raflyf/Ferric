@@ -562,7 +562,7 @@ live_design! {
                 let lifted = vec4(clamp(col.xyz + vec3(sheen), 0.0, 1.0), col.w);
                 let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.16), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let hov_rim = mix(#3D435E, self.accent_col.xyz, 0.24);
+                let hov_rim = mix(#3D435E, self.accent_col, 0.24);
                 let solid_b = mix(mix(#1A1C26, hov_rim, self.hover), vec4(self.accent_col.xyz, 0.78), self.active);
                 let acr_b = mix(vec4(1.0, 1.0, 1.0, 0.08 + 0.18 * self.hover), vec4(self.accent_col.xyz, 0.84), self.active);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
@@ -637,7 +637,7 @@ live_design! {
                 let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
                 let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let hov_rim = mix(#434966, self.accent_col.xyz, 0.28);
+                let hov_rim = mix(#434966, self.accent_col, 0.28);
                 let solid_b = mix(#1B1D27, hov_rim, self.hover);
                 let acr_b = vec4(1.0, 1.0, 1.0, 0.08 + 0.20 * self.hover);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
@@ -714,7 +714,7 @@ live_design! {
                 let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
                 let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let hov_rim = mix(#434966, self.accent_col.xyz, 0.28);
+                let hov_rim = mix(#434966, self.accent_col, 0.28);
                 let solid_b = mix(#1C1E28, hov_rim, self.hover);
                 let acr_b = vec4(1.0, 1.0, 1.0, 0.08 + 0.20 * self.hover);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);

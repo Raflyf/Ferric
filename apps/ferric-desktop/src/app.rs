@@ -62,9 +62,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -77,6 +77,38 @@ const SVG_REPEAT_ONE: &str = "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7
 const SVG_VOL_HIGH: &str = "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z";
 const SVG_VOL_LOW: &str = "M18.5 12C18.5 10.23 17.48 8.71 16 7.97V16.02C17.48 15.29 18.5 13.77 18.5 12ZM5 9V15H9L14 20V4L9 9H5Z";
 const SVG_VOL_MUTE: &str = "M3 9V15H7L12 20V4L7 9H3ZM15.57 8.03L18.20 10.66L20.83 8.03L22.17 9.37L19.54 12.00L22.17 14.63L20.83 15.97L18.20 13.34L15.57 15.97L14.23 14.63L16.86 12.00L14.23 9.37Z";
+
+/// Immortal `Arc<String>` singletons for dynamic SVG icons.
+/// Makepad's `CxIconAtlas` caches parsed paths by `Arc::as_ptr()`, so keeping these 5 `Arc`s
+/// alive permanently guarantees zero heap ABA pointer collisions and zero per-click allocations.
+fn immortal_svg_arc(slot: &OnceLock<Arc<String>>, raw: &'static str) -> Arc<String> {
+    Arc::clone(slot.get_or_init(|| Arc::new(raw.to_string())))
+}
+
+fn svg_arc_repeat_all() -> Arc<String> {
+    static CELL: OnceLock<Arc<String>> = OnceLock::new();
+    immortal_svg_arc(&CELL, SVG_REPEAT_ALL)
+}
+
+fn svg_arc_repeat_one() -> Arc<String> {
+    static CELL: OnceLock<Arc<String>> = OnceLock::new();
+    immortal_svg_arc(&CELL, SVG_REPEAT_ONE)
+}
+
+fn svg_arc_vol_high() -> Arc<String> {
+    static CELL: OnceLock<Arc<String>> = OnceLock::new();
+    immortal_svg_arc(&CELL, SVG_VOL_HIGH)
+}
+
+fn svg_arc_vol_low() -> Arc<String> {
+    static CELL: OnceLock<Arc<String>> = OnceLock::new();
+    immortal_svg_arc(&CELL, SVG_VOL_LOW)
+}
+
+fn svg_arc_vol_mute() -> Arc<String> {
+    static CELL: OnceLock<Arc<String>> = OnceLock::new();
+    immortal_svg_arc(&CELL, SVG_VOL_MUTE)
+}
 
 live_design! {
     use link::theme::*;
@@ -4957,12 +4989,13 @@ impl App {
 
         let is_muted = self.session_state.volume < 0.01;
         let vol_svg = if is_muted {
-            SVG_VOL_MUTE
+            svg_arc_vol_mute()
         } else if self.session_state.volume < 0.50 {
-            SVG_VOL_LOW
+            svg_arc_vol_low()
         } else {
-            SVG_VOL_HIGH
+            svg_arc_vol_high()
         };
+        let vol_svg_fs = Arc::clone(&vol_svg);
         let mute_col = if is_muted { accent } else { muted };
         let mute_hov = if is_muted { accent } else { icon_hover };
         let fs_mute_col = if is_muted { raw_accent } else { fs_muted };
@@ -4980,7 +5013,7 @@ impl App {
             cx,
             live! {
                 draw_bg: { active: (mute_act) }
-                draw_icon: { svg_path: (vol_svg), color: (fs_mute_col), color_hover: (fs_mute_hov), color_focus: (fs_mute_hov) }
+                draw_icon: { svg_path: (vol_svg_fs), color: (fs_mute_col), color_hover: (fs_mute_hov), color_focus: (fs_mute_hov) }
             },
         );
 
@@ -5019,10 +5052,11 @@ impl App {
         let rep_active = self.queue.repeat != RepeatMode::Off;
         let rep_act = if rep_active { 1.0_f32 } else { 0.0_f32 };
         let rep_svg = if self.queue.repeat == RepeatMode::One {
-            SVG_REPEAT_ONE
+            svg_arc_repeat_one()
         } else {
-            SVG_REPEAT_ALL
+            svg_arc_repeat_all()
         };
+        let rep_svg_fs = Arc::clone(&rep_svg);
         let rep_col = match self.queue.repeat {
             RepeatMode::Off => muted,
             RepeatMode::All => accent,
@@ -5052,7 +5086,7 @@ impl App {
             cx,
             live! {
                 draw_bg: { active: (rep_act) }
-                draw_icon: { svg_path: (rep_svg), color: (fs_rep_col), color_hover: (fs_rep_hov), color_focus: (fs_rep_hov) }
+                draw_icon: { svg_path: (rep_svg_fs), color: (fs_rep_col), color_hover: (fs_rep_hov), color_focus: (fs_rep_hov) }
             },
         );
     }
@@ -9888,11 +9922,12 @@ impl App {
                     } else {
                         self.sync_next_deck_to_engine();
                     }
-                    // Release TLS/stream download scratch pages immediately so active playback stays <100 MB
+                    // Release TLS/stream download & decode staging pages cleanly right after playback settles
                     if let Some(db) = &self.db {
                         db.shrink_memory();
                     }
                     win32_trim_working_set();
+                    self.tray_second_trim_at = Some(Instant::now() + Duration::from_secs(3));
                 }
                 BgMessage::StreamFailed {
                     track_id,

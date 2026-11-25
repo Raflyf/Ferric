@@ -2470,10 +2470,10 @@ impl Widget for FerricLyricsView {
                 break;
             }
 
-            // Smooth wide feathered edge fade (top 18% & bottom 18% melt seamlessly into backdrop)
+            // Smooth wide feathered edge fade for inactive lines; NEVER dim the currently sung active line!
             let rel_y = (draw_y + est_h * 0.5 - rect.pos.y) / rect.size.y.max(1.0);
             let fade_zone = if self.compact { 0.14 } else { 0.19 };
-            let edge_fade = if rel_y < fade_zone {
+            let raw_edge_fade = if rel_y < fade_zone {
                 let t = (rel_y / fade_zone).clamp(0.0, 1.0) as f32;
                 t * t * (3.0 - 2.0 * t)
             } else if rel_y > 1.0 - fade_zone {
@@ -2482,6 +2482,7 @@ impl Widget for FerricLyricsView {
             } else {
                 1.0
             };
+            let edge_fade = raw_edge_fade + (1.0 - raw_edge_fade) * focus;
 
             let dist = i.abs_diff(self.active_idx) as f32;
             let press_scale = if is_pressed { 0.985_f32 } else { 1.0_f32 };
@@ -2626,9 +2627,11 @@ impl Widget for FerricLyricsView {
                 vec4(1.0, 1.0, 1.0, alpha)
             };
             let dim_active_col = if use_dark_ink {
-                vec4(0.14, 0.17, 0.24, (0.50 * edge_fade).clamp(0.0, 1.0))
+                vec4(0.09, 0.11, 0.17, (0.76 * edge_fade).clamp(0.0, 1.0))
+            } else if self.compact {
+                vec4(0.96, 0.97, 1.0, (0.78 * edge_fade).clamp(0.0, 1.0))
             } else {
-                vec4(0.94, 0.95, 1.0, (0.42 * edge_fade).clamp(0.0, 1.0))
+                vec4(0.94, 0.95, 1.0, (0.48 * edge_fade).clamp(0.0, 1.0))
             };
 
             let draw_rect = if use_active_draw {

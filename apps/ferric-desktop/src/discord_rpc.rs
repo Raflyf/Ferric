@@ -197,9 +197,9 @@ pub fn build_set_activity_payload(
             };
             (1_u8, combined)
         }
-        DiscordStatusFormat::TrackTitle => (2_u8, artist.clone()),
-        DiscordStatusFormat::Artist => (1_u8, artist.clone()),
-        DiscordStatusFormat::AppName => (0_u8, artist.clone()),
+        DiscordStatusFormat::TrackTitle => (2_u8, artist),
+        DiscordStatusFormat::Artist => (1_u8, artist),
+        DiscordStatusFormat::AppName => (0_u8, artist),
     };
 
     let state_final = if !track.is_playing {

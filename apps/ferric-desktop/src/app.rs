@@ -2583,6 +2583,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_cover_art_url(
         &self,
         cx: &mut Cx,

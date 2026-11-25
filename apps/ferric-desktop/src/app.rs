@@ -674,14 +674,16 @@ live_design! {
             spacing: 2,
             title = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
                 draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 13.0, line_spacing: 1.0 } }
                 text: ""
             }
             sub = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
-                draw_text: { color: #8E909E, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
+                draw_text: { color: #9A9EAE, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
                 text: ""
             }
         }
@@ -759,14 +761,16 @@ live_design! {
             spacing: 2,
             title = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
                 draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 12.5, line_spacing: 1.0 } }
                 text: ""
             }
             sub = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
-                draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
+                draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
                 text: ""
             }
         }
@@ -844,14 +848,16 @@ live_design! {
             spacing: 2,
             title = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
                 draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 12.5, line_spacing: 1.0 } }
                 text: ""
             }
             sub = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
-                draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
+                draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 11.0, line_spacing: 1.0 } }
                 text: ""
             }
         }
@@ -934,21 +940,24 @@ live_design! {
             spacing: 2,
             title = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
                 draw_text: { color: #ECEEF5, text_style: <THEME_FONT_BOLD> { font_size: 12.0, line_spacing: 1.0 } }
                 text: ""
             }
             sub = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
-                draw_text: { color: #848796, text_style: <THEME_FONT_REGULAR> { font_size: 10.5, line_spacing: 1.0 } }
+                draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 10.5, line_spacing: 1.0 } }
                 text: ""
             }
         }
         dur = <Label> {
             width: Fit,
+            flow: Right,
             padding: 0,
-            draw_text: { color: #6E7180, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5, line_spacing: 1.0 } }
+            draw_text: { color: #888CA0, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5, line_spacing: 1.0 } }
             text: ""
         }
     }
@@ -1194,7 +1203,7 @@ live_design! {
 
                                 <Label> {
                                     margin: { left: 11, top: 14, bottom: 4 }
-                                    draw_text: { color: #6E7180, text_style: { font_size: 10.5 } }
+                                    draw_text: { color: #9498AC, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5 } }
                                     text: "Library"
                                 }
                                 nav_songs = <FerricNavItem> {
@@ -1216,7 +1225,7 @@ live_design! {
 
                                 <Label> {
                                     margin: { left: 11, top: 14, bottom: 4 }
-                                    draw_text: { color: #6E7180, text_style: { font_size: 10.5 } }
+                                    draw_text: { color: #9498AC, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5 } }
                                     text: "Pinned"
                                 }
                                 <ScrollYView> {
@@ -1712,12 +1721,12 @@ live_design! {
                                     <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }, text: "Settings" }
 
                                     <View> {
-                                        width: Fill, height: Fit, flow: Right, spacing: 5,
+                                        width: Fill, height: Fit, flow: Right, spacing: 6,
                                         st_accounts_btn = <FerricChipBtn> { text: "Accounts", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
-                                        st_playback_btn = <FerricChipBtn> { text: "Playback & Fade-In" }
+                                        st_playback_btn = <FerricChipBtn> { text: "Playback" }
                                         st_eq_btn = <FerricChipBtn> { text: "Equalizer" }
                                         st_appearance_btn = <FerricChipBtn> { text: "Appearance" }
-                                        st_storage_btn = <FerricChipBtn> { text: "Storage & Updates" }
+                                        st_storage_btn = <FerricChipBtn> { text: "Storage" }
                                         st_connect_btn = <FerricChipBtn> { text: "Connect" }
                                     }
 
@@ -2140,7 +2149,8 @@ live_design! {
                                         height: Fit,
                                         margin: { left: 6, top: 2, bottom: 2 }
                                         <Label> {
-                                            draw_text: { color: #757888, text_style: { font_size: 10.5 } }
+                                            padding: 0,
+                                            draw_text: { color: #9498AC, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5 } }
                                             text: "History"
                                         }
                                     }
@@ -2150,7 +2160,8 @@ live_design! {
 
                                     q_now_header = <Label> {
                                         margin: { left: 6, top: 6, bottom: 2 }
-                                        draw_text: { color: #A882FF, text_style: { font_size: 10.5 } }
+                                        padding: 0,
+                                        draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5 } }
                                         text: "Now playing"
                                     }
                                     q_now_row = <QueueMiniRow> {
@@ -2162,11 +2173,13 @@ live_design! {
                                         flow: Right, align: { y: 0.5 },
                                         q_upnext_header = <Label> {
                                             width: Fill,
-                                            draw_text: { color: #757888, text_style: { font_size: 10.5 } }
+                                            padding: 0,
+                                            draw_text: { color: #9498AC, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5 } }
                                             text: "Up next"
                                         }
                                         q_radio_status = <Label> {
-                                            draw_text: { color: #6E7180, text_style: { font_size: 10.5 } }
+                                            padding: 0,
+                                            draw_text: { color: #9498AC, text_style: <THEME_FONT_MEDIUM> { font_size: 10.5 } }
                                             text: "Radio On"
                                         }
                                     }
@@ -2236,24 +2249,26 @@ live_design! {
                                     height: 46,
                                     draw_bg: { radius: 8.0 }
                                 }
-                                <View> {
-                                    width: Fill,
-                                    height: Fit,
-                                    flow: Down,
-                                    spacing: 2,
-                                    np_title_lbl = <Label> {
+                                    <View> {
                                         width: Fill,
-                                        padding: 0,
-                                        draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 13.0, line_spacing: 1.0 } }
-                                        text: "Ready to play"
+                                        height: Fit,
+                                        flow: Down,
+                                        spacing: 2,
+                                        np_title_lbl = <Label> {
+                                            width: Fill,
+                                            flow: Right,
+                                            padding: 0,
+                                            draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 13.0, line_spacing: 1.0 } }
+                                            text: "Ready to play"
+                                        }
+                                        np_artist_lbl = <Label> {
+                                            width: Fill,
+                                            flow: Right,
+                                            padding: 0,
+                                            draw_text: { color: #A2A6B8, text_style: <THEME_FONT_REGULAR> { font_size: 11.5, line_spacing: 1.0 } }
+                                            text: "Pick a song to play"
+                                        }
                                     }
-                                    np_artist_lbl = <Label> {
-                                        width: Fill,
-                                        padding: 0,
-                                        draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 11.5, line_spacing: 1.0 } }
-                                        text: "Pick a song to play"
-                                    }
-                                }
                                 np_like_btn = <FerricIconBtn> {
                                     width: 30, height: 30,
                                     draw_icon: {
@@ -3902,12 +3917,6 @@ impl App {
         self.ui
             .label(id!(q_now_header))
             .apply_over(cx, live! { draw_text: { color: (accent) } });
-        self.ui
-            .label(id!(rs_lyr_3))
-            .apply_over(cx, live! { draw_text: { color: (accent) } });
-        self.ui
-            .label(id!(fs_lyr_4))
-            .apply_over(cx, live! { draw_text: { color: (accent) } });
         self.ui.view(id!(np_canvas)).apply_over(
             cx,
             live! { draw_bg: { accent: (accent), glass_on: (glass_f) } },
@@ -4042,7 +4051,9 @@ impl App {
         for (i, slot) in pin_slots.into_iter().enumerate() {
             if let Some(pl) = self.playlists.get(i) {
                 self.ui.button(slot).set_visible(cx, true);
-                self.ui.button(slot).set_text(cx, &clip_text(&pl.name, 22));
+                self.ui
+                    .button(slot)
+                    .set_text(cx, &clip_text(&clean_display_text(&pl.name), 18));
             } else {
                 self.ui.button(slot).set_visible(cx, false);
             }
@@ -4266,10 +4277,10 @@ impl App {
                         );
                         card_v
                             .label(id!(title))
-                            .set_text(cx, &clip_text(&clean_display_text(&card.title), 16));
+                            .set_text(cx, &clip_text(&clean_display_text(&card.title), 15));
                         card_v
                             .label(id!(sub))
-                            .set_text(cx, &clip_text(&clean_display_text(&card.subtitle), 19));
+                            .set_text(cx, &clip_text(&clean_display_text(&card.subtitle), 17));
                         self.bind_cover_art_url(
                             cx,
                             card_v.ferric_cover_art(id!(art)),
@@ -5847,14 +5858,24 @@ impl App {
     }
 
     fn set_lyrics_center_message(&self, cx: &mut Cx, msg: &str) {
-        self.set_lyrics_lines(
+        self.set_lyrics_lines_styled(
             cx,
             ["", "", "", msg, "", "", ""],
+            3,
             ["", "", "", "", msg, "", "", "", ""],
+            4,
         );
     }
 
-    fn set_lyrics_lines(&self, cx: &mut Cx, rs_lines: [&str; 7], fs_lines: [&str; 9]) {
+    fn set_lyrics_lines_styled(
+        &self,
+        cx: &mut Cx,
+        rs_lines: [&str; 7],
+        rs_active_slot: usize,
+        fs_lines: [&str; 9],
+        fs_active_slot: usize,
+    ) {
+        let accent = self.current_accent();
         let rs_ids = [
             id!(rs_lyr_0),
             id!(rs_lyr_1),
@@ -5864,6 +5885,22 @@ impl App {
             id!(rs_lyr_5),
             id!(rs_lyr_6),
         ];
+        for (i, lid) in rs_ids.into_iter().enumerate() {
+            let lbl = self.ui.label(lid);
+            lbl.set_text(cx, rs_lines[i]);
+            let dist = i.abs_diff(rs_active_slot);
+            let (col, sz) = match dist {
+                0 => (accent, 16.0_f64),
+                1 => (vec4(0.76, 0.78, 0.84, 1.0), 14.0_f64),
+                2 => (vec4(0.52, 0.54, 0.62, 1.0), 13.0_f64),
+                _ => (vec4(0.36, 0.38, 0.46, 1.0), 12.0_f64),
+            };
+            lbl.apply_over(
+                cx,
+                live! { draw_text: { color: (col), text_style: { font_size: (sz) } } },
+            );
+        }
+
         let fs_ids = [
             id!(fs_lyr_0),
             id!(fs_lyr_1),
@@ -5875,11 +5912,21 @@ impl App {
             id!(fs_lyr_7),
             id!(fs_lyr_8),
         ];
-        for i in 0..7 {
-            self.ui.label(rs_ids[i]).set_text(cx, rs_lines[i]);
-        }
-        for i in 0..9 {
-            self.ui.label(fs_ids[i]).set_text(cx, fs_lines[i]);
+        for (i, lid) in fs_ids.into_iter().enumerate() {
+            let lbl = self.ui.label(lid);
+            lbl.set_text(cx, fs_lines[i]);
+            let dist = i.abs_diff(fs_active_slot);
+            let (col, sz) = match dist {
+                0 => (accent, 25.0_f64),
+                1 => (vec4(0.80, 0.82, 0.88, 1.0), 18.5_f64),
+                2 => (vec4(0.60, 0.63, 0.71, 1.0), 16.5_f64),
+                3 => (vec4(0.45, 0.48, 0.56, 1.0), 15.0_f64),
+                _ => (vec4(0.34, 0.36, 0.44, 1.0), 13.5_f64),
+            };
+            lbl.apply_over(
+                cx,
+                live! { draw_text: { color: (col), text_style: { font_size: (sz) } } },
+            );
         }
     }
 
@@ -5894,33 +5941,42 @@ impl App {
             Err(0) => 0,
             Err(i) => i - 1,
         };
-        let get_txt = |opt_i: Option<usize>| -> &str {
-            opt_i
-                .and_then(|i| lines.get(i))
-                .map_or("", |l| l.text.as_str())
-        };
-        self.set_lyrics_lines(
+        let get_at = |i: usize| -> &str { lines.get(i).map_or("", |l| l.text.as_str()) };
+
+        // Dynamic sliding window: eliminates empty upper voids at the start of a song while
+        // keeping the active line smoothly centered as playback progresses.
+        let rs_max_start = lines.len().saturating_sub(7);
+        let rs_start = idx.saturating_sub(2).min(rs_max_start);
+        let rs_active_slot = idx.saturating_sub(rs_start).min(6);
+
+        let fs_max_start = lines.len().saturating_sub(9);
+        let fs_start = idx.saturating_sub(3).min(fs_max_start);
+        let fs_active_slot = idx.saturating_sub(fs_start).min(8);
+
+        self.set_lyrics_lines_styled(
             cx,
             [
-                get_txt(idx.checked_sub(3)),
-                get_txt(idx.checked_sub(2)),
-                get_txt(idx.checked_sub(1)),
-                get_txt(Some(idx)),
-                get_txt(Some(idx + 1)),
-                get_txt(Some(idx + 2)),
-                get_txt(Some(idx + 3)),
+                get_at(rs_start),
+                get_at(rs_start + 1),
+                get_at(rs_start + 2),
+                get_at(rs_start + 3),
+                get_at(rs_start + 4),
+                get_at(rs_start + 5),
+                get_at(rs_start + 6),
             ],
+            rs_active_slot,
             [
-                get_txt(idx.checked_sub(4)),
-                get_txt(idx.checked_sub(3)),
-                get_txt(idx.checked_sub(2)),
-                get_txt(idx.checked_sub(1)),
-                get_txt(Some(idx)),
-                get_txt(Some(idx + 1)),
-                get_txt(Some(idx + 2)),
-                get_txt(Some(idx + 3)),
-                get_txt(Some(idx + 4)),
+                get_at(fs_start),
+                get_at(fs_start + 1),
+                get_at(fs_start + 2),
+                get_at(fs_start + 3),
+                get_at(fs_start + 4),
+                get_at(fs_start + 5),
+                get_at(fs_start + 6),
+                get_at(fs_start + 7),
+                get_at(fs_start + 8),
             ],
+            fs_active_slot,
         );
     }
 
@@ -6275,21 +6331,21 @@ impl App {
         // pages so Ferric stays consistently <= 100 MB across every page).
         if let Some(started) = self.started_at {
             let elapsed = started.elapsed();
-            if self.startup_trim_stage == 0 && elapsed >= Duration::from_millis(2_200) {
+            if self.startup_trim_stage == 0 && elapsed >= Duration::from_millis(1_600) {
                 self.startup_trim_stage = 1;
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
                 win32_trim_working_set();
-            } else if self.startup_trim_stage == 1 && elapsed >= Duration::from_millis(4_500) {
+            } else if self.startup_trim_stage == 1 && elapsed >= Duration::from_millis(3_400) {
                 self.startup_trim_stage = 2;
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;
                 win32_trim_working_set();
             } else if self.startup_trim_stage >= 2
-                && self.artwork_uploads_since_trim >= 8
+                && self.artwork_uploads_since_trim >= 4
                 && self
                     .last_trim_at
-                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(8))
+                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
             {
                 self.last_trim_at = Some(Instant::now());
                 self.artwork_uploads_since_trim = 0;

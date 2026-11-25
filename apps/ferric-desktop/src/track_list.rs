@@ -127,6 +127,7 @@ live_design! {
             spacing: 2,
             title_lbl = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
                 draw_text: {
                     color: #F4F4F7,
@@ -136,6 +137,7 @@ live_design! {
             }
             artist_lbl = <Label> {
                 width: Fill,
+                flow: Right,
                 padding: 0,
                 draw_text: {
                     color: #9A9CA8,
@@ -147,6 +149,7 @@ live_design! {
 
         album_lbl = <Label> {
             width: 150,
+            flow: Right,
             padding: 0,
             draw_text: {
                 color: #888B99,

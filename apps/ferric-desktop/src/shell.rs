@@ -44,7 +44,7 @@ pub fn open_github_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://github.com/Raflyf/Ferric") {
         return Err("Refused to open non-Ferric GitHub URL".to_string());
     }
-    shell_open(url, None)
+    open_allowed_url(url)
 }
 
 /// Launch a SHA-256-verified `.msi` installer file using Windows ShellExecuteW.
@@ -297,7 +297,9 @@ mod win_impl {
         unsafe {
             let hinst = GetModuleHandleW(None).ok();
             let icon = hinst
-                .and_then(|m| LoadIconW(Some(m.into()), PCWSTR(1 as *const u16)).ok())
+                .and_then(|m| {
+                    LoadIconW(Some(m.into()), PCWSTR(std::ptr::without_provenance(1))).ok()
+                })
                 .or_else(|| LoadIconW(None, IDI_APPLICATION).ok())
                 .unwrap_or_default();
 

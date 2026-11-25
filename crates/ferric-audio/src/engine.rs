@@ -1518,10 +1518,12 @@ mod tests {
         let dur1 = tracks[1].duration_ms;
 
         let engine = AudioEngine::start_headless(EqConfig::default());
-        let mut dsp = PlaybackDspSettings::default();
-        dsp.crossfade_ms = 2_000;
-        dsp.gapless_album_lock = false;
-        dsp.trim_silence = false;
+        let dsp = PlaybackDspSettings {
+            crossfade_ms: 2_000,
+            gapless_album_lock: false,
+            trim_silence: false,
+            ..Default::default()
+        };
         engine.send(EngineCommand::SetDspSettings(dsp));
 
         // 1. Start track 0 and verify playback begins
@@ -1543,7 +1545,7 @@ mod tests {
 
         // 2. Manual CrossfadeToTrack must overlap Deck A -> Deck B without cutting playback
         engine.send(EngineCommand::CrossfadeToTrack {
-            path: p1.clone(),
+            path: p1,
             replay_gain_db: 0,
             fallback_duration_ms: dur1,
             overlap_ms: 800,

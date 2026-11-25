@@ -533,8 +533,10 @@ mod tests {
     #[test]
     fn encodes_subsonic_salted_token_and_validates_urls() {
         assert_eq!(encode_subsonic_password_hex("sesame"), "enc:736573616d65");
-        // Official Subsonic v1.13+ RFC 1321 MD5 example: md5("sesame" + "c19b2d")
-        assert_eq!(md5_hex(b"sesamec19b2d"), "26719a1196d2a94070df2503c10522fb");
+        // RFC 1321 MD5 vectors + Subsonic v1.13+ salted token md5("sesame" + "c19b2d")
+        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(md5_hex(b"sesamec19b2d"), "26719a1196d2a940705a59634eb18eab");
         let creds = SubsonicCredentials {
             base_url: "https://music.example.lan/".to_string(),
             username: "audiophile".to_string(),

@@ -7975,7 +7975,7 @@ impl App {
                 scored_tracks.push((20, t.clone()));
             }
         }
-        scored_tracks.sort_by(|a, b| b.0.cmp(&a.0));
+        scored_tracks.sort_by_key(|t| std::cmp::Reverse(t.0));
         let top_tracks: Vec<Track> = scored_tracks.into_iter().take(20).map(|(_, t)| t).collect();
 
         let mut artist_scores: HashMap<String, (String, i32)> = HashMap::new();
@@ -7997,7 +7997,7 @@ impl App {
             }
         }
         let mut artist_list: Vec<(String, i32)> = artist_scores.into_values().collect();
-        artist_list.sort_by(|a, b| b.1.cmp(&a.1));
+        artist_list.sort_by_key(|a| std::cmp::Reverse(a.1));
         let top_artists: Vec<String> = artist_list.into_iter().take(8).map(|(a, _)| a).collect();
 
         YtmHomeTasteProfile {

@@ -161,46 +161,29 @@ pub fn decode_frame(bytes: &[u8]) -> SyncResult<SyncFrame> {
 
 fn validate_frame(frame: &SyncFrame) -> SyncResult<()> {
     match frame {
-        SyncFrame::StateSnapshot(st) => {
-            if !st.volume_norm.is_finite() {
-                return Err(SyncError::InvalidPairingUri(
-                    "non-finite volume in StateSnapshot".to_string(),
-                ));
-            }
-        }
-        SyncFrame::PlaybackDelta { volume_norm, .. } => {
-            if !volume_norm.is_finite() {
-                return Err(SyncError::InvalidPairingUri(
-                    "non-finite volume in PlaybackDelta".to_string(),
-                ));
-            }
-        }
+        SyncFrame::StateSnapshot(st) if !st.volume_norm.is_finite() => Err(
+            SyncError::InvalidPairingUri("non-finite volume in StateSnapshot".to_string()),
+        ),
+        SyncFrame::PlaybackDelta { volume_norm, .. } if !volume_norm.is_finite() => Err(
+            SyncError::InvalidPairingUri("non-finite volume in PlaybackDelta".to_string()),
+        ),
         SyncFrame::Command {
             action: RemoteAction::SetVolume { volume_norm, .. },
             ..
-        } => {
-            if !volume_norm.is_finite() {
-                return Err(SyncError::InvalidPairingUri(
-                    "non-finite volume in SetVolume".to_string(),
-                ));
-            }
-        }
+        } if !volume_norm.is_finite() => Err(SyncError::InvalidPairingUri(
+            "non-finite volume in SetVolume".to_string(),
+        )),
         SyncFrame::Command {
             action: RemoteAction::SetSimulcastMode { participants, .. },
             ..
-        } => {
-            if participants.len() > MAX_SIMULCAST_PARTICIPANTS {
-                return Err(SyncError::FrameTooLarge(participants.len()));
-            }
+        } if participants.len() > MAX_SIMULCAST_PARTICIPANTS => {
+            Err(SyncError::FrameTooLarge(participants.len()))
         }
-        SyncFrame::QueueFull { tracks, .. } => {
-            if tracks.len() > MAX_SYNC_QUEUE_TRACKS {
-                return Err(SyncError::FrameTooLarge(tracks.len()));
-            }
+        SyncFrame::QueueFull { tracks, .. } if tracks.len() > MAX_SYNC_QUEUE_TRACKS => {
+            Err(SyncError::FrameTooLarge(tracks.len()))
         }
-        _ => {}
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Active Speaker Lease tracker ensuring only one paired device outputs audio unless simulcast is active.

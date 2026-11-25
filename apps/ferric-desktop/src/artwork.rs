@@ -11,8 +11,8 @@ use std::thread;
 
 /// Two worker threads balance fast artwork loading with minimal thread-stack/TLS RAM overhead.
 const WORKER_THREADS: usize = 2;
-/// Hard LRU cap: 36 covers x 128x128 BGRA (64 KB) = ~2.3 MB CPU + ~2.3 MB VRAM max!
-const MAX_CACHED_TEXTURES: usize = 36;
+/// Hard LRU cap: 28 covers x 128x128 BGRA (64 KB) = ~1.8 MB CPU + ~1.8 MB VRAM max!
+const MAX_CACHED_TEXTURES: usize = 28;
 /// Standard cover art thumbnail size (crisp for 40..160 px cards, 56x smaller than 1280x720).
 const THUMB_MAX_DIM: usize = 128;
 /// Higher detail size reserved solely for the currently playing hero/fullscreen artwork (256 KB).

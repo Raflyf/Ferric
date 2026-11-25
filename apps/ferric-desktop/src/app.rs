@@ -420,7 +420,7 @@ live_design! {
     FerricChipBtn = <Button> {
         width: Fit,
         height: 30,
-        padding: { left: 13, right: 13 }
+        padding: { left: 10, right: 10 }
         spacing: 0,
         align: { x: 0.5, y: 0.5 }
         draw_text: {
@@ -631,7 +631,7 @@ live_design! {
         }
         art = <FerricCoverArt> {
             width: Fill,
-            height: 144,
+            height: 136,
             draw_bg: { radius: 8.0 }
         }
         title = <Label> {
@@ -1052,7 +1052,7 @@ live_design! {
                                         width: Fill,
                                         height: Fit,
                                         flow: Right,
-                                        spacing: 7,
+                                        spacing: 5,
                                         chip_0 = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
                                         chip_1 = <FerricChipBtn> { text: "Feel good" }
                                         chip_2 = <FerricChipBtn> { text: "Relax" }
@@ -1493,7 +1493,7 @@ live_design! {
                                     <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }, text: "Settings" }
 
                                     <View> {
-                                        width: Fill, height: Fit, flow: Right, spacing: 7,
+                                        width: Fill, height: Fit, flow: Right, spacing: 5,
                                         st_accounts_btn = <FerricChipBtn> { text: "Accounts", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
                                         st_playback_btn = <FerricChipBtn> { text: "Playback & Fade-In" }
                                         st_eq_btn = <FerricChipBtn> { text: "Equalizer" }
@@ -1757,8 +1757,12 @@ live_design! {
                                                 pal_obsidian_btn = <FerricBtn> { text: "Obsidian Studio" }
                                                 pal_glass_btn = <FerricBtn> { text: "Liquid Glass" }
                                                 pal_cream_btn = <FerricBtn> { text: "Warm Cream" }
-                                                theme_import_btn = <FerricBtn> { text: "Import JSON" }
-                                                theme_export_btn = <FerricBtn> { text: "Export JSON" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }, text: "Custom Theme Profiles" }
+                                                theme_import_btn = <FerricBtn> { height: 28, text: "Import Theme JSON" }
+                                                theme_export_btn = <FerricBtn> { height: 28, text: "Export Theme JSON" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
@@ -1787,7 +1791,7 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
-                                                <Label> { width: 88, draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }, text: "IOR / Disp" }
+                                                <Label> { width: 102, draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }, text: "IOR / Disp" }
                                                 lg_ior_slider = <FerricBarSlider> { min: 1.05, max: 1.95, value: 1.48 }
                                                 lg_ior_lbl = <Label> { width: 42, draw_text: { color: #C8CAD6, text_style: { font_size: 11.5 } }, text: "1.48" }
                                                 lg_disp_slider = <FerricBarSlider> { min: 0.0, max: 1.0, value: 0.42 }
@@ -1795,7 +1799,7 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
-                                                <Label> { width: 88, draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }, text: "Rim / Radius" }
+                                                <Label> { width: 102, draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }, text: "Rim / Radius" }
                                                 lg_rim_slider = <FerricBarSlider> { min: 0.0, max: 1.0, value: 0.78 }
                                                 lg_rad_slider = <FerricBarSlider> { min: 0.0, max: 32.0, value: 12.0 }
                                                 lg_rim_lbl = <Label> { width: 86, draw_text: { color: #C8CAD6, text_style: { font_size: 11.5 } }, text: "78% · 12px" }
@@ -1878,28 +1882,42 @@ live_design! {
 
                                     vid_header = <FerricSurface> {
                                         width: Fill,
-                                        height: 48,
+                                        height: 54,
                                         padding: { left: 16, right: 16 }
                                         flow: Right,
                                         align: { y: 0.5 }
-                                        spacing: 8,
+                                        spacing: 10,
                                         draw_bg: { base_col: #09090D, glass_alpha: 0.72, radius: 0.0 }
 
-                                        vid_title_lbl = <Label> {
+                                        <View> {
                                             width: Fill,
-                                            draw_text: { color: #F4F4F7, text_style: { font_size: 13.5 } }
-                                            text: "Music Video"
+                                            height: Fit,
+                                            flow: Down,
+                                            spacing: 2,
+                                            vid_title_lbl = <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #F4F4F7, text_style: { font_size: 13.0 } }
+                                                text: "Music Video"
+                                            }
+                                            vid_status_lbl = <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #8E909E, text_style: { font_size: 11.0 } }
+                                                text: "Synced to WASAPI"
+                                            }
                                         }
-                                        vid_status_lbl = <Label> {
-                                            draw_text: { color: #8E909E, text_style: { font_size: 11.0 } }
-                                            text: "Synced to WASAPI"
+                                        <View> {
+                                            width: Fit,
+                                            height: Fit,
+                                            flow: Right,
+                                            align: { y: 0.5 }
+                                            spacing: 5,
+                                            vq_auto_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "Auto", draw_text: { text_style: { font_size: 11.0 } } }
+                                            vq_360_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "360p", draw_text: { text_style: { font_size: 11.0 } } }
+                                            vq_480_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "480p", draw_text: { text_style: { font_size: 11.0 } } }
+                                            vq_720_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "720p", draw_text: { text_style: { font_size: 11.0 } } }
+                                            vq_1080_btn = <FerricChipBtn> { height: 26, padding: { left: 8, right: 8 }, text: "1080p", draw_text: { text_style: { font_size: 11.0 } } }
+                                            vid_close_btn = <FerricBtn> { height: 28, padding: { left: 10, right: 10 }, text: "Close" }
                                         }
-                                        vq_auto_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "Auto", draw_text: { text_style: { font_size: 11.0 } } }
-                                        vq_360_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "360p", draw_text: { text_style: { font_size: 11.0 } } }
-                                        vq_480_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "480p", draw_text: { text_style: { font_size: 11.0 } } }
-                                        vq_720_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "720p", draw_text: { text_style: { font_size: 11.0 } } }
-                                        vq_1080_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "1080p", draw_text: { text_style: { font_size: 11.0 } } }
-                                        vid_close_btn = <FerricBtn> { height: 28, text: "Close Video" }
                                     }
                                     <FerricDividerH> {}
                                     video_stage_slot = <View> {
@@ -2473,7 +2491,11 @@ pub struct App {
     #[rust]
     started_at: Option<Instant>,
     #[rust]
-    startup_trim_done: bool,
+    startup_trim_stage: u8,
+    #[rust]
+    last_trim_at: Option<Instant>,
+    #[rust]
+    artwork_uploads_since_trim: u32,
     #[rust]
     lease: Option<ActiveSpeakerLease>,
     #[rust]
@@ -2724,7 +2746,7 @@ impl App {
                 cx,
                 live! {
                     height: (222.0 * z),
-                    art = { height: (144.0 * z) }
+                    art = { height: (136.0 * z) }
                     title = { draw_text: { text_style: { font_size: (12.0 * z) } } }
                     sub = { draw_text: { text_style: { font_size: (11.0 * z) } } }
                 },
@@ -2821,7 +2843,7 @@ impl App {
             } else {
                 0
             };
-            let top_px = ((45.0 * z + 49.0) * scale).round() as i32;
+            let top_px = ((45.0 * z + 55.0) * scale).round() as i32;
             let bot_px = (75.0 * z * scale).round() as i32;
             Some(VideoViewportRect {
                 x: client.left + left_px,
@@ -2935,10 +2957,13 @@ impl App {
         self.ui.view(id!(video_overlay)).set_visible(cx, true);
         self.ui.label(id!(vid_title_lbl)).set_text(
             cx,
-            &format!(
-                "{} — {}",
-                clip_text(&cur.title, 34),
-                clip_text(&cur.artist, 26)
+            &clip_text(
+                &format!(
+                    "{} · {}",
+                    clip_text(&cur.title, 22),
+                    clip_text(&cur.artist, 18)
+                ),
+                38,
             ),
         );
         self.refresh_video_quality_buttons(cx);
@@ -3043,7 +3068,9 @@ impl App {
         }
         self.initialized = true;
         self.started_at = Some(Instant::now());
-        self.startup_trim_done = false;
+        self.startup_trim_stage = 0;
+        self.last_trim_at = None;
+        self.artwork_uploads_since_trim = 0;
         self.active_page = MainPage::Home;
         self.active_settings_tab = SettingsTab::Accounts;
         self.nav_history = Some(NavHistory::new(MainPage::Home));
@@ -3873,7 +3900,9 @@ impl App {
                 && !shelf.cards.is_empty()
             {
                 self.ui.view(wrap_id).set_visible(cx, true);
-                self.ui.label(title_id).set_text(cx, &shelf.title);
+                self.ui
+                    .label(title_id)
+                    .set_text(cx, &clip_text(&shelf.title, 44));
                 let offset = self.shelf_pages[si] * 5;
                 for (ci, cid) in card_ids.into_iter().enumerate() {
                     let card_v = self.ui.view(cid);
@@ -3885,10 +3914,10 @@ impl App {
                         );
                         card_v
                             .label(id!(title))
-                            .set_text(cx, &clip_text(&card.title, 18));
+                            .set_text(cx, &clip_text(&card.title, 15));
                         card_v
                             .label(id!(sub))
-                            .set_text(cx, &clip_text(&card.subtitle, 22));
+                            .set_text(cx, &clip_text(&card.subtitle, 18));
                         self.bind_cover_art_url(
                             cx,
                             card_v.ferric_cover_art(id!(art)),
@@ -5786,14 +5815,34 @@ impl App {
     }
 
     fn handle_tick(&mut self, cx: &mut Cx) {
-        // 0a. One-shot post-startup working-set trim (releases DX11 shader compiler scratch pages)
-        if !self.startup_trim_done
-            && self
-                .started_at
-                .is_some_and(|t| t.elapsed() >= Duration::from_millis(2_400))
-        {
-            self.startup_trim_done = true;
-            win32_trim_working_set();
+        // 0a. Guarantee Win32 subclass hook is attached to the real MakepadWindow HWND
+        // (no-op single atomic load once installed).
+        win32_install_window_hooks();
+
+        // 0b. Multi-stage working-set trim (releases DX11 shader scratch + artwork decode staging
+        // pages so Ferric stays consistently <= 100 MB across every page).
+        if let Some(started) = self.started_at {
+            let elapsed = started.elapsed();
+            if self.startup_trim_stage == 0 && elapsed >= Duration::from_millis(2_200) {
+                self.startup_trim_stage = 1;
+                self.last_trim_at = Some(Instant::now());
+                self.artwork_uploads_since_trim = 0;
+                win32_trim_working_set();
+            } else if self.startup_trim_stage == 1 && elapsed >= Duration::from_millis(4_500) {
+                self.startup_trim_stage = 2;
+                self.last_trim_at = Some(Instant::now());
+                self.artwork_uploads_since_trim = 0;
+                win32_trim_working_set();
+            } else if self.startup_trim_stage >= 2
+                && self.artwork_uploads_since_trim >= 8
+                && self
+                    .last_trim_at
+                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(8))
+            {
+                self.last_trim_at = Some(Instant::now());
+                self.artwork_uploads_since_trim = 0;
+                win32_trim_working_set();
+            }
         }
 
         // 0b. Poll System Tray & Win32 subclass events
@@ -5848,6 +5897,7 @@ impl App {
             && let Some(cache) = &mut self.artwork
             && cache.poll(cx)
         {
+            self.artwork_uploads_since_trim = self.artwork_uploads_since_trim.saturating_add(1);
             self.refresh_all_artwork_slots(cx);
         }
 

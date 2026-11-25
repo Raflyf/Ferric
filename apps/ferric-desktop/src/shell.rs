@@ -139,6 +139,20 @@ mod win_impl {
         fn IsIconic(hwnd: *mut c_void) -> i32;
         fn IsZoomed(hwnd: *mut c_void) -> i32;
         fn GetDpiForWindow(hwnd: *mut c_void) -> u32;
+        fn GetClassNameW(hwnd: *mut c_void, lp_class_name: *mut u16, n_max_count: i32) -> i32;
+    }
+
+    unsafe fn is_makepad_window(hwnd: *mut c_void) -> bool {
+        if hwnd.is_null() {
+            return false;
+        }
+        let mut buf = [0u16; 64];
+        // SAFETY: Valid stack buffer passed to `GetClassNameW`.
+        let len = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if len <= 0 {
+            return false;
+        }
+        String::from_utf16_lossy(&buf[..len as usize]) == "MakepadWindow"
     }
 
     fn push_event(ev: TrayEvent) {
@@ -166,12 +180,9 @@ mod win_impl {
     unsafe extern "system" fn enum_proc_find_own_hwnd(hwnd: *mut c_void, l_param: isize) -> i32 {
         // SAFETY: `l_param` points to stack-owned `*mut c_void`.
         unsafe {
-            if IsWindowVisible(hwnd) == 0 && IsIconic(hwnd) == 0 {
-                return 1;
-            }
             let mut pid = 0u32;
             let _ = GetWindowThreadProcessId(hwnd, &mut pid);
-            if pid == std::process::id() {
+            if pid == std::process::id() && is_makepad_window(hwnd) {
                 let out_slot = l_param as *mut *mut c_void;
                 *out_slot = hwnd;
                 return 0;
@@ -185,14 +196,15 @@ mod win_impl {
         if cached != 0 {
             return Some(HWND(cached as *mut c_void));
         }
-        // SAFETY: Win32 thread/process queries on opaque window handles.
+        // SAFETY: Win32 thread/process queries restricted strictly to our `MakepadWindow` HWND
+        // so Windows IME / `UAC_InputIndicatorOverlayWnd` helper windows are never hooked.
         unsafe {
             let active = GetActiveWindow();
-            if !active.is_null() {
+            if !active.is_null() && is_makepad_window(active) {
                 return Some(HWND(active));
             }
             let fg = GetForegroundWindow();
-            if !fg.is_null() {
+            if !fg.is_null() && is_makepad_window(fg) {
                 let mut pid = 0u32;
                 let _ = GetWindowThreadProcessId(fg, &mut pid);
                 if pid == std::process::id() {
@@ -406,6 +418,7 @@ mod win_impl {
         unsafe {
             match msg {
                 WM_GETMINMAXINFO => {
+                    let _ = DefSubclassProc(hwnd, msg, wparam, lparam);
                     let mmi = lparam.0 as *mut MINMAXINFO;
                     if !mmi.is_null() {
                         let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -418,6 +431,10 @@ mod win_impl {
                             (*mmi).ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
                             (*mmi).ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
                             (*mmi).ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+                            (*mmi).ptMaxTrackSize.x =
+                                (mi.rcMonitor.right - mi.rcMonitor.left).max(1920);
+                            (*mmi).ptMaxTrackSize.y =
+                                (mi.rcMonitor.bottom - mi.rcMonitor.top).max(1080);
                         }
                         if MINI_MODE_ACTIVE.load(Ordering::Relaxed) {
                             (*mmi).ptMinTrackSize.x = 460;

@@ -35,10 +35,11 @@ mod imp {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-        GetClientRect, GetMessageW, KillTimer, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-        SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, SetWindowLongPtrW,
-        SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_SIZE,
-        WM_TIMER, WNDCLASSW, WS_CLIPSIBLINGS, WS_EX_TOOLWINDOW, WS_POPUP,
+        GetClientRect, GetMessageW, HWND_TOP, KillTimer, MSG, PostMessageW, PostQuitMessage,
+        RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE,
+        WM_DESTROY, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
 
@@ -72,8 +73,6 @@ mod imp {
         controller: ICoreWebView2Controller,
         webview: ICoreWebView2,
         cmd_rx: Receiver<VideoCmd>,
-        ready_html: bool,
-        pending_load: Option<(String, f64, bool)>,
     }
 
     pub struct NativeVideoPlayer {
@@ -116,11 +115,6 @@ mod imp {
             }
 
             let (tx, rx) = mpsc::channel::<VideoCmd>();
-            let _ = tx.send(VideoCmd::LoadStream {
-                url: stream_url,
-                pos_sec,
-                playing,
-            });
             self.cmd_tx = Some(tx);
 
             let (hwnd_tx, hwnd_rx) = mpsc::channel::<isize>();
@@ -128,7 +122,16 @@ mod imp {
             let _ = thread::Builder::new()
                 .name("ferric-video-stage".to_string())
                 .spawn(move || {
-                    let _ = run_video_sta(owner_hwnd_raw, rect, profile_dir, rx, hwnd_tx);
+                    let _ = run_video_sta(
+                        owner_hwnd_raw,
+                        rect,
+                        profile_dir,
+                        stream_url,
+                        pos_sec,
+                        playing,
+                        rx,
+                        hwnd_tx,
+                    );
                 });
             if let Ok(raw) = hwnd_rx.recv_timeout(std::time::Duration::from_millis(600)) {
                 *self.host_hwnd_raw.borrow_mut() = raw;
@@ -186,28 +189,32 @@ mod imp {
         }
     }
 
-    fn player_shell_html() -> &'static str {
-        r#"<!DOCTYPE html>
+    fn player_shell_html(initial_url: &str, initial_pos: f64, initial_playing: bool) -> String {
+        let quoted_url = js_quote(initial_url);
+        let init_play = if initial_playing { "true" } else { "false" };
+        format!(
+            r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
 <style>
-  html, body {
+  html, body {{
     margin: 0; padding: 0; width: 100%; height: 100%;
     background: #000000; overflow: hidden;
     display: flex; align-items: center; justify-content: center;
     user-select: none;
-  }
-  video {
+  }}
+  video {{
     width: 100%; height: 100%; object-fit: contain;
     background: #000000; opacity: 0;
     transition: opacity 220ms ease-out;
-  }
-  video.ready { opacity: 1; }
-  #msg {
+  }}
+  video.ready {{ opacity: 1; }}
+  #msg {{
     position: absolute; color: #9A9CA8; font: 500 13px/1.4 "Segoe UI", sans-serif;
     letter-spacing: 0.2px; pointer-events: none;
-  }
+  }}
 </style>
 </head>
 <body>
@@ -216,23 +223,27 @@ mod imp {
   <script>
     const v = document.getElementById('v');
     const msg = document.getElementById('msg');
-    let desiredPos = 0;
-    let desiredPlaying = true;
-    v.addEventListener('loadeddata', () => {
+    let desiredPos = {initial_pos:.3};
+    let desiredPlaying = {init_play};
+    const reveal = () => {{
       msg.style.display = 'none';
       v.classList.add('ready');
-      try {
-        if (Number.isFinite(desiredPos) && desiredPos > 0.25 && v.duration && desiredPos < v.duration) {
-          v.currentTime = desiredPos;
-        }
-        if (desiredPlaying) { v.play().catch(() => {}); } else { v.pause(); }
-      } catch (_) {}
-    });
-    v.addEventListener('error', () => {
+      try {{
+        if (Number.isFinite(desiredPos) && desiredPos > 0.25 && v.duration && desiredPos < v.duration) {{
+          if (Math.abs((v.currentTime || 0) - desiredPos) > 0.6) {{
+            v.currentTime = desiredPos;
+          }}
+        }}
+        if (desiredPlaying) {{ v.play().catch(() => {{}}); }} else {{ v.pause(); }}
+      }} catch (_) {{}}
+    }};
+    v.addEventListener('loadeddata', reveal);
+    v.addEventListener('canplay', reveal);
+    v.addEventListener('error', () => {{
       msg.style.display = 'block';
       msg.textContent = 'Video stream unavailable for this track';
-    });
-    window.__ferricLoad = (url, pos, playing) => {
+    }});
+    window.__ferricLoad = (url, pos, playing) => {{
       desiredPos = pos || 0;
       desiredPlaying = !!playing;
       v.classList.remove('ready');
@@ -240,34 +251,41 @@ mod imp {
       msg.textContent = 'Switching stream...';
       v.src = url;
       v.load();
-    };
-    window.__ferricSync = (pos, playing) => {
+      if (desiredPlaying) {{ v.play().catch(() => {{}}); }}
+    }};
+    window.__ferricSync = (pos, playing) => {{
       desiredPos = pos || 0;
       desiredPlaying = !!playing;
-      if (v.readyState >= 2) {
-        if (Math.abs((v.currentTime || 0) - desiredPos) > 0.55) {
-          try { v.currentTime = desiredPos; } catch (_) {}
-        }
-        if (desiredPlaying && v.paused) {
-          v.play().catch(() => {});
-        } else if (!desiredPlaying && !v.paused) {
+      if (v.readyState >= 2) {{
+        if (Math.abs((v.currentTime || 0) - desiredPos) > 0.55) {{
+          try {{ v.currentTime = desiredPos; }} catch (_) {{}}
+        }}
+        if (desiredPlaying && v.paused) {{
+          v.play().catch(() => {{}});
+        }} else if (!desiredPlaying && !v.paused) {{
           v.pause();
-        }
-      }
-    };
+        }}
+      }}
+    }};
+    window.__ferricLoad({quoted_url}, {initial_pos:.3}, {init_play});
   </script>
 </body>
 </html>"#
+        )
     }
 
     fn js_quote(s: &str) -> String {
         serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_video_sta(
         owner_hwnd_raw: isize,
         rect: VideoViewportRect,
         profile_dir: PathBuf,
+        initial_url: String,
+        initial_pos: f64,
+        initial_playing: bool,
         cmd_rx: Receiver<VideoCmd>,
         hwnd_tx: Sender<isize>,
     ) -> Result<(), String> {
@@ -302,7 +320,7 @@ mod imp {
         // SAFETY: Borderless owned tool popup docked inside Ferric's viewport (no extra taskbar entry).
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOOLWINDOW,
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 class_name,
                 w!("Ferric Video"),
                 WS_POPUP | WS_CLIPSIBLINGS,
@@ -320,8 +338,17 @@ mod imp {
 
         let _ = hwnd_tx.send(hwnd.0 as isize);
 
-        // SAFETY: Show docked stage without stealing keyboard focus from Ferric's transport shortcuts.
+        // SAFETY: Show docked stage directly on top of Ferric's viewport without stealing keyboard focus.
         unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOP),
+                rect.x,
+                rect.y,
+                rect.width.max(160),
+                rect.height.max(90),
+                SWP_NOACTIVATE,
+            );
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let _ = UpdateWindow(hwnd);
         }
@@ -390,7 +417,8 @@ mod imp {
                 .map_err(|e| format!("WebView2 controller error: {e}"))?
         };
 
-        // SAFETY: Fit WebView2 surface to video viewport and load minimalist HTML5 video shell.
+        // SAFETY: Fit WebView2 surface to video viewport and load minimalist HTML5 video shell
+        // with the initial stream baked directly in (zero NavigateToString/ExecuteScript race).
         let webview = unsafe {
             let mut client = RECT::default();
             let _ = GetClientRect(hwnd, &mut client);
@@ -399,7 +427,8 @@ mod imp {
             let wv = controller
                 .CoreWebView2()
                 .map_err(|e| format!("CoreWebView2 unavailable: {e}"))?;
-            let html_w = CoTaskMemPWSTR::from(player_shell_html());
+            let html = player_shell_html(&initial_url, initial_pos, initial_playing);
+            let html_w = CoTaskMemPWSTR::from(html.as_str());
             let _ = wv.NavigateToString(*html_w.as_ref().as_pcwstr());
             wv
         };
@@ -408,8 +437,6 @@ mod imp {
             controller,
             webview,
             cmd_rx,
-            ready_html: false,
-            pending_load: None,
         });
 
         // SAFETY: Attach state pointer and start lightweight 120 ms command drain timer.
@@ -435,22 +462,6 @@ mod imp {
     }
 
     fn drain_video_commands(hwnd: HWND, st: &mut VideoHostState) {
-        if let Some((url, pos, playing)) = st.pending_load.take() {
-            let script = format!(
-                "window.__ferricLoad && window.__ferricLoad({}, {:.3}, {});",
-                js_quote(&url),
-                pos,
-                if playing { "true" } else { "false" }
-            );
-            let w_script = CoTaskMemPWSTR::from(script.as_str());
-            // SAFETY: Execute JS sync call on STA WebView2.
-            unsafe {
-                let _ = st
-                    .webview
-                    .ExecuteScript(*w_script.as_ref().as_pcwstr(), None);
-            }
-        }
-
         while let Ok(cmd) = st.cmd_rx.try_recv() {
             match cmd {
                 VideoCmd::LoadStream {
@@ -458,19 +469,10 @@ mod imp {
                     pos_sec,
                     playing,
                 } => {
-                    if !st.ready_html {
-                        st.ready_html = true;
-                        st.pending_load = Some((url, pos_sec, playing));
-                        continue;
-                    }
+                    let q = js_quote(&url);
+                    let p_flag = if playing { "true" } else { "false" };
                     let script = format!(
-                        "if (window.__ferricLoad) {{ window.__ferricLoad({}, {:.3}, {}); }} else {{ setTimeout(() => window.__ferricLoad && window.__ferricLoad({}, {:.3}, {}), 220); }}",
-                        js_quote(&url),
-                        pos_sec,
-                        if playing { "true" } else { "false" },
-                        js_quote(&url),
-                        pos_sec,
-                        if playing { "true" } else { "false" }
+                        "(function r(n){{if(window.__ferricLoad){{window.__ferricLoad({q},{pos_sec:.3},{p_flag});}}else if(n>0){{setTimeout(()=>r(n-1),120);}}}})(30);"
                     );
                     let w_script = CoTaskMemPWSTR::from(script.as_str());
                     // SAFETY: STA thread WebView2 script execution.

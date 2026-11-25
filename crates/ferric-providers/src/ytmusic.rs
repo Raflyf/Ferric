@@ -1298,7 +1298,7 @@ pub fn fetch_rich_home(
         let mut disc_iter = ranked_discovery.iter().cloned().peekable();
         let mut slot = 0usize;
         while quick_picks.len() < 32 && (fav_iter.peek().is_some() || disc_iter.peek().is_some()) {
-            let pick = if slot % 3 == 0 {
+            let pick = if slot.is_multiple_of(3) {
                 fav_iter.next().or_else(|| disc_iter.next())
             } else {
                 disc_iter.next().or_else(|| fav_iter.next())

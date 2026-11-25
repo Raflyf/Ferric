@@ -45,6 +45,8 @@ pub fn startup_play_first() -> bool {
 }
 
 fn main() {
+    shell::win32_harden_process();
+    shell::win32_set_app_user_model_id();
     if !shell::win32_acquire_single_instance_or_activate() {
         return;
     }

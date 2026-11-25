@@ -70,31 +70,8 @@ impl SmtcBridge {
 
 #[cfg(target_os = "windows")]
 fn find_current_process_hwnd() -> Option<*mut std::ffi::c_void> {
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn GetActiveWindow() -> *mut std::ffi::c_void;
-        fn GetForegroundWindow() -> *mut std::ffi::c_void;
-        fn GetWindowThreadProcessId(hwnd: *mut std::ffi::c_void, lpdw_process_id: *mut u32) -> u32;
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetCurrentProcessId() -> u32;
-    }
-
-    // SAFETY: Standard Win32 queries with valid out-pointer and null checks.
-    unsafe {
-        let pid = GetCurrentProcessId();
-        for hwnd in [GetActiveWindow(), GetForegroundWindow()] {
-            if !hwnd.is_null() {
-                let mut win_pid: u32 = 0;
-                GetWindowThreadProcessId(hwnd, &mut win_pid);
-                if win_pid == pid {
-                    return Some(hwnd);
-                }
-            }
-        }
-    }
-    None
+    let raw = crate::shell::win32_main_hwnd_raw();
+    (raw != 0).then_some(raw as *mut std::ffi::c_void)
 }
 
 #[cfg(not(target_os = "windows"))]

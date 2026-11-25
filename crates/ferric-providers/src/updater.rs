@@ -25,7 +25,7 @@ pub struct ReleaseInfo {
 pub enum DownloadEvent {
     Progress(Option<u8>),
     Verifying,
-    Ready(PathBuf),
+    Ready { path: PathBuf, sha256: [u8; 32] },
     Failed(String),
 }
 
@@ -77,6 +77,9 @@ pub fn allowed_download_host(host: &str) -> bool {
 }
 
 pub fn validate_https_download_url(url: &str) -> Result<(&str, &str), String> {
+    if url.bytes().any(|b| b.is_ascii_control()) {
+        return Err("Invalid control characters in download URL".to_string());
+    }
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| "Untrusted update download scheme".to_string())?;
@@ -91,6 +94,16 @@ pub fn validate_https_download_url(url: &str) -> Result<(&str, &str), String> {
         || !allowed_download_host(authority)
     {
         return Err("Untrusted update download host".to_string());
+    }
+    if authority.eq_ignore_ascii_case("github.com") {
+        let expected_prefix = format!("/{GITHUB_REPO}/");
+        if !path
+            .get(..expected_prefix.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(&expected_prefix))
+            || path.contains("..")
+        {
+            return Err("Untrusted GitHub repository path".to_string());
+        }
     }
     Ok((authority, path))
 }
@@ -262,12 +275,14 @@ fn check_cancelled(cancelled: &AtomicBool, deadline: Instant) -> Result<(), Stri
     Ok(())
 }
 
-fn build_strict_agent(timeout: Duration) -> ureq::Agent {
+fn build_strict_agent(total_timeout: Duration, phase_timeout: Duration) -> ureq::Agent {
     let cfg = ureq::Agent::config_builder()
         .max_redirects(0)
         .max_redirects_will_error(false)
         .http_status_as_error(false)
-        .timeout_global(Some(timeout))
+        .timeout_connect(Some(phase_timeout))
+        .timeout_recv_response(Some(phase_timeout))
+        .timeout_global(Some(total_timeout))
         .build();
     ureq::Agent::new_with_config(cfg)
 }
@@ -281,7 +296,7 @@ pub fn check_latest_release(
     let deadline = Instant::now() + CHECK_TIMEOUT;
     check_cancelled(cancelled, deadline)?;
 
-    let agent = build_strict_agent(CHECK_TIMEOUT);
+    let agent = build_strict_agent(CHECK_TIMEOUT, CHECK_TIMEOUT);
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let resp = agent
         .get(&url)
@@ -323,9 +338,9 @@ fn open_verified_github_response(
         validate_https_download_url(&current_url)?;
         let remaining = deadline
             .saturating_duration_since(Instant::now())
-            .min(PHASE_TIMEOUT)
             .max(Duration::from_secs(1));
-        let agent = build_strict_agent(remaining);
+        let phase = remaining.min(PHASE_TIMEOUT);
+        let agent = build_strict_agent(remaining, phase);
         let resp = agent
             .get(&current_url)
             .header("User-Agent", user_agent)
@@ -359,14 +374,14 @@ fn open_verified_github_response(
 }
 
 /// Download `SHA256SUMS.txt` and `ferricsetup-{tag}.msi` exclusively from allowlisted GitHub hosts,
-/// stream to `.part` with live `%` progress callbacks, verify SHA-256, and atomically rename on success.
+/// stream to an exclusively-created CSPRNG `.part` file, verify SHA-256, and atomically rename on success.
 pub fn download_verified_installer(
     tag: &str,
     current_version: &str,
     updates_dir: &Path,
     cancelled: &AtomicBool,
     mut on_progress: impl FnMut(Option<u8>),
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, [u8; 32]), String> {
     let canonical = normalize_tag(tag)?;
     let user_agent = format!("Ferric/{current_version}");
     let deadline = Instant::now() + DOWNLOAD_TIMEOUT;
@@ -396,15 +411,19 @@ pub fn download_verified_installer(
     fs::create_dir_all(updates_dir)
         .map_err(|e| format!("Could not prepare updates folder: {e}"))?;
     let final_path = updates_dir.join(&installer_name);
-    let part_path = updates_dir.join(format!("{installer_name}.part"));
+    let nonce = ferric_core::secrets::csprng_hex(8);
+    let part_path = updates_dir.join(format!("{installer_name}.{nonce}.part"));
 
     let write_res: Result<(), String> = (|| {
         let mut reader = msi_body
             .into_with_config()
             .limit(MAX_INSTALLER_BYTES)
             .reader();
-        let file =
-            File::create(&part_path).map_err(|e| format!("Could not create download file: {e}"))?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part_path)
+            .map_err(|e| format!("Could not create download file: {e}"))?;
         let mut writer = BufWriter::new(file);
         let mut downloaded = 0u64;
         let mut last_pct: Option<u8> = None;
@@ -472,7 +491,7 @@ pub fn download_verified_installer(
         let _ = fs::remove_file(&part_path);
         return Err(format!("Could not finalize installer file: {err}"));
     }
-    Ok(final_path)
+    Ok((final_path, expected_sha))
 }
 
 #[cfg(test)]

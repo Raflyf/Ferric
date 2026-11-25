@@ -377,13 +377,16 @@ live_design! {
                 draw_bg: {
                     instance hover: 0.0
                     instance down: 0.0
+                    uniform light_mode: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                         let inset = 0.5 + self.down * 0.6;
                         let r = (self.rect_size.y - inset * 2.0) * 0.28;
                         sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
-                        let col = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D6D9E4, self.down);
-                        sdf.fill(col);
+                        let dark_col = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D6D9E4, self.down);
+                        let light_col = mix(mix(#FFFFFF, #F5F1EA, self.hover), #E4DEC8, self.down);
+                        sdf.fill_keep(mix(dark_col, light_col, self.light_mode));
+                        sdf.stroke(vec4(0.08, 0.09, 0.14, 0.22 * self.light_mode), 1.0);
                         return sdf.result;
                     }
                 }
@@ -763,6 +766,7 @@ impl Widget for TrackList {
                                     }
                                     empty_title_lbl = { draw_text: { color: (text_primary) } }
                                     empty_sub_lbl = { draw_text: { color: (text_secondary) } }
+                                    empty_discover_btn = { draw_bg: { light_mode: (light_mode) } }
                                 },
                             );
                             empty.draw_all(cx, scope);

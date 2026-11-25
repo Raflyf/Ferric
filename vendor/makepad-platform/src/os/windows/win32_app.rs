@@ -83,7 +83,8 @@ use {
                     Threading::ExitProcess,
                     LibraryLoader::{
                         GetModuleHandleW,
-                        LoadLibraryA,
+                        LoadLibraryExA,
+                        LOAD_LIBRARY_SEARCH_SYSTEM32,
                         GetProcAddress,
                     },
                     Performance::{
@@ -201,7 +202,7 @@ impl Win32Time{
 impl Win32App {
     pub fn new(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) -> Win32App {
         
-        let window_class_name = encode_wide("MakepadWindow\0");
+        let window_class_name = encode_wide("FerricMainWindow\0");
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW
@@ -560,7 +561,13 @@ type EnableNonClientDpiScaling = unsafe extern "system" fn (hwnd: HWND) -> BOOL;
 fn get_function_impl(library: &str, function: &str) -> FARPROC {
     // Library names we will use are ASCII so we can use the A version to avoid string conversion.
     
-    let module = unsafe {LoadLibraryA(PCSTR::from_raw(library.as_ptr()))};
+    let module = unsafe {
+        LoadLibraryExA(
+            PCSTR::from_raw(library.as_ptr()),
+            None,
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    };
     if module.is_err() {
         return None;
     }

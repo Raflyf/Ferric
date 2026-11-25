@@ -134,29 +134,79 @@ impl Default for DetailViewState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct NavEntry {
+    pub page: MainPage,
+    pub detail: Option<DetailViewState>,
+}
+
 pub struct NavHistory {
-    entries: Vec<MainPage>,
+    entries: Vec<NavEntry>,
     cursor: usize,
 }
 
 impl NavHistory {
     pub fn new(initial: MainPage) -> Self {
         Self {
-            entries: vec![initial],
+            entries: vec![NavEntry {
+                page: initial,
+                detail: None,
+            }],
             cursor: 0,
         }
     }
 
-    pub fn push(&mut self, page: MainPage) {
-        if self.entries.get(self.cursor).copied() == Some(page) {
-            return;
+    pub fn push(&mut self, page: MainPage, detail: Option<DetailViewState>) {
+        if let Some(cur) = self.entries.get(self.cursor) {
+            let same_page = cur.page == page;
+            let same_detail = cur.detail.as_ref().map(|d| d.id.as_str())
+                == detail.as_ref().map(|d| d.id.as_str());
+            if same_page && (page != MainPage::Detail || same_detail) {
+                if page == MainPage::Detail
+                    && let Some(slot) = self.entries.get_mut(self.cursor)
+                {
+                    slot.detail = detail;
+                }
+                return;
+            }
         }
         self.entries.truncate(self.cursor + 1);
-        self.entries.push(page);
+        self.entries.push(NavEntry { page, detail });
         if self.entries.len() > 32 {
             self.entries.remove(0);
         }
         self.cursor = self.entries.len().saturating_sub(1);
+    }
+
+    pub fn update_current_detail(&mut self, detail: &DetailViewState) {
+        if let Some(cur) = self.entries.get_mut(self.cursor)
+            && cur.page == MainPage::Detail
+            && cur.detail.as_ref().is_some_and(|d| d.id == detail.id)
+        {
+            cur.detail = Some(detail.clone());
+        }
+    }
+
+    pub fn prune_detail_id(&mut self, detail_id: &str) {
+        let mut i = 0;
+        while i < self.entries.len() {
+            let matches = self.entries[i].page == MainPage::Detail
+                && self.entries[i]
+                    .detail
+                    .as_ref()
+                    .is_some_and(|d| d.id == detail_id);
+            if matches && self.entries.len() > 1 {
+                self.entries.remove(i);
+                if i <= self.cursor && self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if self.cursor >= self.entries.len() {
+            self.cursor = self.entries.len().saturating_sub(1);
+        }
     }
 
     pub fn can_back(&self) -> bool {
@@ -167,19 +217,19 @@ impl NavHistory {
         self.cursor + 1 < self.entries.len()
     }
 
-    pub fn go_back(&mut self) -> Option<MainPage> {
+    pub fn go_back(&mut self) -> Option<NavEntry> {
         if self.can_back() {
             self.cursor -= 1;
-            self.entries.get(self.cursor).copied()
+            self.entries.get(self.cursor).cloned()
         } else {
             None
         }
     }
 
-    pub fn go_forward(&mut self) -> Option<MainPage> {
+    pub fn go_forward(&mut self) -> Option<NavEntry> {
         if self.can_forward() {
             self.cursor += 1;
-            self.entries.get(self.cursor).copied()
+            self.entries.get(self.cursor).cloned()
         } else {
             None
         }
@@ -412,8 +462,9 @@ pub fn build_artist_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
     out
 }
 
-/// Truncate text cleanly at UTF-8 char boundaries and strip glyphs absent from IBM Plex Sans
-/// (such as emoji/CJK/private-use blocks) so cards & sidebar rows stay single-line with zero tofu boxes.
+/// Truncate text cleanly at UTF-8 char boundaries while retaining all scripts supported by
+/// bundled Inter v4.1 (Latin, Latin Extended / Vietnamese, Greek, Cyrillic, and standard symbols)
+/// and filtering unsupported emoji/private-use blocks so cards stay single-line with zero tofu boxes.
 pub fn clip_text(raw: &str, max_chars: usize) -> String {
     let cleaned: String = raw
         .chars()
@@ -426,12 +477,17 @@ pub fn clip_text(raw: &str, max_chars: usize) -> String {
         })
         .filter(|&c| {
             let cp = c as u32;
-            cp <= 0x25FF && !matches!(cp, 0x0370..=0x1EFF)
+            (0x0020..=0x052F).contains(&cp) || (0x1E00..=0x25FF).contains(&cp)
         })
         .collect();
     let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let final_str = if trimmed.is_empty() {
-        "Unknown".to_string()
+        let raw_single = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if raw_single.is_empty() {
+            "Unknown".to_string()
+        } else {
+            raw_single
+        }
     } else {
         trimmed
     };

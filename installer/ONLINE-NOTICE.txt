@@ -1,4 +1,4 @@
-Ferric — Native Rust Hi-Fi Music Player
+Ferric — Hi-Fi Desktop Music Player
 
 Ferric plays your local lossless and lossy audio library (FLAC, MP3, AAC/M4A, ALAC, Ogg, Opus, WAV, AIFF) alongside optional online music discovery using 100% native Rust audio decoding (Symphonia + pure-Rust Opus + Rubato resampler + dual-deck Bass-Swap Automix + 10-band parametric Biquad EQ).
 

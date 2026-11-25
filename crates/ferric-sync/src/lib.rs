@@ -10,6 +10,8 @@ use thiserror::Error;
 
 /// Maximum wire frame length (1 MiB) to prevent memory exhaustion on malformed peers.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_SYNC_QUEUE_TRACKS: usize = 2_000;
+const MAX_SIMULCAST_PARTICIPANTS: usize = 16;
 pub const FERRIC_CONNECT_ALPN: &[u8] = b"ferric-connect/v1";
 pub const FERRIC_MDNS_SERVICE: &str = "_ferric-connect._udp.local.";
 
@@ -140,7 +142,7 @@ pub fn encode_frame(frame: &SyncFrame) -> SyncResult<Vec<u8>> {
     Ok(out)
 }
 
-/// Decode a single length-prefixed `SyncFrame`.
+/// Decode a single length-prefixed `SyncFrame` with strict semantic bounds validation.
 pub fn decode_frame(bytes: &[u8]) -> SyncResult<SyncFrame> {
     if bytes.len() < 4 {
         return Err(SyncError::TruncatedFrame);
@@ -152,7 +154,53 @@ pub fn decode_frame(bytes: &[u8]) -> SyncResult<SyncFrame> {
     if bytes.len() < 4 + len {
         return Err(SyncError::TruncatedFrame);
     }
-    Ok(postcard::from_bytes(&bytes[4..4 + len])?)
+    let frame: SyncFrame = postcard::from_bytes(&bytes[4..4 + len])?;
+    validate_frame(&frame)?;
+    Ok(frame)
+}
+
+fn validate_frame(frame: &SyncFrame) -> SyncResult<()> {
+    match frame {
+        SyncFrame::StateSnapshot(st) => {
+            if !st.volume_norm.is_finite() {
+                return Err(SyncError::InvalidPairingUri(
+                    "non-finite volume in StateSnapshot".to_string(),
+                ));
+            }
+        }
+        SyncFrame::PlaybackDelta { volume_norm, .. } => {
+            if !volume_norm.is_finite() {
+                return Err(SyncError::InvalidPairingUri(
+                    "non-finite volume in PlaybackDelta".to_string(),
+                ));
+            }
+        }
+        SyncFrame::Command {
+            action: RemoteAction::SetVolume { volume_norm, .. },
+            ..
+        } => {
+            if !volume_norm.is_finite() {
+                return Err(SyncError::InvalidPairingUri(
+                    "non-finite volume in SetVolume".to_string(),
+                ));
+            }
+        }
+        SyncFrame::Command {
+            action: RemoteAction::SetSimulcastMode { participants, .. },
+            ..
+        } => {
+            if participants.len() > MAX_SIMULCAST_PARTICIPANTS {
+                return Err(SyncError::FrameTooLarge(participants.len()));
+            }
+        }
+        SyncFrame::QueueFull { tracks, .. } => {
+            if tracks.len() > MAX_SYNC_QUEUE_TRACKS {
+                return Err(SyncError::FrameTooLarge(tracks.len()));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Active Speaker Lease tracker ensuring only one paired device outputs audio unless simulcast is active.
@@ -193,13 +241,50 @@ pub struct PairingPayload {
     pub device_name: String,
 }
 
+fn pct_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len() + 8);
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push(char::from(HEX[usize::from(b >> 4)]));
+            out.push(char::from(HEX[usize::from(b & 0x0F)]));
+        }
+    }
+    out
+}
+
+fn pct_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            )
+        {
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 impl PairingPayload {
     pub fn to_uri(&self) -> String {
         format!(
             "ferric://pair?id={}&tok={}&name={}",
-            self.endpoint_id,
-            self.token_hex,
-            self.device_name.replace(' ', "%20")
+            pct_encode(&self.endpoint_id),
+            pct_encode(&self.token_hex),
+            pct_encode(&self.device_name),
         )
     }
 
@@ -213,9 +298,9 @@ impl PairingPayload {
         for pair in query.split('&') {
             if let Some((k, v)) = pair.split_once('=') {
                 match k {
-                    "id" => endpoint_id = Some(v.to_string()),
-                    "tok" => token_hex = Some(v.to_string()),
-                    "name" => device_name = Some(v.replace("%20", " ")),
+                    "id" => endpoint_id = Some(pct_decode(v)),
+                    "tok" => token_hex = Some(pct_decode(v)),
+                    "name" => device_name = Some(pct_decode(v)),
                     _ => {}
                 }
             }

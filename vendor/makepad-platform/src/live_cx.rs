@@ -394,10 +394,14 @@ impl Cx {
     }
     
     pub fn register_live_body(&mut self, live_body: LiveBody) {
-        //println!("START");
+        let manifest_path = if std::option_env!("MAKEPAD_PACKAGE_DIR").is_some() {
+            ""
+        } else {
+            &live_body.cargo_manifest_path
+        };
         let result = self.live_registry.borrow_mut().register_live_file(
             &live_body.file,
-            &live_body.cargo_manifest_path,
+            manifest_path,
             LiveModuleId::from_str(&live_body.module_path).unwrap(),
             live_body.code,
             live_body.live_type_infos,

@@ -312,8 +312,66 @@ impl ArtworkCache {
     }
 }
 
+const MAX_DECODE_DIM: u32 = 4096;
+
+/// Pre-check PNG/JPEG header dimensions before allocating full decoded pixel buffers (blocks decompression bombs).
+fn check_image_header_dimensions(bytes: &[u8]) -> bool {
+    if bytes.len() >= 24 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        return w > 0 && h > 0 && w <= MAX_DECODE_DIM && h <= MAX_DECODE_DIM;
+    }
+    if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+        let mut i = 2usize;
+        while i + 9 < bytes.len() {
+            if bytes[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = bytes[i + 1];
+            i += 2;
+            if marker == 0xD9 || marker == 0xDA {
+                break;
+            }
+            if marker == 0x01 || (0xD0..=0xD7).contains(&marker) || marker == 0x00 {
+                continue;
+            }
+            if i + 2 > bytes.len() {
+                break;
+            }
+            let seg_len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+            if seg_len < 2 || i + seg_len > bytes.len() {
+                break;
+            }
+            if matches!(
+                marker,
+                0xC0 | 0xC1
+                    | 0xC2
+                    | 0xC3
+                    | 0xC5
+                    | 0xC6
+                    | 0xC7
+                    | 0xC9
+                    | 0xCA
+                    | 0xCB
+                    | 0xCD
+                    | 0xCE
+                    | 0xCF
+            ) && seg_len >= 7
+            {
+                let h = u16::from_be_bytes([bytes[i + 3], bytes[i + 4]]) as u32;
+                let w = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+                return w > 0 && h > 0 && w <= MAX_DECODE_DIM && h <= MAX_DECODE_DIM;
+            }
+            i += seg_len;
+        }
+        return false;
+    }
+    true
+}
+
 fn decode_and_downscale(bytes: &[u8], max_dim: usize) -> Option<ImageBuffer> {
-    if bytes.len() < 16 {
+    if bytes.len() < 16 || !check_image_header_dimensions(bytes) {
         return None;
     }
     let decoded = if bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 {

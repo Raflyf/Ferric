@@ -14,9 +14,9 @@ use crate::shell::{
 };
 use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::state::{
-    BgMessage, CollectionGroup, DetailViewState, LibraryFilter, MainPage, NavHistory, SearchFilter,
-    SettingsTab, SleepTimerMode, SortField, build_album_groups, build_artist_groups, clip_text,
-    dir_size_bytes, format_bytes_mb,
+    BgMessage, CollectionGroup, DetailViewState, LibraryFilter, MainPage, NavEntry, NavHistory,
+    SearchFilter, SettingsTab, SleepTimerMode, SortField, build_album_groups, build_artist_groups,
+    clip_text, dir_size_bytes, format_bytes_mb,
 };
 use crate::track_list::{TrackListAction, TrackListScope};
 use crate::video_player::{NativeVideoPlayer, VideoViewportRect};
@@ -34,6 +34,7 @@ use ferric_core::models::{
     primary_artist_key,
 };
 use ferric_core::queue::PlayQueue;
+use ferric_core::secrets::csprng_hex;
 use ferric_core::theme::{AdaptivePalette, ThemeConfig, hex_to_rgba_f32, parse_hex_rgb};
 use ferric_providers::autoeq::search_autoeq_profiles;
 use ferric_providers::local_scanner::scan_local_folder;
@@ -2860,17 +2861,16 @@ live_design! {
 
                                             video_stage_frame = <View> {
                                                 width: Fill,
-                                                height: 323,
-                                                padding: 4,
+                                                height: 319,
+                                                padding: 0,
                                                 align: { x: 0.5, y: 0.5 }
                                                 show_bg: true,
                                                 draw_bg: {
                                                     fn pixel(self) -> vec4 {
                                                         let p = self.pos * self.rect_size;
                                                         let sdf = Sdf2d::viewport(p);
-                                                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 18.0);
-                                                        sdf.fill_keep(vec4(0.04, 0.05, 0.08, 0.42));
-                                                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.16), 1.0);
+                                                        sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 16.0);
+                                                        sdf.fill(vec4(0.04, 0.05, 0.08, 0.34));
                                                         return sdf.result;
                                                     }
                                                 }
@@ -3497,6 +3497,12 @@ pub struct App {
     last_codec_txt: String,
     #[rust]
     sleep_timer: SleepTimerMode,
+    #[rust]
+    sleep_fade_base_vol: Option<f32>,
+    #[rust]
+    pending_stream_track: Option<Track>,
+    #[rust]
+    consecutive_stream_failures: u32,
     #[rust]
     discord_settings: DiscordRpcSettings,
     #[rust]
@@ -4257,7 +4263,7 @@ impl App {
         if self.video_open {
             let card_w = (600.0 * z).min(680.0);
             let box_w = (568.0 * z).min(640.0);
-            let frame_h = (box_w * 9.0 / 16.0).round() + 8.0;
+            let frame_h = (box_w * 9.0 / 16.0).round();
             let box_h = frame_h + 64.0;
             self.ui
                 .view(id!(fs_left_card))
@@ -4394,7 +4400,7 @@ impl App {
         if let Some(vp) = &mut self.video_player {
             vp.close();
         }
-        let muted = vec4(0.604, 0.612, 0.659, 1.0);
+        let muted = rgba_to_vec4(self.adaptive_palette().icon_idle);
         self.ui.button(id!(bar_video_btn)).apply_over(
             cx,
             live! { draw_bg: { active: 0.0 }, draw_icon: { color: (muted) } },
@@ -4428,9 +4434,6 @@ impl App {
         self.video_player = Some(NativeVideoPlayer::new(
             app_data_dir().join("webview2_video"),
         ));
-        self.hide_native_makepad_caption(cx);
-        win32_install_window_hooks();
-
         let db_path = app_data_dir().join("ferric.db");
         let mut db = LibraryDb::open(&db_path)
             .or_else(|_| LibraryDb::open_in_memory())
@@ -4438,11 +4441,13 @@ impl App {
 
         if let Some(store) = &mut db {
             self.theme = store.load_theme().unwrap_or_default();
-            // Upgrade legacy Liquid Glass / older theme names cleanly to AMOLED Black default
-            if !matches!(
-                self.theme.name.as_str(),
-                "AMOLED Black" | "Native Acrylic" | "Obsidian Studio" | "Warm Cream Light"
-            ) {
+            // Upgrade deprecated Liquid Glass preset or corrupted hex configs while preserving valid custom themes
+            let core_hex_ok = parse_hex_rgb(&self.theme.canvas_hex).is_ok()
+                && parse_hex_rgb(&self.theme.surface_hex).is_ok()
+                && parse_hex_rgb(&self.theme.border_hex).is_ok()
+                && parse_hex_rgb(&self.theme.text_primary_hex).is_ok()
+                && parse_hex_rgb(&self.theme.text_secondary_hex).is_ok();
+            if self.theme.name == "Liquid Glass" || !core_hex_ok {
                 self.theme = ThemeConfig::default();
                 let _ = store.save_theme(&self.theme);
             }
@@ -4461,6 +4466,19 @@ impl App {
                 self.theme.ui_zoom = 1.0;
             }
             self.theme.acrylic_opacity = self.theme.acrylic_opacity.clamp(0.18, 0.94);
+        }
+
+        // Seed DWM Acrylic state BEFORE installing Win32 window hooks so frame 0 renders
+        // with native blur immediately instead of flashing solid first.
+        win32_set_native_acrylic(
+            self.theme.acrylic_enabled,
+            self.theme.acrylic_opacity,
+            self.theme.acrylic_tint_rgb(),
+        );
+        self.hide_native_makepad_caption(cx);
+        win32_install_window_hooks();
+
+        if let Some(store) = &mut db {
             self.eq = store.load_eq().unwrap_or_default();
             self.dsp = store.load_playback_dsp().unwrap_or_default();
             self.accounts = store.load_accounts().unwrap_or_default();
@@ -4498,7 +4516,7 @@ impl App {
 
         self.smtc = Some(SmtcBridge::try_init());
         self.discord_rpc = Some(DiscordRpcBridge::start(self.discord_settings.clone()));
-        let dev_id = format!("ferric-pc-{:08x}", fastrand::u32(..));
+        let dev_id = format!("ferric-pc-{}", csprng_hex(6));
         self.lease = Some(ActiveSpeakerLease::new(dev_id.clone(), "Desktop-PC"));
         self.lan_ip = detect_local_lan_ip();
         self.lan_beacon = LanDiscoveryBeacon::bind_default(&dev_id).ok();
@@ -4635,13 +4653,29 @@ impl App {
         }
     }
 
+    fn navigate_to_entry(&mut self, cx: &mut Cx, entry: NavEntry) {
+        if entry.page == MainPage::Detail
+            && let Some(det) = entry.detail
+        {
+            self.detail_tracks = Rc::new(det.tracks.clone());
+            self.detail_state = det;
+            self.refresh_detail_hero(cx);
+        }
+        self.navigate_to(cx, entry.page, false);
+    }
+
     fn navigate_to(&mut self, cx: &mut Cx, target: MainPage, push_history: bool) {
         if self.video_open {
             self.close_native_video_stage(cx);
         }
         self.active_page = target;
         if push_history && let Some(hist) = &mut self.nav_history {
-            hist.push(target);
+            let det = if target == MainPage::Detail {
+                Some(self.detail_state.clone())
+            } else {
+                None
+            };
+            hist.push(target, det);
         }
 
         let pages = [
@@ -4905,6 +4939,9 @@ impl App {
     /// Request cover art strictly lazily for currently visible items (never bulk-loading hundreds
     /// of covers into RAM) so working set stays strictly under 100 MB.
     fn request_artwork_for_tracks(&mut self, tracks: &[Track]) {
+        if self.window_hidden_or_minimized {
+            return;
+        }
         if let Some(cache) = &mut self.artwork {
             for t in tracks.iter().take(14) {
                 let _ = cache.request_for_track(t);
@@ -4913,6 +4950,9 @@ impl App {
     }
 
     fn request_artwork_for_cards(&mut self, cards: &[YtmShelfCard]) {
+        if self.window_hidden_or_minimized {
+            return;
+        }
         if let Some(cache) = &mut self.artwork {
             for c in cards.iter().take(6) {
                 if let Some(url) = c.thumbnail_url.as_deref() {
@@ -5542,7 +5582,9 @@ impl App {
             self.playlists_page = max_pl_page;
         }
 
-        // Sidebar Pinned slots
+        // Sidebar Pinned slots (honors user pinned_ids across playlists, albums, and artists;
+        // falls back to first 5 saved playlists when nothing is explicitly pinned).
+        let pinned_items = self.resolve_pinned_sidebar_items();
         let pin_slots = [
             id!(pin_slot_0),
             id!(pin_slot_1),
@@ -5551,11 +5593,11 @@ impl App {
             id!(pin_slot_4),
         ];
         for (i, slot) in pin_slots.into_iter().enumerate() {
-            if let Some(pl) = self.playlists.get(i) {
+            if let Some(group) = pinned_items.get(i) {
                 self.ui.button(slot).set_visible(cx, true);
                 self.ui
                     .button(slot)
-                    .set_text(cx, &clip_text(&clean_display_text(&pl.name), 18));
+                    .set_text(cx, &clip_text(&clean_display_text(&group.title), 18));
             } else {
                 self.ui.button(slot).set_visible(cx, false);
             }
@@ -5585,6 +5627,52 @@ impl App {
                 "Guest Mode (Optional)".to_string()
             },
         );
+    }
+
+    fn resolve_pinned_sidebar_items(&self) -> Vec<CollectionGroup> {
+        let mut out = Vec::new();
+        for pin_id in &self.session_state.pinned_ids {
+            if out.len() >= 5 {
+                break;
+            }
+            if let Some(pl) = self.playlists.iter().find(|p| &p.id == pin_id) {
+                let tracks = self
+                    .db
+                    .as_ref()
+                    .and_then(|d| d.list_playlist_tracks(&pl.id).ok())
+                    .unwrap_or_default();
+                out.push(CollectionGroup {
+                    id: pl.id.clone(),
+                    title: pl.name.clone(),
+                    subtitle: pl.description.clone(),
+                    kind: YtmCardKind::Playlist,
+                    thumbnail_url: pl.thumbnail_url.clone(),
+                    tracks,
+                });
+            } else if let Some(alb) = self.album_groups.iter().find(|g| &g.id == pin_id) {
+                out.push(alb.clone());
+            } else if let Some(art) = self.artist_groups.iter().find(|g| &g.id == pin_id) {
+                out.push(art.clone());
+            }
+        }
+        if out.is_empty() {
+            for pl in self.playlists.iter().take(5) {
+                let tracks = self
+                    .db
+                    .as_ref()
+                    .and_then(|d| d.list_playlist_tracks(&pl.id).ok())
+                    .unwrap_or_default();
+                out.push(CollectionGroup {
+                    id: pl.id.clone(),
+                    title: pl.name.clone(),
+                    subtitle: pl.description.clone(),
+                    kind: YtmCardKind::Playlist,
+                    thumbnail_url: pl.thumbnail_url.clone(),
+                    tracks,
+                });
+            }
+        }
+        out
     }
 
     fn home_quick_picks_pool(&self) -> Vec<Track> {
@@ -5897,7 +5985,9 @@ impl App {
             .take(3)
             .collect();
         let upcoming: Vec<Track> = self.queue.peek_upcoming(10).into_iter().cloned().collect();
-        if let Some(cache) = &mut self.artwork {
+        if !self.window_hidden_or_minimized
+            && let Some(cache) = &mut self.artwork
+        {
             for t in &hist {
                 let _ = cache.request_for_track(t);
             }
@@ -5995,11 +6085,13 @@ impl App {
                 false,
             );
         } else {
+            let pal = self.adaptive_palette();
+            let text_primary = rgba_to_vec4(pal.text_primary);
             now_v.set_visible(cx, true);
             now_v.label(id!(title)).set_text(cx, "Nothing playing");
             now_v
                 .label(id!(title))
-                .apply_over(cx, live! { draw_text: { color: #ECEEF5 } });
+                .apply_over(cx, live! { draw_text: { color: (text_primary) } });
             now_v.label(id!(sub)).set_text(cx, "Pick any song");
             now_v.label(id!(dur)).set_text(cx, "");
             now_v.ferric_cover_art(id!(art)).set_texture(cx, None, 1.0);
@@ -6017,11 +6109,14 @@ impl App {
                 "Radio Off"
             },
         );
+        let radio_pal = self.adaptive_palette();
+        let radio_idle = rgba_to_vec4(radio_pal.icon_muted);
+        let radio_lm = if radio_pal.is_light { 1.0_f32 } else { 0.0_f32 };
         self.ui.button(id!(rs_radio_btn)).apply_over(
             cx,
             live! {
-                draw_bg: { active: (if self.session_state.autoplay_radio { 1.0 } else { 0.0 }), acrylic_on: (acr) }
-                draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { vec4(0.55, 0.56, 0.62, 1.0) }) }
+                draw_bg: { active: (if self.session_state.autoplay_radio { 1.0 } else { 0.0 }), acrylic_on: (acr), light_mode: (radio_lm) }
+                draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { radio_idle }) }
             },
         );
 
@@ -6802,6 +6897,10 @@ impl App {
     }
 
     fn apply_theme_live(&self, cx: &mut Cx) {
+        self.apply_theme_live_inner(cx, true);
+    }
+
+    fn apply_theme_live_inner(&self, cx: &mut Cx, save_db: bool) {
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
         } else {
@@ -6896,7 +6995,7 @@ impl App {
             );
         }
         // Modal cards sit over a dark scrim, so keep them opaque solid matching dark/light polarity
-        for modal_card_id in [id!(card_cmdk), id!(card_update_popup)] {
+        for modal_card_id in [id!(card_cmdk), id!(card_update_popup), id!(card_track_menu)] {
             self.ui.view(modal_card_id).apply_over(
                 cx,
                 live! {
@@ -7740,6 +7839,7 @@ impl App {
             id!(np_title_lbl),
             id!(lbl_t_powerbar),
             id!(update_popup_title),
+            id!(tm_title_lbl),
         ] {
             self.ui
                 .label(lid)
@@ -7790,6 +7890,7 @@ impl App {
             id!(np_artist_lbl),
             id!(pos_lbl),
             id!(update_popup_notes),
+            id!(tm_sub_lbl),
         ] {
             self.ui
                 .label(lid)
@@ -7818,17 +7919,21 @@ impl App {
         }
 
         self.apply_adaptive_accent_live(cx);
-        if let Some(db) = &self.db {
+        if save_db && let Some(db) = &self.db {
             let _ = db.save_theme(&self.theme);
         }
         self.ui.redraw(cx);
     }
 
     fn apply_dsp_live(&mut self, cx: &mut Cx) {
+        self.apply_dsp_live_inner(cx, true);
+    }
+
+    fn apply_dsp_live_inner(&mut self, cx: &mut Cx, save_db: bool) {
         if let Some(audio) = &self.audio {
             audio.send(EngineCommand::SetDspSettings(self.dsp.clone()));
         }
-        if let Some(db) = &self.db {
+        if save_db && let Some(db) = &self.db {
             let _ = db.save_playback_dsp(&self.dsp);
         }
         self.sync_next_deck_to_engine();
@@ -7836,6 +7941,10 @@ impl App {
     }
 
     fn apply_eq_live(&self, cx: &mut Cx) {
+        self.apply_eq_live_inner(cx, true);
+    }
+
+    fn apply_eq_live_inner(&self, cx: &mut Cx, save_db: bool) {
         if let Some(audio) = &self.audio {
             audio.send(EngineCommand::SetEq(self.eq.clone()));
         }
@@ -7849,7 +7958,7 @@ impl App {
             self.eq.preamp_db,
             &gains,
         );
-        if let Some(db) = &self.db {
+        if save_db && let Some(db) = &self.db {
             let _ = db.save_eq(&self.eq);
         }
         self.ui.redraw(cx);
@@ -7977,6 +8086,15 @@ impl App {
         let Some(audio) = &self.audio else {
             return;
         };
+        if matches!(self.sleep_timer, SleepTimerMode::EndOfTrack) {
+            audio.send(EngineCommand::QueueNextTrack {
+                path: None,
+                same_album_consecutive: false,
+                replay_gain_db: 0,
+                fallback_duration_ms: 0,
+            });
+            return;
+        }
         let next_opt = if self.queue.repeat == RepeatMode::One {
             self.queue.current()
         } else {
@@ -7984,25 +8102,27 @@ impl App {
         };
         if let Some(next_track) = next_opt {
             let valid_path = next_track.path.as_ref().filter(|p| p.is_file()).cloned();
-            // Only lock 0ms gapless album transitions for true Local albums (never streaming playlists
-            // whose album labels like "Quick picks" or "YouTube Music" would wrongly disable crossfade).
-            let same_album = self.queue.current().is_some_and(|cur| {
-                cur.source == TrackSource::Local
-                    && next_track.source == TrackSource::Local
-                    && !cur.album.is_empty()
-                    && cur.album != "Unknown Album"
-                    && cur.album == next_track.album
-                    && cur.id != next_track.id
-            });
+            // Lock 0ms gapless transition for RepeatMode::One and consecutive Local album tracks.
+            let same_album = self.queue.repeat == RepeatMode::One
+                || self.queue.current().is_some_and(|cur| {
+                    cur.source == TrackSource::Local
+                        && next_track.source == TrackSource::Local
+                        && !cur.album.is_empty()
+                        && cur.album != "Unknown Album"
+                        && cur.album == next_track.album
+                        && cur.id != next_track.id
+                });
             audio.send(EngineCommand::QueueNextTrack {
                 path: valid_path,
                 same_album_consecutive: same_album,
+                replay_gain_db: next_track.replay_gain_db,
                 fallback_duration_ms: next_track.duration_ms,
             });
         } else {
             audio.send(EngineCommand::QueueNextTrack {
                 path: None,
                 same_album_consecutive: false,
+                replay_gain_db: 0,
                 fallback_duration_ms: 0,
             });
         }
@@ -8190,6 +8310,64 @@ impl App {
         );
     }
 
+    fn clear_now_playing_ui(&mut self, cx: &mut Cx) {
+        self.pending_stream_track_id = None;
+        self.pending_stream_track = None;
+        self.last_pos_txt.clear();
+        self.last_dur_txt.clear();
+        self.last_codec_txt.clear();
+        self.synced_lyrics = SyncedLyrics::default();
+        self.set_lyrics_center_message(cx, "Play a song to load synced lyrics.");
+        self.ui.label(id!(np_title_lbl)).set_text(cx, "Not playing");
+        self.ui
+            .label(id!(np_artist_lbl))
+            .set_text(cx, "Pick any song");
+        self.ui
+            .label(id!(fs_title_lbl))
+            .set_text(cx, "No track playing");
+        self.ui.label(id!(fs_artist_lbl)).set_text(cx, "");
+        self.ui.button(id!(codec_pill_btn)).set_text(cx, "HI-FI");
+        self.ui.label(id!(pos_lbl)).set_text(cx, "0:00");
+        self.ui.button(id!(dur_btn)).set_text(cx, "0:00");
+        self.ui.label(id!(fs_pos_lbl)).set_text(cx, "0:00");
+        self.ui.label(id!(fs_dur_lbl)).set_text(cx, "0:00");
+        self.ui
+            .ferric_bar_slider(id!(seek_slider))
+            .set_value(cx, 0.0);
+        self.ui
+            .ferric_bar_slider(id!(fs_seek_slider))
+            .set_value(cx, 0.0);
+        self.ui
+            .ferric_play_btn(id!(play_pause_btn))
+            .set_playing(cx, false);
+        self.ui
+            .ferric_play_btn(id!(fs_play_pause_btn))
+            .set_playing(cx, false);
+        self.ui
+            .ferric_cover_art(id!(np_art))
+            .set_texture(cx, None, 1.0);
+        self.ui
+            .ferric_cover_art(id!(fs_art))
+            .set_texture(cx, None, 1.0);
+        self.sync_fullscreen_backdrop_artwork(cx);
+        if self.video_open {
+            self.close_native_video_stage(cx);
+        }
+        if let Some(cache) = &mut self.artwork {
+            cache.pin_active_track(None);
+        }
+        if let Some(smtc) = &mut self.smtc {
+            smtc.set_playing(false);
+        }
+        if let Some(rpc) = &mut self.discord_rpc {
+            rpc.update_playback(None);
+        }
+        win32_update_tray_tooltip("Ferric — Music Player");
+        win32_update_taskbar_playback("", "", false);
+        self.refresh_discord_preview(cx);
+        self.apply_adaptive_accent_live(cx);
+    }
+
     fn remove_track_contextually(&mut self, cx: &mut Cx, target: &Track) {
         let title = clip_text(&target.title, 24);
         let in_saved_pl = self.active_page == MainPage::Detail
@@ -8224,8 +8402,21 @@ impl App {
             return;
         }
 
+        let was_playing_target = self.queue.current().is_some_and(|cur| cur.id == target.id);
+        let _ = self.queue.remove_track_by_id(&target.id);
+        if was_playing_target {
+            if let Some(audio) = &self.audio {
+                audio.send(EngineCommand::Stop);
+            }
+            if let Some(next) = self.queue.current().cloned() {
+                self.play_track(cx, next);
+            } else {
+                self.clear_now_playing_ui(cx);
+            }
+        }
+
         // Remove from Ferric SQLite library (never deletes user's own music files on disk;
-        // removes generated demo `.wav` only for `demo:` tracks).
+        // removes generated demo `.wav` only for `demo:` tracks after engine handle is released).
         if target.id.starts_with("demo:")
             && let Some(p) = target.path.as_ref()
             && (p.starts_with(app_data_dir().join("demo_tracks"))
@@ -8246,15 +8437,6 @@ impl App {
         if let Some(db) = &self.db {
             let _ = db.save_session_state(&self.session_state);
         }
-        let was_playing_target = self.queue.current().is_some_and(|cur| cur.id == target.id);
-        let _ = self.queue.remove_track_by_id(&target.id);
-        if was_playing_target {
-            if let Some(next) = self.queue.current().cloned() {
-                self.play_track(cx, next);
-            } else if let Some(audio) = &self.audio {
-                audio.send(EngineCommand::Stop);
-            }
-        }
         if self.active_page == MainPage::Search {
             let mut next_search: Vec<Track> = (*self.search_tracks).clone();
             next_search.retain(|t| t.id != target.id);
@@ -8271,6 +8453,30 @@ impl App {
     }
 
     fn remove_all_demo_tracks(&mut self, cx: &mut Cx) {
+        let playing_demo = self
+            .queue
+            .current()
+            .is_some_and(|cur| cur.id.starts_with("demo:"));
+        let demo_ids: Vec<String> = self
+            .queue
+            .tracks()
+            .iter()
+            .filter(|t| t.id.starts_with("demo:"))
+            .map(|t| t.id.clone())
+            .collect();
+        for did in demo_ids {
+            let _ = self.queue.remove_track_by_id(&did);
+        }
+        if playing_demo {
+            if let Some(audio) = &self.audio {
+                audio.send(EngineCommand::Stop);
+            }
+            if let Some(next) = self.queue.current().cloned() {
+                self.play_track(cx, next);
+            } else {
+                self.clear_now_playing_ui(cx);
+            }
+        }
         let removed = if let Some(db) = &mut self.db {
             let n = db.delete_demo_tracks().unwrap_or(0);
             self.all_tracks = db.list_tracks("").unwrap_or_default();
@@ -8289,16 +8495,7 @@ impl App {
         if let Some(db) = &self.db {
             let _ = db.save_session_state(&self.session_state);
         }
-        let demo_ids: Vec<String> = self
-            .queue
-            .tracks()
-            .iter()
-            .filter(|t| t.id.starts_with("demo:"))
-            .map(|t| t.id.clone())
-            .collect();
-        for did in demo_ids {
-            let _ = self.queue.remove_track_by_id(&did);
-        }
+        self.sync_next_deck_to_engine();
         self.rebuild_library_views(cx);
         self.refresh_right_sidebar(cx);
         self.show_toast(
@@ -8344,8 +8541,13 @@ impl App {
                     out.push_str(&format!("https://music.youtube.com/watch?v={vid}\n"));
                 }
             }
-            if std::fs::write(&dest, out).is_ok() {
-                self.show_toast(cx, &format!("Exported '{}'", self.detail_state.title));
+            match std::fs::write(&dest, out) {
+                Ok(()) => {
+                    self.show_toast(cx, &format!("Exported '{}'", self.detail_state.title));
+                }
+                Err(err) => {
+                    self.show_toast(cx, &format!("Playlist export failed: {err}"));
+                }
             }
         }
     }
@@ -8419,6 +8621,13 @@ impl App {
     }
 
     fn play_track(&mut self, cx: &mut Cx, track: Track) {
+        self.play_track_inner(cx, track, true);
+    }
+
+    fn play_track_inner(&mut self, cx: &mut Cx, track: Track, reset_failures: bool) {
+        if reset_failures {
+            self.consecutive_stream_failures = 0;
+        }
         self.last_pos_txt.clear();
         self.last_dur_txt.clear();
         self.last_codec_txt.clear();
@@ -8427,6 +8636,7 @@ impl App {
         }
         if let Some(path) = track.path.as_ref().filter(|p| p.is_file()).cloned() {
             self.pending_stream_track_id = None;
+            self.pending_stream_track = None;
             self.send_play_or_crossfade(path, track.replay_gain_db, track.duration_ms);
             self.sync_next_deck_to_engine();
             self.prefetch_next_online_track();
@@ -8442,6 +8652,17 @@ impl App {
             )
         {
             self.pending_stream_track_id = Some(track.id.clone());
+            self.pending_stream_track = Some(track.clone());
+            // Clear any preloaded Deck B while resolving a manual online stream so an old track
+            // cannot crossfade mid-buffering.
+            if let Some(audio) = &self.audio {
+                audio.send(EngineCommand::QueueNextTrack {
+                    path: None,
+                    same_album_consecutive: false,
+                    replay_gain_db: 0,
+                    fallback_duration_ms: 0,
+                });
+            }
             self.ui
                 .label(id!(np_title_lbl))
                 .set_text(cx, &clip_text(&track.title, 22));
@@ -9275,8 +9496,8 @@ impl App {
     }
 
     fn regenerate_pairing_qr(&mut self, cx: &mut Cx) {
-        let tok = format!("{:016x}", fastrand::u64(..));
-        let ep = format!("ed25519_{:08x}", fastrand::u32(..));
+        let tok = csprng_hex(16);
+        let ep = format!("ed25519_{}", csprng_hex(6));
         let payload = PairingPayload {
             endpoint_id: ep,
             token_hex: tok,
@@ -9356,7 +9577,7 @@ impl App {
             .button(id!(update_now_btn))
             .set_text(cx, "Downloading...");
 
-        let dest_dir = std::env::temp_dir().join("ferric-updates");
+        let dest_dir = app_data_dir().join("updates");
         thread::spawn(move || {
             let progress_tx = tx.clone();
             let res = download_verified_installer(
@@ -9370,8 +9591,11 @@ impl App {
                 },
             );
             match res {
-                Ok(path) => {
-                    let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Ready(path)));
+                Ok((path, sha256)) => {
+                    let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Ready {
+                        path,
+                        sha256,
+                    }));
                 }
                 Err(err) => {
                     let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Failed(err)));
@@ -9787,6 +10011,9 @@ impl App {
                             loading: false,
                             tracks: detail.tracks,
                         };
+                        if let Some(hist) = &mut self.nav_history {
+                            hist.update_current_detail(&self.detail_state);
+                        }
                         self.refresh_detail_hero(cx);
                         self.ui.redraw(cx);
                     }
@@ -9829,15 +10056,14 @@ impl App {
                     seed_title,
                     tracks,
                 } => {
-                    let added = self.queue.append_tracks(tracks);
-                    if added > 0
-                        && self.queue.current().map(|t| t.id.as_str())
-                            == Some(seed_track_id.as_str())
-                    {
-                        self.queue_context = format!("{seed_title} radio");
-                        self.sync_next_deck_to_engine();
-                        self.prefetch_next_online_track();
-                        self.refresh_right_sidebar(cx);
+                    if self.queue.current().map(|t| t.id.as_str()) == Some(seed_track_id.as_str()) {
+                        let added = self.queue.append_tracks(tracks);
+                        if added > 0 {
+                            self.queue_context = format!("{seed_title} radio");
+                            self.sync_next_deck_to_engine();
+                            self.prefetch_next_online_track();
+                            self.refresh_right_sidebar(cx);
+                        }
                     }
                 }
                 BgMessage::GoogleLoginResult(outcome) => match outcome {
@@ -9947,14 +10173,29 @@ impl App {
                         && self.pending_stream_track_id.as_deref() == Some(track_id.as_str())
                     {
                         self.pending_stream_track_id = None;
-                        let rg = updated_track.as_ref().map_or(0, |t| t.replay_gain_db);
-                        let dur_ms = updated_track.as_ref().map_or(stream.duration_ms, |t| {
+                        self.consecutive_stream_failures = 0;
+                        let pending_meta = self.pending_stream_track.take().map(|mut t| {
+                            t.path = Some(stream.path.clone());
+                            t.codec = stream.codec.clone();
+                            if stream.bitrate_kbps > 0 {
+                                t.bitrate_kbps = stream.bitrate_kbps;
+                            }
+                            if stream.duration_ms > 0 && t.duration_ms == 0 {
+                                t.duration_ms = stream.duration_ms;
+                            }
+                            t
+                        });
+                        let resolved_track = updated_track
+                            .or(pending_meta)
+                            .or_else(|| self.queue.current().cloned());
+                        let rg = resolved_track.as_ref().map_or(0, |t| t.replay_gain_db);
+                        let dur_ms = resolved_track.as_ref().map_or(stream.duration_ms, |t| {
                             t.duration_ms.max(stream.duration_ms)
                         });
                         self.send_play_or_crossfade(stream.path, rg, dur_ms);
                         self.sync_next_deck_to_engine();
                         self.prefetch_next_online_track();
-                        if let Some(tr) = updated_track.or_else(|| self.queue.current().cloned()) {
+                        if let Some(tr) = resolved_track {
                             self.update_now_playing_metadata(cx, &tr);
                         }
                     } else {
@@ -9979,11 +10220,15 @@ impl App {
                         && self.pending_stream_track_id.as_deref() == Some(track_id.as_str())
                     {
                         self.pending_stream_track_id = None;
-                        if let Some(next_candidate) = self.queue.next_track().cloned()
+                        self.pending_stream_track = None;
+                        self.consecutive_stream_failures =
+                            self.consecutive_stream_failures.saturating_add(1);
+                        if self.consecutive_stream_failures <= 3
+                            && let Some(next_candidate) = self.queue.next_track().cloned()
                             && next_candidate.id != track_id
                         {
                             self.show_toast(cx, "Skipping unavailable stream...");
-                            self.play_track(cx, next_candidate);
+                            self.play_track_inner(cx, next_candidate, false);
                         } else {
                             self.ui
                                 .label(id!(np_artist_lbl))
@@ -10105,12 +10350,20 @@ impl App {
                             .button(id!(update_now_btn))
                             .set_text(cx, "Verifying SHA-256...");
                     }
-                    DownloadEvent::Ready(msi_path) => {
+                    DownloadEvent::Ready { path, sha256 } => {
                         self.update_download_in_flight = false;
-                        if launch_verified_installer(&msi_path).is_ok() {
-                            self.close_native_video_stage(cx);
-                            win32_force_quit();
-                            cx.quit();
+                        let updates_dir = app_data_dir().join("updates");
+                        match launch_verified_installer(&path, &updates_dir, &sha256) {
+                            Ok(()) => {
+                                self.close_native_video_stage(cx);
+                                win32_force_quit();
+                                cx.quit();
+                            }
+                            Err(err) => {
+                                self.ui.button(id!(update_now_btn)).set_text(cx, "Retry");
+                                self.ui.label(id!(update_popup_sub)).set_text(cx, &err);
+                                self.show_toast(cx, &err);
+                            }
                         }
                     }
                     DownloadEvent::Failed(err) => {
@@ -10163,19 +10416,31 @@ impl App {
             }
         }
 
-        // 3. Sleep timer countdown
+        // 3. Sleep timer countdown (with optional smooth 4-second fade-out)
         if let SleepTimerMode::Deadline(deadline) = self.sleep_timer {
             let now = Instant::now();
             if now >= deadline {
                 self.sleep_timer = SleepTimerMode::Off;
+                self.sleep_fade_base_vol = None;
                 self.ui
                     .label(id!(sleep_status_lbl))
                     .set_text(cx, "Sleep Timer: Paused smoothly");
                 if let Some(a) = &self.audio {
                     a.send(EngineCommand::Pause);
+                    a.send(EngineCommand::SetVolume(self.session_state.volume));
                 }
             } else {
-                let rem_s = deadline.duration_since(now).as_secs();
+                let rem = deadline.duration_since(now);
+                let rem_s = rem.as_secs();
+                if self.dsp.sleep_timer_fade_out && rem <= Duration::from_secs(4) {
+                    let base = *self
+                        .sleep_fade_base_vol
+                        .get_or_insert(self.session_state.volume);
+                    let frac = (rem.as_secs_f32() / 4.0).clamp(0.0, 1.0);
+                    if let Some(a) = &self.audio {
+                        a.send(EngineCommand::SetVolume(base * frac));
+                    }
+                }
                 self.ui.label(id!(sleep_status_lbl)).set_text(
                     cx,
                     &format!("Sleep Timer: {}:{:02} left", rem_s / 60, rem_s % 60),
@@ -10496,12 +10761,12 @@ impl App {
         if self.ui.button(id!(nav_back_btn)).clicked(actions)
             && let Some(prev) = self.nav_history.as_mut().and_then(NavHistory::go_back)
         {
-            self.navigate_to(cx, prev, false);
+            self.navigate_to_entry(cx, prev);
         }
         if self.ui.button(id!(nav_fwd_btn)).clicked(actions)
             && let Some(next) = self.nav_history.as_mut().and_then(NavHistory::go_forward)
         {
-            self.navigate_to(cx, next, false);
+            self.navigate_to_entry(cx, next);
         }
         if self.ui.button(id!(refresh_btn)).clicked(actions) {
             self.trigger_icon_pulse(cx, id!(refresh_btn), 1.0);
@@ -10562,6 +10827,7 @@ impl App {
             self.rebuild_library_views(cx);
             self.navigate_to(cx, MainPage::Songs, true);
         }
+        let pinned_items = self.resolve_pinned_sidebar_items();
         for (i, slot) in [
             id!(pin_slot_0),
             id!(pin_slot_1),
@@ -10573,24 +10839,9 @@ impl App {
         .enumerate()
         {
             if self.ui.button(slot).clicked(actions)
-                && let Some(pl) = self.playlists.get(i).cloned()
+                && let Some(group) = pinned_items.get(i).cloned()
             {
-                let tracks = self
-                    .db
-                    .as_ref()
-                    .and_then(|d| d.list_playlist_tracks(&pl.id).ok())
-                    .unwrap_or_default();
-                self.open_local_detail(
-                    cx,
-                    CollectionGroup {
-                        id: pl.id,
-                        title: pl.name,
-                        subtitle: pl.description,
-                        kind: YtmCardKind::Playlist,
-                        thumbnail_url: pl.thumbnail_url,
-                        tracks,
-                    },
-                );
+                self.open_local_detail(cx, group);
             }
         }
 
@@ -10677,8 +10928,7 @@ impl App {
                         self.queue_context = format!("{} radio", track.title);
                         self.queue.set_tracks(vec![track.clone()], Some(0));
                         self.last_radio_seed_id = None;
-                        self.play_track(cx, track.clone());
-                        self.maybe_fetch_radio_for_track(&track, true);
+                        self.play_track(cx, track);
                     } else {
                         self.queue_context = "Quick picks".to_string();
                         self.queue.set_tracks(pool, Some(idx));
@@ -10945,11 +11195,15 @@ impl App {
         if self.ui.button(id!(hero_shuffle_btn)).clicked(actions)
             && !self.filtered_tracks.is_empty()
         {
+            let start_idx = fastrand::usize(..self.filtered_tracks.len());
             self.queue_context = "Library Shuffle".to_string();
             self.queue
-                .set_tracks((*self.filtered_tracks).clone(), Some(0));
+                .set_tracks((*self.filtered_tracks).clone(), Some(start_idx));
             self.queue.set_shuffle(true);
             self.session_state.shuffle = true;
+            if let Some(db) = &self.db {
+                let _ = db.save_session_state(&self.session_state);
+            }
             self.sync_controls_from_state(cx);
             if let Some(first) = self.queue.current().cloned() {
                 self.play_track(cx, first);
@@ -11095,24 +11349,37 @@ impl App {
                 .set_title("Import Playlist (.m3u, .m3u8, .csv)")
                 .add_filter("Playlist Files", &["m3u", "m3u8", "csv"])
                 .pick_file()
-            && let Ok(content) = std::fs::read_to_string(&file)
         {
-            let stem = file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Imported Playlist");
-            let (pl, tracks) = parse_playlist_import_text(stem, &content, file.parent());
-            if let Some(db) = &mut self.db {
-                let _ = db.upsert_tracks(&tracks);
-                let ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
-                let _ = db.upsert_playlist(&pl, &ids);
-                let _ = db.match_cloud_tracks_to_local();
-                self.all_tracks = db.list_tracks("").unwrap_or_default();
-                self.playlists = db.list_playlists().unwrap_or_default();
+            match std::fs::read_to_string(&file) {
+                Ok(content) => {
+                    let stem = file
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Imported Playlist");
+                    let (pl, tracks) = parse_playlist_import_text(stem, &content, file.parent());
+                    if tracks.is_empty() {
+                        self.show_toast(cx, "No valid tracks found in playlist file");
+                    } else {
+                        if let Some(db) = &mut self.db {
+                            let _ = db.upsert_tracks(&tracks);
+                            let ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
+                            let _ = db.upsert_playlist(&pl, &ids);
+                            let _ = db.match_cloud_tracks_to_local();
+                            self.all_tracks = db.list_tracks("").unwrap_or_default();
+                            self.playlists = db.list_playlists().unwrap_or_default();
+                        }
+                        self.rebuild_library_views(cx);
+                        self.refresh_playlists_grid(cx);
+                        self.show_toast(
+                            cx,
+                            &format!("Imported '{}' ({} tracks)", pl.name, tracks.len()),
+                        );
+                    }
+                }
+                Err(err) => {
+                    self.show_toast(cx, &format!("Could not read playlist file: {err}"));
+                }
             }
-            self.rebuild_library_views(cx);
-            self.refresh_playlists_grid(cx);
-            self.show_toast(cx, &format!("Imported '{}'", pl.name));
         }
         if self.ui.button(id!(pl_prev_btn)).clicked(actions) && self.playlists_page > 0 {
             self.playlists_page -= 1;
@@ -11185,11 +11452,15 @@ impl App {
         if self.ui.button(id!(detail_shuffle_btn)).clicked(actions)
             && !self.detail_state.tracks.is_empty()
         {
+            let start_idx = fastrand::usize(..self.detail_state.tracks.len());
             self.queue_context = self.detail_state.title.clone();
             self.queue
-                .set_tracks(self.detail_state.tracks.clone(), Some(0));
+                .set_tracks(self.detail_state.tracks.clone(), Some(start_idx));
             self.queue.set_shuffle(true);
             self.session_state.shuffle = true;
+            if let Some(db) = &self.db {
+                let _ = db.save_session_state(&self.session_state);
+            }
             self.sync_controls_from_state(cx);
             if let Some(first) = self.queue.current().cloned() {
                 self.play_track(cx, first);
@@ -11200,8 +11471,11 @@ impl App {
         {
             self.queue_context = format!("{} radio", first.title);
             self.queue.set_tracks(vec![first.clone()], Some(0));
+            self.last_radio_seed_id = None;
             self.play_track(cx, first.clone());
-            self.maybe_fetch_radio_for_track(&first, true);
+            if !self.session_state.autoplay_radio {
+                self.maybe_fetch_radio_for_track(&first, true);
+            }
             self.show_toast(cx, &format!("Started radio for '{}'", first.title));
         }
         if self.ui.button(id!(detail_pin_btn)).clicked(actions) && !self.detail_state.id.is_empty()
@@ -11211,6 +11485,7 @@ impl App {
                 let _ = db.save_session_state(&self.session_state);
             }
             self.refresh_detail_hero(cx);
+            self.rebuild_library_views(cx);
             self.show_toast(
                 cx,
                 if pinned {
@@ -11273,6 +11548,9 @@ impl App {
             if let Some(db) = &self.db {
                 let _ = db.save_session_state(&self.session_state);
             }
+            if let Some(hist) = &mut self.nav_history {
+                hist.prune_detail_id(&pl_id);
+            }
             self.refresh_playlists_grid(cx);
             self.rebuild_library_views(cx);
             self.navigate_to(cx, MainPage::Playlists, false);
@@ -11306,8 +11584,7 @@ impl App {
                             self.queue_context = format!("{} radio", clicked.title);
                             self.queue.set_tracks(vec![clicked.clone()], Some(0));
                             self.last_radio_seed_id = None;
-                            self.play_track(cx, clicked.clone());
-                            self.maybe_fetch_radio_for_track(&clicked, true);
+                            self.play_track(cx, clicked);
                         } else {
                             self.queue_context = match self.active_page {
                                 MainPage::Search => "Search".to_string(),
@@ -11489,7 +11766,7 @@ impl App {
                 && let Some(t) = hist_tracks.get(i).cloned()
             {
                 self.queue.insert_play_next(t);
-                if let Some(next) = self.queue.next_track().cloned() {
+                if let Some(next) = self.queue.jump_to_upcoming(0).cloned() {
                     self.play_track(cx, next);
                 }
             }
@@ -11712,9 +11989,6 @@ impl App {
             if let Some(audio) = &self.audio {
                 audio.send(EngineCommand::SetVolume(vol as f32));
             }
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
             self.sync_controls_from_state(cx);
             if was_muted != now_muted {
                 self.ui
@@ -11723,6 +11997,27 @@ impl App {
                 self.ui
                     .ferric_volume_btn(id!(fs_vol_mute_btn))
                     .trigger_anim(cx);
+            }
+        }
+        if let Some(vol) = self
+            .ui
+            .ferric_bar_slider(id!(vol_slider))
+            .released(actions)
+            .or_else(|| {
+                self.ui
+                    .ferric_bar_slider(id!(fs_vol_slider))
+                    .released(actions)
+            })
+        {
+            self.session_state.volume = vol as f32;
+            if self.session_state.volume > 0.02 {
+                self.pre_mute_volume = self.session_state.volume;
+            }
+            if let Some(audio) = &self.audio {
+                audio.send(EngineCommand::SetVolume(vol as f32));
+            }
+            if let Some(db) = &self.db {
+                let _ = db.save_session_state(&self.session_state);
             }
         }
         if self
@@ -11937,6 +12232,8 @@ impl App {
             self.accounts.youtube_channel_name.clear();
             self.accounts.youtube_visitor_data.clear();
             self.accounts.youtube_playlist_count = 0;
+            // Remove persisted WebView2 login profile so Google cookies do not remain on disk.
+            let _ = std::fs::remove_dir_all(app_data_dir().join("webview2_profile"));
             if let Some(db) = &mut self.db {
                 let _ = db.save_accounts(&self.accounts);
                 let _ = db.delete_account_synced_playlists();
@@ -11973,12 +12270,18 @@ impl App {
                 &format!("Matched {matched} cloud tracks to local files"),
             );
         }
-        if self.ui.button(id!(rescan_btn)).clicked(actions)
-            && let Some(db) = &self.db
-            && let Ok(folders) = db.list_music_folders()
-            && !folders.is_empty()
-        {
-            self.spawn_folder_scan(folders);
+        if self.ui.button(id!(rescan_btn)).clicked(actions) {
+            let folders = self
+                .db
+                .as_ref()
+                .and_then(|db| db.list_music_folders().ok())
+                .unwrap_or_default();
+            if folders.is_empty() {
+                self.show_toast(cx, "No local music folders added yet");
+            } else {
+                self.show_toast(cx, &format!("Rescanning {} folder(s)...", folders.len()));
+                self.spawn_folder_scan(folders);
+            }
         }
         if self.ui.button(id!(sub_sync_btn)).clicked(actions) {
             self.accounts.subsonic_url = self
@@ -12033,6 +12336,17 @@ impl App {
             self.ui
                 .label(id!(xfade_val_lbl))
                 .set_text(cx, &format!("{sec:.1} s"));
+            self.apply_dsp_live_inner(cx, false);
+        }
+        if let Some(sec) = self
+            .ui
+            .ferric_bar_slider(id!(xfade_slider))
+            .released(actions)
+        {
+            self.dsp.crossfade_ms = (sec * 1_000.0).round() as u32;
+            self.ui
+                .label(id!(xfade_val_lbl))
+                .set_text(cx, &format!("{sec:.1} s"));
             self.apply_dsp_live(cx);
         }
         for (btn, ms) in [
@@ -12051,6 +12365,17 @@ impl App {
             .ui
             .ferric_bar_slider(id!(fadein_slider))
             .changed(actions)
+        {
+            self.dsp.fade_in_play_ms = ms.round() as u32;
+            self.ui
+                .label(id!(fadein_val_lbl))
+                .set_text(cx, &format!("{} ms", self.dsp.fade_in_play_ms));
+            self.apply_dsp_live_inner(cx, false);
+        }
+        if let Some(ms) = self
+            .ui
+            .ferric_bar_slider(id!(fadein_slider))
+            .released(actions)
         {
             self.dsp.fade_in_play_ms = ms.round() as u32;
             self.ui
@@ -12153,6 +12478,11 @@ impl App {
             (id!(slp_60_btn), Some(60_u64)),
         ] {
             if self.ui.button(btn).clicked(actions) {
+                if self.sleep_fade_base_vol.take().is_some()
+                    && let Some(a) = &self.audio
+                {
+                    a.send(EngineCommand::SetVolume(self.session_state.volume));
+                }
                 self.sleep_timer = match mins_opt {
                     Some(m) => {
                         SleepTimerMode::Deadline(Instant::now() + Duration::from_secs(m * 60))
@@ -12164,10 +12494,17 @@ impl App {
                         .label(id!(sleep_status_lbl))
                         .set_text(cx, "Sleep Timer: Off");
                 }
+                self.sync_next_deck_to_engine();
             }
         }
         if self.ui.button(id!(slp_eot_btn)).clicked(actions) {
+            if self.sleep_fade_base_vol.take().is_some()
+                && let Some(a) = &self.audio
+            {
+                a.send(EngineCommand::SetVolume(self.session_state.volume));
+            }
             self.sleep_timer = SleepTimerMode::EndOfTrack;
+            self.sync_next_deck_to_engine();
             self.ui
                 .label(id!(sleep_status_lbl))
                 .set_text(cx, "Sleep Timer: Stop after current song");
@@ -12191,10 +12528,29 @@ impl App {
             self.ui
                 .label(id!(eq_preamp_lbl))
                 .set_text(cx, &format!("{pre:+.1} dB"));
+            self.apply_eq_live_inner(cx, false);
+        }
+        if let Some(pre) = self
+            .ui
+            .ferric_bar_slider(id!(eq_preamp_slider))
+            .released(actions)
+        {
+            self.eq.preamp_db = pre as f32;
+            self.ui
+                .label(id!(eq_preamp_lbl))
+                .set_text(cx, &format!("{pre:+.1} dB"));
             self.apply_eq_live(cx);
         }
         for (idx, (slider_id, val_id)) in eq_band_ids().into_iter().enumerate() {
             if let Some(val) = self.ui.ferric_vert_slider(slider_id).changed(actions)
+                && let Some(band) = self.eq.bands.get_mut(idx)
+            {
+                band.gain_db = val as f32;
+                self.eq.preset_name = "Custom".to_string();
+                self.ui.label(val_id).set_text(cx, &format!("{val:+.1}"));
+                self.apply_eq_live_inner(cx, false);
+            }
+            if let Some(val) = self.ui.ferric_vert_slider(slider_id).released(actions)
                 && let Some(band) = self.eq.bands.get_mut(idx)
             {
                 band.gain_db = val as f32;
@@ -12233,18 +12589,29 @@ impl App {
                 self.sync_controls_from_state(cx);
                 self.apply_eq_live(cx);
                 self.show_toast(cx, &format!("Applied AutoEq: {}", best.name));
+            } else {
+                self.show_toast(cx, "No matching AutoEq headphone profile found");
             }
         }
         if self.ui.button(id!(eq_import_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()
                 .add_filter("Equalizer APO", &["txt"])
                 .pick_file()
-            && let Ok(raw) = std::fs::read_to_string(file)
-            && let Ok(parsed) = EqConfig::from_equalizer_apo(&raw)
         {
-            self.eq = parsed;
-            self.sync_controls_from_state(cx);
-            self.apply_eq_live(cx);
+            match std::fs::read_to_string(&file)
+                .map_err(|e| e.to_string())
+                .and_then(|raw| EqConfig::from_equalizer_apo(&raw).map_err(|e| e.to_string()))
+            {
+                Ok(parsed) => {
+                    self.eq = parsed;
+                    self.sync_controls_from_state(cx);
+                    self.apply_eq_live(cx);
+                    self.show_toast(cx, "Imported Equalizer APO profile");
+                }
+                Err(err) => {
+                    self.show_toast(cx, &format!("EQ import failed: {err}"));
+                }
+            }
         }
         if self.ui.button(id!(eq_export_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()
@@ -12252,7 +12619,10 @@ impl App {
                 .add_filter("Equalizer APO", &["txt"])
                 .save_file()
         {
-            let _ = std::fs::write(file, self.eq.to_equalizer_apo());
+            match std::fs::write(file, self.eq.to_equalizer_apo()) {
+                Ok(()) => self.show_toast(cx, "Exported Equalizer APO profile"),
+                Err(err) => self.show_toast(cx, &format!("EQ export failed: {err}")),
+            }
         }
 
         // Appearance Tab (AMOLED Black, Native Windows 11 Acrylic, Obsidian Studio, Warm Cream)
@@ -12332,6 +12702,17 @@ impl App {
             self.ui
                 .label(id!(acrylic_opacity_lbl))
                 .set_text(cx, &format!("{:.0}%", self.theme.acrylic_opacity * 100.0));
+            self.apply_theme_live_inner(cx, false);
+        }
+        if let Some(v) = self
+            .ui
+            .ferric_bar_slider(id!(acrylic_opacity_slider))
+            .released(actions)
+        {
+            self.theme.acrylic_opacity = (v as f32).clamp(0.18, 0.94);
+            self.ui
+                .label(id!(acrylic_opacity_lbl))
+                .set_text(cx, &format!("{:.0}%", self.theme.acrylic_opacity * 100.0));
             self.apply_theme_live(cx);
         }
         for (btn, name, hex) in [
@@ -12375,7 +12756,7 @@ impl App {
             self.ui
                 .text_input(id!(acrylic_tint_input))
                 .set_text(cx, &picked_hex);
-            self.apply_theme_live(cx);
+            self.apply_theme_live_inner(cx, false);
         }
         if let Some(picked_hex) = self
             .ui
@@ -12500,17 +12881,27 @@ impl App {
                 .add_filter("Ferric Theme JSON", &["json"])
                 .save_file()
         {
-            let _ = self.theme.export_to_file(&file);
+            match self.theme.export_to_file(&file) {
+                Ok(()) => self.show_toast(cx, "Exported theme JSON"),
+                Err(err) => self.show_toast(cx, &format!("Theme export failed: {err}")),
+            }
         }
         if self.ui.button(id!(theme_import_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()
                 .add_filter("Ferric Theme JSON", &["json"])
                 .pick_file()
-            && let Ok(loaded) = ThemeConfig::import_from_file(&file)
         {
-            self.theme = loaded;
-            self.sync_controls_from_state(cx);
-            self.apply_theme_live(cx);
+            match ThemeConfig::import_from_file(&file) {
+                Ok(loaded) => {
+                    self.theme = loaded;
+                    self.sync_controls_from_state(cx);
+                    self.apply_theme_live(cx);
+                    self.show_toast(cx, &format!("Imported theme '{}'", self.theme.name));
+                }
+                Err(err) => {
+                    self.show_toast(cx, &format!("Theme import failed: {err}"));
+                }
+            }
         }
 
         // Storage, Updates & Connect Tabs
@@ -12534,14 +12925,53 @@ impl App {
             self.remove_all_demo_tracks(cx);
         }
         if self.ui.button(id!(clear_local_btn)).clicked(actions) {
+            let playing_local = self
+                .queue
+                .current()
+                .is_some_and(|t| t.source == TrackSource::Local);
+            let local_ids: Vec<String> = self
+                .queue
+                .tracks()
+                .iter()
+                .filter(|t| t.source == TrackSource::Local)
+                .map(|t| t.id.clone())
+                .collect();
+            let all_local_ids: std::collections::HashSet<String> = self
+                .all_tracks
+                .iter()
+                .filter(|t| t.source == TrackSource::Local)
+                .map(|t| t.id.clone())
+                .collect();
+            for lid in &local_ids {
+                let _ = self.queue.remove_track_by_id(lid);
+            }
+            if playing_local {
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::Stop);
+                }
+                if let Some(next) = self.queue.current().cloned() {
+                    self.play_track(cx, next);
+                } else {
+                    self.clear_now_playing_ui(cx);
+                }
+            }
             let removed = if let Some(db) = &mut self.db {
                 let n = db.clear_music_folders_and_local_tracks().unwrap_or(0);
                 self.all_tracks = db.list_tracks("").unwrap_or_default();
                 self.playlists = db.list_playlists().unwrap_or_default();
                 n
             } else {
-                0
+                let before = self.all_tracks.len();
+                self.all_tracks.retain(|t| t.source != TrackSource::Local);
+                before.saturating_sub(self.all_tracks.len())
             };
+            self.session_state
+                .recent_track_ids
+                .retain(|id| !all_local_ids.contains(id));
+            if let Some(db) = &self.db {
+                let _ = db.save_session_state(&self.session_state);
+            }
+            self.sync_next_deck_to_engine();
             self.rebuild_library_views(cx);
             self.refresh_right_sidebar(cx);
             self.show_toast(
@@ -12597,10 +13027,7 @@ impl App {
                 self.queue_context = format!("{} radio", target.title);
                 self.queue.set_tracks(vec![target.clone()], Some(0));
                 self.last_radio_seed_id = None;
-                self.play_track(cx, target.clone());
-                if self.session_state.autoplay_radio {
-                    self.maybe_fetch_radio_for_track(&target, true);
-                }
+                self.play_track(cx, target);
             } else if self.ui.button(id!(tm_play_next_btn)).clicked(actions) {
                 self.close_track_menu(cx);
                 let title = clip_text(&target.title, 22);
@@ -12622,7 +13049,9 @@ impl App {
                 self.queue.set_tracks(vec![target.clone()], Some(0));
                 self.last_radio_seed_id = None;
                 self.play_track(cx, target.clone());
-                self.maybe_fetch_radio_for_track(&target, true);
+                if !self.session_state.autoplay_radio {
+                    self.maybe_fetch_radio_for_track(&target, true);
+                }
                 self.show_toast(
                     cx,
                     &format!("Started radio for '{}'", clip_text(&target.title, 22)),
@@ -12970,14 +13399,14 @@ impl AppMain for App {
                 && ke.key_code == KeyCode::ArrowLeft
                 && let Some(prev) = self.nav_history.as_mut().and_then(NavHistory::go_back)
             {
-                self.navigate_to(cx, prev, false);
+                self.navigate_to_entry(cx, prev);
                 return;
             }
             if ke.modifiers.alt
                 && ke.key_code == KeyCode::ArrowRight
                 && let Some(next) = self.nav_history.as_mut().and_then(NavHistory::go_forward)
             {
-                self.navigate_to(cx, next, false);
+                self.navigate_to_entry(cx, next);
                 return;
             }
             if ke.modifiers.shift
@@ -12996,46 +13425,77 @@ impl AppMain for App {
             }
             if ke.modifiers.control && ke.key_code == KeyCode::ArrowUp {
                 self.session_state.volume = (self.session_state.volume + 0.05).min(1.0);
+                if self.session_state.volume > 0.02 {
+                    self.pre_mute_volume = self.session_state.volume;
+                }
                 if let Some(a) = &self.audio {
                     a.send(EngineCommand::SetVolume(self.session_state.volume));
+                }
+                if let Some(db) = &self.db {
+                    let _ = db.save_session_state(&self.session_state);
                 }
                 self.sync_controls_from_state(cx);
                 return;
             }
             if ke.modifiers.control && ke.key_code == KeyCode::ArrowDown {
                 self.session_state.volume = (self.session_state.volume - 0.05).max(0.0);
+                if self.session_state.volume > 0.02 {
+                    self.pre_mute_volume = self.session_state.volume;
+                }
                 if let Some(a) = &self.audio {
                     a.send(EngineCommand::SetVolume(self.session_state.volume));
+                }
+                if let Some(db) = &self.db {
+                    let _ = db.save_session_state(&self.session_state);
                 }
                 self.sync_controls_from_state(cx);
                 return;
             }
             let typing = self.is_text_input_focused(cx);
-            if !typing && !ke.modifiers.control && !ke.modifiers.alt && !ke.modifiers.shift {
+            let modal_open = self.cmdk_open || self.track_menu_open || self.update_popup_visible;
+            if !typing
+                && !modal_open
+                && !ke.modifiers.control
+                && !ke.modifiers.alt
+                && !ke.modifiers.shift
+            {
                 if ke.key_code == KeyCode::Space
-                    && !self.cmdk_open
-                    && !self.track_menu_open
                     && let Some(audio) = &self.audio
                 {
-                    audio.send(EngineCommand::TogglePlayPause);
+                    let snap = audio.telemetry();
+                    if !snap.is_playing && self.queue.current().is_none() {
+                        let pool = self.home_quick_picks_pool();
+                        if let Some(first) = pool.first().cloned() {
+                            self.queue.set_tracks(pool, Some(0));
+                            self.play_track(cx, first);
+                        } else {
+                            self.load_and_play_demo_suite(cx);
+                        }
+                    } else {
+                        audio.send(EngineCommand::TogglePlayPause);
+                    }
                     return;
                 }
                 if ke.key_code == KeyCode::ArrowRight
                     && let Some(audio) = &self.audio
                 {
                     let snap = audio.telemetry();
-                    let next_ms = snap.position_ms.saturating_add(5_000).min(snap.duration_ms);
-                    audio.send(EngineCommand::SeekMs(next_ms));
-                    self.update_lyrics_display(cx, next_ms);
+                    if snap.duration_ms > 0 {
+                        let next_ms = snap.position_ms.saturating_add(5_000).min(snap.duration_ms);
+                        audio.send(EngineCommand::SeekMs(next_ms));
+                        self.update_lyrics_display(cx, next_ms);
+                    }
                     return;
                 }
                 if ke.key_code == KeyCode::ArrowLeft
                     && let Some(audio) = &self.audio
                 {
                     let snap = audio.telemetry();
-                    let next_ms = snap.position_ms.saturating_sub(5_000);
-                    audio.send(EngineCommand::SeekMs(next_ms));
-                    self.update_lyrics_display(cx, next_ms);
+                    if snap.duration_ms > 0 {
+                        let next_ms = snap.position_ms.saturating_sub(5_000);
+                        audio.send(EngineCommand::SeekMs(next_ms));
+                        self.update_lyrics_display(cx, next_ms);
+                    }
                     return;
                 }
                 if ke.key_code == KeyCode::KeyM {
@@ -13047,6 +13507,9 @@ impl AppMain for App {
                     }
                     if let Some(audio) = &self.audio {
                         audio.send(EngineCommand::SetVolume(self.session_state.volume));
+                    }
+                    if let Some(db) = &self.db {
+                        let _ = db.save_session_state(&self.session_state);
                     }
                     self.sync_controls_from_state(cx);
                     self.ui
@@ -13061,6 +13524,10 @@ impl AppMain for App {
                     let next_s = !self.session_state.shuffle;
                     self.session_state.shuffle = next_s;
                     self.queue.set_shuffle(next_s);
+                    if let Some(db) = &self.db {
+                        let _ = db.save_session_state(&self.session_state);
+                    }
+                    self.sync_next_deck_to_engine();
                     self.sync_controls_from_state(cx);
                     self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
                     self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
@@ -13076,6 +13543,10 @@ impl AppMain for App {
                     };
                     self.session_state.repeat = next_r;
                     self.queue.repeat = next_r;
+                    if let Some(db) = &self.db {
+                        let _ = db.save_session_state(&self.session_state);
+                    }
+                    self.sync_next_deck_to_engine();
                     self.sync_controls_from_state(cx);
                     self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
                     self.ui
@@ -13107,7 +13578,7 @@ impl AppMain for App {
                     );
                     return;
                 }
-                if ke.key_code == KeyCode::KeyF && !self.track_menu_open {
+                if ke.key_code == KeyCode::KeyF {
                     self.set_fullscreen(cx, !self.fullscreen_open);
                     return;
                 }
@@ -13163,7 +13634,8 @@ impl AppMain for App {
 
         // Drain lazily requested artwork for scrolled TrackList rows beyond initial batch
         let lazy_tracks: Vec<Track> = self.missing_art_queue.borrow_mut().drain(..).collect();
-        if !lazy_tracks.is_empty()
+        if !self.window_hidden_or_minimized
+            && !lazy_tracks.is_empty()
             && let Some(cache) = &mut self.artwork
         {
             for t in &lazy_tracks {

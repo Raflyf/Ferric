@@ -177,7 +177,7 @@ impl ThemeConfig {
 
 pub fn parse_hex_rgb(hex: &str) -> CoreResult<(u8, u8, u8)> {
     let clean = hex.trim().trim_start_matches('#');
-    if clean.len() != 6 {
+    if clean.len() != 6 || !clean.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(CoreError::InvalidHex(hex.to_string()));
     }
     let r =
@@ -424,5 +424,14 @@ mod tests {
             !AdaptivePalette::for_background((11, 13, 20), (232, 106, 44), (232, 106, 44), true)
                 .is_light
         );
+    }
+
+    #[test]
+    fn parse_hex_rgb_rejects_non_ascii_six_byte_utf8_without_panicking() {
+        // Two 3-byte UTF-8 chars ("€€") have byte length 6; must return Err, never slice panic.
+        assert!(parse_hex_rgb("€€").is_err());
+        assert!(parse_hex_rgb("#€€").is_err());
+        assert!(parse_hex_rgb("ZZZZZZ").is_err());
+        assert_eq!(parse_hex_rgb("#E86A2C").expect("valid hex"), (232, 106, 44));
     }
 }

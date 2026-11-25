@@ -421,6 +421,7 @@ impl CxOsApi for Cx {
         }
         
         self.live_expand();
+        #[cfg(debug_assertions)]
         if std::env::args().find( | v | v == "--stdin-loop").is_none() {
             self.start_disk_live_file_watcher(100);
         }

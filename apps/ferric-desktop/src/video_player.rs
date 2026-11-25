@@ -15,19 +15,24 @@ pub struct VideoViewportRect {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::VideoViewportRect;
+    use ferric_providers::ytmusic::is_allowed_stream_url;
     use std::cell::RefCell;
     use std::ffi::c_void;
-    use std::path::PathBuf;
+    use std::path::{Component, Path, PathBuf, Prefix};
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicIsize, Ordering};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::thread;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
-        CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
-        ICoreWebView2EnvironmentOptions,
+        COREWEBVIEW2_PERMISSION_STATE_DENY, CreateCoreWebView2EnvironmentWithOptions,
+        ICoreWebView2, ICoreWebView2Controller, ICoreWebView2EnvironmentOptions,
+        ICoreWebView2Settings3, ICoreWebView2Settings4, ICoreWebView2Settings6,
     };
     use webview2_com::{
         CoTaskMemPWSTR, CreateCoreWebView2ControllerCompletedHandler,
-        CreateCoreWebView2EnvironmentCompletedHandler,
+        CreateCoreWebView2EnvironmentCompletedHandler, NavigationStartingEventHandler,
+        NewWindowRequestedEventHandler, PermissionRequestedEventHandler, take_pwstr,
     };
     use windows::Win32::Foundation::{E_POINTER, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::UpdateWindow;
@@ -35,28 +40,16 @@ mod imp {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-        GetClientRect, GetMessageW, HWND_TOP, KillTimer, MSG, PostMessageW, PostQuitMessage,
-        RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE,
+        GetClientRect, GetMessageW, GetWindowLongPtrW, HWND_TOP, KillTimer, MSG, PostMessageW,
+        PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
+        SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE,
         WM_DESTROY, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
         WS_EX_TOOLWINDOW, WS_POPUP,
     };
-    use windows::core::{PCWSTR, w};
+    use windows::core::{Interface, PCWSTR, PWSTR, w};
 
     const WM_WAKE_VIDEO_CMD: u32 = WM_APP + 77;
     const CMD_POLL_TIMER: usize = 2001;
-    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-    const DWMWCP_ROUND: u32 = 2;
-
-    #[link(name = "dwmapi")]
-    unsafe extern "system" {
-        fn DwmSetWindowAttribute(
-            hwnd: *mut c_void,
-            dw_attribute: u32,
-            pv_attribute: *const c_void,
-            cb_attribute: u32,
-        ) -> i32;
-    }
 
     #[link(name = "gdi32")]
     unsafe extern "system" {
@@ -67,28 +60,72 @@ mod imp {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn SetWindowRgn(hwnd: *mut c_void, hrgn: *mut c_void, redraw: i32) -> i32;
+        fn GetDpiForWindow(hwnd: *mut c_void) -> u32;
     }
 
-    /// Clip the docked WebView2 surface with smooth 16px rounded corners so it blends seamlessly
-    /// into Ferric's ambient aurora stage instead of showing sharp rectangular edges.
+    /// Clip the docked WebView2 surface with a single DPI-exact 16px rounded region (matching
+    /// `#vignette`'s `border-radius: 16px`) and zero competing OS DWM corner frames.
     fn apply_rounded_video_corners(hwnd: HWND, width: i32, height: i32) {
         let w = width.max(2);
         let h = height.max(2);
-        let radius = ((w.min(h) as f32) * 0.055).clamp(14.0, 22.0).round() as i32;
-        // SAFETY: Valid owned popup HWND on the video STA thread; Windows owns the HRGN once SetWindowRgn succeeds.
+        // SAFETY: Valid owned popup HWND on the video STA thread; Windows owns HRGN on success.
         unsafe {
-            let pref = DWMWCP_ROUND;
-            let _ = DwmSetWindowAttribute(
-                hwnd.0,
-                DWMWA_WINDOW_CORNER_PREFERENCE,
-                (&raw const pref).cast(),
-                std::mem::size_of::<u32>() as u32,
-            );
+            let dpi = GetDpiForWindow(hwnd.0).max(96) as f32;
+            let radius = (16.0 * dpi / 96.0).round().clamp(12.0, 36.0) as i32;
             let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2);
             if !rgn.is_null() && SetWindowRgn(hwnd.0, rgn, 1) == 0 {
                 let _ = DeleteObject(rgn);
             }
         }
+    }
+
+    fn is_allowed_local_video_uri(raw: &str) -> bool {
+        let Some(rest) = raw.strip_prefix("file:///") else {
+            return false;
+        };
+        if raw.bytes().any(|b| b.is_ascii_control()) || rest.starts_with('/') {
+            return false;
+        }
+        let path = Path::new(rest);
+        for comp in path.components() {
+            match comp {
+                Component::Prefix(pref) => match pref.kind() {
+                    Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {}
+                    _ => return false,
+                },
+                Component::ParentDir => return false,
+                _ => {}
+            }
+        }
+        let ext_ok = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "mp4" | "webm" | "mkv"));
+        ext_ok && path.is_file()
+    }
+
+    fn is_allowed_video_stream_url(raw: &str) -> bool {
+        is_allowed_stream_url(raw) || is_allowed_local_video_uri(raw)
+    }
+
+    fn safe_pos_secs(pos: f64) -> f64 {
+        if pos.is_finite() && pos >= 0.0 {
+            pos.min(86_400.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// JSON-encode string and escape HTML/JS breakout characters (`</script>`, U+2028/U+2029).
+    fn js_quote_safe(s: &str) -> String {
+        serde_json::to_string(s)
+            .unwrap_or_else(|_| "\"\"".to_string())
+            .replace('<', "\\u003c")
+            .replace('>', "\\u003e")
+            .replace('&', "\\u0026")
+            .replace('/', "\\/")
+            .replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029")
     }
 
     enum VideoCmd {
@@ -117,12 +154,13 @@ mod imp {
     struct VideoHostState {
         controller: ICoreWebView2Controller,
         webview: ICoreWebView2,
-        cmd_rx: Receiver<VideoCmd>,
+        cmd_rx: RefCell<Receiver<VideoCmd>>,
+        shared_hwnd: Arc<AtomicIsize>,
     }
 
     pub struct NativeVideoPlayer {
         cmd_tx: Option<Sender<VideoCmd>>,
-        host_hwnd_raw: Rc<RefCell<isize>>,
+        host_hwnd_raw: Arc<AtomicIsize>,
         profile_dir: PathBuf,
     }
 
@@ -130,7 +168,7 @@ mod imp {
         pub fn new(profile_dir: PathBuf) -> Self {
             Self {
                 cmd_tx: None,
-                host_hwnd_raw: Rc::new(RefCell::new(0)),
+                host_hwnd_raw: Arc::new(AtomicIsize::new(0)),
                 profile_dir,
             }
         }
@@ -147,6 +185,10 @@ mod imp {
             pos_sec: f64,
             playing: bool,
         ) {
+            if !is_allowed_video_stream_url(&stream_url) {
+                return;
+            }
+            let pos_sec = safe_pos_secs(pos_sec);
             if let Some(tx) = &self.cmd_tx {
                 let _ = tx.send(VideoCmd::SetBounds(rect));
                 let _ = tx.send(VideoCmd::SetVisible(true));
@@ -164,6 +206,7 @@ mod imp {
 
             let (hwnd_tx, hwnd_rx) = mpsc::channel::<isize>();
             let profile_dir = self.profile_dir.clone();
+            let shared_hwnd = Arc::clone(&self.host_hwnd_raw);
             let _ = thread::Builder::new()
                 .name("ferric-video-stage".to_string())
                 .spawn(move || {
@@ -176,10 +219,11 @@ mod imp {
                         playing,
                         rx,
                         hwnd_tx,
+                        shared_hwnd,
                     );
                 });
             if let Ok(raw) = hwnd_rx.recv_timeout(std::time::Duration::from_millis(600)) {
-                *self.host_hwnd_raw.borrow_mut() = raw;
+                self.host_hwnd_raw.store(raw, Ordering::Release);
             }
         }
 
@@ -199,7 +243,10 @@ mod imp {
 
         pub fn sync_playback(&self, pos_sec: f64, playing: bool) {
             if let Some(tx) = &self.cmd_tx {
-                let _ = tx.send(VideoCmd::SyncPlayback { pos_sec, playing });
+                let _ = tx.send(VideoCmd::SyncPlayback {
+                    pos_sec: safe_pos_secs(pos_sec),
+                    playing,
+                });
                 self.wake_thread();
             }
         }
@@ -209,13 +256,13 @@ mod imp {
                 let _ = tx.send(VideoCmd::Close);
                 self.wake_thread();
             }
-            *self.host_hwnd_raw.borrow_mut() = 0;
+            self.host_hwnd_raw.store(0, Ordering::Release);
         }
 
         fn wake_thread(&self) {
-            let raw = *self.host_hwnd_raw.borrow();
+            let raw = self.host_hwnd_raw.load(Ordering::Acquire);
             if raw != 0 {
-                // SAFETY: Non-blocking wake message posted to our STA video window.
+                // SAFETY: Non-blocking wake message posted to our STA video window; cleared on WM_DESTROY.
                 unsafe {
                     let _ = PostMessageW(
                         Some(HWND(raw as *mut c_void)),
@@ -235,7 +282,8 @@ mod imp {
     }
 
     fn player_shell_html(initial_url: &str, initial_pos: f64, initial_playing: bool) -> String {
-        let quoted_url = js_quote(initial_url);
+        let quoted_url = js_quote_safe(initial_url);
+        let safe_pos = safe_pos_secs(initial_pos);
         let init_play = if initial_playing { "true" } else { "false" };
         format!(
             r#"<!DOCTYPE html>
@@ -243,6 +291,7 @@ mod imp {
 <head>
 <meta charset="utf-8">
 <meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; media-src https://*.googlevideo.com file:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <style>
   html, body {{
     margin: 0; padding: 0; width: 100%; height: 100%;
@@ -259,7 +308,7 @@ mod imp {
   video.ready {{ opacity: 1; }}
   #vignette {{
     position: absolute; inset: 0; pointer-events: none;
-    box-shadow: inset 0 0 28px rgba(0, 0, 0, 0.42), inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+    box-shadow: inset 0 0 22px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(255, 255, 255, 0.14);
     border-radius: 16px;
   }}
   #msg {{
@@ -270,12 +319,14 @@ mod imp {
 </head>
 <body>
   <div id="msg">Loading video stream...</div>
-  <video id="v" muted playsinline autoplay preload="auto"></video>
+  <video id="v" muted playsinline autoplay preload="auto" disablePictureInPicture controlsList="nodownload noplaybackrate"></video>
   <div id="vignette"></div>
   <script>
+    document.addEventListener('contextmenu', e => e.preventDefault());
+    document.addEventListener('dragstart', e => e.preventDefault());
     const v = document.getElementById('v');
     const msg = document.getElementById('msg');
-    let desiredPos = {initial_pos:.3};
+    let desiredPos = {safe_pos:.3};
     let desiredPlaying = {init_play};
     const reveal = () => {{
       if (v.videoWidth > 0 && v.videoHeight > 0) {{
@@ -300,7 +351,7 @@ mod imp {
       msg.textContent = 'Video stream unavailable for this track';
     }});
     window.__ferricLoad = (url, pos, playing) => {{
-      desiredPos = pos || 0;
+      desiredPos = Number.isFinite(pos) ? pos : 0;
       desiredPlaying = !!playing;
       v.classList.remove('ready');
       msg.style.display = 'block';
@@ -310,7 +361,7 @@ mod imp {
       if (desiredPlaying) {{ v.play().catch(() => {{}}); }}
     }};
     window.__ferricSync = (pos, playing) => {{
-      desiredPos = pos || 0;
+      desiredPos = Number.isFinite(pos) ? pos : 0;
       desiredPlaying = !!playing;
       if (v.readyState >= 2) {{
         if (Math.abs((v.currentTime || 0) - desiredPos) > 0.55) {{
@@ -323,15 +374,73 @@ mod imp {
         }}
       }}
     }};
-    window.__ferricLoad({quoted_url}, {initial_pos:.3}, {init_play});
+    window.__ferricLoad({quoted_url}, {safe_pos:.3}, {init_play});
   </script>
 </body>
 </html>"#
         )
     }
 
-    fn js_quote(s: &str) -> String {
-        serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+    unsafe fn harden_video_webview(wv: &ICoreWebView2) {
+        // SAFETY: STA-thread COM settings and event handler registration on our WebView2 instance.
+        unsafe {
+            if let Ok(settings) = wv.Settings() {
+                let _ = settings.SetAreDevToolsEnabled(false);
+                let _ = settings.SetAreDefaultContextMenusEnabled(false);
+                let _ = settings.SetIsStatusBarEnabled(false);
+                let _ = settings.SetAreHostObjectsAllowed(false);
+                let _ = settings.SetIsWebMessageEnabled(false);
+                let _ = settings.SetAreDefaultScriptDialogsEnabled(false);
+                let _ = settings.SetIsZoomControlEnabled(false);
+                let _ = settings.SetIsBuiltInErrorPageEnabled(false);
+                if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
+                    let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
+                }
+                if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
+                    let _ = s4.SetIsPasswordAutosaveEnabled(false);
+                    let _ = s4.SetIsGeneralAutofillEnabled(false);
+                }
+                if let Ok(s6) = settings.cast::<ICoreWebView2Settings6>() {
+                    let _ = s6.SetIsSwipeNavigationEnabled(false);
+                }
+            }
+
+            let new_win_handler = NewWindowRequestedEventHandler::create(Box::new(|_, args| {
+                if let Some(a) = args {
+                    let _ = a.SetHandled(true);
+                }
+                Ok(())
+            }));
+            let mut nw_tok = 0_i64;
+            let _ = wv.add_NewWindowRequested(&new_win_handler, &mut nw_tok);
+
+            let perm_handler = PermissionRequestedEventHandler::create(Box::new(|_, args| {
+                if let Some(a) = args {
+                    let _ = a.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY);
+                }
+                Ok(())
+            }));
+            let mut perm_tok = 0_i64;
+            let _ = wv.add_PermissionRequested(&perm_handler, &mut perm_tok);
+
+            let nav_handler = NavigationStartingEventHandler::create(Box::new(|_, args| {
+                if let Some(a) = args {
+                    let mut uri_raw = PWSTR(std::ptr::null_mut());
+                    let allowed = if a.Uri(&mut uri_raw).is_ok() {
+                        let uri = take_pwstr(uri_raw);
+                        uri.eq_ignore_ascii_case("about:blank") || uri.starts_with("data:text/html")
+                    } else {
+                        false
+                    };
+                    if !allowed {
+                        let _ = a.SetCancel(true);
+                    }
+                }
+                Ok(())
+            }));
+            let mut nav_tok = 0_i64;
+            let _ = wv.add_NavigationStarting(&nav_handler, &mut nav_tok);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -344,6 +453,7 @@ mod imp {
         initial_playing: bool,
         cmd_rx: Receiver<VideoCmd>,
         hwnd_tx: Sender<isize>,
+        shared_hwnd: Arc<AtomicIsize>,
     ) -> Result<(), String> {
         let _ = std::fs::create_dir_all(&profile_dir);
 
@@ -392,6 +502,7 @@ mod imp {
         }
         .map_err(|e| format!("Video window create failed: {e}"))?;
 
+        shared_hwnd.store(hwnd.0 as isize, Ordering::Release);
         let _ = hwnd_tx.send(hwnd.0 as isize);
 
         // SAFETY: Show docked stage directly on top of Ferric's viewport without stealing keyboard focus.
@@ -412,10 +523,18 @@ mod imp {
             let _ = UpdateWindow(hwnd);
         }
 
+        let cleanup_hwnd = |h: HWND, slot: &Arc<AtomicIsize>| {
+            slot.store(0, Ordering::Release);
+            // SAFETY: Destroy window if WebView2 init fails before state is attached.
+            unsafe {
+                let _ = DestroyWindow(h);
+            }
+        };
+
         let environment = {
             let (tx, rx) = mpsc::channel();
             let ud = profile_dir.to_string_lossy().into_owned();
-            CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
+            if let Err(e) = CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
                 Box::new(move |handler| {
                     let ud_w = CoTaskMemPWSTR::from(ud.as_str());
                     // SAFETY: `ud_w` stays valid for the async WebView2 environment creation call.
@@ -434,22 +553,26 @@ mod imp {
                     let _ = tx.send(env.ok_or_else(|| windows::core::Error::from(E_POINTER)));
                     Ok(())
                 }),
-            )
-            .map_err(|e| {
-                // SAFETY: Destroy window if WebView2 init fails.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
+            ) {
+                cleanup_hwnd(hwnd, &shared_hwnd);
+                return Err(format!("WebView2 video init failed: {e}"));
+            }
+            match rx.recv() {
+                Ok(Ok(env)) => env,
+                Ok(Err(e)) => {
+                    cleanup_hwnd(hwnd, &shared_hwnd);
+                    return Err(format!("WebView2 env error: {e}"));
                 }
-                format!("WebView2 video init failed: {e}")
-            })?;
-            rx.recv()
-                .map_err(|_| "WebView2 env channel closed".to_string())?
-                .map_err(|e| format!("WebView2 env error: {e}"))?
+                Err(_) => {
+                    cleanup_hwnd(hwnd, &shared_hwnd);
+                    return Err("WebView2 env channel closed".to_string());
+                }
+            }
         };
 
         let controller = {
             let (tx, rx) = mpsc::channel();
-            CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
+            if let Err(e) = CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
                 Box::new(move |handler| {
                     // SAFETY: Attach controller to STA-owned borderless video HWND.
                     unsafe {
@@ -463,44 +586,54 @@ mod imp {
                     let _ = tx.send(ctrl.ok_or_else(|| windows::core::Error::from(E_POINTER)));
                     Ok(())
                 }),
-            )
-            .map_err(|e| {
-                // SAFETY: Cleanup window on failure.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
+            ) {
+                cleanup_hwnd(hwnd, &shared_hwnd);
+                return Err(format!("WebView2 video controller failed: {e}"));
+            }
+            match rx.recv() {
+                Ok(Ok(ctrl)) => ctrl,
+                Ok(Err(e)) => {
+                    cleanup_hwnd(hwnd, &shared_hwnd);
+                    return Err(format!("WebView2 controller error: {e}"));
                 }
-                format!("WebView2 video controller failed: {e}")
-            })?;
-            rx.recv()
-                .map_err(|_| "WebView2 controller channel closed".to_string())?
-                .map_err(|e| format!("WebView2 controller error: {e}"))?
+                Err(_) => {
+                    cleanup_hwnd(hwnd, &shared_hwnd);
+                    return Err("WebView2 controller channel closed".to_string());
+                }
+            }
         };
 
-        // SAFETY: Fit WebView2 surface to video viewport and load minimalist HTML5 video shell
-        // with the initial stream baked directly in (zero NavigateToString/ExecuteScript race).
+        // SAFETY: Fit WebView2 surface to video viewport, harden settings/handlers, and load shell HTML.
         let webview = unsafe {
             let mut client = RECT::default();
             let _ = GetClientRect(hwnd, &mut client);
             let _ = controller.SetBounds(client);
             let _ = controller.SetIsVisible(true);
-            let wv = controller
-                .CoreWebView2()
-                .map_err(|e| format!("CoreWebView2 unavailable: {e}"))?;
+            let wv = match controller.CoreWebView2() {
+                Ok(wv) => wv,
+                Err(e) => {
+                    let _ = controller.Close();
+                    cleanup_hwnd(hwnd, &shared_hwnd);
+                    return Err(format!("CoreWebView2 unavailable: {e}"));
+                }
+            };
+            harden_video_webview(&wv);
             let html = player_shell_html(&initial_url, initial_pos, initial_playing);
             let html_w = CoTaskMemPWSTR::from(html.as_str());
             let _ = wv.NavigateToString(*html_w.as_ref().as_pcwstr());
             wv
         };
 
-        let state = Box::new(VideoHostState {
+        let state = Rc::new(VideoHostState {
             controller,
             webview,
-            cmd_rx,
+            cmd_rx: RefCell::new(cmd_rx),
+            shared_hwnd,
         });
 
-        // SAFETY: Attach state pointer and start lightweight 120 ms command drain timer.
+        // SAFETY: Attach Rc pointer (`Rc::into_raw`) released cleanly once in `WM_DESTROY`.
         unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::into_raw(state) as isize);
             let _ = SetTimer(Some(hwnd), CMD_POLL_TIMER, 120, None);
         }
 
@@ -520,21 +653,38 @@ mod imp {
         Ok(())
     }
 
-    fn drain_video_commands(hwnd: HWND, st: &mut VideoHostState) {
-        while let Ok(cmd) = st.cmd_rx.try_recv() {
+    fn drain_video_commands(hwnd: HWND, st: &Rc<VideoHostState>) {
+        // Drain pending commands into a local Vec and drop the RefCell borrow BEFORE any
+        // Win32/COM call so re-entrant WM_SIZE / WM_DESTROY can never alias or panic.
+        let pending: Vec<VideoCmd> = {
+            let Ok(rx) = st.cmd_rx.try_borrow() else {
+                return;
+            };
+            let mut batch = Vec::new();
+            while let Ok(cmd) = rx.try_recv() {
+                batch.push(cmd);
+            }
+            batch
+        };
+
+        for cmd in pending {
             match cmd {
                 VideoCmd::LoadStream {
                     url,
                     pos_sec,
                     playing,
                 } => {
-                    let q = js_quote(&url);
+                    if !is_allowed_video_stream_url(&url) {
+                        continue;
+                    }
+                    let q = js_quote_safe(&url);
+                    let pos = safe_pos_secs(pos_sec);
                     let p_flag = if playing { "true" } else { "false" };
                     let script = format!(
-                        "(function r(n){{if(window.__ferricLoad){{window.__ferricLoad({q},{pos_sec:.3},{p_flag});}}else if(n>0){{setTimeout(()=>r(n-1),120);}}}})(30);"
+                        "(function r(n){{if(window.__ferricLoad){{window.__ferricLoad({q},{pos:.3},{p_flag});}}else if(n>0){{setTimeout(()=>r(n-1),120);}}}})(30);"
                     );
                     let w_script = CoTaskMemPWSTR::from(script.as_str());
-                    // SAFETY: STA thread WebView2 script execution.
+                    // SAFETY: STA thread WebView2 script execution; `st: &Rc` keeps allocation alive.
                     unsafe {
                         let _ = st
                             .webview
@@ -542,13 +692,13 @@ mod imp {
                     }
                 }
                 VideoCmd::SyncPlayback { pos_sec, playing } => {
+                    let pos = safe_pos_secs(pos_sec);
                     let script = format!(
-                        "window.__ferricSync && window.__ferricSync({:.3}, {});",
-                        pos_sec,
+                        "window.__ferricSync && window.__ferricSync({pos:.3}, {});",
                         if playing { "true" } else { "false" }
                     );
                     let w_script = CoTaskMemPWSTR::from(script.as_str());
-                    // SAFETY: STA thread WebView2 script execution.
+                    // SAFETY: STA thread WebView2 script execution; `st: &Rc` keeps allocation alive.
                     unsafe {
                         let _ = st
                             .webview
@@ -576,14 +726,25 @@ mod imp {
                     }
                 }
                 VideoCmd::Close => {
-                    // SAFETY: Tear down WebView2 controller and destroy window completely to reclaim 100% RAM.
+                    // SAFETY: Post WM_CLOSE asynchronously so teardown never re-enters mid-loop.
                     unsafe {
-                        let _ = st.controller.Close();
-                        let _ = DestroyWindow(hwnd);
+                        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                     }
                     return;
                 }
             }
+        }
+    }
+
+    unsafe fn clone_host_state(hwnd: HWND) -> Option<Rc<VideoHostState>> {
+        // SAFETY: `GWLP_USERDATA` stores `Rc::into_raw` on this STA thread until `WM_DESTROY` clears it.
+        unsafe {
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const VideoHostState;
+            if ptr.is_null() {
+                return None;
+            }
+            Rc::increment_strong_count(ptr);
+            Some(Rc::from_raw(ptr))
         }
     }
 
@@ -595,37 +756,38 @@ mod imp {
     ) -> LRESULT {
         // SAFETY: Valid Win32 message dispatch on video STA window.
         unsafe {
-            let ptr =
-                windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA)
-                    as *mut VideoHostState;
             match msg {
                 WM_SIZE => {
-                    if !ptr.is_null() {
+                    if let Some(st) = clone_host_state(hwnd) {
                         let mut rc = RECT::default();
                         let _ = GetClientRect(hwnd, &mut rc);
                         apply_rounded_video_corners(hwnd, rc.right - rc.left, rc.bottom - rc.top);
-                        let _ = (*ptr).controller.SetBounds(rc);
+                        let _ = st.controller.SetBounds(rc);
                     }
                     LRESULT(0)
                 }
                 WM_WAKE_VIDEO_CMD | WM_TIMER => {
-                    if !ptr.is_null() {
-                        drain_video_commands(hwnd, &mut *ptr);
+                    if let Some(st) = clone_host_state(hwnd) {
+                        drain_video_commands(hwnd, &st);
                     }
                     LRESULT(0)
                 }
                 WM_CLOSE => {
-                    if !ptr.is_null() {
-                        let _ = (*ptr).controller.Close();
+                    if let Some(st) = clone_host_state(hwnd) {
+                        let _ = st.controller.Close();
                     }
                     let _ = DestroyWindow(hwnd);
                     LRESULT(0)
                 }
                 WM_DESTROY => {
                     let _ = KillTimer(Some(hwnd), CMD_POLL_TIMER);
+                    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const VideoHostState;
                     if !ptr.is_null() {
                         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                        drop(Box::from_raw(ptr));
+                        let st = Rc::from_raw(ptr);
+                        st.shared_hwnd.store(0, Ordering::Release);
+                        let _ = st.controller.Close();
+                        drop(st);
                     }
                     PostQuitMessage(0);
                     LRESULT(0)

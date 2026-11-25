@@ -12,6 +12,7 @@ const PUBLIC_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple
 
 fn build_http_agent() -> ureq::Agent {
     let cfg = ureq::Agent::config_builder()
+        .max_redirects(2)
         .timeout_global(Some(Duration::from_secs(14)))
         .http_status_as_error(false)
         .build();
@@ -631,7 +632,9 @@ fn parse_clock_ms(text: &str) -> Option<u64> {
 fn extract_query_param(url: &str, key: &str) -> Option<String> {
     let (_, query) = url.split_once('?')?;
     for pair in query.split('&') {
-        let (k, v) = pair.split_once('=')?;
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
         if k == key {
             return Some(v.split('#').next().unwrap_or(v).trim().to_string());
         }

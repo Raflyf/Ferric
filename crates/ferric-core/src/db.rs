@@ -195,7 +195,7 @@ impl LibraryDb {
             )?
         } else {
             self.conn.prepare(
-                "SELECT id, title, artist, album, duration_ms, file_path, source, codec, sample_rate, bit_depth, bitrate_kbps, isrc, spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url FROM tracks WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1 ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE",
+                "SELECT id, title, artist, album, duration_ms, file_path, source, codec, sample_rate, bit_depth, bitrate_kbps, isrc, spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url FROM tracks WHERE title LIKE ?1 ESCAPE '\\' OR artist LIKE ?1 ESCAPE '\\' OR album LIKE ?1 ESCAPE '\\' ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE",
             )?
         };
 
@@ -206,7 +206,11 @@ impl LibraryDb {
                 out.push(item?);
             }
         } else {
-            let pat = format!("%{q}%");
+            let escaped = q
+                .replace('\\', r"\\")
+                .replace('%', r"\%")
+                .replace('_', r"\_");
+            let pat = format!("%{escaped}%");
             let rows = stmt.query_map([pat], row_to_track)?;
             for item in rows {
                 out.push(item?);
@@ -606,10 +610,10 @@ impl LibraryDb {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM music_folders", [])?;
         tx.execute(
-            "DELETE FROM playlist_tracks WHERE track_id IN (SELECT id FROM tracks WHERE source = 'Local')",
+            "DELETE FROM playlist_tracks WHERE track_id IN (SELECT id FROM tracks WHERE UPPER(source) = 'LOCAL')",
             [],
         )?;
-        let removed = tx.execute("DELETE FROM tracks WHERE source = 'Local'", [])?;
+        let removed = tx.execute("DELETE FROM tracks WHERE UPPER(source) = 'LOCAL'", [])?;
         tx.commit()?;
         Ok(removed)
     }
@@ -647,11 +651,44 @@ impl LibraryDb {
     }
 
     pub fn save_accounts(&self, accounts: &AccountSettings) -> CoreResult<()> {
-        self.set_setting("accounts", accounts)
+        let mut protected = accounts.clone();
+        protected.spotify_access_token =
+            crate::secrets::protect_secret(&protected.spotify_access_token);
+        protected.spotify_refresh_token =
+            crate::secrets::protect_secret(&protected.spotify_refresh_token);
+        protected.youtube_client_secret =
+            crate::secrets::protect_secret(&protected.youtube_client_secret);
+        protected.youtube_access_token =
+            crate::secrets::protect_secret(&protected.youtube_access_token);
+        protected.youtube_refresh_token =
+            crate::secrets::protect_secret(&protected.youtube_refresh_token);
+        protected.youtube_cookie = crate::secrets::protect_secret(&protected.youtube_cookie);
+        protected.youtube_sapisid = crate::secrets::protect_secret(&protected.youtube_sapisid);
+        protected.subsonic_password = crate::secrets::protect_secret(&protected.subsonic_password);
+        self.set_setting("accounts", &protected)
     }
 
     pub fn load_accounts(&self) -> CoreResult<AccountSettings> {
-        Ok(self.get_setting("accounts")?.unwrap_or_default())
+        let mut loaded: AccountSettings = self.get_setting("accounts")?.unwrap_or_default();
+        let mut migrated = false;
+        let mut dec = |slot: &mut String| {
+            let (plain, needs_mig) = crate::secrets::unprotect_secret(slot);
+            *slot = plain;
+            migrated |= needs_mig;
+        };
+        dec(&mut loaded.spotify_access_token);
+        dec(&mut loaded.spotify_refresh_token);
+        dec(&mut loaded.youtube_client_secret);
+        dec(&mut loaded.youtube_access_token);
+        dec(&mut loaded.youtube_refresh_token);
+        dec(&mut loaded.youtube_cookie);
+        dec(&mut loaded.youtube_sapisid);
+        dec(&mut loaded.subsonic_password);
+        if migrated {
+            let _ = self.save_accounts(&loaded);
+            let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        Ok(loaded)
     }
 
     pub fn save_update_settings(&self, settings: &UpdateSettings) -> CoreResult<()> {
@@ -975,5 +1012,77 @@ mod tests {
         let remaining = db.list_tracks("").expect("list remaining");
         assert!(remaining.iter().any(|t| t.id == "yt:video:real2222222"));
         assert!(!remaining.iter().any(|t| t.id == "yt:video:junk1111111"));
+    }
+
+    #[test]
+    fn clear_local_folders_deletes_local_tracks_and_preserves_streaming() {
+        let mut db = LibraryDb::open_in_memory().expect("open memory db");
+        let local = Track {
+            id: "local:a".to_string(),
+            title: "Local Song".to_string(),
+            artist: "Local Artist".to_string(),
+            album: "Local Album".to_string(),
+            duration_ms: 120_000,
+            path: Some(PathBuf::from("C:/Music/a.flac")),
+            source: TrackSource::Local,
+            codec: "FLAC".to_string(),
+            sample_rate: 44_100,
+            bit_depth: 16,
+            bitrate_kbps: 900,
+            isrc: None,
+            spotify_id: None,
+            youtube_video_id: None,
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked: false,
+        };
+        let yt = Track {
+            id: "yt:video:abc".to_string(),
+            source: TrackSource::YouTubeMusic,
+            path: None,
+            ..local.clone()
+        };
+        db.upsert_tracks(&[local, yt]).expect("upsert");
+        db.add_music_folder(Path::new("C:/Music"))
+            .expect("add folder");
+        let removed = db
+            .clear_music_folders_and_local_tracks()
+            .expect("clear local");
+        assert_eq!(removed, 1);
+        assert!(db.list_music_folders().expect("folders").is_empty());
+        let left = db.list_tracks("").expect("list");
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, "yt:video:abc");
+    }
+
+    #[test]
+    fn account_secrets_roundtrip_and_encrypt_at_rest_on_windows() {
+        let db = LibraryDb::open_in_memory().expect("open memory db");
+        let acct = AccountSettings {
+            youtube_connected: true,
+            youtube_cookie: "SAPISID=secret_cookie_val".to_string(),
+            youtube_sapisid: "secret_sapisid_val".to_string(),
+            subsonic_password: "secret_subsonic_pw".to_string(),
+            ..AccountSettings::default()
+        };
+        db.save_accounts(&acct).expect("save accounts");
+        let raw_json: String = db
+            .conn
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = 'accounts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("raw json");
+        if cfg!(target_os = "windows") {
+            assert!(!raw_json.contains("secret_cookie_val"));
+            assert!(!raw_json.contains("secret_sapisid_val"));
+            assert!(!raw_json.contains("secret_subsonic_pw"));
+            assert!(raw_json.contains(crate::secrets::DPAPI_PREFIX));
+        }
+        let loaded = db.load_accounts().expect("load accounts");
+        assert_eq!(loaded.youtube_cookie, "SAPISID=secret_cookie_val");
+        assert_eq!(loaded.youtube_sapisid, "secret_sapisid_val");
+        assert_eq!(loaded.subsonic_password, "secret_subsonic_pw");
     }
 }

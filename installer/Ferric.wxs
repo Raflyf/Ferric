@@ -31,18 +31,6 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <Property Id="WixShellExecTarget" Value="[#FerricExe]" />
 
-    <Property Id="INSTALLFOLDER_CLEANUP" Secure="yes">
-      <RegistrySearch
-          Id="FindInstallPath"
-          Root="HKCU"
-          Key="Software\Raflyf\Ferric\Install"
-          Name="InstallPath"
-          Type="raw"
-          Win64="yes" />
-    </Property>
-
-    <SetProperty Id="INSTALLFOLDER_CLEANUP" Value="" Before="WixRemoveFoldersEx" Sequence="execute">UPGRADINGPRODUCTCODE</SetProperty>
-
     <util:CloseApplication
         Id="CloseFerric"
         Target="ferric.exe"
@@ -86,7 +74,6 @@
             Value="[INSTALLFOLDER]"
             KeyPath="yes" />
         <RegistryKey Root="HKCU" Key="Software\Raflyf\Ferric" ForceDeleteOnUninstall="yes" />
-        <util:RemoveFolderEx Id="CleanupInstallFolder" On="uninstall" Property="INSTALLFOLDER_CLEANUP" />
         <File Id="FerricExe" Source="$(var.AppExe)" />
         <File Id="ReadmeMd" Source="$(var.RepoRoot)\README.md" />
         <File Id="LicenseTxt" Source="$(var.RepoRoot)\LICENSE" />
@@ -96,7 +83,7 @@
             Id="ApplicationStartMenuShortcut"
             Directory="ProgramMenuFolder"
             Name="Ferric"
-            Description="Ferric Music Player"
+            Description="Ferric"
             Target="[#FerricExe]"
             WorkingDirectory="INSTALLFOLDER"
             Icon="FerricIcon.ico"

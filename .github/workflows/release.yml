@@ -25,10 +25,45 @@ jobs:
       - name: Verify tests before release
         run: cargo test --workspace --locked
 
-      - name: Build release binary
+      - name: Build hardened release binary
+        shell: pwsh
         env:
           MAKEPAD_PACKAGE_DIR: makepad
-        run: cargo build --release -p ferric-desktop --locked
+          CFLAGS: /guard:cf
+          CXXFLAGS: /guard:cf
+        run: |
+          $ws = (Resolve-Path .).ProviderPath
+          $wsSlash = $ws.Replace('\', '/')
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $cargoSlash = $cargoHome.Replace('\', '/')
+          $userProf = $env:USERPROFILE
+          $userSlash = $userProf.Replace('\', '/')
+          $flags = @(
+            '-C', 'control-flow-guard=yes',
+            '-C', 'link-arg=/GUARD:CF',
+            '-C', 'link-arg=/CETCOMPAT',
+            '-C', 'link-arg=/DYNAMICBASE',
+            '-C', 'link-arg=/HIGHENTROPYVA',
+            '-C', 'link-arg=/NXCOMPAT',
+            '-C', 'link-arg=/DEBUG:NONE',
+            '-C', 'link-arg=/NOCOFFGRPINFO',
+            '-C', 'link-arg=/INCREMENTAL:NO',
+            '-C', 'link-arg=/OPT:REF',
+            '-C', 'link-arg=/OPT:ICF',
+            '-C', 'link-arg=/BREPRO',
+            "--remap-path-prefix=$ws=/s",
+            "--remap-path-prefix=$wsSlash=/s",
+            "--remap-path-prefix=$cargoHome=/c",
+            "--remap-path-prefix=$cargoSlash=/c",
+            "--remap-path-prefix=$userProf=/u",
+            "--remap-path-prefix=$userSlash=/u"
+          )
+          $env:CARGO_ENCODED_RUSTFLAGS = $flags -join ([char]0x1F)
+          cargo build --release -p ferric-desktop --locked
+
+      - name: Verify PE hardening flags and zero path/PDB leaks
+        shell: pwsh
+        run: python .\scripts\verify_pe_hardening.py target\release\ferric.exe
 
       - name: Build MSI installer & portable ZIP
         shell: pwsh
@@ -71,7 +106,8 @@ jobs:
 
           $msiHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
           $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $sums = "$msiHash  $msiName`n$zipHash  $zipName`n"
+          $exeHash = (Get-FileHash -LiteralPath "$stage/ferric.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sums = "$msiHash  $msiName`n$zipHash  $zipName`n$exeHash  ferric.exe`n"
           [IO.File]::WriteAllText((Join-Path $PWD "dist\SHA256SUMS.txt"), $sums, [Text.Encoding]::ASCII)
 
       - name: Publish GitHub Release

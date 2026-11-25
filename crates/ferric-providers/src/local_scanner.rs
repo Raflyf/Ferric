@@ -124,10 +124,16 @@ pub fn read_track_metadata(path: &Path) -> Option<Track> {
     })
 }
 
-/// Extract embedded album art raw bytes (JPEG/PNG) if present in the audio file tags.
+const MAX_EMBEDDED_COVER_BYTES: usize = 8 * 1024 * 1024;
+
+/// Extract embedded album art raw bytes (JPEG/PNG) if present in the audio file tags (8 MiB cap).
 pub fn read_embedded_cover_bytes(path: &Path) -> Option<Vec<u8>> {
     let tagged = Probe::open(path).ok()?.read().ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     let pic = tag.pictures().first()?;
-    Some(pic.data().to_vec())
+    let data = pic.data();
+    if data.is_empty() || data.len() > MAX_EMBEDDED_COVER_BYTES {
+        return None;
+    }
+    Some(data.to_vec())
 }

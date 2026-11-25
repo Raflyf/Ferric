@@ -103,6 +103,7 @@ pub enum EngineCommand {
     QueueNextTrack {
         path: Option<PathBuf>,
         same_album_consecutive: bool,
+        replay_gain_db: i32,
         fallback_duration_ms: u64,
     },
     Play,
@@ -148,8 +149,9 @@ impl AudioEngine {
         telemetry.output_rate.store(out_rate, Ordering::Relaxed);
         let cb_telemetry = Arc::clone(&telemetry);
 
-        let err_fn = |err| {
-            eprintln!("ferric-audio stream error: {err}");
+        let err_fn = |_err| {
+            #[cfg(debug_assertions)]
+            eprintln!("ferric-audio stream error: {_err}");
         };
 
         let stream = match sample_format {
@@ -1004,9 +1006,15 @@ impl DecodeRuntime {
                 };
                 self.deck_a = Some(deck);
             }
-            Err(err) => {
-                eprintln!("ferric-audio open failed ({}): {err}", path.display());
+            Err(_err) => {
+                #[cfg(debug_assertions)]
+                eprintln!("ferric-audio open failed ({}): {_err}", path.display());
                 telemetry.is_playing.store(false, Ordering::Release);
+                telemetry.is_crossfading.store(false, Ordering::Relaxed);
+                self.deck_a = None;
+                self.deck_b = None;
+                self.crossfade_state = None;
+                self.bass_swap.reset();
             }
         }
     }
@@ -1081,9 +1089,10 @@ impl DecodeRuntime {
                 telemetry.is_playing.store(true, Ordering::Release);
                 self.micro_fade = MicroFade::Steady(1.0);
             }
-            Err(err) => {
+            Err(_err) => {
+                #[cfg(debug_assertions)]
                 eprintln!(
-                    "ferric-audio manual crossfade open failed ({}): {err}",
+                    "ferric-audio manual crossfade open failed ({}): {_err}",
                     path.display()
                 );
             }
@@ -1094,6 +1103,7 @@ impl DecodeRuntime {
         &mut self,
         path: Option<PathBuf>,
         same_album_consecutive: bool,
+        replay_gain_db: i32,
         fallback_duration_ms: u64,
     ) {
         match path {
@@ -1112,7 +1122,7 @@ impl DecodeRuntime {
                 self.queued_next = Some(QueuedTrackSpec {
                     path: p,
                     same_album_consecutive,
-                    replay_gain_db: 0,
+                    replay_gain_db,
                     fallback_duration_ms,
                 });
             }
@@ -1188,14 +1198,20 @@ fn decode_loop(
                     );
                 }
                 EngineCommand::QueueNext(path) => {
-                    rt.set_queued_next(path, false, 0);
+                    rt.set_queued_next(path, false, 0, 0);
                 }
                 EngineCommand::QueueNextTrack {
                     path,
                     same_album_consecutive,
+                    replay_gain_db,
                     fallback_duration_ms,
                 } => {
-                    rt.set_queued_next(path, same_album_consecutive, fallback_duration_ms);
+                    rt.set_queued_next(
+                        path,
+                        same_album_consecutive,
+                        replay_gain_db,
+                        fallback_duration_ms,
+                    );
                 }
                 EngineCommand::Play => {
                     if rt.deck_a.is_some() {
@@ -1263,11 +1279,13 @@ fn decode_loop(
                 EngineCommand::Stop => {
                     telemetry.flush_ring.store(true, Ordering::Release);
                     telemetry.is_playing.store(false, Ordering::Release);
+                    telemetry.is_crossfading.store(false, Ordering::Relaxed);
                     telemetry.auto_transitioned.store(false, Ordering::Release);
                     telemetry.position_ms.store(0, Ordering::Relaxed);
                     telemetry.store_spectrum([0; 8]);
                     rt.deck_a = None;
                     rt.deck_b = None;
+                    rt.queued_next = None;
                     rt.crossfade_state = None;
                     rt.micro_fade = MicroFade::Steady(0.0);
                     rt.bass_swap.reset();
@@ -1287,11 +1305,23 @@ fn decode_loop(
                         rt.eq.reset();
                         if rt.crossfade_state.is_some() {
                             rt.crossfade_state = None;
-                            rt.deck_b = None;
+                            if let Some(old_b) = rt.deck_b.take()
+                                && rt.queued_next.is_none()
+                            {
+                                rt.queued_next = Some(QueuedTrackSpec {
+                                    path: old_b.path,
+                                    same_album_consecutive: rt.deck_b_same_album,
+                                    replay_gain_db: 0,
+                                    fallback_duration_ms: old_b.duration_ms,
+                                });
+                            }
                             telemetry.is_crossfading.store(false, Ordering::Relaxed);
                             rt.bass_swap.reset();
                         }
-                        if rt.dsp.fade_in_play_ms > 0 {
+                        if rt.dsp.fade_in_play_ms > 0
+                            && telemetry.is_playing.load(Ordering::Relaxed)
+                            && !matches!(rt.micro_fade, MicroFade::Pausing { .. })
+                        {
                             rt.micro_fade = MicroFade::FadingIn {
                                 start_gain: 0.0,
                                 elapsed_frames: 0,
@@ -1391,9 +1421,10 @@ fn decode_loop(
                         rt.deck_b_same_album = s.same_album_consecutive;
                         rt.deck_b = Some(next_deck);
                     }
-                    Err(err) => {
+                    Err(_err) => {
+                        #[cfg(debug_assertions)]
                         eprintln!(
-                            "ferric-audio Deck B pre-open failed ({}): {err}",
+                            "ferric-audio Deck B pre-open failed ({}): {_err}",
                             s.path.display()
                         );
                     }
@@ -1407,13 +1438,21 @@ fn decode_loop(
             && let Some(da) = &rt.deck_a
         {
             let album_locked = rt.dsp.gapless_album_lock && rt.deck_b_same_album;
-            let eff_xfade_ms = if album_locked { 0 } else { rt.dsp.crossfade_ms };
+            let raw_xfade_ms = if album_locked { 0 } else { rt.dsp.crossfade_ms };
+            // Cap overlap to at most 1/3 of track length so short tracks/intros never skip on frame 0.
+            let eff_xfade_ms = if da.duration_ms > 0 {
+                raw_xfade_ms.min((da.duration_ms / 3) as u32)
+            } else {
+                raw_xfade_ms
+            };
             let rem_ms = da.remaining_ms();
             let sustained_silence = da.quiet_outro_frames >= (out_rate as usize / 12).max(512)
                 && da.last_chunk_rms < 0.003;
 
-            let time_trigger =
-                eff_xfade_ms > 0 && da.duration_ms > 0 && rem_ms <= u64::from(eff_xfade_ms);
+            let time_trigger = eff_xfade_ms > 0
+                && da.duration_ms >= 2_000
+                && da.current_pos_ms() >= 1_000
+                && rem_ms <= u64::from(eff_xfade_ms);
             let silence_trigger = !album_locked
                 && rt.dsp.trim_silence
                 && da.current_pos_ms() > 2_000
@@ -1507,7 +1546,12 @@ fn decode_loop(
                         rt.crossfade_state = None;
                         rt.deck_b = None;
                         telemetry.is_crossfading.store(false, Ordering::Relaxed);
-                        Some(sample_a)
+                        if xfade.ui_handed_off {
+                            unqueued_track_ended = true;
+                            None
+                        } else {
+                            Some(sample_a)
+                        }
                     }
                 }
             } else {
@@ -1703,6 +1747,7 @@ mod tests {
         engine.send(EngineCommand::QueueNextTrack {
             path: Some(p0),
             same_album_consecutive: false,
+            replay_gain_db: 0,
             fallback_duration_ms: dur0,
         });
         let seek_target = dur1.saturating_sub(2_400);

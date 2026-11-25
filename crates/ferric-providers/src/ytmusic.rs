@@ -19,6 +19,78 @@ const VISIONOS_VERSION: &str = "1.02";
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 const STREAM_CHUNK_BYTES: u64 = 512 * 1024;
 const STREAM_CONCURRENCY: usize = 3;
+const MAX_SINGLE_STREAM_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_STREAM_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ARTWORK_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+
+fn extract_strict_https_host(raw: &str) -> Option<String> {
+    if raw.bytes().any(|b| b.is_ascii_control() || b == b' ') {
+        return None;
+    }
+    let rest = raw.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains(':') {
+        return None;
+    }
+    Some(authority.to_ascii_lowercase())
+}
+
+/// Strictly allowlist HTTPS album/artist cover hosts (prevents SSRF via untrusted thumbnail URLs).
+pub fn is_allowed_artwork_url(raw: &str) -> bool {
+    let Some(host) = extract_strict_https_host(raw) else {
+        return false;
+    };
+    host == "googleusercontent.com"
+        || host.ends_with(".googleusercontent.com")
+        || host == "ggpht.com"
+        || host.ends_with(".ggpht.com")
+        || host == "i.ytimg.com"
+        || host == "i9.ytimg.com"
+        || host == "scdn.co"
+        || host.ends_with(".scdn.co")
+        || host == "spotifycdn.com"
+        || host.ends_with(".spotifycdn.com")
+}
+
+/// Strictly allowlist HTTPS media CDN hosts (`*.googlevideo.com`) for audio & video streams.
+pub fn is_allowed_stream_url(raw: &str) -> bool {
+    let Some(host) = extract_strict_https_host(raw) else {
+        return false;
+    };
+    host == "googlevideo.com" || host.ends_with(".googlevideo.com")
+}
+
+/// Enforce an LRU disk-space cap on a flat cache directory (removes oldest modified files first).
+fn prune_cache_dir_lru(cache_dir: &Path, max_bytes: u64) {
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            let len = meta.len();
+            let modified = meta.modified().unwrap_or(UNIX_EPOCH);
+            total = total.saturating_add(len);
+            files.push((path, len, modified));
+        }
+    }
+    if total <= max_bytes {
+        return;
+    }
+    files.sort_by_key(|(_, _, m)| *m);
+    for (path, len, _) in files {
+        if total <= max_bytes {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct YtmSession {
@@ -147,9 +219,12 @@ pub fn normalize_ytm_thumbnail_url(raw: &str) -> String {
         trimmed.to_string()
     };
 
-    if full.contains("lh3.googleusercontent.com")
-        || full.contains("yt3.googleusercontent.com")
-        || full.contains("yt3.ggpht.com")
+    let host = extract_strict_https_host(&full).unwrap_or_default();
+    if host == "lh3.googleusercontent.com"
+        || host == "yt3.googleusercontent.com"
+        || host == "yt3.ggpht.com"
+        || host.ends_with(".googleusercontent.com")
+        || host.ends_with(".ggpht.com")
     {
         let no_query = full.split('?').next().unwrap_or(&full);
         if let Some(slash_idx) = no_query.rfind('/')
@@ -161,7 +236,7 @@ pub fn normalize_ytm_thumbnail_url(raw: &str) -> String {
         return format!("{no_query}=w180-h180-l85-rj");
     }
 
-    if full.contains("i.ytimg.com") || full.contains("i9.ytimg.com") {
+    if host == "i.ytimg.com" || host == "i9.ytimg.com" {
         let no_query = full.split('?').next().unwrap_or(&full);
         // Clamp 1280x720 maxresdefault/sddefault/hqdefault to compact 320x180 mqdefault.jpg
         // so artwork decodes 12x faster and consumes minimal RAM.
@@ -215,11 +290,17 @@ fn is_supported_image_bytes(bytes: &[u8]) -> bool {
             && bytes[3] == 0x47)
 }
 
-/// Download and disk-cache album/playlist/artist artwork bytes (JPEG or PNG) with 0 ms cache hits.
+/// Download and disk-cache album/playlist/artist artwork bytes (JPEG or PNG) with 0 ms cache hits,
+/// strict HTTPS host allowlist, zero redirects, and a 128 MiB LRU disk cap.
 pub fn download_artwork_bytes(url: &str, cache_dir: &Path) -> ProviderResult<Vec<u8>> {
     let normalized = normalize_ytm_thumbnail_url(url);
     if normalized.is_empty() {
         return Err(ProviderError::Metadata("Empty artwork URL".to_string()));
+    }
+    if !is_allowed_artwork_url(&normalized) {
+        return Err(ProviderError::Metadata(
+            "Refused untrusted artwork URL host".to_string(),
+        ));
     }
     fs::create_dir_all(cache_dir)?;
     let key = sha1_hex(normalized.as_bytes());
@@ -254,9 +335,14 @@ pub fn download_artwork_bytes(url: &str, cache_dir: &Path) -> ProviderResult<Vec
         ));
     }
 
-    let part = cache_dir.join(format!("{key}.part"));
+    let nonce = ferric_core::secrets::csprng_hex(6);
+    let part = cache_dir.join(format!("{key}.{}.{nonce}.part", std::process::id()));
     if fs::write(&part, &bytes).is_ok() {
-        let _ = fs::rename(&part, &dest);
+        if fs::rename(&part, &dest).is_err() {
+            let _ = fs::remove_file(&part);
+        } else {
+            prune_cache_dir_lru(cache_dir, MAX_ARTWORK_CACHE_BYTES);
+        }
     }
     Ok(bytes)
 }
@@ -264,6 +350,8 @@ pub fn download_artwork_bytes(url: &str, cache_dir: &Path) -> ProviderResult<Vec
 fn build_http_agent_with_family(timeout_secs: u64, ipv4_only: bool) -> ureq::Agent {
     let body_secs = timeout_secs.max(14);
     let mut cfg = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .max_redirects_will_error(false)
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_recv_response(Some(Duration::from_secs(body_secs.min(18))))
         .timeout_per_read(Some(Duration::from_secs(12)))
@@ -2357,9 +2445,23 @@ pub fn resolve_and_cache_audio_stream_with_quality(
     })?;
 
     let dest_path = cache_dir.join(format!("{video_id}_{suffix}.{}", selected.ext));
-    let part_path = cache_dir.join(format!("{video_id}_{suffix}.{}.part", selected.ext));
-    download_ranged_parallel(&selected.url, selected.content_length, &part_path)?;
-    fs::rename(&part_path, &dest_path)?;
+    let nonce = ferric_core::secrets::csprng_hex(6);
+    let part_path = cache_dir.join(format!(
+        "{video_id}_{suffix}.{}.{nonce}.part",
+        std::process::id()
+    ));
+    if let Err(err) = download_ranged_parallel(&selected.url, selected.content_length, &part_path) {
+        let _ = fs::remove_file(&part_path);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&part_path, &dest_path) {
+        let _ = fs::remove_file(&part_path);
+        // Another concurrent prefetch/play worker may have already finalized `dest_path`.
+        if !fs::metadata(&dest_path).is_ok_and(|m| m.len() > 16_384) {
+            return Err(err.into());
+        }
+    }
+    prune_cache_dir_lru(cache_dir, MAX_STREAM_CACHE_BYTES);
 
     Ok(CachedAudioStream {
         path: dest_path,
@@ -2689,6 +2791,9 @@ fn extract_video_streams_from_player(root: &Value) -> ProviderResult<Vec<VideoSt
         let Some(url) = fmt.get("url").and_then(Value::as_str) else {
             continue;
         };
+        if !is_allowed_stream_url(url) {
+            continue;
+        }
         let mime = fmt.get("mimeType").and_then(Value::as_str).unwrap_or("");
         if !mime.starts_with("video/") {
             continue;
@@ -2841,6 +2946,9 @@ fn select_audio_format_for_quality(
         let Some(url) = fmt.get("url").and_then(Value::as_str) else {
             continue;
         };
+        if !is_allowed_stream_url(url) {
+            continue;
+        }
         let mime = fmt.get("mimeType").and_then(Value::as_str).unwrap_or("");
         if !mime.starts_with("audio/") {
             continue;
@@ -2932,27 +3040,72 @@ fn select_audio_format_for_quality(
     best.map(|(_, f)| f)
 }
 
-fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> ProviderResult<()> {
-    if content_length == 0 {
-        let agent = build_http_agent(45);
-        let resp = agent
-            .get(url)
-            .header("User-Agent", VISIONOS_UA)
-            .call()
-            .map_err(|e| ProviderError::Http(format!("Audio fetch failed: {e}")))?;
-        let status = resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(ProviderError::Http(format!("Audio CDN HTTP {status}")));
+fn open_verified_stream_get(
+    initial_url: &str,
+    range_hdr: Option<&str>,
+    timeout_secs: u64,
+) -> ProviderResult<(u16, ureq::Body)> {
+    let mut current_url = initial_url.to_string();
+    for _ in 0..=3 {
+        if !is_allowed_stream_url(&current_url) {
+            return Err(ProviderError::Http(
+                "Refused untrusted media stream host".to_string(),
+            ));
         }
-        let bytes = resp
-            .into_body()
-            .into_with_config()
-            .limit(40 * 1024 * 1024)
-            .read_to_vec()
-            .map_err(|e| ProviderError::Http(format!("Audio stream read failed: {e}")))?;
-        let mut f = File::create(dest)?;
-        f.write_all(&bytes)?;
-        return Ok(());
+        let agent = build_http_agent(timeout_secs);
+        let mut req = agent.get(&current_url).header("User-Agent", VISIONOS_UA);
+        if let Some(range) = range_hdr {
+            req = req.header("Range", range);
+        }
+        let resp = req
+            .call()
+            .map_err(|e| ProviderError::Http(format!("Audio CDN request failed: {e}")))?;
+        let status = resp.status().as_u16();
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let loc = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| ProviderError::Http("Invalid stream redirect".to_string()))?;
+            current_url = loc.to_string();
+            continue;
+        }
+        return Ok((status, resp.into_body()));
+    }
+    Err(ProviderError::Http(
+        "Too many audio stream redirects".to_string(),
+    ))
+}
+
+fn download_single_stream(url: &str, dest: &Path) -> ProviderResult<()> {
+    let (status, body) = open_verified_stream_get(url, None, 45)?;
+    if !(200..300).contains(&status) {
+        return Err(ProviderError::Http(format!("Audio CDN HTTP {status}")));
+    }
+    let mut reader = body
+        .into_with_config()
+        .limit(MAX_SINGLE_STREAM_BYTES)
+        .reader();
+    let mut file = File::create(dest)?;
+    std::io::copy(&mut reader, &mut file)
+        .map_err(|e| ProviderError::Http(format!("Audio stream read failed: {e}")))?;
+    file.flush()?;
+    Ok(())
+}
+
+fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> ProviderResult<()> {
+    if !is_allowed_stream_url(url) {
+        return Err(ProviderError::Http(
+            "Refused untrusted audio stream URL".to_string(),
+        ));
+    }
+    if content_length > MAX_SINGLE_STREAM_BYTES {
+        return Err(ProviderError::Http(
+            "Audio stream exceeds 64 MiB cache safety cap".to_string(),
+        ));
+    }
+    if content_length == 0 {
+        return download_single_stream(url, dest);
     }
 
     let mut ranges = Vec::new();
@@ -2963,36 +3116,40 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
         start = end + 1;
     }
 
-    let mut ordered_chunks: Vec<Vec<u8>> = vec![Vec::new(); ranges.len()];
+    enum ChunkOutcome {
+        Partial(Vec<u8>),
+        Full200Fallback,
+    }
+
+    let mut file = File::create(dest)?;
     let mut idx = 0usize;
     while idx < ranges.len() {
         let batch_end = (idx + STREAM_CONCURRENCY).min(ranges.len());
         let batch = &ranges[idx..batch_end];
-        let results: Vec<ProviderResult<Vec<u8>>> = std::thread::scope(|scope| {
+        let results: Vec<ProviderResult<ChunkOutcome>> = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(batch.len());
             for &(s, e) in batch {
                 handles.push(scope.spawn(move || {
-                    let agent = build_http_agent(25);
                     let range_hdr = format!("bytes={s}-{e}");
-                    let resp = agent
-                        .get(url)
-                        .header("User-Agent", VISIONOS_UA)
-                        .header("Range", &range_hdr)
-                        .call()
-                        .map_err(|err| ProviderError::Http(format!("Audio chunk failed: {err}")))?;
-                    let st = resp.status().as_u16();
-                    if !(200..300).contains(&st) {
+                    let (st, body) = open_verified_stream_get(url, Some(&range_hdr), 25)?;
+                    if st == 200 {
+                        // Server ignored Range header; do NOT concatenate full body N times!
+                        return Ok(ChunkOutcome::Full200Fallback);
+                    }
+                    if st != 206 {
                         return Err(ProviderError::Http(format!(
                             "Audio chunk returned HTTP {st}"
                         )));
                     }
-                    resp.into_body()
+                    let expected_max = (e - s + 1).min(4 * 1024 * 1024);
+                    let bytes = body
                         .into_with_config()
-                        .limit(4 * 1024 * 1024)
+                        .limit(expected_max)
                         .read_to_vec()
                         .map_err(|err| {
                             ProviderError::Http(format!("Audio chunk read failed: {err}"))
-                        })
+                        })?;
+                    Ok(ChunkOutcome::Partial(bytes))
                 }));
             }
             handles
@@ -3006,16 +3163,18 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
                 })
                 .collect()
         });
-        for (offset, res) in results.into_iter().enumerate() {
-            ordered_chunks[idx + offset] = res?;
+        for res in results {
+            match res? {
+                ChunkOutcome::Partial(chunk) => file.write_all(&chunk)?,
+                ChunkOutcome::Full200Fallback => {
+                    drop(file);
+                    return download_single_stream(url, dest);
+                }
+            }
         }
         idx = batch_end;
     }
 
-    let mut file = File::create(dest)?;
-    for chunk in ordered_chunks {
-        file.write_all(&chunk)?;
-    }
     file.flush()?;
     Ok(())
 }

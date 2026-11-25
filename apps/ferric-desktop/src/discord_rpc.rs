@@ -144,10 +144,16 @@ fn set_status(slot: &Arc<Mutex<String>>, text: impl Into<String>) {
 
 fn normalize_cover_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
-    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+    if trimmed.bytes().any(|b| b.is_ascii_control() || b == b' ') {
         return None;
     }
-    if trimmed.contains("googleusercontent.com")
+    let rest = trimmed.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains(':') {
+        return None;
+    }
+    let host = authority.to_ascii_lowercase();
+    if (host == "googleusercontent.com" || host.ends_with(".googleusercontent.com"))
         && let Some(eq_idx) = trimmed.rfind('=')
     {
         return Some(format!("{}=w512-h512-l90-rj", &trimmed[..eq_idx]));
@@ -321,12 +327,17 @@ struct DiscordPipe {
 #[cfg(target_os = "windows")]
 impl DiscordPipe {
     fn connect(client_id: &str) -> Result<Self, String> {
+        use std::os::windows::fs::OpenOptionsExt;
+        // SECURITY_SQOS_PRESENT (0x0010_0000) | SECURITY_IDENTIFICATION (0x0001_0000)
+        // prevents a rogue named-pipe server from impersonating Ferric's security token.
+        const PIPE_SQOS_FLAGS: u32 = 0x0010_0000 | 0x0001_0000;
         let mut last_err = String::from("Discord desktop app not detected");
         for idx in 0..10 {
             let path = format!(r"\\.\pipe\discord-ipc-{idx}");
             match std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
+                .security_qos_flags(PIPE_SQOS_FLAGS)
                 .open(&path)
             {
                 Ok(mut file) => {

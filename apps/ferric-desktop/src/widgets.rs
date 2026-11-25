@@ -1299,6 +1299,7 @@ impl Widget for FerricVertSlider {
                     self.value = 0.0;
                     self.draw_bg.redraw(cx);
                     cx.widget_action(uid, &scope.path, FerricSliderAction::Changed(0.0));
+                    cx.widget_action(uid, &scope.path, FerricSliderAction::Released(0.0));
                     return;
                 }
                 self.dragging = true;
@@ -1343,8 +1344,15 @@ impl FerricVertSliderRef {
 
     pub fn changed(&self, actions: &Actions) -> Option<f64> {
         match actions.find_widget_action(self.widget_uid()).cast() {
-            FerricSliderAction::Changed(v) | FerricSliderAction::Released(v) => Some(v),
-            FerricSliderAction::None => None,
+            FerricSliderAction::Changed(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn released(&self, actions: &Actions) -> Option<f64> {
+        match actions.find_widget_action(self.widget_uid()).cast() {
+            FerricSliderAction::Released(v) => Some(v),
+            _ => None,
         }
     }
 }
@@ -3317,17 +3325,7 @@ impl Widget for FerricColorPicker {
 
 impl FerricColorPickerRef {
     pub fn set_hex(&self, cx: &mut Cx, hex: &str) {
-        let clean = hex.trim().trim_start_matches('#');
-        if clean.len() != 6 {
-            return;
-        }
-        let Ok(r) = u8::from_str_radix(&clean[0..2], 16) else {
-            return;
-        };
-        let Ok(g) = u8::from_str_radix(&clean[2..4], 16) else {
-            return;
-        };
-        let Ok(b) = u8::from_str_radix(&clean[4..6], 16) else {
+        let Ok((r, g, b)) = ferric_core::theme::parse_hex_rgb(hex) else {
             return;
         };
         if let Some(mut inner) = self.borrow_mut() {

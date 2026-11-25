@@ -155,21 +155,32 @@ fn parse_lrc_timestamp_ms(tag: &str) -> Option<u64> {
         .or_else(|| sec_part.split_once(':'))
         .unwrap_or((sec_part, "0"));
     let secs: u64 = sec_s.trim().parse().ok()?;
-    let frac_ms: u64 = match frac_s.len() {
+    let frac_trim = frac_s.trim();
+    if !frac_trim.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let frac_ms: u64 = match frac_trim.len() {
         0 => 0,
-        1 => frac_s.parse::<u64>().ok()? * 100,
-        2 => frac_s.parse::<u64>().ok()? * 10,
-        _ => frac_s[..3].parse::<u64>().ok()?,
+        1 => frac_trim.parse::<u64>().ok()?.checked_mul(100)?,
+        2 => frac_trim.parse::<u64>().ok()?.checked_mul(10)?,
+        _ => frac_trim[..3].parse::<u64>().ok()?,
     };
-    Some(mins * 60_000 + secs * 1000 + frac_ms)
+    mins.checked_mul(60_000)?
+        .checked_add(secs.checked_mul(1_000)?)?
+        .checked_add(frac_ms)
 }
 
-/// Check sidecar `<track>.lrc` next to local audio file first (0 network cost).
+/// Check sidecar `<track>.lrc` next to local audio file first (0 network cost, 2 MiB safety cap).
 pub fn read_local_sidecar_lrc(audio_path: &Path) -> Option<String> {
+    use std::io::Read;
     let lrc_path = audio_path.with_extension("lrc");
-    std::fs::read_to_string(lrc_path)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    let file = std::fs::File::open(lrc_path).ok()?;
+    let mut buf = Vec::new();
+    file.take(MAX_LYRICS_RESPONSE_BYTES)
+        .read_to_end(&mut buf)
+        .ok()?;
+    let text = String::from_utf8(buf).ok()?;
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Read embedded `USLT` / `LYRICS` / Vorbis `LYRICS` tag from a local audio file via `lofty`.
@@ -205,6 +216,7 @@ struct LyricsOvhResponse {
 
 fn lyrics_http_agent() -> ureq::Agent {
     let cfg = ureq::Agent::config_builder()
+        .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(Some(LYRICS_HTTP_TIMEOUT))
         .build();
@@ -569,5 +581,12 @@ mod tests {
         let s1 = score_lrclib_candidate(&synced_close, "Daft Punk", "Instant Crush", 259_000);
         let s2 = score_lrclib_candidate(&plain_far, "Daft Punk", "Instant Crush", 259_000);
         assert!(s1 > s2);
+    }
+
+    #[test]
+    fn lrc_timestamp_parser_rejects_non_ascii_and_overflow_without_panicking() {
+        assert_eq!(parse_lrc_timestamp_ms("00:12.😀"), None);
+        assert_eq!(parse_lrc_timestamp_ms("9999999999999999:00.00"), None);
+        assert_eq!(parse_lrc_timestamp_ms("01:02.3456"), Some(62_345));
     }
 }

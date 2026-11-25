@@ -68,13 +68,6 @@ function Find-WixBinDir {
             return $dir
         }
     }
-    $cmd = Get-Command candle.exe -CommandType Application -ErrorAction SilentlyContinue
-    if ($cmd) {
-        $bin = Split-Path -Parent $cmd.Source
-        if (Test-Path -LiteralPath (Join-Path $bin 'light.exe') -PathType Leaf) {
-            return $bin
-        }
-    }
     return $null
 }
 
@@ -107,6 +100,7 @@ if (-not $wixBin) {
     $lightHash = '8EE3D7FA5592511152A4D1FC605780EAE1B27AC7B41D75D518C958515DE39529'
     if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
         New-Item -ItemType Directory -Path $tools -Force | Out-Null
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip' -OutFile $archive -TimeoutSec 120
     }
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $archiveHash) {
@@ -114,7 +108,8 @@ if (-not $wixBin) {
     }
     $wixBin = Join-Path $tools ('wix-3.14-build-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $wixBin | Out-Null
-    tar.exe -xf $archive -C $wixBin
+    $sysTar = Join-Path $env:SystemRoot 'System32\tar.exe'
+    & $sysTar -xf $archive -C $wixBin
     if ($LASTEXITCODE -ne 0) { throw "WiX extraction failed (exit $LASTEXITCODE). Retained: $wixBin" }
     if ((Get-FileHash -LiteralPath (Join-Path $wixBin 'candle.exe') -Algorithm SHA256).Hash -ne $candleHash) {
         throw 'Portable candle.exe checksum mismatch.'
@@ -258,6 +253,9 @@ public static class FerricMsiReader {
     static extern uint MsiCloseHandle(IntPtr hAny);
 
     public static string GetProperty(string msiPath, string name) {
+        if (string.IsNullOrEmpty(name) || !System.Text.RegularExpressions.Regex.IsMatch(name, "^[A-Za-z0-9_]+$")) {
+            throw new ArgumentException("Invalid MSI property name.");
+        }
         IntPtr db = IntPtr.Zero, view = IntPtr.Zero, rec = IntPtr.Zero;
         try {
             if (MsiOpenDatabase(msiPath, IntPtr.Zero, out db) != 0) throw new Exception("MsiOpenDatabase failed.");

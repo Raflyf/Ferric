@@ -335,7 +335,7 @@ impl Default for DiscordRpcSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AccountSettings {
     #[serde(default)]
@@ -382,6 +382,48 @@ pub struct AccountSettings {
     pub subsonic_password: String,
     #[serde(default)]
     pub subsonic_connected: bool,
+}
+
+impl std::fmt::Debug for AccountSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |s: &str| if s.is_empty() { "" } else { "[REDACTED]" };
+        f.debug_struct("AccountSettings")
+            .field("spotify_client_id", &self.spotify_client_id)
+            .field("spotify_connected", &self.spotify_connected)
+            .field("spotify_user_name", &self.spotify_user_name)
+            .field("spotify_access_token", &redact(&self.spotify_access_token))
+            .field(
+                "spotify_refresh_token",
+                &redact(&self.spotify_refresh_token),
+            )
+            .field("spotify_playlist_count", &self.spotify_playlist_count)
+            .field("spotify_liked_count", &self.spotify_liked_count)
+            .field("youtube_client_id", &self.youtube_client_id)
+            .field(
+                "youtube_client_secret",
+                &redact(&self.youtube_client_secret),
+            )
+            .field("youtube_connected", &self.youtube_connected)
+            .field("youtube_channel_name", &self.youtube_channel_name)
+            .field("youtube_access_token", &redact(&self.youtube_access_token))
+            .field(
+                "youtube_refresh_token",
+                &redact(&self.youtube_refresh_token),
+            )
+            .field("youtube_playlist_count", &self.youtube_playlist_count)
+            .field(
+                "youtube_music_category_only",
+                &self.youtube_music_category_only,
+            )
+            .field("youtube_cookie", &redact(&self.youtube_cookie))
+            .field("youtube_sapisid", &redact(&self.youtube_sapisid))
+            .field("youtube_visitor_data", &self.youtube_visitor_data)
+            .field("subsonic_url", &self.subsonic_url)
+            .field("subsonic_username", &self.subsonic_username)
+            .field("subsonic_password", &redact(&self.subsonic_password))
+            .field("subsonic_connected", &self.subsonic_connected)
+            .finish()
+    }
 }
 
 impl Default for AccountSettings {
@@ -690,13 +732,9 @@ pub fn parse_playlist_import_text(
             if line.starts_with('#') {
                 continue;
             }
-            let p = PathBuf::from(line);
-            let resolved = if p.is_absolute() {
-                p
-            } else if let Some(base) = base_dir {
-                base.join(&p)
-            } else {
-                p
+            let Some(resolved) = sanitize_m3u_local_path(line, base_dir) else {
+                pending_meta = None;
+                continue;
             };
             let fallback_title = resolved
                 .file_stem()
@@ -748,6 +786,51 @@ pub fn parse_playlist_import_text(
         thumbnail_url: None,
     };
     (playlist, tracks)
+}
+
+/// Reject UNC / Windows device paths, URL schemes, control characters, and `..` directory traversal
+/// so importing an untrusted `.m3u` / `.m3u8` cannot trigger SMB Net-NTLMv2 leaks or path escapes.
+fn sanitize_m3u_local_path(raw_line: &str, base_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+
+    let s = raw_line.trim();
+    if s.is_empty() || s.bytes().any(|b| b.is_ascii_control()) {
+        return None;
+    }
+    let low = s.to_ascii_lowercase();
+    if low.starts_with("http://")
+        || low.starts_with("https://")
+        || low.starts_with("file://")
+        || low.starts_with("ftp://")
+        || s.starts_with(r"\\")
+        || s.starts_with("//")
+    {
+        return None;
+    }
+
+    let p = PathBuf::from(s);
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(pref) => match pref.kind() {
+                Prefix::UNC(_, _)
+                | Prefix::VerbatimUNC(_, _)
+                | Prefix::DeviceNS(_)
+                | Prefix::Verbatim(_) => return None,
+                Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {}
+            },
+            Component::ParentDir => return None,
+            _ => {}
+        }
+    }
+
+    let resolved = if p.is_absolute() {
+        p
+    } else if let Some(base) = base_dir {
+        base.join(&p)
+    } else {
+        p
+    };
+    Some(resolved)
 }
 
 fn split_csv_line(line: &str) -> Vec<&str> {

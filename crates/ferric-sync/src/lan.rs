@@ -10,6 +10,9 @@ const BEACON_MAGIC: &[u8; 4] = b"FRC1";
 const PEER_STALE_TIMEOUT_MS: u64 = 30_000;
 const MAX_DATAGRAM_BYTES: usize = 1024;
 const MAX_POLL_PACKETS_PER_TICK: usize = 64;
+const MAX_DISCOVERED_PEERS: usize = 32;
+const MAX_DEVICE_ID_LEN: usize = 64;
+const MAX_DEVICE_NAME_CHARS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredPeer {
@@ -140,26 +143,49 @@ impl LanDiscoveryBeacon {
             let Ok(ann) = postcard::from_bytes::<BeaconAnnouncement>(&buf[4..n]) else {
                 continue;
             };
-            if ann.device_id.is_empty() || ann.device_id == self.local_device_id {
+            let clean_id = ann.device_id.trim();
+            if clean_id.is_empty()
+                || clean_id.len() > MAX_DEVICE_ID_LEN
+                || !clean_id
+                    .bytes()
+                    .all(|b| b.is_ascii_graphic() && !b.is_ascii_control())
+                || clean_id == self.local_device_id
+            {
                 continue;
             }
 
-            let effective_port = if ann.service_port > 0 {
+            // Drop unknown peers when table is saturated (existing peers still refresh).
+            if !self.peers.contains_key(clean_id) && self.peers.len() >= MAX_DISCOVERED_PEERS {
+                self.peers.retain(|_, peer| {
+                    now_ms.saturating_sub(peer.last_seen_ms) <= PEER_STALE_TIMEOUT_MS
+                });
+                if self.peers.len() >= MAX_DISCOVERED_PEERS {
+                    continue;
+                }
+            }
+
+            let effective_port = if ann.service_port >= 1024 {
                 ann.service_port
             } else {
-                src_addr.port()
+                FERRIC_LAN_UDP_PORT
             };
             let peer_addr = format!("{}:{effective_port}", src_addr.ip());
-            let device_name = if ann.device_name.trim().is_empty() {
+            let sanitized_name: String = ann
+                .device_name
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_DEVICE_NAME_CHARS)
+                .collect();
+            let device_name = if sanitized_name.trim().is_empty() {
                 "Ferric Peer".to_string()
             } else {
-                ann.device_name
+                sanitized_name.trim().to_string()
             };
 
             self.peers.insert(
-                ann.device_id.clone(),
+                clean_id.to_string(),
                 DiscoveredPeer {
-                    device_id: ann.device_id,
+                    device_id: clean_id.to_string(),
                     device_name,
                     addr: peer_addr,
                     is_active_speaker: ann.is_active_speaker,

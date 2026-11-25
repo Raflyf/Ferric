@@ -2,11 +2,16 @@ use std::path::Path;
 
 /// Allowed external HTTPS origins that Ferric may open in the system browser (OAuth & GitHub Releases only).
 const ALLOWED_HTTPS_PREFIXES: &[&str] = &[
-    "https://github.com/Raflyf/Ferric",
+    "https://github.com/Raflyf/Ferric/",
     "https://accounts.spotify.com/",
     "https://developer.spotify.com/",
     "https://accounts.google.com/",
     "https://console.cloud.google.com/",
+    "https://discord.com/developers/applications/",
+];
+
+const ALLOWED_HTTPS_EXACT: &[&str] = &[
+    "https://github.com/Raflyf/Ferric",
     "https://discord.com/developers/applications",
 ];
 
@@ -32,9 +37,29 @@ pub struct WindowClientScreenRect {
     pub dpi_scale: f32,
 }
 
+fn is_safe_external_url(url: &str) -> bool {
+    if url.is_empty()
+        || url.len() > 2048
+        || url
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '"' | '\\' | '<' | '>'))
+        || url.contains("..")
+    {
+        return false;
+    }
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    ALLOWED_HTTPS_EXACT.contains(&url) || ALLOWED_HTTPS_PREFIXES.iter().any(|p| url.starts_with(p))
+}
+
 /// Open an allowlisted HTTPS URL (GitHub Releases or official Spotify/Google OAuth pages) fail-closed.
 pub fn open_allowed_url(url: &str) -> Result<(), String> {
-    if !ALLOWED_HTTPS_PREFIXES.iter().any(|p| url.starts_with(p)) {
+    if !is_safe_external_url(url) {
         return Err("Refused to open untrusted external URL".to_string());
     }
     shell_open(url, None)
@@ -42,16 +67,25 @@ pub fn open_allowed_url(url: &str) -> Result<(), String> {
 
 /// Backwards-compatible helper for GitHub release links.
 pub fn open_github_url(url: &str) -> Result<(), String> {
-    if !url.starts_with("https://github.com/Raflyf/Ferric") {
+    let is_ferric_repo = url == "https://github.com/Raflyf/Ferric"
+        || url.starts_with("https://github.com/Raflyf/Ferric/");
+    if !is_ferric_repo || !is_safe_external_url(url) {
         return Err("Refused to open non-Ferric GitHub URL".to_string());
     }
     open_allowed_url(url)
 }
 
-/// Launch a SHA-256-verified `.msi` installer file using Windows ShellExecuteW.
-pub fn launch_verified_installer(msi_path: &Path) -> Result<(), String> {
-    if !msi_path.is_file() {
-        return Err("Verified installer file does not exist".to_string());
+/// Launch a SHA-256-verified `.msi` installer file directly via `%SystemRoot%\System32\msiexec.exe`
+/// after re-verifying containment, regular-file type, and cryptographic SHA-256 digest right before launch.
+pub fn launch_verified_installer(
+    msi_path: &Path,
+    expected_dir: &Path,
+    expected_sha256: &[u8; 32],
+) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(msi_path)
+        .map_err(|_| "Verified installer file does not exist".to_string())?;
+    if !meta.file_type().is_file() {
+        return Err("Refused to launch non-regular or symlinked installer file".to_string());
     }
     let ext_ok = msi_path
         .extension()
@@ -60,9 +94,42 @@ pub fn launch_verified_installer(msi_path: &Path) -> Result<(), String> {
     if !ext_ok {
         return Err("Refused to launch non-MSI installer file".to_string());
     }
-    let target = msi_path.to_string_lossy();
-    let dir = msi_path.parent().map(|p| p.to_string_lossy().into_owned());
-    shell_open(&target, dir.as_deref())
+    let canonical_dir = std::fs::canonicalize(expected_dir)
+        .map_err(|_| "Updates directory could not be verified".to_string())?;
+    let canonical_msi = std::fs::canonicalize(msi_path)
+        .map_err(|_| "Verified installer path could not be resolved".to_string())?;
+    if !canonical_msi.starts_with(&canonical_dir) {
+        return Err("Refused to launch installer outside verified updates directory".to_string());
+    }
+
+    // Re-hash immediately before execution to eliminate TOCTOU tampering on disk.
+    let actual_sha = ferric_providers::updater::sha256_file(&canonical_msi)?;
+    if actual_sha != *expected_sha256 {
+        return Err("Installer integrity check failed before launch".to_string());
+    }
+
+    let raw_target = canonical_msi.to_string_lossy();
+    if raw_target.starts_with(r"\\?\UNC\") || raw_target.starts_with(r"\\.\") {
+        return Err("Refused to launch installer from network or device path".to_string());
+    }
+    let clean_target = raw_target.strip_prefix(r"\\?\").unwrap_or(&raw_target);
+    if clean_target.is_empty()
+        || clean_target
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '\0'))
+    {
+        return Err("Installer path contains unsafe characters".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        win_impl::launch_msiexec(clean_target)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = clean_target;
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -165,7 +232,6 @@ mod win_impl {
     static ACRYLIC_ENABLED: AtomicBool = AtomicBool::new(false);
     static ACRYLIC_TINT_RGB: AtomicU32 = AtomicU32::new(0x000B_0D14);
     static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
-    static MUI_CACHE_SYNCED: AtomicBool = AtomicBool::new(false);
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
     static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
     static TRAY_ADDED: AtomicBool = AtomicBool::new(false);
@@ -244,6 +310,36 @@ mod win_impl {
         fn AllowSetForegroundWindow(dw_process_id: u32) -> i32;
     }
 
+    #[repr(C)]
+    struct StartupInfoW {
+        cb: u32,
+        lp_reserved: *mut u16,
+        lp_desktop: *mut u16,
+        lp_title: *mut u16,
+        dw_x: u32,
+        dw_y: u32,
+        dw_x_size: u32,
+        dw_y_size: u32,
+        dw_x_count_chars: u32,
+        dw_y_count_chars: u32,
+        dw_fill_attribute: u32,
+        dw_flags: u32,
+        w_show_window: u16,
+        cb_reserved2: u16,
+        lp_reserved2: *mut u8,
+        h_std_input: *mut c_void,
+        h_std_output: *mut c_void,
+        h_std_error: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct ProcessInformation {
+        h_process: *mut c_void,
+        h_thread: *mut c_void,
+        dw_process_id: u32,
+        dw_thread_id: u32,
+    }
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn CreateMutexW(
@@ -253,6 +349,132 @@ mod win_impl {
         ) -> *mut c_void;
         fn GetLastError() -> u32;
         fn CloseHandle(h_object: *mut c_void) -> i32;
+        fn SetDllDirectoryW(lp_path_name: *const u16) -> i32;
+        fn SetDefaultDllDirectories(directory_flags: u32) -> i32;
+        fn HeapSetInformation(
+            heap_handle: *mut c_void,
+            heap_information_class: u32,
+            heap_information: *const c_void,
+            heap_information_length: usize,
+        ) -> i32;
+        fn SetProcessMitigationPolicy(
+            mitigation_policy: i32,
+            lp_buffer: *const c_void,
+            dw_length: usize,
+        ) -> i32;
+        fn GetSystemDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
+        fn CreateProcessW(
+            lp_application_name: *const u16,
+            lp_command_line: *mut u16,
+            lp_process_attributes: *mut c_void,
+            lp_thread_attributes: *mut c_void,
+            b_inherit_handles: i32,
+            dw_creation_flags: u32,
+            lp_environment: *mut c_void,
+            lp_current_directory: *const u16,
+            lp_startup_info: *const StartupInfoW,
+            lp_process_information: *mut ProcessInformation,
+        ) -> i32;
+    }
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
+    }
+
+    /// Enable OS-level Win32 anti-injection and DLL-hijacking mitigations immediately at process startup.
+    pub fn harden_process() {
+        const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+        const HEAP_ENABLE_TERMINATION_ON_CORRUPTION: u32 = 1;
+        const PROCESS_EXTENSION_POINT_DISABLE_POLICY: i32 = 6;
+        const PROCESS_IMAGE_LOAD_POLICY: i32 = 10;
+        // NoRemoteImages (0x1) | NoLowMandatoryLabelImages (0x2) | PreferSystem32Images (0x4)
+        let image_load_flags: u32 = 0x0000_0007;
+        // DisableExtensionPoints (0x1): blocks legacy AppInit_DLLs & global WinEventHook injection
+        let ext_point_flags: u32 = 0x0000_0001;
+        let empty_dir: [u16; 1] = [0];
+        // SAFETY: Standard Win32 process-hardening APIs with valid pointer/size arguments.
+        // Older OS builds ignore unsupported policies cleanly via non-zero/zero return codes.
+        unsafe {
+            let _ = SetDllDirectoryW(empty_dir.as_ptr());
+            let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+            let _ = HeapSetInformation(
+                ptr::null_mut(),
+                HEAP_ENABLE_TERMINATION_ON_CORRUPTION,
+                ptr::null(),
+                0,
+            );
+            let _ = SetProcessMitigationPolicy(
+                PROCESS_IMAGE_LOAD_POLICY,
+                (&raw const image_load_flags).cast(),
+                std::mem::size_of::<u32>(),
+            );
+            let _ = SetProcessMitigationPolicy(
+                PROCESS_EXTENSION_POINT_DISABLE_POLICY,
+                (&raw const ext_point_flags).cast(),
+                std::mem::size_of::<u32>(),
+            );
+        }
+    }
+
+    /// Set a deterministic AppUserModelID so Windows Taskbar, SMTC, and Task Manager bind consistently.
+    pub fn set_app_user_model_id() {
+        let app_id: Vec<u16> = "Raflyf.Ferric\0".encode_utf16().collect();
+        // SAFETY: Null-terminated UTF-16 AppUserModelID passed once at process startup.
+        unsafe {
+            let _ = SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
+        }
+    }
+
+    pub fn launch_msiexec(msi_path: &str) -> Result<(), String> {
+        let mut sys_buf = [0u16; 512];
+        // SAFETY: Queries `%SystemRoot%\System32` into a bounded UTF-16 stack buffer.
+        let sys_len = unsafe { GetSystemDirectoryW(sys_buf.as_mut_ptr(), sys_buf.len() as u32) };
+        if sys_len == 0 || (sys_len as usize) >= sys_buf.len() {
+            return Err("Could not locate Windows System32 directory".to_string());
+        }
+        let sys_dir = String::from_utf16_lossy(&sys_buf[..sys_len as usize]);
+        let msiexec = format!("{sys_dir}\\msiexec.exe");
+        let app_w: Vec<u16> = msiexec.encode_utf16().chain(Some(0)).collect();
+        let dir_w: Vec<u16> = sys_dir.encode_utf16().chain(Some(0)).collect();
+        let mut cmd_w: Vec<u16> = format!("\"{msiexec}\" /i \"{msi_path}\"")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+
+        // SAFETY: Zero-initialized STARTUPINFOW with exact struct size and PROCESS_INFORMATION.
+        let mut si: StartupInfoW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<StartupInfoW>() as u32;
+        let mut pi: ProcessInformation = unsafe { std::mem::zeroed() };
+
+        // SAFETY: Direct CreateProcessW invocation of System32 msiexec.exe with mutable UTF-16 cmdline.
+        let ok = unsafe {
+            CreateProcessW(
+                app_w.as_ptr(),
+                cmd_w.as_mut_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                0,
+                ptr::null_mut(),
+                dir_w.as_ptr(),
+                &raw const si,
+                &raw mut pi,
+            )
+        };
+        if ok == 0 {
+            let code = unsafe { GetLastError() };
+            return Err(format!("Failed to launch Windows Installer (error {code})"));
+        }
+        unsafe {
+            if !pi.h_thread.is_null() {
+                let _ = CloseHandle(pi.h_thread);
+            }
+            if !pi.h_process.is_null() {
+                let _ = CloseHandle(pi.h_process);
+            }
+        }
+        Ok(())
     }
 
     fn activate_message_id() -> u32 {
@@ -291,153 +513,7 @@ mod win_impl {
     /// Ensure only one Ferric desktop instance runs per user session.
     /// If Ferric is already running (even minimized or hidden in System Tray),
     /// signal the existing instance to restore and focus itself, then return `false`.
-    /// Overwrite any stale Windows Shell MuiCache friendly-name entry for `ferric.exe`
-    /// so Windows Task Manager immediately displays `Ferric` instead of an outdated description.
-    fn refresh_windows_mui_cache() {
-        if MUI_CACHE_SYNCED.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        #[link(name = "advapi32")]
-        unsafe extern "system" {
-            fn RegOpenKeyExW(
-                h_key: isize,
-                lp_sub_key: *const u16,
-                ul_options: u32,
-                sam_desired: u32,
-                phk_result: *mut isize,
-            ) -> i32;
-            fn RegEnumValueW(
-                h_key: isize,
-                dw_index: u32,
-                lp_value_name: *mut u16,
-                lpcch_value_name: *mut u32,
-                lp_reserved: *mut u32,
-                lp_type: *mut u32,
-                lp_data: *mut u8,
-                lpcb_data: *mut u32,
-            ) -> i32;
-            fn RegSetValueExW(
-                h_key: isize,
-                lp_value_name: *const u16,
-                reserved: u32,
-                dw_type: u32,
-                lp_data: *const u8,
-                cb_data: u32,
-            ) -> i32;
-            fn RegCloseKey(h_key: isize) -> i32;
-        }
-
-        const HKEY_CURRENT_USER: isize = 0x8000_0001_u32 as i32 as isize;
-        const KEY_QUERY_VALUE: u32 = 0x0001;
-        const KEY_SET_VALUE: u32 = 0x0002;
-        const REG_SZ: u32 = 1;
-        const ERROR_SUCCESS: i32 = 0;
-        const ERROR_MORE_DATA: i32 = 234;
-
-        let subkey: Vec<u16> =
-            "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache\0"
-                .encode_utf16()
-                .collect();
-        let clean_name: Vec<u16> = "Ferric\0".encode_utf16().collect();
-        let clean_bytes = clean_name.len() * std::mem::size_of::<u16>();
-
-        // SAFETY: Opens user-owned MuiCache key, scans only `ferric.exe.FriendlyAppName` values,
-        // updates stale descriptions to `"Ferric"`, and closes the handle cleanly.
-        unsafe {
-            let mut hkey: isize = 0;
-            if RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                subkey.as_ptr(),
-                0,
-                KEY_QUERY_VALUE | KEY_SET_VALUE,
-                &mut hkey,
-            ) != ERROR_SUCCESS
-                || hkey == 0
-            {
-                return;
-            }
-
-            let mut to_fix: Vec<Vec<u16>> = Vec::new();
-            let mut idx = 0u32;
-            let mut name_buf = [0u16; 1024];
-            let mut data_buf = [0u8; 1024];
-            loop {
-                let mut name_len = name_buf.len() as u32;
-                let mut data_len = data_buf.len() as u32;
-                let mut val_type = 0u32;
-                let res = RegEnumValueW(
-                    hkey,
-                    idx,
-                    name_buf.as_mut_ptr(),
-                    &mut name_len,
-                    ptr::null_mut(),
-                    &mut val_type,
-                    data_buf.as_mut_ptr(),
-                    &mut data_len,
-                );
-                if res == ERROR_MORE_DATA {
-                    idx = idx.saturating_add(1);
-                    continue;
-                }
-                if res != ERROR_SUCCESS {
-                    break;
-                }
-                idx = idx.saturating_add(1);
-                if val_type != REG_SZ {
-                    continue;
-                }
-                let val_name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
-                if val_name
-                    .to_ascii_lowercase()
-                    .ends_with("ferric.exe.friendlyappname")
-                {
-                    let words: Vec<u16> = data_buf[..(data_len as usize).min(data_buf.len())]
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|&c| u16::from_le_bytes(c))
-                        .take_while(|&w| w != 0)
-                        .collect();
-                    let cur_val = String::from_utf16_lossy(&words);
-                    if cur_val != "Ferric" {
-                        let mut wide: Vec<u16> = name_buf[..name_len as usize].to_vec();
-                        wide.push(0);
-                        to_fix.push(wide);
-                    }
-                }
-            }
-
-            for val_wide in to_fix {
-                let _ = RegSetValueExW(
-                    hkey,
-                    val_wide.as_ptr(),
-                    0,
-                    REG_SZ,
-                    clean_name.as_ptr().cast(),
-                    clean_bytes as u32,
-                );
-            }
-
-            if let Ok(exe_path) = std::env::current_exe() {
-                let cur_val_name: Vec<u16> = format!("{}.FriendlyAppName\0", exe_path.display())
-                    .encode_utf16()
-                    .collect();
-                let _ = RegSetValueExW(
-                    hkey,
-                    cur_val_name.as_ptr(),
-                    0,
-                    REG_SZ,
-                    clean_name.as_ptr().cast(),
-                    clean_bytes as u32,
-                );
-            }
-
-            let _ = RegCloseKey(hkey);
-        }
-    }
-
     pub fn acquire_single_instance_or_activate() -> bool {
-        refresh_windows_mui_cache();
         let msg_id = activate_message_id();
         let mutex_name: Vec<u16> = "Local\\FerricMusicPlayerSingleInstance_v1\0"
             .encode_utf16()
@@ -451,7 +527,7 @@ mod win_impl {
             }
             if last_err == ERROR_ALREADY_EXISTS {
                 let _ = CloseHandle(handle);
-                let cls: Vec<u16> = "MakepadWindow\0".encode_utf16().collect();
+                let cls: Vec<u16> = "FerricMainWindow\0".encode_utf16().collect();
                 let title: Vec<u16> = "Ferric\0".encode_utf16().collect();
                 let mut target = FindWindowW(cls.as_ptr(), title.as_ptr());
                 if target.is_null() {
@@ -583,7 +659,7 @@ mod win_impl {
         if len <= 0 {
             return false;
         }
-        String::from_utf16_lossy(&buf[..len as usize]) == "MakepadWindow"
+        String::from_utf16_lossy(&buf[..len as usize]) == "FerricMainWindow"
     }
 
     fn push_event(ev: TrayEvent) {
@@ -719,7 +795,6 @@ mod win_impl {
             if CLOSE_TO_TRAY.load(Ordering::Acquire) {
                 ensure_tray_icon(hwnd, "Ferric — Music Player");
             }
-            refresh_windows_mui_cache();
             apply_window_icon(hwnd);
             init_taskbar_thumbbar(hwnd);
             let acr_on = ACRYLIC_ENABLED.load(Ordering::Acquire);
@@ -891,37 +966,58 @@ mod win_impl {
             if tb.HrInit().is_err() {
                 return;
             }
-            TASKBAR_STATE.with(|cell| {
-                let mut guard = cell.borrow_mut();
-                let (prev_playing, prev_title) = if let Some(old) = guard.take() {
-                    for ic in [old.ico_prev, old.ico_play, old.ico_pause, old.ico_next] {
-                        if !ic.is_invalid() {
-                            let _ = DestroyIcon(ic);
-                        }
-                    }
-                    (old.last_playing.unwrap_or(false), old.last_title)
-                } else {
-                    (false, String::new())
+            let (old_state, prev_playing, prev_title) = TASKBAR_STATE.with(|cell| {
+                let Ok(mut guard) = cell.try_borrow_mut() else {
+                    return (None, false, String::new());
                 };
-                let ico_prev = create_media_hicon(ThumbIconKind::Prev);
-                let ico_play = create_media_hicon(ThumbIconKind::Play);
-                let ico_pause = create_media_hicon(ThumbIconKind::Pause);
-                let ico_next = create_media_hicon(ThumbIconKind::Next);
-                let buttons =
-                    build_thumb_buttons(ico_prev, ico_play, ico_pause, ico_next, prev_playing);
-                let added = tb.ThumbBarAddButtons(hwnd, &buttons).is_ok();
-                *guard = Some(TaskbarThumbState {
-                    tb,
-                    ico_prev,
-                    ico_play,
-                    ico_pause,
-                    ico_next,
-                    buttons_added: added,
-                    add_retries: 0,
-                    last_playing: if added { Some(prev_playing) } else { None },
-                    last_title: prev_title,
-                });
+                if let Some(old) = guard.take() {
+                    let p = old.last_playing.unwrap_or(false);
+                    let t = old.last_title.clone();
+                    (Some(old), p, t)
+                } else {
+                    (None, false, String::new())
+                }
             });
+            if let Some(old) = old_state {
+                for ic in [old.ico_prev, old.ico_play, old.ico_pause, old.ico_next] {
+                    if !ic.is_invalid() {
+                        let _ = DestroyIcon(ic);
+                    }
+                }
+            }
+            let ico_prev = create_media_hicon(ThumbIconKind::Prev);
+            let ico_play = create_media_hicon(ThumbIconKind::Play);
+            let ico_pause = create_media_hicon(ThumbIconKind::Pause);
+            let ico_next = create_media_hicon(ThumbIconKind::Next);
+            let buttons =
+                build_thumb_buttons(ico_prev, ico_play, ico_pause, ico_next, prev_playing);
+            // Execute STA COM outside RefCell borrows to prevent re-entrancy panics.
+            let added = tb.ThumbBarAddButtons(hwnd, &buttons).is_ok();
+            let stored = TASKBAR_STATE.with(|cell| {
+                if let Ok(mut guard) = cell.try_borrow_mut() {
+                    *guard = Some(TaskbarThumbState {
+                        tb,
+                        ico_prev,
+                        ico_play,
+                        ico_pause,
+                        ico_next,
+                        buttons_added: added,
+                        add_retries: 0,
+                        last_playing: if added { Some(prev_playing) } else { None },
+                        last_title: prev_title,
+                    });
+                    true
+                } else {
+                    false
+                }
+            });
+            if !stored {
+                for ic in [ico_prev, ico_play, ico_pause, ico_next] {
+                    if !ic.is_invalid() {
+                        let _ = DestroyIcon(ic);
+                    }
+                }
+            }
         }
     }
 
@@ -936,25 +1032,27 @@ mod win_impl {
         } else {
             format!("{} - {} - Ferric", title.trim(), artist.trim())
         };
-        TASKBAR_STATE.with(|cell| {
-            let mut guard = cell.borrow_mut();
-            let Some(st) = guard.as_mut() else {
-                let wide: Vec<u16> = win_title.encode_utf16().chain(Some(0)).collect();
-                // SAFETY: Valid HWND and null-terminated UTF-16 title string.
-                unsafe {
-                    let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
-                }
-                return;
+
+        enum PendingAction {
+            None,
+            Add(ITaskbarList3, [THUMBBUTTON; 3]),
+            Update(ITaskbarList3, THUMBBUTTON),
+        }
+
+        let (need_set_title, action) = TASKBAR_STATE.with(|cell| {
+            let Ok(mut guard) = cell.try_borrow_mut() else {
+                return (false, PendingAction::None);
             };
-            if st.last_title != win_title {
+            let Some(st) = guard.as_mut() else {
+                return (true, PendingAction::None);
+            };
+            let set_title = if st.last_title != win_title {
                 st.last_title = win_title.clone();
-                let wide: Vec<u16> = win_title.encode_utf16().chain(Some(0)).collect();
-                // SAFETY: Valid HWND and null-terminated UTF-16 title string.
-                unsafe {
-                    let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
-                }
-            }
-            if !st.buttons_added && st.add_retries < 8 {
+                true
+            } else {
+                false
+            };
+            let act = if !st.buttons_added && st.add_retries < 8 {
                 st.add_retries += 1;
                 let buttons = build_thumb_buttons(
                     st.ico_prev,
@@ -963,14 +1061,8 @@ mod win_impl {
                     st.ico_next,
                     is_playing,
                 );
-                // SAFETY: UI-thread COM retry when Explorer taskbar button finishes registering.
-                if unsafe { st.tb.ThumbBarAddButtons(hwnd, &buttons) }.is_ok() {
-                    st.buttons_added = true;
-                    st.last_playing = Some(is_playing);
-                    return;
-                }
-            }
-            if st.buttons_added && st.last_playing != Some(is_playing) {
+                PendingAction::Add(st.tb.clone(), buttons)
+            } else if st.buttons_added && st.last_playing != Some(is_playing) {
                 st.last_playing = Some(is_playing);
                 let btn = THUMBBUTTON {
                     dwMask: THB_ICON | THB_TOOLTIP | THB_FLAGS,
@@ -984,27 +1076,58 @@ mod win_impl {
                     szTip: fill_tip_buf(if is_playing { "Pause" } else { "Play" }),
                     dwFlags: THBF_ENABLED,
                 };
-                // SAFETY: UI-thread COM call updating center Play/Pause thumbnail toolbar button.
-                unsafe {
-                    let _ = st.tb.ThumbBarUpdateButtons(hwnd, &[btn]);
+                PendingAction::Update(st.tb.clone(), btn)
+            } else {
+                PendingAction::None
+            };
+            (set_title, act)
+        });
+
+        // Execute Win32 & STA COM calls outside RefCell borrows so re-entrant messages never panic.
+        if need_set_title {
+            let wide: Vec<u16> = win_title.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: Valid HWND and null-terminated UTF-16 title string.
+            unsafe {
+                let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
+            }
+        }
+        match action {
+            PendingAction::None => {}
+            PendingAction::Add(tb, buttons) => {
+                // SAFETY: UI-thread COM retry when Explorer taskbar button finishes registering.
+                if unsafe { tb.ThumbBarAddButtons(hwnd, &buttons) }.is_ok() {
+                    TASKBAR_STATE.with(|cell| {
+                        if let Ok(mut guard) = cell.try_borrow_mut()
+                            && let Some(st) = guard.as_mut()
+                        {
+                            st.buttons_added = true;
+                            st.last_playing = Some(is_playing);
+                        }
+                    });
                 }
             }
-        });
+            PendingAction::Update(tb, btn) => {
+                // SAFETY: UI-thread COM call updating center Play/Pause thumbnail toolbar button.
+                unsafe {
+                    let _ = tb.ThumbBarUpdateButtons(hwnd, &[btn]);
+                }
+            }
+        }
     }
 
     fn destroy_taskbar_thumbbar() {
-        TASKBAR_STATE.with(|cell| {
-            if let Some(st) = cell.borrow_mut().take() {
-                // SAFETY: Releases HICONs created via CreateIconIndirect on shutdown.
-                unsafe {
-                    for ic in [st.ico_prev, st.ico_play, st.ico_pause, st.ico_next] {
-                        if !ic.is_invalid() {
-                            let _ = DestroyIcon(ic);
-                        }
+        let taken =
+            TASKBAR_STATE.with(|cell| cell.try_borrow_mut().ok().and_then(|mut g| g.take()));
+        if let Some(st) = taken {
+            // SAFETY: Releases HICONs created via CreateIconIndirect on shutdown.
+            unsafe {
+                for ic in [st.ico_prev, st.ico_play, st.ico_pause, st.ico_next] {
+                    if !ic.is_invalid() {
+                        let _ = DestroyIcon(ic);
                     }
                 }
             }
-        });
+        }
     }
 
     fn apply_window_icon(hwnd: HWND) {
@@ -1426,6 +1549,8 @@ mod win_impl {
                 }
                 WM_DESTROY => {
                     destroy_taskbar_thumbbar();
+                    MAIN_HWND.store(0, Ordering::Release);
+                    HOOK_INSTALLED.store(false, Ordering::Release);
                     let mh = SINGLE_INSTANCE_MUTEX.swap(0, Ordering::AcqRel);
                     if mh != 0 {
                         let _ = CloseHandle(mh as *mut c_void);
@@ -1524,6 +1649,7 @@ mod win_impl {
             fn GlobalAlloc(u_flags: u32, dw_bytes: usize) -> *mut c_void;
             fn GlobalLock(h_mem: *mut c_void) -> *mut c_void;
             fn GlobalUnlock(h_mem: *mut c_void) -> i32;
+            fn GlobalFree(h_mem: *mut c_void) -> *mut c_void;
         }
 
         const CF_UNICODETEXT: u32 = 13;
@@ -1532,7 +1658,7 @@ mod win_impl {
         let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let byte_len = wide.len() * std::mem::size_of::<u16>();
 
-        // SAFETY: Standard Win32 CF_UNICODETEXT clipboard transfer with checked pointers.
+        // SAFETY: Standard Win32 CF_UNICODETEXT clipboard transfer with checked pointers and cleanup.
         unsafe {
             if OpenClipboard(ptr::null_mut()) == 0 {
                 return Err("Could not open Windows clipboard".to_string());
@@ -1545,12 +1671,14 @@ mod win_impl {
             }
             let dst = GlobalLock(h_mem) as *mut u16;
             if dst.is_null() {
+                let _ = GlobalFree(h_mem);
                 let _ = CloseClipboard();
                 return Err("Clipboard GlobalLock failed".to_string());
             }
             ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
             let _ = GlobalUnlock(h_mem);
             if SetClipboardData(CF_UNICODETEXT, h_mem).is_null() {
+                let _ = GlobalFree(h_mem);
                 let _ = CloseClipboard();
                 return Err("SetClipboardData failed".to_string());
             }
@@ -1558,6 +1686,16 @@ mod win_impl {
         }
         Ok(())
     }
+}
+
+pub fn win32_harden_process() {
+    #[cfg(target_os = "windows")]
+    win_impl::harden_process();
+}
+
+pub fn win32_set_app_user_model_id() {
+    #[cfg(target_os = "windows")]
+    win_impl::set_app_user_model_id();
 }
 
 pub fn win32_acquire_single_instance_or_activate() -> bool {

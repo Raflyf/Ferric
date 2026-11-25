@@ -3,13 +3,11 @@ use crate::{ProviderError, ProviderResult};
 use ferric_core::models::{Playlist, Track, TrackSource};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
-use std::hash::BuildHasher;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 43824;
 pub const DEFAULT_OAUTH_CALLBACK_PATH: &str = "/callback";
@@ -57,46 +55,12 @@ pub struct LoopbackListener {
     listener: TcpListener,
     pub redirect_uri: String,
     expected_state: String,
+    expected_path: String,
+    bound_port: u16,
 }
 
 fn fill_entropy_bytes(out: &mut [u8]) {
-    let mut seed_material = Vec::with_capacity(192);
-
-    #[cfg(unix)]
-    if let Ok(mut urandom) = std::fs::File::open("/dev/urandom") {
-        let mut os_bytes = [0u8; 64];
-        if urandom.read_exact(&mut os_bytes).is_ok() {
-            seed_material.extend_from_slice(&os_bytes);
-        }
-    }
-
-    // Every `RandomState::new()` seeds directly from the OS CSPRNG (`BCryptGenRandom` on Windows).
-    for round in 0..12_u64 {
-        let state = RandomState::new();
-        seed_material.extend_from_slice(&state.hash_one(round).to_le_bytes());
-    }
-
-    if let Ok(dur) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        seed_material.extend_from_slice(&dur.as_nanos().to_le_bytes());
-    }
-
-    static SEQ: AtomicU64 = AtomicU64::new(1);
-    let counter = SEQ.fetch_add(1, Ordering::Relaxed);
-    seed_material.extend_from_slice(&counter.to_le_bytes());
-    seed_material.extend_from_slice(&std::process::id().to_le_bytes());
-
-    let mut written = 0usize;
-    let mut block = 0u64;
-    while written < out.len() {
-        let mut hasher = Sha256::new();
-        hasher.update(&seed_material);
-        hasher.update(block.to_le_bytes());
-        let digest = hasher.finalize();
-        let take = (out.len() - written).min(digest.len());
-        out[written..written + take].copy_from_slice(&digest[..take]);
-        written += take;
-        block += 1;
-    }
+    ferric_core::secrets::csprng_fill(out);
 }
 
 pub fn base64url_encode_nopad(bytes: &[u8]) -> String {
@@ -251,10 +215,29 @@ pub fn bind_loopback_callback(
         listener,
         redirect_uri,
         expected_state: expected_state.to_string(),
+        expected_path: normalized_path,
+        bound_port: port,
     })
 }
 
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 fn build_callback_html(title: &str, message: &str, is_error: bool) -> String {
+    let safe_title = escape_html(title);
+    let safe_message = escape_html(message);
     let status_label = if is_error {
         "AUTHORIZATION ERROR"
     } else {
@@ -263,7 +246,7 @@ fn build_callback_html(title: &str, message: &str, is_error: bool) -> String {
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-<title>{title}</title>\
+<title>{safe_title}</title>\
 <style>\
 body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
 background:#000000;color:#F3EEE3;font-family:system-ui,-apple-system,Segoe UI,sans-serif;}}\
@@ -275,7 +258,7 @@ h1{{margin:0 0 10px 0;font-size:20px;font-weight:600;color:#F3EEE3;}}\
 p{{margin:0;font-size:14px;line-height:1.55;color:rgba(243,238,227,0.78);}}\
 </style></head><body><div class=\"card\">\
 <div class=\"badge\">{status_label}</div>\
-<h1>{title}</h1><p>{message}</p></div></body></html>"
+<h1>{safe_title}</h1><p>{safe_message}</p></div></body></html>"
     )
 }
 
@@ -357,6 +340,39 @@ impl LoopbackListener {
                 let _ = stream.flush();
                 continue;
             }
+            if req_path != self.expected_path {
+                let html = build_callback_html(
+                    "Invalid Callback Path",
+                    "Unexpected OAuth callback path.",
+                    true,
+                );
+                write_http_html(&mut stream, "404 Not Found", &html);
+                continue;
+            }
+            let expected_host_ip = format!("127.0.0.1:{}", self.bound_port);
+            let expected_host_lh = format!("localhost:{}", self.bound_port);
+            let host_ok = raw_req
+                .lines()
+                .skip(1)
+                .find_map(|line| {
+                    let (k, v) = line.split_once(':')?;
+                    k.trim().eq_ignore_ascii_case("host").then(|| v.trim())
+                })
+                .is_some_and(|h| {
+                    h.eq_ignore_ascii_case(&expected_host_ip)
+                        || h.eq_ignore_ascii_case(&expected_host_lh)
+                        || h.eq_ignore_ascii_case("127.0.0.1")
+                        || h.eq_ignore_ascii_case("localhost")
+                });
+            if !host_ok {
+                let html = build_callback_html(
+                    "Invalid Host Header",
+                    "OAuth callback rejected due to unexpected Host header.",
+                    true,
+                );
+                write_http_html(&mut stream, "400 Bad Request", &html);
+                continue;
+            }
 
             let params = parse_query_params(query_str);
             if let Some(oauth_err) = params.get("error") {
@@ -408,6 +424,7 @@ impl LoopbackListener {
 
 fn http_agent() -> ureq::Agent {
     let cfg = ureq::Agent::config_builder()
+        .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(Some(HTTP_TIMEOUT))
         .build();

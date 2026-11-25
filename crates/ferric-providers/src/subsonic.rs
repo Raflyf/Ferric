@@ -8,6 +8,8 @@ const SUBSONIC_API_VERSION: &str = "1.16.1";
 const SUBSONIC_CLIENT_NAME: &str = "Ferric";
 const SUBSONIC_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SUBSONIC_JSON_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SUBSONIC_PLAYLISTS: usize = 100;
+const MAX_SUBSONIC_PLAYLIST_TRACKS: usize = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubsonicCredentials {
@@ -16,7 +18,82 @@ pub struct SubsonicCredentials {
     pub password: String,
 }
 
-/// Encode UTF-8 password bytes as Subsonic `enc:<hex>` parameter.
+/// Pure-Rust RFC 1321 MD5 hex digest used strictly for Subsonic v1.13+ salted token authentication.
+fn md5_hex(input: &[u8]) -> String {
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const K: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
+    ];
+
+    let bit_len = (input.len() as u64).wrapping_mul(8);
+    let mut msg = input.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    let mut a0: u32 = 0x6745_2301;
+    let mut b0: u32 = 0xefcd_ab89;
+    let mut c0: u32 = 0x98ba_dcfe;
+    let mut d0: u32 = 0x1032_5476;
+
+    let (blocks, _) = msg.as_chunks::<64>();
+    for block in blocks {
+        let mut m = [0u32; 16];
+        let (words, _) = block.as_chunks::<4>();
+        for (slot, &w) in m.iter_mut().zip(words.iter()) {
+            *slot = u32::from_le_bytes(w);
+        }
+        let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
+        for i in 0..64 {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | ((!b) & d), i),
+                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | (!d)), (7 * i) % 16),
+            };
+            let f = f.wrapping_add(a).wrapping_add(K[i]).wrapping_add(m[g]);
+            a = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(f.rotate_left(S[i]));
+        }
+        a0 = a0.wrapping_add(a);
+        b0 = b0.wrapping_add(b);
+        c0 = c0.wrapping_add(c);
+        d0 = d0.wrapping_add(d);
+    }
+
+    let mut digest = [0u8; 16];
+    digest[0..4].copy_from_slice(&a0.to_le_bytes());
+    digest[4..8].copy_from_slice(&b0.to_le_bytes());
+    digest[8..12].copy_from_slice(&c0.to_le_bytes());
+    digest[12..16].copy_from_slice(&d0.to_le_bytes());
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(32);
+    for b in digest {
+        out.push(char::from(HEX[usize::from(b >> 4)]));
+        out.push(char::from(HEX[usize::from(b & 0x0F)]));
+    }
+    out
+}
+
+/// Encode UTF-8 password bytes as Subsonic `enc:<hex>` parameter (retained for compatibility tests).
 pub fn encode_subsonic_password_hex(password: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(4 + password.len() * 2);
@@ -28,6 +105,42 @@ pub fn encode_subsonic_password_hex(password: &str) -> String {
     out
 }
 
+fn is_private_or_local_host(host: &str) -> bool {
+    let h = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    if h == "localhost"
+        || h.ends_with(".local")
+        || h.ends_with(".lan")
+        || h.ends_with(".internal")
+        || !h.contains('.')
+    {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+        };
+    }
+    false
+}
+
+fn is_blocked_metadata_host(host: &str) -> bool {
+    let h = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified(),
+            std::net::IpAddr::V6(v6) => {
+                v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
+        };
+    }
+    false
+}
+
 fn normalized_base_url(raw: &str) -> ProviderResult<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -35,20 +148,62 @@ fn normalized_base_url(raw: &str) -> ProviderResult<String> {
             "Subsonic server URL cannot be empty".to_string(),
         ));
     }
-    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+    if trimmed.bytes().any(|b| b.is_ascii_control() || b == b' ') {
+        return Err(ProviderError::Http(
+            "Subsonic server URL contains invalid characters".to_string(),
+        ));
+    }
+    let (is_https, rest) = if let Some(r) = trimmed.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = trimmed.strip_prefix("http://") {
+        (false, r)
+    } else {
         return Err(ProviderError::Http(
             "Subsonic server URL must start with http:// or https://".to_string(),
+        ));
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(ProviderError::Http(
+            "Subsonic server URL has an invalid host".to_string(),
+        ));
+    }
+    let host = if authority.starts_with('[') {
+        authority
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[')
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() || is_blocked_metadata_host(host) {
+        return Err(ProviderError::Http(
+            "Refused to connect to link-local or unspecified Subsonic host".to_string(),
+        ));
+    }
+    if !is_https && !is_private_or_local_host(host) {
+        return Err(ProviderError::Http(
+            "Public Subsonic servers must use https:// (http:// is allowed only for local/LAN hosts)"
+                .to_string(),
         ));
     }
     Ok(trimmed.to_string())
 }
 
-fn build_auth_query(creds: &SubsonicCredentials) -> String {
+fn build_auth_query_with_salt(creds: &SubsonicCredentials, salt: &str) -> String {
+    let token_input = format!("{}{}", creds.password, salt);
+    let token = md5_hex(token_input.as_bytes());
     format!(
-        "f=json&v={SUBSONIC_API_VERSION}&c={SUBSONIC_CLIENT_NAME}&u={}&p={}",
+        "f=json&v={SUBSONIC_API_VERSION}&c={SUBSONIC_CLIENT_NAME}&u={}&t={token}&s={}",
         url_encode(creds.username.trim()),
-        encode_subsonic_password_hex(&creds.password)
+        url_encode(salt)
     )
+}
+
+fn build_auth_query(creds: &SubsonicCredentials) -> String {
+    let salt = ferric_core::secrets::csprng_hex(8);
+    build_auth_query_with_salt(creds, &salt)
 }
 
 /// Construct direct OpenSubsonic/Navidrome audio stream URL for `song_id`.
@@ -296,6 +451,7 @@ pub fn sync_subsonic_catalog(
     let auth = build_auth_query(creds);
 
     let cfg = ureq::Agent::config_builder()
+        .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(Some(SUBSONIC_TIMEOUT))
         .build();
@@ -320,8 +476,8 @@ pub fn sync_subsonic_catalog(
         .map(|p| p.playlist)
         .unwrap_or_default();
 
-    let mut bundles = Vec::with_capacity(summaries.len());
-    for summary in summaries {
+    let mut bundles = Vec::with_capacity(summaries.len().min(MAX_SUBSONIC_PLAYLISTS));
+    for summary in summaries.into_iter().take(MAX_SUBSONIC_PLAYLISTS) {
         if summary.id.trim().is_empty() {
             continue;
         }
@@ -334,8 +490,9 @@ pub fn sync_subsonic_catalog(
             continue;
         };
 
-        let mut pl_tracks = Vec::with_capacity(detail.entry.len());
-        for entry in detail.entry {
+        let mut pl_tracks =
+            Vec::with_capacity(detail.entry.len().min(MAX_SUBSONIC_PLAYLIST_TRACKS));
+        for entry in detail.entry.into_iter().take(MAX_SUBSONIC_PLAYLIST_TRACKS) {
             if let Some(track) = map_subsonic_song(entry) {
                 pl_tracks.push(track);
             }
@@ -374,18 +531,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encodes_subsonic_hex_password_and_stream_url() {
+    fn encodes_subsonic_salted_token_and_validates_urls() {
         assert_eq!(encode_subsonic_password_hex("sesame"), "enc:736573616d65");
+        // Official Subsonic v1.13+ RFC 1321 MD5 example: md5("sesame" + "c19b2d")
+        assert_eq!(md5_hex(b"sesamec19b2d"), "26719a1196d2a94070df2503c10522fb");
         let creds = SubsonicCredentials {
             base_url: "https://music.example.lan/".to_string(),
             username: "audiophile".to_string(),
             password: "secret".to_string(),
         };
         let url = subsonic_stream_url(&creds, "subsonic:song_42");
-        assert_eq!(
-            url,
-            "https://music.example.lan/rest/stream.view?id=song_42&f=json&v=1.16.1&c=Ferric&u=audiophile&p=enc:736563726574"
-        );
+        assert!(url.starts_with(
+            "https://music.example.lan/rest/stream.view?id=song_42&f=json&v=1.16.1&c=Ferric&u=audiophile&t="
+        ));
+        assert!(url.contains("&s="));
+        assert!(!url.contains("enc:"));
+        assert!(!url.contains("secret"));
+
+        assert!(normalized_base_url("http://169.254.169.254").is_err());
+        assert!(normalized_base_url("http://public.example.com").is_err());
+        assert!(normalized_base_url("https://public.example.com").is_ok());
+        assert!(normalized_base_url("http://192.168.1.50:4533").is_ok());
     }
 
     #[test]

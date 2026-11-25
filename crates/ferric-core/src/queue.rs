@@ -59,7 +59,9 @@ impl PlayQueue {
             return None;
         }
         let track_idx = self.order.remove(target);
-        self.tracks.get(track_idx).cloned()
+        let removed = self.tracks.get(track_idx).cloned();
+        self.compact_unreferenced_tracks();
+        removed
     }
 
     /// Move the `offset`-th upcoming track one slot higher in Up Next (`offset >= 1`).
@@ -78,20 +80,21 @@ impl PlayQueue {
         true
     }
 
-    /// Remove all queued occurrences of a deleted track ID while keeping current cursor valid.
+    /// Remove all queued occurrences of a deleted track ID while keeping current cursor valid
+    /// and compacting `self.tracks` so toggling Shuffle never resurrects deleted tracks.
     pub fn remove_track_by_id(&mut self, track_id: &str) -> bool {
         let mut removed_any = false;
-        let cur_pos = self.cursor;
+        let orig_cp = self.cursor;
         let mut new_order = Vec::with_capacity(self.order.len());
-        let mut new_cursor = cur_pos;
+        let mut removed_before_cursor = 0usize;
         for (ord_pos, &track_idx) in self.order.iter().enumerate() {
             let matches = self.tracks.get(track_idx).is_some_and(|t| t.id == track_id);
             if matches {
                 removed_any = true;
-                if let Some(cp) = new_cursor
+                if let Some(cp) = orig_cp
                     && ord_pos < cp
                 {
-                    new_cursor = Some(cp.saturating_sub(1));
+                    removed_before_cursor += 1;
                 }
             } else {
                 new_order.push(track_idx);
@@ -102,10 +105,41 @@ impl PlayQueue {
             self.cursor = if self.order.is_empty() {
                 None
             } else {
-                new_cursor.map(|c| c.min(self.order.len() - 1))
+                orig_cp.map(|cp| {
+                    cp.saturating_sub(removed_before_cursor)
+                        .min(self.order.len() - 1)
+                })
             };
+            self.compact_unreferenced_tracks();
         }
         removed_any
+    }
+
+    fn compact_unreferenced_tracks(&mut self) {
+        if self.tracks.is_empty() {
+            return;
+        }
+        let mut used = vec![false; self.tracks.len()];
+        for &idx in &self.order {
+            if let Some(slot) = used.get_mut(idx) {
+                *slot = true;
+            }
+        }
+        if used.iter().all(|&u| u) {
+            return;
+        }
+        let mut remap = vec![0usize; self.tracks.len()];
+        let mut new_tracks = Vec::with_capacity(self.order.len());
+        for (old_idx, track) in std::mem::take(&mut self.tracks).into_iter().enumerate() {
+            if used[old_idx] {
+                remap[old_idx] = new_tracks.len();
+                new_tracks.push(track);
+            }
+        }
+        for idx in &mut self.order {
+            *idx = remap[*idx];
+        }
+        self.tracks = new_tracks;
     }
 
     /// Jump directly to the `offset`-th upcoming track (0 = very next song in Up Next).
@@ -128,11 +162,11 @@ impl PlayQueue {
     }
 
     pub fn len(&self) -> usize {
-        self.tracks.len()
+        self.order.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tracks.is_empty()
+        self.order.is_empty()
     }
 
     /// Update the `liked` flag for all queued occurrences of a track ID.
@@ -358,5 +392,28 @@ mod tests {
         q.set_shuffle(true);
         assert_eq!(q.current().map(|t| t.id.as_str()), Some("1"));
         assert_eq!(q.peek_upcoming(2).len(), 2);
+    }
+
+    #[test]
+    fn remove_track_by_id_compacts_and_keeps_cursor_stable_across_shuffle() {
+        let tracks = vec![
+            dummy_track("1", "A"),
+            dummy_track("2", "B"),
+            dummy_track("3", "C"),
+            dummy_track("4", "D"),
+        ];
+        let mut q = PlayQueue::new();
+        q.set_tracks(tracks, Some(2)); // playing "3"
+        assert_eq!(q.current().map(|t| t.id.as_str()), Some("3"));
+        assert!(q.remove_track_by_id("1"));
+        assert!(q.remove_track_by_id("2"));
+        assert_eq!(q.current().map(|t| t.id.as_str()), Some("3"));
+        assert_eq!(q.len(), 2);
+        // Toggling shuffle must never resurrect deleted tracks "1" or "2"
+        q.set_shuffle(true);
+        q.set_shuffle(false);
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.tracks().len(), 2);
+        assert!(q.tracks().iter().all(|t| t.id != "1" && t.id != "2"));
     }
 }

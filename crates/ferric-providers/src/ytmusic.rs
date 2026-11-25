@@ -1302,6 +1302,13 @@ fn is_low_quality_radio_candidate(
         "mashup",
         "acapella",
         "a cappella",
+        "todays top hits",
+        "today's top hits",
+        "radio top hits",
+        "chill hit songs",
+        "top hits radio",
+        "hits playlist",
+        "nonstop",
     ] {
         if t.contains(bad) || a.contains(bad) {
             return true;

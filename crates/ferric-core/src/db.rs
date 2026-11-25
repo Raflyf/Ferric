@@ -246,13 +246,13 @@ impl LibraryDb {
     }
 
     /// One-time cleanup migration that purges unplayed, unliked ephemeral YouTube Music discovery/radio
-    /// dumps (such as unrelated music videos cached by older builds) while strictly preserving all local
-    /// files, liked tracks, playlist tracks, and recently played history.
+    /// dumps (including older `stream_cache` prefetch entries and unrelated Minecraft music videos)
+    /// while strictly preserving all local files, liked tracks, playlist tracks, and recently played history.
     pub fn prune_ephemeral_discovery_bloat(
         &mut self,
         keep_recent_ids: &[String],
     ) -> CoreResult<usize> {
-        const MIGRATION_KEY: &str = "migration_pruned_ephemeral_v1";
+        const MIGRATION_KEY: &str = "migration_pruned_ephemeral_v2";
         if self.get_setting::<bool>(MIGRATION_KEY)?.unwrap_or(false) {
             return Ok(0);
         }
@@ -262,18 +262,24 @@ impl LibraryDb {
         let mut stale_ids = Vec::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT id, title FROM tracks \
+                "SELECT id, title, artist FROM tracks \
                  WHERE source = 'YT MUSIC' \
                    AND liked = 0 \
-                   AND file_path IS NULL \
+                   AND (file_path IS NULL OR file_path LIKE '%stream_cache%') \
                    AND id NOT IN (SELECT track_id FROM playlist_tracks)",
             )?;
             let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
             for row in rows {
-                let (id, title) = row?;
-                if !keep.contains(id.as_str()) || title.to_ascii_lowercase().contains("minecraft") {
+                let (id, title, artist) = row?;
+                let is_mc = title.to_ascii_lowercase().contains("minecraft")
+                    || artist.to_ascii_lowercase().contains("minecraft");
+                if !keep.contains(id.as_str()) || is_mc {
                     stale_ids.push(id);
                 }
             }
@@ -914,7 +920,9 @@ mod tests {
             artist: "A Minecraft Music Video".to_string(),
             album: "YouTube Music".to_string(),
             duration_ms: 180_000,
-            path: None,
+            path: Some(PathBuf::from(
+                "C:/Users/Test/AppData/Local/LivelyDesk/Ferric/data/stream_cache/junk1111111_high.webm",
+            )),
             source: TrackSource::YouTubeMusic,
             codec: "YT AAC".to_string(),
             sample_rate: 44_100,

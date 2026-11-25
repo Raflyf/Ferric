@@ -514,8 +514,76 @@ mod win_impl {
             if CLOSE_TO_TRAY.load(Ordering::Acquire) {
                 ensure_tray_icon(hwnd, "Ferric — Music Player");
             }
+            apply_window_icon(hwnd);
             let acr_on = ACRYLIC_ENABLED.load(Ordering::Acquire);
             set_native_acrylic(acr_on, 0.72);
+        }
+    }
+
+    fn apply_window_icon(hwnd: HWND) {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetSystemMetrics(n_index: i32) -> i32;
+            fn LoadImageW(
+                h_inst: *mut c_void,
+                name: *const u16,
+                img_type: u32,
+                cx: i32,
+                cy: i32,
+                fu_load: u32,
+            ) -> *mut c_void;
+            fn SendMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
+            fn SetClassLongPtrW(hwnd: *mut c_void, n_index: i32, dw_new_long: isize) -> isize;
+        }
+        const IMAGE_ICON: u32 = 1;
+        const LR_DEFAULTCOLOR: u32 = 0x0000;
+        const LR_SHARED: u32 = 0x8000;
+        const SM_CXICON: i32 = 11;
+        const SM_CYICON: i32 = 12;
+        const SM_CXSMICON: i32 = 49;
+        const SM_CYSMICON: i32 = 50;
+        const WM_SETICON: u32 = 0x0080;
+        const ICON_SMALL: usize = 0;
+        const ICON_BIG: usize = 1;
+        const GCLP_HICON: i32 = -14;
+        const GCLP_HICONSM: i32 = -34;
+
+        // SAFETY: Loads embedded resource icon #1 (`ferric.ico` via `winresource`) at exact OS
+        // small/big icon dimensions and binds it to both HWND and MakepadWindow class so Windows 11
+        // Taskbar Hover Thumbnail Preview & Alt+Tab display Ferric's cassette icon instead of a blank icon.
+        unsafe {
+            let Ok(hmod) = GetModuleHandleW(None) else {
+                return;
+            };
+            let res_id = std::ptr::without_provenance::<u16>(1);
+            let big_w = GetSystemMetrics(SM_CXICON).max(32);
+            let big_h = GetSystemMetrics(SM_CYICON).max(32);
+            let sm_w = GetSystemMetrics(SM_CXSMICON).max(16);
+            let sm_h = GetSystemMetrics(SM_CYSMICON).max(16);
+            let h_big = LoadImageW(
+                hmod.0,
+                res_id,
+                IMAGE_ICON,
+                big_w,
+                big_h,
+                LR_DEFAULTCOLOR | LR_SHARED,
+            );
+            let h_small = LoadImageW(
+                hmod.0,
+                res_id,
+                IMAGE_ICON,
+                sm_w,
+                sm_h,
+                LR_DEFAULTCOLOR | LR_SHARED,
+            );
+            if !h_big.is_null() {
+                let _ = SendMessageW(hwnd.0, WM_SETICON, ICON_BIG, h_big as isize);
+                let _ = SetClassLongPtrW(hwnd.0, GCLP_HICON, h_big as isize);
+            }
+            if !h_small.is_null() {
+                let _ = SendMessageW(hwnd.0, WM_SETICON, ICON_SMALL, h_small as isize);
+                let _ = SetClassLongPtrW(hwnd.0, GCLP_HICONSM, h_small as isize);
+            }
         }
     }
 

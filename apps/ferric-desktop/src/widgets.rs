@@ -210,7 +210,7 @@ live_design! {
                         c = mix(self.dim_col, c, lit);
                         if self.glow_amt > 0.01 && lit > 0.05 {
                             let halo = clamp(((sample2d(self.grayscale_texture, self.t.xy).x - (1.0 - self.cutoff)) * self.radius / (base_scale * 4.0) + 0.5), 0.0, 1.0);
-                            s = max(s, halo * 0.26 * lit * self.glow_amt);
+                            s = max(s, halo * 0.38 * lit * self.glow_amt);
                         }
                     }
                     return s * vec4(c.rgb * c.a, c.a);
@@ -2264,27 +2264,27 @@ impl Widget for FerricLyricsView {
             let dist = i.abs_diff(self.active_idx) as f32;
             let press_scale = if is_pressed { 0.985_f32 } else { 1.0_f32 };
             let scale = (1.0
-                + focus * if self.compact { 0.14 } else { 0.065 }
-                + hover_v * (1.0 - focus) * if self.compact { 0.02 } else { 0.018 })
+                + focus * if self.compact { 0.14 } else { 0.095 }
+                + hover_v * (1.0 - focus) * if self.compact { 0.02 } else { 0.022 })
                 * press_scale;
 
-            // Gentle optical depth-of-field blur on distant lines, keeping adjacent ±1 lines crisp
+            // Cinema depth-of-field blur on inactive lines, snapping razor-sharp on active line or hover
             let base_blur = if self.compact {
                 0.0
             } else {
-                ((dist - 0.85).max(0.0) * 0.18).clamp(0.0, 0.48)
+                ((dist - 0.15).max(0.0) * 0.34).clamp(0.0, 0.92)
             };
             let blur_amt = base_blur * (1.0 - focus) * (1.0 - hover_v);
 
-            // High-legibility luminance hierarchy: active 100%, hover 92%, nearby 56-64%, distant 28%
+            // High-contrast spotlight hierarchy: active 100% pure white + glow, hover 90%, nearby 28-34%, distant 13%
             let base_alpha = if self.compact {
-                (0.76 - dist * 0.10).clamp(0.32, 0.76)
+                (0.70 - dist * 0.10).clamp(0.26, 0.70)
             } else {
-                (0.64 - dist * 0.08).clamp(0.28, 0.64)
+                (0.34 - dist * 0.055).clamp(0.13, 0.34)
             };
             let target_alpha = base_alpha
                 + (1.0 - base_alpha) * focus
-                + (0.92 - base_alpha).max(0.0) * hover_v * (1.0 - focus);
+                + (0.90 - base_alpha).max(0.0) * hover_v * (1.0 - focus);
             let alpha = target_alpha.clamp(0.0, 1.0) * edge_fade;
 
             let x_shift = if self.compact {
@@ -2398,7 +2398,7 @@ impl Widget for FerricLyricsView {
                 };
 
             let bright_col = vec4(1.0, 1.0, 1.0, alpha);
-            let dim_active_col = vec4(0.95, 0.96, 1.0, (0.58 * edge_fade).clamp(0.0, 1.0));
+            let dim_active_col = vec4(0.94, 0.95, 1.0, (0.42 * edge_fade).clamp(0.0, 1.0));
 
             let draw_rect = if use_active_draw {
                 self.draw_active.blur_amt = 0.0;

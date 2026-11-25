@@ -1432,22 +1432,22 @@ live_design! {
                                         }
                                     }
 
-                                    // Recent searches row
+                                    // Recent searches row (unified frosted glass chips)
                                     recent_searches_row = <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 5,
-                                        <Label> { draw_text: { color: #6E7180, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }, text: "Recent:" }
-                                        rsrch_0 = <FerricBtn> { visible: false, height: 22, text: "" }
-                                        rsrch_1 = <FerricBtn> { visible: false, height: 22, text: "" }
-                                        rsrch_2 = <FerricBtn> { visible: false, height: 22, text: "" }
-                                        rsrch_3 = <FerricBtn> { visible: false, height: 22, text: "" }
-                                        rsrch_4 = <FerricBtn> { visible: false, height: 22, text: "" }
+                                        <Label> { draw_text: { color: #848796, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }, text: "Recent:" }
+                                        rsrch_0 = <FerricChipBtn> { visible: false, height: 22, text: "" }
+                                        rsrch_1 = <FerricChipBtn> { visible: false, height: 22, text: "" }
+                                        rsrch_2 = <FerricChipBtn> { visible: false, height: 22, text: "" }
+                                        rsrch_3 = <FerricChipBtn> { visible: false, height: 22, text: "" }
+                                        rsrch_4 = <FerricChipBtn> { visible: false, height: 22, text: "" }
                                     }
 
-                                    // Search Album / Artist / Playlist cards strip
+                                    // Search Top Result / Album / Artist / Playlist cards strip
                                     search_cards_wrap = <View> {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 6,
-                                        <Label> { draw_text: { color: #C5C7D4, text_style: <THEME_FONT_BOLD> { font_size: 10.2 } }, text: "Albums, Artists & Playlists" }
+                                        <Label> { draw_text: { color: #D4D6E2, text_style: <THEME_FONT_BOLD> { font_size: 10.2 } }, text: "Top Results · Artists, Albums & Playlists" }
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, spacing: 8,
                                             sc_0 = <ShelfCard> {}
@@ -2464,26 +2464,27 @@ live_design! {
                             flow: Down,
                             spacing: 4,
 
-                            // TOP ULTRA-MINIMAL FLOATING STRIP (zero heavy chrome)
+                            // TOP ULTRA-MINIMAL FLOATING STRIP (generous hit target for Close (Esc))
                             <View> {
-                                width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                width: Fill, height: 30, flow: Right, align: { y: 0.5 }, spacing: 8,
                                 signal_path_lbl = <Label> {
                                     width: Fill, padding: 0,
                                     draw_text: { color: #FFFFFF4C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
                                     text: "Signal Path: WASAPI 48.0 kHz · 6.0s Bass-Swap"
                                 }
                                 fs_close_btn = <Button> {
-                                    width: Fit, height: 24, padding: { left: 10, right: 10 },
+                                    width: Fit, height: 28, padding: { left: 14, right: 14 },
+                                    cursor: Hand,
                                     text: "Close (Esc)"
-                                    draw_text: { color: #FFFFFFA6, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }
+                                    draw_text: { color: #FFFFFFCC, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.6 } }
                                     draw_bg: {
                                         instance hover: 0.0
                                         fn pixel(self) -> vec4 {
                                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                            let r = (self.rect_size.y - 1.0) * 0.25;
+                                            let r = (self.rect_size.y - 1.0) * 0.28;
                                             sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                                            sdf.fill_keep(vec4(1.0, 1.0, 1.0, 0.055 + 0.095 * self.hover));
-                                            sdf.stroke(vec4(1.0, 1.0, 1.0, 0.10 + 0.14 * self.hover), 1.0);
+                                            sdf.fill_keep(vec4(1.0, 1.0, 1.0, 0.08 + 0.12 * self.hover));
+                                            sdf.stroke(vec4(1.0, 1.0, 1.0, 0.15 + 0.18 * self.hover), 1.0);
                                             return sdf.result;
                                         }
                                     }
@@ -2969,6 +2970,12 @@ pub struct App {
     search_tracks: Rc<Vec<Track>>,
     #[rust]
     search_filter: SearchFilter,
+    #[rust]
+    search_request_seq: u64,
+    #[rust]
+    pending_live_search: Option<(String, Instant)>,
+    #[rust]
+    last_dispatched_search: String,
     #[rust]
     detail_state: DetailViewState,
     #[rust]
@@ -5460,6 +5467,7 @@ impl App {
             if let Some(q) = self.session_state.recent_searches.get(i) {
                 self.ui.button(bid).set_visible(cx, true);
                 self.ui.button(bid).set_text(cx, &clip_text(q, 20));
+                self.style_chip_btn(cx, bid, false);
             } else {
                 self.ui.button(bid).set_visible(cx, false);
             }
@@ -6253,6 +6261,11 @@ impl App {
             id!(pin_slot_4),
             id!(chip_0),
             id!(chip_1),
+            id!(rsrch_0),
+            id!(rsrch_1),
+            id!(rsrch_2),
+            id!(rsrch_3),
+            id!(rsrch_4),
             id!(chip_2),
             id!(chip_3),
             id!(chip_4),
@@ -7277,10 +7290,85 @@ impl App {
     }
 
     fn spawn_rich_search(&mut self, cx: &mut Cx, raw_query: String) {
+        self.dispatch_rich_search(cx, raw_query, true);
+    }
+
+    fn schedule_live_search(&mut self, cx: &mut Cx, raw: String, from_top_bar: bool) {
+        if from_top_bar {
+            if self.ui.text_input(id!(search_page_input)).text() != raw {
+                self.ui
+                    .text_input(id!(search_page_input))
+                    .set_text(cx, &raw);
+            }
+        } else if self.ui.text_input(id!(top_search_input)).text() != raw {
+            self.ui.text_input(id!(top_search_input)).set_text(cx, &raw);
+        }
+
+        let q = raw.trim().to_string();
+        if q.is_empty() {
+            self.pending_live_search = None;
+            self.last_dispatched_search.clear();
+            self.search_request_seq = self.search_request_seq.wrapping_add(1);
+            self.search_result = YtmRichSearch::default();
+            self.search_tracks = Rc::new(Vec::new());
+            self.ui
+                .label(id!(search_status_lbl))
+                .set_text(cx, "Instant YouTube Music + Local Search");
+            self.refresh_search_ui(cx);
+            self.ui.redraw(cx);
+            return;
+        }
+        // Wait for explicit Enter / Search click on pasted playlist URLs
+        if parse_spotify_target(&q).is_some() || parse_youtube_target(&q).is_some() {
+            self.pending_live_search = None;
+            return;
+        }
+        if q.chars().count() < 2 {
+            self.pending_live_search = None;
+            return;
+        }
+
+        if self.active_page != MainPage::Search {
+            self.navigate_to(cx, MainPage::Search, true);
+            if from_top_bar {
+                self.ui.widget(id!(top_search_input)).set_key_focus(cx);
+            }
+        }
+
+        // Instant zero-latency local + Home feed filtering while live YouTube Music results load
+        let q_low = q.to_ascii_lowercase();
+        let mut instant_hits = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for t in self
+            .all_tracks
+            .iter()
+            .chain(self.rich_home.quick_picks.iter())
+            .chain(self.rich_home.all_tracks.iter())
+        {
+            if (t.title.to_ascii_lowercase().contains(&q_low)
+                || t.artist.to_ascii_lowercase().contains(&q_low)
+                || t.album.to_ascii_lowercase().contains(&q_low))
+                && seen.insert(t.id.clone())
+            {
+                instant_hits.push(t.clone());
+            }
+        }
+        if !instant_hits.is_empty() {
+            self.search_tracks = Rc::new(instant_hits);
+        }
+        self.ui
+            .label(id!(search_status_lbl))
+            .set_text(cx, &format!("Searching '{q}'..."));
+        self.refresh_search_ui(cx);
+        self.pending_live_search = Some((q, Instant::now() + Duration::from_millis(260)));
+    }
+
+    fn dispatch_rich_search(&mut self, cx: &mut Cx, raw_query: String, record_history: bool) {
         let query = raw_query.trim().to_string();
         if query.is_empty() {
             return;
         }
+        self.pending_live_search = None;
         if parse_spotify_target(&query).is_some() {
             self.start_public_sync(cx, "Spotify", query);
             return;
@@ -7289,33 +7377,55 @@ impl App {
             self.start_public_sync(cx, "YouTube", query);
             return;
         }
-        self.session_state.record_search(&query);
-        if let Some(db) = &self.db {
-            let _ = db.save_session_state(&self.session_state);
+        if record_history {
+            self.session_state.record_search(&query);
+            if let Some(db) = &self.db {
+                let _ = db.save_session_state(&self.session_state);
+            }
         }
-        self.ui
-            .text_input(id!(search_page_input))
-            .set_text(cx, &query);
-        self.navigate_to(cx, MainPage::Search, true);
+        if self.ui.text_input(id!(search_page_input)).text() != query {
+            self.ui
+                .text_input(id!(search_page_input))
+                .set_text(cx, &query);
+        }
+        if self.ui.text_input(id!(top_search_input)).text() != query {
+            self.ui
+                .text_input(id!(top_search_input))
+                .set_text(cx, &query);
+        }
+        if self.active_page != MainPage::Search {
+            self.navigate_to(cx, MainPage::Search, true);
+        }
         self.ui
             .label(id!(search_status_lbl))
             .set_text(cx, &format!("Searching '{query}'..."));
 
-        // Immediate local matches while YouTube Music responds
+        // Immediate local + cached matches while YouTube Music responds
         let q_low = query.to_ascii_lowercase();
-        let local_hits: Vec<Track> = self
+        let mut local_hits = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for t in self
             .all_tracks
             .iter()
-            .filter(|t| {
-                t.title.to_ascii_lowercase().contains(&q_low)
-                    || t.artist.to_ascii_lowercase().contains(&q_low)
-                    || t.album.to_ascii_lowercase().contains(&q_low)
-            })
-            .cloned()
-            .collect();
-        self.search_tracks = Rc::new(local_hits);
+            .chain(self.rich_home.quick_picks.iter())
+            .chain(self.rich_home.all_tracks.iter())
+        {
+            if (t.title.to_ascii_lowercase().contains(&q_low)
+                || t.artist.to_ascii_lowercase().contains(&q_low)
+                || t.album.to_ascii_lowercase().contains(&q_low))
+                && seen.insert(t.id.clone())
+            {
+                local_hits.push(t.clone());
+            }
+        }
+        if !local_hits.is_empty() || record_history {
+            self.search_tracks = Rc::new(local_hits);
+        }
         self.refresh_search_ui(cx);
 
+        self.search_request_seq = self.search_request_seq.wrapping_add(1);
+        let seq = self.search_request_seq;
+        self.last_dispatched_search = query.clone();
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
@@ -7323,12 +7433,14 @@ impl App {
         thread::spawn(move || match fetch_rich_search(&session, &query, 30) {
             Ok(result) => {
                 let _ = tx.send(BgMessage::YtmRichSearchCompleted {
+                    seq,
                     query,
                     result: Box::new(result),
                 });
             }
             Err(err) => {
                 let _ = tx.send(BgMessage::YtmSearchFailed {
+                    seq,
                     query,
                     error: err.to_string(),
                 });
@@ -7731,6 +7843,15 @@ impl App {
             }
         }
 
+        // Fire debounced live instant search while typing in top bar or Search page
+        if let Some((_, due)) = self.pending_live_search
+            && Instant::now() >= due
+            && let Some((q, _)) = self.pending_live_search.take()
+            && q != self.last_dispatched_search
+        {
+            self.dispatch_rich_search(cx, q, false);
+        }
+
         // Auto-hide toast after 3s
         if let Some(until) = self.toast_until
             && Instant::now() >= until
@@ -7963,23 +8084,28 @@ impl App {
                         self.refresh_detail_hero(cx);
                     }
                 }
-                BgMessage::YtmRichSearchCompleted { query, result } => {
+                BgMessage::YtmRichSearchCompleted { seq, query, result } => {
+                    if seq != self.search_request_seq {
+                        continue;
+                    }
                     let result = *result;
                     let song_n = result.tracks.len();
                     let card_n = result.cards.len();
                     // Priority-load Search album/artist/playlist cards first so top cards never look blank
                     self.request_artwork_for_cards(&result.cards);
                     self.request_artwork_for_tracks(&result.tracks);
-                    self.search_tracks = Rc::new(result.tracks.clone());
                     self.search_result = result;
+                    self.apply_search_filter(cx, self.search_filter);
                     self.ui.label(id!(search_status_lbl)).set_text(
                         cx,
                         &format!("'{query}' · {song_n} songs, {card_n} albums/artists"),
                     );
-                    self.refresh_search_ui(cx);
                     self.ui.redraw(cx);
                 }
-                BgMessage::YtmSearchFailed { query, error } => {
+                BgMessage::YtmSearchFailed { seq, query, error } => {
+                    if seq != self.search_request_seq {
+                        continue;
+                    }
                     self.ui
                         .label(id!(search_status_lbl))
                         .set_text(cx, &format!("Search '{query}' failed: {error}"));
@@ -8607,10 +8733,12 @@ impl App {
             self.spawn_ytm_rich_home(cx, self.active_mood_idx, params, true);
             self.show_toast(cx, "Refreshing YouTube Music feed...");
         }
+        if let Some(typed) = self.ui.text_input(id!(top_search_input)).changed(actions) {
+            self.schedule_live_search(cx, typed, true);
+        }
         if let Some((submitted, _)) = self.ui.text_input(id!(top_search_input)).returned(actions) {
             let q = submitted.trim().to_string();
             if !q.is_empty() {
-                self.ui.text_input(id!(search_page_input)).set_text(cx, &q);
                 self.spawn_rich_search(cx, q);
             }
         }
@@ -8906,6 +9034,9 @@ impl App {
         }
 
         // 4. SEARCH PAGE
+        if let Some(typed) = self.ui.text_input(id!(search_page_input)).changed(actions) {
+            self.schedule_live_search(cx, typed, false);
+        }
         if self.ui.button(id!(search_go_btn)).clicked(actions) {
             let q = self.ui.text_input(id!(search_page_input)).text();
             self.spawn_rich_search(cx, q);
@@ -8914,9 +9045,16 @@ impl App {
             self.spawn_rich_search(cx, submitted);
         }
         if self.ui.button(id!(search_clear_btn)).clicked(actions) {
+            self.pending_live_search = None;
+            self.last_dispatched_search.clear();
+            self.search_request_seq = self.search_request_seq.wrapping_add(1);
             self.ui.text_input(id!(search_page_input)).set_text(cx, "");
+            self.ui.text_input(id!(top_search_input)).set_text(cx, "");
             self.search_result = YtmRichSearch::default();
             self.search_tracks = Rc::new(Vec::new());
+            self.ui
+                .label(id!(search_status_lbl))
+                .set_text(cx, "Instant YouTube Music + Local Search");
             self.refresh_search_ui(cx);
         }
         for (btn, flt) in [
@@ -10626,22 +10764,34 @@ impl AppMain for App {
         }
 
         // Native Windows 11 Frameless Drag & Aero Snap on empty regions of top_bar
+        // (never hijack clicks over Fullscreen Lyrics' Close (Esc) button!)
         let top_bar_h = 36.0 * self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
         if let Event::WindowDragQuery(dq) = event
             && dq.abs.y >= 0.0
             && dq.abs.y <= top_bar_h
         {
-            let left_r = self.ui.view(id!(top_left_grp)).area().rect(cx);
-            let pill_r = self.ui.view(id!(top_search_box)).area().rect(cx);
-            let right_r = self.ui.view(id!(top_right_grp)).area().rect(cx);
-            let in_left = left_r.size.x > 0.0 && dq.abs.x <= left_r.pos.x + left_r.size.x + 6.0;
-            let in_pill = pill_r.size.x > 0.0
-                && dq.abs.x >= pill_r.pos.x - 4.0
-                && dq.abs.x <= pill_r.pos.x + pill_r.size.x + 4.0;
-            let in_right = right_r.size.x > 0.0 && dq.abs.x >= right_r.pos.x - 6.0;
-            if !in_left && !in_pill && !in_right {
-                dq.response.set(WindowDragQueryResponse::Caption);
-                return;
+            if self.fullscreen_open {
+                let close_r = self.ui.button(id!(fs_close_btn)).area().rect(cx);
+                let near_close = close_r.size.x > 0.0
+                    && dq.abs.x >= close_r.pos.x - 20.0
+                    && dq.abs.x <= close_r.pos.x + close_r.size.x + 20.0;
+                if !near_close {
+                    dq.response.set(WindowDragQueryResponse::Caption);
+                    return;
+                }
+            } else {
+                let left_r = self.ui.view(id!(top_left_grp)).area().rect(cx);
+                let pill_r = self.ui.view(id!(top_search_box)).area().rect(cx);
+                let right_r = self.ui.view(id!(top_right_grp)).area().rect(cx);
+                let in_left = left_r.size.x > 0.0 && dq.abs.x <= left_r.pos.x + left_r.size.x + 6.0;
+                let in_pill = pill_r.size.x > 0.0
+                    && dq.abs.x >= pill_r.pos.x - 4.0
+                    && dq.abs.x <= pill_r.pos.x + pill_r.size.x + 4.0;
+                let in_right = right_r.size.x > 0.0 && dq.abs.x >= right_r.pos.x - 6.0;
+                if !in_left && !in_pill && !in_right {
+                    dq.response.set(WindowDragQueryResponse::Caption);
+                    return;
+                }
             }
         }
 

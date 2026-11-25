@@ -205,10 +205,12 @@ pub enum BgMessage {
         error: String,
     },
     YtmRichSearchCompleted {
+        seq: u64,
         query: String,
         result: Box<YtmRichSearch>,
     },
     YtmSearchFailed {
+        seq: u64,
         query: String,
         error: String,
     },

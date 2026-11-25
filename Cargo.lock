@@ -615,6 +615,7 @@ name = "ferric-providers"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "fastrand",
  "ferric-core",
  "lofty",
  "serde",

@@ -2993,10 +2993,10 @@ impl App {
             return;
         };
         let session = self.current_ytm_session();
-        let track_id = cur.id.clone();
-        let artist = cur.artist.clone();
-        let title = cur.title.clone();
-        let existing_vid = cur.youtube_video_id.clone();
+        let track_id = cur.id;
+        let artist = cur.artist;
+        let title = cur.title;
+        let existing_vid = cur.youtube_video_id;
         thread::spawn(move || {
             let res = (|| {
                 let vid = match existing_vid {

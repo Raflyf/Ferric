@@ -125,6 +125,67 @@ impl FadeCurve {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioQuality {
+    Low,
+    Normal,
+    #[default]
+    High,
+    Best,
+}
+
+impl AudioQuality {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low (64k)",
+            Self::Normal => "Normal (128k)",
+            Self::High => "High (160k Opus)",
+            Self::Best => "Best Available",
+        }
+    }
+
+    pub fn cache_suffix(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "std",
+            Self::High => "high",
+            Self::Best => "best",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoQuality {
+    Auto,
+    P360,
+    P480,
+    #[default]
+    P720,
+    P1080,
+}
+
+impl VideoQuality {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::P360 => "360p",
+            Self::P480 => "480p",
+            Self::P720 => "720p",
+            Self::P1080 => "1080p",
+        }
+    }
+
+    pub fn target_height(self) -> u32 {
+        match self {
+            Self::Auto => 720,
+            Self::P360 => 360,
+            Self::P480 => 480,
+            Self::P720 => 720,
+            Self::P1080 => 1080,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlaybackDspSettings {
@@ -137,6 +198,12 @@ pub struct PlaybackDspSettings {
     pub mono_audio: bool,
     pub playback_speed: f32,
     pub sleep_timer_fade_out: bool,
+    #[serde(default)]
+    pub audio_quality: AudioQuality,
+    #[serde(default)]
+    pub video_quality: VideoQuality,
+    #[serde(default)]
+    pub close_to_tray: bool,
 }
 
 impl Default for PlaybackDspSettings {
@@ -145,12 +212,15 @@ impl Default for PlaybackDspSettings {
             crossfade_ms: 6_000,
             fade_in_play_ms: 240,
             fade_curve: FadeCurve::BassSwapAutomix,
-            gapless_album_lock: true,
+            gapless_album_lock: false,
             trim_silence: true,
             replay_gain: true,
             mono_audio: false,
             playback_speed: 1.0,
             sleep_timer_fade_out: true,
+            audio_quality: AudioQuality::High,
+            video_quality: VideoQuality::P720,
+            close_to_tray: false,
         }
     }
 }
@@ -167,6 +237,9 @@ impl PlaybackDspSettings {
             mono_audio: self.mono_audio,
             playback_speed: self.playback_speed.clamp(0.5, 2.0),
             sleep_timer_fade_out: self.sleep_timer_fade_out,
+            audio_quality: self.audio_quality,
+            video_quality: self.video_quality,
+            close_to_tray: self.close_to_tray,
         }
     }
 }
@@ -612,8 +685,11 @@ mod tests {
         assert_eq!(dsp.crossfade_ms, 6_000);
         assert_eq!(dsp.fade_in_play_ms, 240);
         assert_eq!(dsp.fade_curve, FadeCurve::BassSwapAutomix);
-        assert!(dsp.gapless_album_lock);
+        assert!(!dsp.gapless_album_lock);
         assert!(dsp.trim_silence);
+        assert_eq!(dsp.audio_quality, AudioQuality::High);
+        assert_eq!(dsp.video_quality, VideoQuality::P720);
+        assert!(!dsp.close_to_tray);
         assert_eq!(FadeCurve::all().len(), 3);
     }
 }

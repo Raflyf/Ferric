@@ -1,5 +1,5 @@
 //! Native 1-Click Google / YouTube Music Sign-In window using Windows Edge WebView2.
-//! Matches Sonora's zero-Developer-Console sign-in flow: opens Google's official YouTube Music
+//! Zero-Developer-Console sign-in flow: opens Google's official YouTube Music
 //! login page, automatically captures `SAPISID` / `__Secure-3PAPISID` session cookies once
 //! redirected to `music.youtube.com`, and closes the window cleanly.
 

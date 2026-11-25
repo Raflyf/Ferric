@@ -3,7 +3,8 @@ use ferric_core::models::{Playlist, Track};
 use ferric_providers::lyrics::SyncedLyrics;
 use ferric_providers::updater::{DownloadEvent, ReleaseInfo};
 use ferric_providers::ytmusic::{
-    CachedAudioStream, YtmAccountLibrary, YtmBrowseDetail, YtmCardKind, YtmRichHome, YtmRichSearch,
+    CachedAudioStream, VideoStreamOption, YtmAccountLibrary, YtmBrowseDetail, YtmCardKind,
+    YtmRichHome, YtmRichSearch,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -224,6 +225,15 @@ pub enum BgMessage {
         track_id: String,
         error: String,
         auto_play: bool,
+    },
+    VideoStreamsLoaded {
+        track_id: String,
+        video_id: String,
+        streams: Vec<VideoStreamOption>,
+    },
+    VideoStreamsFailed {
+        track_id: String,
+        error: String,
     },
     PublicSyncCompleted {
         provider: &'static str,

@@ -27,18 +27,28 @@ live_design! {
             instance active: 0.0
             instance hover: 0.0
             uniform base_col: #00000000
-            uniform hover_col: #191B23
-            uniform active_col: #1D1B2B
+            uniform hover_col: #14151D
+            uniform active_col: #181726
             uniform accent_col: #A882FF
+            uniform glass_on: 0.0
             uniform radius: 8.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, self.radius * 0.5);
-                let idle_or_hover = mix(self.base_col, self.hover_col, self.hover);
-                let active_tint = mix(self.active_col, vec4(self.accent_col.xyz, 0.16), 0.35);
+                let r = mix(self.radius * 0.5, 9.0, self.glass_on);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, r);
+                let glass_idle = vec4(0.11, 0.12, 0.17, 0.34 * self.glass_on);
+                let base = mix(self.base_col, glass_idle, self.glass_on);
+                let hov = mix(self.hover_col, vec4(0.20, 0.21, 0.28, 0.56), self.glass_on);
+                let idle_or_hover = mix(base, hov, self.hover);
+                let active_tint = mix(self.active_col, vec4(self.accent_col.xyz, 0.22), 0.42);
                 let bg = mix(idle_or_hover, active_tint, self.active);
-                sdf.fill(bg);
+                sdf.fill_keep(bg);
+                let top_rim = smoothstep(0.45, 0.0, self.pos.y);
+                let g_border = vec4(1.0, 1.0, 1.0, (0.09 + 0.14 * top_rim) * self.glass_on);
+                let a_border = vec4(self.accent_col.xyz, 0.45 * self.active);
+                let border = mix(g_border, a_border, self.active);
+                sdf.stroke(border, 1.0);
                 return sdf.result;
             }
         }
@@ -99,7 +109,7 @@ live_design! {
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 14, height: Fit }
+            icon_walk: { width: 14, height: 14 }
             draw_icon: {
                 svg_path: "M14 10H2V12H14V10ZM14 6H2V8H14V6ZM18 14V10H16V14H12V16H16V20H18V16H22V14H18ZM2 16H10V14H2V16Z"
                 color: #6E7180
@@ -125,7 +135,7 @@ live_design! {
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 14, height: Fit }
+            icon_walk: { width: 14, height: 14 }
             draw_icon: {
                 svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
                 color: #5C5F6E
@@ -305,6 +315,8 @@ pub struct TrackListScope {
     pub is_playing: bool,
     pub audio_level: f32,
     pub accent: Vec4,
+    pub glass_on: f32,
+    pub ui_zoom: f32,
     pub artworks: Rc<HashMap<String, CachedArtwork>>,
 }
 
@@ -360,7 +372,7 @@ impl Widget for TrackList {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let (tracks, active_id, is_playing, level, accent, artworks) = scope
+        let (tracks, active_id, is_playing, level, accent, glass_on, zoom, artworks) = scope
             .props
             .get::<TrackListScope>()
             .map(|d| {
@@ -370,6 +382,8 @@ impl Widget for TrackList {
                     d.is_playing,
                     d.audio_level,
                     d.accent,
+                    d.glass_on,
+                    d.ui_zoom.clamp(0.8, 1.4),
                     Rc::clone(&d.artworks),
                 )
             })
@@ -380,10 +394,16 @@ impl Widget for TrackList {
                     false,
                     0.5,
                     vec4(0.659, 0.510, 1.0, 1.0),
+                    0.0,
+                    1.0,
                     Rc::new(HashMap::new()),
                 )
             });
         let count = tracks.len();
+        let row_h = (54.0 * zoom) as f64;
+        let art_sz = (40.0 * zoom) as f64;
+        let title_fs = (13.0 * zoom) as f64;
+        let sub_fs = (11.5 * zoom) as f64;
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
@@ -422,12 +442,18 @@ impl Widget for TrackList {
                         row.apply_over(
                             cx,
                             live! {
+                                height: (row_h),
                                 draw_bg: {
                                     active: (if is_active { 1.0 } else { 0.0 }),
-                                    accent_col: (accent)
+                                    accent_col: (accent),
+                                    glass_on: (glass_on)
                                 }
-                                idx_lbl = { draw_text: { color: (idx_col) } }
-                                title_lbl = { draw_text: { color: (title_col) } }
+                                art_tile = { width: (art_sz), height: (art_sz) }
+                                idx_lbl = { draw_text: { color: (idx_col), text_style: { font_size: (sub_fs) } } }
+                                title_lbl = { draw_text: { color: (title_col), text_style: { font_size: (title_fs) } } }
+                                artist_lbl = { draw_text: { text_style: { font_size: (sub_fs) } } }
+                                album_lbl = { draw_text: { text_style: { font_size: (sub_fs) } } }
+                                dur_lbl = { draw_text: { text_style: { font_size: (sub_fs) } } }
                                 like_btn = { draw_icon: { color: (like_col) } }
                             },
                         );

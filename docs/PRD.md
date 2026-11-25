@@ -12,8 +12,8 @@
 
 Membangun aplikasi pemutar dan pengelola musik modern sekelas Spotify & YouTube Music yang **100% gratis, bebas iklan di dalam aplikasi, seluruh fitur pemutaran terbuka penuh** (*unlimited skips*, bebas pilih lagu spesifik kapan saja, *on-demand queue*, lirik sinkron kata-per-kata, *offline mode*, *parametric equalizer*, *cross-service playlist sync*, dan *cross-device remote control*), namun ditulis menggunakan **Full Native Rust** agar memiliki jejak penggunaan **RAM, CPU, GPU, dan baterai paling ringan di kelasnya** baik di PC Windows maupun HP Android.
 
-Keunggulan utama dibanding aplikasi referensi (`Sonora v0.50.3` di Windows dan `Auralys v4.1.0 / Metrolist` di Android) adalah:
-1. **Satu Inti Kode Native Rust untuk Windows + Android** (mengatasi keterbatasan `GPUI` pada Sonora yang tidak bisa jalan di Android, dan mengatasi beban memori JVM/Compose/ExoPlayer pada Auralys di Android).
+Keunggulan utama dibanding aplikasi referensi (`Desktop Reference v0.50.3` di Windows dan `Mobile Reference v4.1.0 / Metrolist` di Android) adalah:
+1. **Satu Inti Kode Native Rust untuk Windows + Android** (mengatasi keterbatasan `GPUI` pada Desktop Reference yang tidak bisa jalan di Android, dan mengatasi beban memori JVM/Compose/ExoPlayer pada Mobile Reference di Android).
 2. **Multi-Account Login Terpadu (Spotify + YouTube / YouTube Music Sekaligus):** Pengguna dapat login menggunakan akun **Spotify (Free/Premium)**, akun **Google untuk YouTube & YouTube Music (Free/Premium)**, keduanya secara bersamaan, atau tanpa akun sama sekali (*offline-first*).
 3. **Fitur "Ferric Connect" (Bidirectional Desktop <-> Mobile Sync Tanpa Server Pusat):** Memutar musik di PC Windows dapat dikontrol penuh secara real-time dari HP Android (play/pause, seek, ganti lagu, atur volume, ubah antrean, lempar output suara dari PC ke HP atau sebaliknya), bekerja otomatis di Wi-Fi lokal (`mDNS`) maupun jarak jauh lewat internet seluler (`iroh` P2P QUIC).
 4. **Arsitektur Legal & Tahan Banting (*Metadata-Audio Decoupling*):** Mendukung login resmi ke ekosistem Spotify dan YouTube / YouTube Music tanpa bergantung pada pembobolan DRM, *QuickJS cipher scraping*, atau pemalsuan token anti-bot yang melanggar hukum dan mudah rusak.
@@ -66,7 +66,7 @@ flowchart LR
 **Mengapa desain ini jauh lebih unggul?**
 1. **Satu Login Google Mencakup YouTube Sekaligus YouTube Music:** Secara arsitektur backend Google, **YouTube dan YouTube Music memakai akun dan database playlist yang sama**. Dengan **Google OAuth 2.0 PKCE + YouTube Data API v3** (`youtube.readonly` / `youtube.force-ssl`), pengguna otomatis mendapatkan seluruh playlist YouTube Music, playlist YouTube reguler, *Liked Songs/Videos* (playlist sistem `LL`), dan channel musisi yang di-subscribe (termasuk channel otomatis `Artis - Topic` milik YouTube Music), baik pada akun **Free maupun YouTube Premium**.
 2. **Akun Free (Spotify maupun YouTube) Tidak Dibatasi di Lapisan Aplikasi Kita:** Pembatasan akun Free (iklan, larangan *background play* saat layar HP mati di aplikasi YouTube gratis, atau paksaan *shuffle* di Spotify mobile gratis) hanya mengikat pemutar stream milik platform tersebut. Karena pemutaran audio ditangani oleh engine native Rust kita dari sumber audio pilihan pengguna (file lokal, streaming P2P dari PC rumah, server Navidrome/Jellyfin, katalog bebas royalti, atau plugin resolver eksternal WASM), maka **layar mati (*background play*), *on-demand play*, *unlimited skip*, *gapless/crossfade*, *offline cache*, dan *10-band EQ* terbuka 100% tanpa iklan**.
-3. **Lebih Ringan Tanpa Beban `QuickJS`:** Dengan menggunakan REST JSON murni **YouTube Data API v3** alih-alih membajak `innertube`, aplikasi kita **tidak perlu mengemas `libquickjs.so` (~925 KB) + skrip JS pemecah cipher (`yt.solver.core.js` ~530 KB) + WebView `po_token.html`** seperti yang ada di dalam Auralys dan Sonora.
+3. **Lebih Ringan Tanpa Beban `QuickJS`:** Dengan menggunakan REST JSON murni **YouTube Data API v3** alih-alih membajak `innertube`, aplikasi kita **tidak perlu mengemas `libquickjs.so` (~925 KB) + skrip JS pemecah cipher (`yt.solver.core.js` ~530 KB) + WebView `po_token.html`** seperti yang ada di dalam Mobile Reference dan Desktop Reference.
 4. **Anti-Blokir Kuota API (*BYO Client ID + ETag Caching*):** Mendukung *Client ID* pribadi pengguna baik untuk Spotify Developer maupun Google Cloud Console (10.000 unit gratis/hari; pembacaan `playlists.list`, `playlistItems.list`, dan batch 50 lagu di `videos.list` masing-masing hanya memakan **1 unit**, ditambah *short-circuit* header `If-None-Match: <ETag>` yang menghasilkan `304 Not Modified` tanpa mengunduh ulang!).
 
 ---
@@ -171,12 +171,12 @@ flowchart TB
    - Dua slot decoder aktif (`Deck A` dan `Deck B`). `Deck B` melakukan *pre-buffering* 8 detik sebelum `Deck A` selesai.
    - Memotong *encoder delay* dan *padding* pada file MP3/AAC/Opus sehingga album live atau konsep (seperti Pink Floyd / transisi DJ mix) menyambung 0 milidetik tanpa bunyi klik/jeda.
    - Opsi *Crossfade* mulus yang dapat diatur dari `0` hingga `12 detik` (otomatis dinonaktifkan bila mendeteksi dua lagu berurutan berasal dari album yang sama dan pengguna mengaktifkan opsi *"Album-Aware Crossfade"*!).
-3. **10-Band Parametric Equalizer + Import AutoEq & Equalizer APO (Inspirasi Terbaik Sonora + Auralys):**
+3. **10-Band Parametric Equalizer + Import AutoEq & Equalizer APO (Inspirasi Terbaik Desktop Reference + Mobile Reference):**
    - Mendukung filter Biquad `Peaking`, `LowShelf`, `HighShelf`, `LowPass`, `HighPass` dengan pengaturan *Preamp* dan pencegah kliping (*Soft Limiter*).
-   - **AutoEq 1-Click Search (dari Auralys):** Cari model TWS/headphone (ribuan profil headphone) dan terapkan kurva koreksinya dalam 1 klik.
-   - **Import/Export `.txt` Equalizer APO (dari Sonora):** Pengguna desktop audiophile dapat langsung memuat konfigurasi Equalizer APO mereka, dan konfigurasi EQ tersebut **ikut tersinkronisasi ke HP Android**!
+   - **AutoEq 1-Click Search (dari Mobile Reference):** Cari model TWS/headphone (ribuan profil headphone) dan terapkan kurva koreksinya dalam 1 klik.
+   - **Import/Export `.txt` Equalizer APO (dari Desktop Reference):** Pengguna desktop audiophile dapat langsung memuat konfigurasi Equalizer APO mereka, dan konfigurasi EQ tersebut **ikut tersinkronisasi ke HP Android**!
 4. **Loudness Normalization (ReplayGain / EBU R128) & Silence Trimmer:**
-   - Menyamakan kekerasan suara antar-lagu dari sumber berbeda tanpa merusak dinamika, ditambah fitur opsional pemotong bagian hening di awal/akhir lagu (*Trim Silence* dari Sonora).
+   - Menyamakan kekerasan suara antar-lagu dari sumber berbeda tanpa merusak dinamika, ditambah fitur opsional pemotong bagian hening di awal/akhir lagu (*Trim Silence* dari Desktop Reference).
 
 ### 5.3 Fitur Utama Unggulan: "Ferric Connect" (Sinkronisasi & Kontrol Silang Desktop <-> HP)
 Fitur ini menjawab kebutuhan utama kontrol bolak-balik PC Windows dan HP Android seperti Spotify Connect, namun bekerja untuk **semua pengguna (termasuk akun Free maupun tanpa akun Spotify)**:
@@ -191,13 +191,13 @@ Fitur ini menjawab kebutuhan utama kontrol bolak-balik PC Windows dan HP Android
    - Satu klik tombol **"Putar di HP Ini"** saat musik sedang menyala di PC akan memindahkan *Active Speaker Lease* dari PC ke HP pada milidetik dan posisi lagu yang sama persis (*seamless handoff*), sambil otomatis mem-pause output audio PC.
 4. **Bonus Fitur Killer — "Personal Home Cloud Streaming" (PC sebagai Server Musik Pribadi untuk HP):**
    - Punya 50 GB koleksi lagu FLAC/MP3 di hardisk PC Windows tapi memori HP penuh? Selama PC menyala, HP Android dapat memutar atau mengunduh lagu lokal yang ada di hardisk PC secara langsung dari mana saja lewat tunnel P2P `iroh-blobs` (dengan opsi *On-the-Fly Opus 160kbps Transcoding* agar hemat kuota seluler saat di luar rumah!).
-5. **Mode "Listen Together" Sinkron (Inspirasi Auralys, namun P2P):**
+5. **Mode "Listen Together" Sinkron (Inspirasi Mobile Reference, namun P2P):**
    - Selain mode *1 Active Speaker + Remote Control*, pengguna bisa mengaktifkan mode **Simulcast (Nyalakan Bareng)** di mana PC dan HP (atau bersama perangkat teman lewat tautan undangan `iroh`) memutar suara secara bersamaan dengan kompensasi offset jam presisi (*Buffer-Ready Barrier*).
 
 ### 5.4 Lirik, Offline Caching, & Integrasi Ekosistem
 1. **Synced Lyrics Ringan Tanpa Kamus 33 MB:**
    - Mengambil lirik berwaktu (*line-synced* `.lrc` & *word/syllable-synced* `.elrc`/TTML) dari `LRCLIB` dan file `.lrc` lokal, lalu menyimpannya di SQLite agar tetap tampil saat offline.
-   - Romanisasi lirik Jepang/Korea/Mandarin dibuat sebagai **modul unduhan opsional (*on-demand language pack*)** atau menggunakan tabel transliterasi ringan (<500 KB), menghindarkan APK dari pembengkakan 33,4 MB kamus Kuromoji seperti di Auralys.
+   - Romanisasi lirik Jepang/Korea/Mandarin dibuat sebagai **modul unduhan opsional (*on-demand language pack*)** atau menggunakan tabel transliterasi ringan (<500 KB), menghindarkan APK dari pembengkakan 33,4 MB kamus Kuromoji seperti di Mobile Reference.
 2. **Smart Offline Cache & Kuota Penyimpanan Otomatis:**
    - Pengguna dapat mengatur batas cache (misal `512 MB`, `2 GB`, `5 GB`) atau menandai Playlist sebagai *"Tersedia Offline"* (untuk sumber lokal, P2P PC, Subsonic/Jellyfin, dan sumber terbuka yang mengizinkan unduhan). Pembersihan otomatis berbasis LRU (*Least Recently Played*).
 3. **Integrasi Ekosistem Tambahan:**
@@ -206,9 +206,9 @@ Fitur ini menjawab kebutuhan utama kontrol bolak-balik PC Windows dan HP Android
 
 ---
 
-## 6. Saran Peningkatan (*Improvements*) Fungsi, Logika, & Cara Kerja di Atas Sonora & Auralys
+## 6. Saran Peningkatan (*Improvements*) Fungsi, Logika, & Cara Kerja di Atas Desktop Reference & Mobile Reference
 
-Berikut adalah daftar inovasi teknis dan logika produk yang dirancang khusus agar aplikasi kita melampaui Spotify resmi, Sonora, maupun Auralys:
+Berikut adalah daftar inovasi teknis dan logika produk yang dirancang khusus agar aplikasi kita melampaui Spotify resmi, Desktop Reference, maupun Mobile Reference:
 
 1. **Zero-GPU Background Teardown (*Battery & RAM Saver Mode*):**
    - **Masalah di aplikasi lain:** Spotify Desktop (Chromium CEF) memakan 350–700 MB RAM bahkan saat diminimize ke tray; banyak aplikasi mobile tetap menahan puluhan megabyte tekstur sampul album di VRAM saat layar HP mati.

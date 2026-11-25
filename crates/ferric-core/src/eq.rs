@@ -80,7 +80,7 @@ impl EqConfig {
         }
     }
 
-    /// Parse standard Equalizer APO `.txt` configuration (AutoEq / Peace / Sonora compatible).
+    /// Parse standard Equalizer APO `.txt` configuration (AutoEq / Peace compatible).
     pub fn from_equalizer_apo(text: &str) -> CoreResult<Self> {
         let mut preamp_db = 0.0_f32;
         let mut bands = Vec::new();

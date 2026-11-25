@@ -37,6 +37,8 @@ pub struct AudioTelemetry {
     /// `true` when `Deck B` was already promoted gaplessly/crossfaded to `Deck A` on the most
     /// recent `track_finished_seq` increment so the UI updates metadata without cutting audio.
     pub auto_transitioned: AtomicBool,
+    /// `true` while Deck A and Deck B are actively overlapping in a crossfade transition.
+    pub is_crossfading: AtomicBool,
     /// Lock-free 8-band visualizer energy levels (`0..=1000`).
     pub spectrum_bins: [AtomicU32; 8],
     pub(crate) flush_ring: AtomicBool,
@@ -56,6 +58,7 @@ impl AudioTelemetry {
             output_rate: self.output_rate.load(Ordering::Relaxed),
             track_finished_seq: self.track_finished_seq.load(Ordering::Acquire),
             auto_transitioned: self.auto_transitioned.load(Ordering::Acquire),
+            is_crossfading: self.is_crossfading.load(Ordering::Relaxed),
             spectrum_bins: bins,
         }
     }
@@ -76,6 +79,7 @@ pub struct TelemetrySnapshot {
     pub output_rate: u32,
     pub track_finished_seq: u64,
     pub auto_transitioned: bool,
+    pub is_crossfading: bool,
     pub spectrum_bins: [u32; 8],
 }
 
@@ -85,11 +89,19 @@ pub enum EngineCommand {
     LoadAndPlayTrack {
         path: PathBuf,
         replay_gain_db: i32,
+        fallback_duration_ms: u64,
+    },
+    CrossfadeToTrack {
+        path: PathBuf,
+        replay_gain_db: i32,
+        fallback_duration_ms: u64,
+        overlap_ms: u32,
     },
     QueueNext(Option<PathBuf>),
     QueueNextTrack {
         path: Option<PathBuf>,
         same_album_consecutive: bool,
+        fallback_duration_ms: u64,
     },
     Play,
     Pause,
@@ -231,6 +243,7 @@ struct QueuedTrackSpec {
     path: PathBuf,
     same_album_consecutive: bool,
     replay_gain_db: i32,
+    fallback_duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -238,6 +251,7 @@ struct ActiveCrossfade {
     elapsed_frames: u64,
     total_frames: u64,
     curve: FadeCurve,
+    is_manual_switch: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -342,6 +356,7 @@ impl ActiveDeck {
         out_rate: u32,
         playback_speed: f32,
         replay_gain_db: i32,
+        fallback_duration_ms: u64,
         codecs: &CodecRegistry,
     ) -> AudioResult<Self> {
         let file = File::open(path)?;
@@ -379,13 +394,18 @@ impl ActiveDeck {
             .map(|c| c.count())
             .unwrap_or(2)
             .max(1);
-        let duration_ms = match (time_base, num_frames) {
+        let probed_duration_ms = match (time_base, num_frames) {
             (Some(tb), Some(frames)) => tb
                 .calc_duration(SymDuration::from(frames))
                 .map(|t| t.as_millis().max(0) as u64)
                 .unwrap_or(0),
             (_, Some(frames)) if sample_rate > 0 => (frames * 1000) / u64::from(sample_rate),
             _ => 0,
+        };
+        let duration_ms = if probed_duration_ms > 0 {
+            probed_duration_ms
+        } else {
+            fallback_duration_ms
         };
 
         let decoder = codecs
@@ -796,6 +816,7 @@ fn promote_deck_b_to_a(
     crossfade_state: &mut Option<ActiveCrossfade>,
     bass_swap: &mut BassSwapMixer,
     telemetry: &AudioTelemetry,
+    emit_finished_event: bool,
 ) -> bool {
     let Some(next_deck) = deck_b.take() else {
         return false;
@@ -812,8 +833,10 @@ fn promote_deck_b_to_a(
         .position_ms
         .store(next_deck.current_pos_ms(), Ordering::Relaxed);
     telemetry.is_playing.store(true, Ordering::Release);
-    telemetry.auto_transitioned.store(true, Ordering::Release);
-    telemetry.track_finished_seq.fetch_add(1, Ordering::AcqRel);
+    if emit_finished_event {
+        telemetry.auto_transitioned.store(true, Ordering::Release);
+        telemetry.track_finished_seq.fetch_add(1, Ordering::AcqRel);
+    }
     *deck_a = Some(next_deck);
     true
 }
@@ -855,6 +878,7 @@ impl DecodeRuntime {
         &mut self,
         path: &Path,
         replay_gain_db: i32,
+        fallback_duration_ms: u64,
         out_rate: u32,
         telemetry: &AudioTelemetry,
     ) {
@@ -863,6 +887,7 @@ impl DecodeRuntime {
             out_rate,
             self.dsp.playback_speed,
             replay_gain_db,
+            fallback_duration_ms,
             &self.codecs,
         ) {
             Ok(mut deck) => {
@@ -877,6 +902,7 @@ impl DecodeRuntime {
                 }
                 telemetry.flush_ring.store(true, Ordering::Release);
                 telemetry.auto_transitioned.store(false, Ordering::Release);
+                telemetry.is_crossfading.store(false, Ordering::Relaxed);
                 telemetry
                     .duration_ms
                     .store(deck.duration_ms, Ordering::Relaxed);
@@ -909,7 +935,90 @@ impl DecodeRuntime {
         }
     }
 
-    fn set_queued_next(&mut self, path: Option<PathBuf>, same_album_consecutive: bool) {
+    /// Seamlessly crossfade from currently playing `Deck A` directly into a newly chosen track
+    /// without cutting Deck A abruptly (used when user clicks Next or selects another song).
+    fn crossfade_to_primary(
+        &mut self,
+        path: &Path,
+        replay_gain_db: i32,
+        fallback_duration_ms: u64,
+        overlap_ms: u32,
+        out_rate: u32,
+        telemetry: &AudioTelemetry,
+    ) {
+        let is_active = self.deck_a.is_some()
+            && telemetry.is_playing.load(Ordering::Acquire)
+            && overlap_ms >= 200;
+        if !is_active {
+            self.load_primary(
+                path,
+                replay_gain_db,
+                fallback_duration_ms,
+                out_rate,
+                telemetry,
+            );
+            return;
+        }
+        match ActiveDeck::open(
+            path,
+            out_rate,
+            self.dsp.playback_speed,
+            replay_gain_db,
+            fallback_duration_ms,
+            &self.codecs,
+        ) {
+            Ok(mut next_deck) => {
+                next_deck.prime_first_chunk(
+                    &mut self.raw_scratch,
+                    self.dsp.trim_silence,
+                    2.5,
+                    out_rate,
+                    self.dsp.playback_speed,
+                );
+                // If already mid-crossfade, promote current B to A first so the new track overlaps cleanly
+                if self.crossfade_state.is_some()
+                    && let Some(old_b) = self.deck_b.take()
+                {
+                    self.deck_a = Some(old_b);
+                }
+                telemetry
+                    .duration_ms
+                    .store(next_deck.duration_ms, Ordering::Relaxed);
+                telemetry
+                    .sample_rate
+                    .store(next_deck.sample_rate, Ordering::Relaxed);
+                telemetry
+                    .position_ms
+                    .store(next_deck.current_pos_ms(), Ordering::Relaxed);
+                self.deck_b = Some(next_deck);
+                self.deck_b_same_album = false;
+                self.queued_next = None;
+                self.bass_swap.reset();
+                self.crossfade_state = Some(ActiveCrossfade {
+                    elapsed_frames: 0,
+                    total_frames: ms_to_frames(overlap_ms.min(6_000), out_rate).max(1),
+                    curve: self.dsp.fade_curve,
+                    is_manual_switch: true,
+                });
+                telemetry.is_crossfading.store(true, Ordering::Relaxed);
+                telemetry.is_playing.store(true, Ordering::Release);
+                self.micro_fade = MicroFade::Steady(1.0);
+            }
+            Err(err) => {
+                eprintln!(
+                    "ferric-audio manual crossfade open failed ({}): {err}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    fn set_queued_next(
+        &mut self,
+        path: Option<PathBuf>,
+        same_album_consecutive: bool,
+        fallback_duration_ms: u64,
+    ) {
         match path {
             Some(p) => {
                 if let Some(existing_b) = &self.deck_b
@@ -926,6 +1035,7 @@ impl DecodeRuntime {
                     path: p,
                     same_album_consecutive,
                     replay_gain_db: 0,
+                    fallback_duration_ms,
                 });
             }
             None => {
@@ -937,13 +1047,15 @@ impl DecodeRuntime {
         }
     }
 
-    fn promote_deck_b(&mut self, telemetry: &AudioTelemetry) -> bool {
+    fn promote_deck_b(&mut self, telemetry: &AudioTelemetry, emit_finished_event: bool) -> bool {
+        telemetry.is_crossfading.store(false, Ordering::Relaxed);
         promote_deck_b_to_a(
             &mut self.deck_a,
             &mut self.deck_b,
             &mut self.crossfade_state,
             &mut self.bass_swap,
             telemetry,
+            emit_finished_event,
         )
     }
 }
@@ -964,22 +1076,45 @@ fn decode_loop(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 EngineCommand::LoadAndPlay(path) => {
-                    rt.load_primary(&path, 0, out_rate, &telemetry);
+                    rt.load_primary(&path, 0, 0, out_rate, &telemetry);
                 }
                 EngineCommand::LoadAndPlayTrack {
                     path,
                     replay_gain_db,
+                    fallback_duration_ms,
                 } => {
-                    rt.load_primary(&path, replay_gain_db, out_rate, &telemetry);
+                    rt.load_primary(
+                        &path,
+                        replay_gain_db,
+                        fallback_duration_ms,
+                        out_rate,
+                        &telemetry,
+                    );
+                }
+                EngineCommand::CrossfadeToTrack {
+                    path,
+                    replay_gain_db,
+                    fallback_duration_ms,
+                    overlap_ms,
+                } => {
+                    rt.crossfade_to_primary(
+                        &path,
+                        replay_gain_db,
+                        fallback_duration_ms,
+                        overlap_ms,
+                        out_rate,
+                        &telemetry,
+                    );
                 }
                 EngineCommand::QueueNext(path) => {
-                    rt.set_queued_next(path, false);
+                    rt.set_queued_next(path, false, 0);
                 }
                 EngineCommand::QueueNextTrack {
                     path,
                     same_album_consecutive,
+                    fallback_duration_ms,
                 } => {
-                    rt.set_queued_next(path, same_album_consecutive);
+                    rt.set_queued_next(path, same_album_consecutive, fallback_duration_ms);
                 }
                 EngineCommand::Play => {
                     if rt.deck_a.is_some() {
@@ -1123,7 +1258,7 @@ fn decode_loop(
             (slots / 2).min(1024)
         };
 
-        // 1. Proactively pre-open and prime Deck B within max(eff_xfade_ms + 4000, 8000) ms of Deck A end.
+        // 1. Proactively pre-open and prime Deck B within max(eff_xfade_ms + 8000, 12000) ms of Deck A end.
         if rt.deck_b.is_none()
             && let Some(da) = &rt.deck_a
             && let Some(spec) = &rt.queued_next
@@ -1133,7 +1268,7 @@ fn decode_loop(
             } else {
                 rt.dsp.crossfade_ms
             };
-            let preopen_window_ms = u64::from(eff_xfade_ms.saturating_add(4_000).max(8_000));
+            let preopen_window_ms = u64::from(eff_xfade_ms.saturating_add(8_000).max(12_000));
             if (da.duration_ms == 0 || da.remaining_ms() <= preopen_window_ms)
                 && let Some(s) = rt.queued_next.take()
             {
@@ -1142,6 +1277,7 @@ fn decode_loop(
                     out_rate,
                     rt.dsp.playback_speed,
                     s.replay_gain_db,
+                    s.fallback_duration_ms,
                     &rt.codecs,
                 ) {
                     Ok(mut next_deck) => {
@@ -1182,9 +1318,8 @@ fn decode_loop(
                 eff_xfade_ms > 0 && da.duration_ms > 0 && rem_ms <= u64::from(eff_xfade_ms);
             let silence_trigger = !album_locked
                 && rt.dsp.trim_silence
-                && da.duration_ms > 0
                 && da.current_pos_ms() > 2_000
-                && rem_ms <= u64::from(eff_xfade_ms) + 4_500
+                && (da.duration_ms == 0 || rem_ms <= u64::from(eff_xfade_ms) + 4_500)
                 && sustained_silence;
 
             if time_trigger || silence_trigger {
@@ -1194,7 +1329,9 @@ fn decode_loop(
                     elapsed_frames: 0,
                     total_frames: ms_to_frames(overlap_ms, out_rate).max(1),
                     curve: rt.dsp.fade_curve,
+                    is_manual_switch: false,
                 });
+                telemetry.is_crossfading.store(true, Ordering::Relaxed);
             }
         }
 
@@ -1241,7 +1378,7 @@ fn decode_loop(
                         let (ml, mr) = rt.bass_swap.mix_frame(sample_a, sb, progress, xfade.curve);
                         xfade.elapsed_frames += 1;
                         if xfade.elapsed_frames >= xfade.total_frames {
-                            rt.promote_deck_b(&telemetry);
+                            rt.promote_deck_b(&telemetry, !xfade.is_manual_switch);
                         } else {
                             rt.crossfade_state = Some(xfade);
                         }
@@ -1250,6 +1387,7 @@ fn decode_loop(
                     None => {
                         rt.crossfade_state = None;
                         rt.deck_b = None;
+                        telemetry.is_crossfading.store(false, Ordering::Relaxed);
                         Some(sample_a)
                     }
                 }
@@ -1273,6 +1411,7 @@ fn decode_loop(
                                 out_rate,
                                 rt.dsp.playback_speed,
                                 s.replay_gain_db,
+                                s.fallback_duration_ms,
                                 &rt.codecs,
                             )
                         {
@@ -1289,7 +1428,7 @@ fn decode_loop(
                             rt.deck_b = Some(next_deck);
                         }
 
-                        if rt.promote_deck_b(&telemetry) {
+                        if rt.promote_deck_b(&telemetry, true) {
                             rt.deck_a.as_mut().and_then(|da| {
                                 da.next_stereo_frame(
                                     &mut rt.raw_scratch,
@@ -1320,7 +1459,14 @@ fn decode_loop(
             dsp_scratch.push(r);
         }
 
-        if let Some(da) = &rt.deck_a {
+        if let Some(xf) = rt.crossfade_state
+            && xf.is_manual_switch
+            && let Some(db) = &rt.deck_b
+        {
+            telemetry
+                .position_ms
+                .store(db.current_pos_ms(), Ordering::Relaxed);
+        } else if let Some(da) = &rt.deck_a {
             telemetry
                 .position_ms
                 .store(da.current_pos_ms(), Ordering::Relaxed);
@@ -1353,5 +1499,113 @@ fn decode_loop(
             telemetry.store_spectrum([0; 8]);
             telemetry.track_finished_seq.fetch_add(1, Ordering::AcqRel);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::demo_synth::ensure_demo_tracks;
+
+    #[test]
+    fn dual_deck_manual_and_auto_crossfade_overlap_with_zero_gap() {
+        let dir = std::env::temp_dir().join(format!("ferric_xfade_test_{}", std::process::id()));
+        let tracks = ensure_demo_tracks(&dir).expect("generate demo wav tracks");
+        assert!(tracks.len() >= 2);
+        let p0 = tracks[0].path.clone().expect("track 0 path");
+        let p1 = tracks[1].path.clone().expect("track 1 path");
+        let dur0 = tracks[0].duration_ms;
+        let dur1 = tracks[1].duration_ms;
+
+        let engine = AudioEngine::start_headless(EqConfig::default());
+        let mut dsp = PlaybackDspSettings::default();
+        dsp.crossfade_ms = 2_000;
+        dsp.gapless_album_lock = false;
+        dsp.trim_silence = false;
+        engine.send(EngineCommand::SetDspSettings(dsp));
+
+        // 1. Start track 0 and verify playback begins
+        engine.send(EngineCommand::LoadAndPlayTrack {
+            path: p0.clone(),
+            replay_gain_db: 0,
+            fallback_duration_ms: dur0,
+        });
+        let mut started = false;
+        for _ in 0..80 {
+            let s = engine.telemetry();
+            if s.is_playing && s.duration_ms > 0 {
+                started = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started, "track 0 should start playing in headless engine");
+
+        // 2. Manual CrossfadeToTrack must overlap Deck A -> Deck B without cutting playback
+        engine.send(EngineCommand::CrossfadeToTrack {
+            path: p1.clone(),
+            replay_gain_db: 0,
+            fallback_duration_ms: dur1,
+            overlap_ms: 800,
+        });
+        let mut saw_manual_xfade = false;
+        let mut manual_done = false;
+        for _ in 0..250 {
+            let s = engine.telemetry();
+            if s.is_crossfading {
+                saw_manual_xfade = true;
+            } else if saw_manual_xfade && s.is_playing {
+                manual_done = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            saw_manual_xfade,
+            "manual CrossfadeToTrack should enter dual-deck overlap"
+        );
+        assert!(
+            manual_done,
+            "manual crossfade should promote Deck B cleanly while staying playing"
+        );
+        assert_eq!(
+            engine.telemetry().track_finished_seq,
+            0,
+            "manual crossfade switch must not emit spurious track_finished_seq"
+        );
+
+        // 3. Queue next track and seek near end to verify automatic overlap crossfade before EOF
+        engine.send(EngineCommand::QueueNextTrack {
+            path: Some(p0),
+            same_album_consecutive: false,
+            fallback_duration_ms: dur0,
+        });
+        let seek_target = dur1.saturating_sub(2_400);
+        engine.send(EngineCommand::SeekMs(seek_target));
+
+        let mut saw_auto_xfade = false;
+        let mut promoted = false;
+        for _ in 0..450 {
+            let s = engine.telemetry();
+            if s.is_crossfading {
+                saw_auto_xfade = true;
+            }
+            if s.track_finished_seq >= 1 && s.auto_transitioned {
+                promoted = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            saw_auto_xfade,
+            "automatic end-of-track crossfade must start overlapping before Deck A ends"
+        );
+        assert!(
+            promoted,
+            "Deck B must auto-promote with zero gap (auto_transitioned=true)"
+        );
+
+        engine.send(EngineCommand::Shutdown);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -9,6 +9,7 @@ mod smtc;
 mod state;
 mod theme;
 mod track_list;
+mod video_player;
 mod widgets;
 
 use std::sync::OnceLock;

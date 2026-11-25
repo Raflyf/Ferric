@@ -1,9 +1,12 @@
 use crate::artwork::{ArtworkCache, CachedArtwork};
 use crate::google_login::{GoogleLoginOutcome, launch_google_ytm_login_window};
 use crate::shell::{
-    copy_text_to_clipboard, launch_verified_installer, open_github_url, open_track_video_clip,
-    win32_close_active_window, win32_is_active_window_maximized, win32_minimize_active_window,
-    win32_toggle_maximize_active_window,
+    TrayEvent, copy_text_to_clipboard, launch_verified_installer, open_github_url,
+    win32_client_rect_screen, win32_close_active_window, win32_force_quit,
+    win32_install_window_hooks, win32_is_active_window_maximized,
+    win32_is_window_hidden_or_minimized, win32_main_hwnd_raw, win32_minimize_active_window,
+    win32_poll_tray_events, win32_set_close_to_tray, win32_set_mini_mode_flag,
+    win32_toggle_maximize_active_window, win32_trim_working_set, win32_update_tray_tooltip,
 };
 use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::state::{
@@ -12,6 +15,7 @@ use crate::state::{
     dir_size_bytes, format_bytes_mb,
 };
 use crate::track_list::{TrackListAction, TrackListScope};
+use crate::video_player::{NativeVideoPlayer, VideoViewportRect};
 use crate::widgets::*;
 use crate::{startup_load_demo, startup_page_override, startup_play_first};
 use ferric_audio::demo_synth::ensure_demo_tracks;
@@ -20,8 +24,9 @@ use ferric_core::app_data_dir;
 use ferric_core::db::LibraryDb;
 use ferric_core::eq::EqConfig;
 use ferric_core::models::{
-    AccountSettings, FadeCurve, PlaybackDspSettings, Playlist, RepeatMode, SessionResumeState,
-    Track, TrackSource, UpdateSettings, format_duration_ms, parse_playlist_import_text,
+    AccountSettings, AudioQuality, FadeCurve, PlaybackDspSettings, Playlist, RepeatMode,
+    SessionResumeState, Track, TrackSource, UpdateSettings, VideoQuality, format_duration_ms,
+    parse_playlist_import_text,
 };
 use ferric_core::queue::PlayQueue;
 use ferric_core::theme::{LiquidGlassPreset, ThemeConfig, hex_to_rgba_f32};
@@ -38,9 +43,10 @@ use ferric_providers::updater::{
     format_check_status, release_page_url,
 };
 use ferric_providers::ytmusic::{
-    YtmCardKind, YtmRichHome, YtmRichSearch, YtmSession, YtmShelfCard, fetch_account_library,
-    fetch_browse_detail, fetch_radio_up_next, fetch_rich_home, fetch_rich_search,
-    normalize_ytm_thumbnail_url, resolve_and_cache_audio_stream, resolve_best_video_id_for_track,
+    VideoStreamOption, YtmCardKind, YtmRichHome, YtmRichSearch, YtmSession, YtmShelfCard,
+    fetch_account_library, fetch_browse_detail, fetch_radio_up_next, fetch_rich_home,
+    fetch_rich_search, fetch_video_streams, normalize_ytm_thumbnail_url,
+    resolve_and_cache_audio_stream_with_quality, resolve_best_video_id_for_track,
 };
 use ferric_sync::{
     ActiveSpeakerLease, LanDiscoveryBeacon, PairingPayload, QrMatrix, detect_local_lan_ip,
@@ -65,14 +71,15 @@ live_design! {
     use crate::widgets::*;
     use crate::track_list::TrackList;
 
-    // Sonora Obsidian surface that seamlessly upgrades into Snell Refractive Liquid Glass when toggled ON
+    // Ferric Pure AMOLED Black surface that upgrades cohesively into frosted translucent Liquid Glass
     FerricSurface = <View> {
         show_bg: true,
         draw_bg: {
-            uniform base_col: #0E0F13
-            uniform border_col: #232530
+            uniform base_col: #09090D
+            uniform border_col: #1C1D25
             uniform accent_col: #A882FF
             uniform glass_enabled: 0.0
+            uniform glass_alpha: 0.62
             uniform glass_ior: 1.48
             uniform glass_disp: 0.42
             uniform glass_rim: 0.78
@@ -85,67 +92,56 @@ live_design! {
                 }
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                let r = min(max(self.radius, 12.0) * 0.5, min(self.rect_size.x, self.rect_size.y) * 0.18);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, r);
+                let r = min(self.radius * 0.5, min(self.rect_size.x, self.rect_size.y) * 0.12);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
 
-                let center = self.rect_size * 0.5;
-                let rel = p - center;
-                let half_b = max(center - vec2(r * 2.0 + 1.0, r * 2.0 + 1.0), vec2(1.0, 1.0));
-                let q = abs(rel) - half_b;
-                let sd = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r * 2.0;
-                let depth = max(-sd, 0.0);
-                let edge_t = clamp(1.0 - depth / 24.0, 0.0, 1.0);
-                let slope = edge_t * edge_t * (2.2 - 0.8 * edge_t);
-                let n = normalize(rel / max(center, vec2(1.0, 1.0)) + vec2(0.0001, 0.0001));
-                let ang = atan(n.y, n.x);
+                let uv = self.pos;
+                let top_sheen = smoothstep(0.45, 0.0, uv.y) * 0.065;
+                let diag = clamp(1.0 - (uv.x * 0.55 + uv.y * 0.75), 0.0, 1.0);
+                let tint = self.accent_col.xyz * (0.06 + 0.08 * diag) * clamp(self.glass_ior - 0.85, 0.2, 1.2);
+                let frost = mix(vec3(0.06, 0.065, 0.09), vec3(0.02, 0.022, 0.03), clamp(self.glass_scrim, 0.05, 0.65));
+                let rgb = clamp(frost + tint + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0);
+                let alpha = clamp(self.glass_alpha + self.glass_scrim * 0.16, 0.24, 0.86);
+                sdf.fill_keep(vec4(rgb, alpha));
 
-                let diag = clamp(1.0 - (self.pos.x * 0.65 + self.pos.y * 0.85), 0.0, 1.0);
-                let warm_glow = self.accent_col.xyz * (0.14 * diag + 0.09 * slope);
-                let cool_glow = vec3(0.14, 0.26, 0.58) * (0.09 * (1.0 - diag) + 0.07 * slope);
-                let disp_amt = pow(edge_t, 2.2) * self.glass_disp * clamp(self.glass_ior - 1.0, 0.1, 1.0);
-                let prism = vec3(
-                    0.55 + 0.45 * cos(ang - 0.55),
-                    0.45 + 0.55 * cos(ang - 2.55),
-                    0.55 + 0.45 * cos(ang + 1.45)
-                ) * disp_amt;
-
-                let tl = clamp(-(n.x * 0.72 + n.y * 0.70), 0.0, 1.0);
-                let br = clamp((n.x * 0.70 + n.y * 0.72), 0.0, 1.0);
-                let rim_band = clamp(1.0 - depth / 2.2, 0.0, 1.0);
-                let spec = rim_band * ((0.30 + 0.80 * pow(tl, 1.5)) + (0.16 + 0.52 * pow(br, 1.6))) * self.glass_rim;
-                let fresnel = pow(edge_t, 4.0) * 0.24 * self.glass_rim;
-
-                let base_rgb = mix(self.base_col.xyz * 0.72 + vec3(0.03, 0.03, 0.05), vec3(0.02, 0.02, 0.03), self.glass_scrim);
-                let rgb = base_rgb + warm_glow + cool_glow + prism + vec3(0.96, 0.96, 0.98) * (fresnel + spec * 0.62);
-                sdf.fill(vec4(clamp(rgb, 0.0, 1.0), 1.0));
+                let rim_grad = smoothstep(0.70, 0.0, uv.y);
+                let disp_tint = mix(vec3(1.0, 1.0, 1.0), mix(vec3(0.92, 0.96, 1.0), self.accent_col.xyz, 0.32), self.glass_disp * 0.45);
+                let rim_a = (0.07 + 0.16 * rim_grad) * clamp(self.glass_rim, 0.25, 1.0);
+                sdf.stroke(vec4(disp_tint, rim_a), 1.0);
                 return sdf.result;
             }
         }
     }
 
-    // Sonora-style ambient player bar radiating a soft adaptive color wash from active album artwork
+    // Adaptive ambient bottom player bar (AMOLED Black default + full Liquid Glass dock when enabled)
     AmbientBottomBar = <View> {
         width: Fill,
-        height: 68,
-        padding: { left: 14, right: 14 }
+        height: 74,
+        padding: { left: 16, right: 16, top: 6, bottom: 6 }
         flow: Right,
         align: { y: 0.5 }
         spacing: 14,
         show_bg: true,
         draw_bg: {
-            uniform base_col: #13141B
+            uniform base_col: #08080C
             uniform accent_col: #A882FF
-            uniform glow_amt: 0.24
+            uniform glow_amt: 0.22
+            uniform glass_on: 0.0
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
-                if p.y < 1.0 {
-                    return vec4(0.15, 0.16, 0.21, 1.0);
+                if (p.y < 1.0) {
+                    let top_a = mix(1.0, 0.30, self.glass_on);
+                    let top_rgb = mix(vec3(0.11, 0.12, 0.16), vec3(0.95, 0.96, 1.0), self.glass_on);
+                    return vec4(top_rgb, top_a);
                 }
                 let d_left = length((self.pos - vec2(0.08, 0.55)) * vec2(1.4, 2.2));
                 let d_mid = length((self.pos - vec2(0.46, 0.85)) * vec2(0.9, 2.4));
                 let wash = (exp(-d_left * d_left * 2.4) * 0.65 + exp(-d_mid * d_mid * 1.8) * 0.45) * self.glow_amt;
-                let rgb = self.base_col.xyz + self.accent_col.xyz * wash;
-                return vec4(clamp(rgb, 0.0, 1.0), 1.0);
+                let top_sheen = self.glass_on * smoothstep(0.45, 0.0, self.pos.y) * 0.07;
+                let base_rgb = mix(self.base_col.xyz, vec3(0.065, 0.07, 0.10), self.glass_on);
+                let rgb = base_rgb + self.accent_col.xyz * (wash * mix(1.0, 1.25, self.glass_on)) + vec3(top_sheen, top_sheen, top_sheen);
+                let alpha = mix(1.0, 0.72, self.glass_on);
+                return vec4(clamp(rgb, 0.0, 1.0), alpha);
             }
         }
     }
@@ -153,63 +149,115 @@ live_design! {
     FerricDividerH = <SolidView> {
         width: Fill,
         height: 1,
-        draw_bg: { color: #222430 }
+        draw_bg: { color: #191B23 }
     }
 
     FerricDividerV = <SolidView> {
         width: 1,
         height: Fill,
-        draw_bg: { color: #222430 }
+        draw_bg: { color: #191B23 }
     }
 
-    SonoraCard = <View> {
+    FerricCard = <View> {
         width: Fill,
         height: Fit,
         padding: 18,
         show_bg: true,
         draw_bg: {
+            uniform glass_on: 0.0
+            uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
-                sdf.fill_keep(#15161C);
-                sdf.stroke(#232530, 1.0);
+                let r = mix(7.0, 11.0, self.glass_on);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let top_sheen = smoothstep(0.42, 0.0, self.pos.y) * 0.06;
+                let solid_fill = vec4(0.051, 0.055, 0.075, 1.0);
+                let glass_rgb = vec3(0.085, 0.092, 0.13) + self.accent_col.xyz * 0.045 + vec3(top_sheen, top_sheen, top_sheen);
+                let glass_fill = vec4(clamp(glass_rgb, 0.0, 1.0), 0.56);
+                sdf.fill_keep(mix(solid_fill, glass_fill, self.glass_on));
+
+                let rim = smoothstep(0.65, 0.0, self.pos.y);
+                let solid_border = vec4(0.114, 0.122, 0.161, 1.0);
+                let glass_border = vec4(1.0, 1.0, 1.0, 0.09 + 0.17 * rim);
+                sdf.stroke(mix(solid_border, glass_border, self.glass_on), 1.0);
                 return sdf.result;
             }
         }
     }
 
-    SonoraNavItem = <Button> {
+    FerricNavItem = <Button> {
         width: Fill,
         height: 34,
         padding: { left: 11, right: 10 }
         spacing: 11,
         align: { x: 0.0, y: 0.5 }
-        icon_walk: { width: 15, height: Fit }
+        icon_walk: { width: Fit, height: 15 }
         draw_icon: {
             color: #888B99,
             color_hover: #F4F4F7,
-            color_down: #F4F4F7
+            color_focus: #F4F4F7,
+            color_down: #FFFFFF
         }
         draw_text: {
             color: #A2A5B4,
             color_hover: #F4F4F7,
-            color_down: #F4F4F7,
+            color_focus: #F4F4F7,
+            color_down: #FFFFFF,
             text_style: { font_size: 13.0 }
         }
         draw_bg: {
             instance active: 0.0
             instance hover: 0.0
+            instance down: 0.0
+            uniform glass_on: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.5);
-                let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), #1E202B, self.hover), #242636, self.active);
-                sdf.fill(col);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 6.0);
+                let solid_hov = #161822;
+                let solid_act = #1E202E;
+                let glass_hov = vec4(1.0, 1.0, 1.0, 0.09);
+                let glass_act = vec4(1.0, 1.0, 1.0, 0.15);
+                let hov = mix(solid_hov, glass_hov, self.glass_on);
+                let act = mix(solid_act, glass_act, self.glass_on);
+                let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
+                sdf.fill_keep(col);
+                let rim = vec4(1.0, 1.0, 1.0, (0.14 * self.active + 0.08 * self.hover) * self.glass_on);
+                sdf.stroke(rim, 1.0);
                 return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: { all: Forward { duration: 0.16 } }
+                    apply: {
+                        draw_bg: { down: 0.0, hover: 0.0 }
+                        draw_icon: { down: 0.0, hover: 0.0 }
+                        draw_text: { down: 0.0, hover: 0.0 }
+                    }
+                }
+                on = {
+                    from: { all: Forward { duration: 0.14 } }
+                    apply: {
+                        draw_bg: { down: 0.0, hover: 1.0 }
+                        draw_icon: { down: 0.0, hover: 1.0 }
+                        draw_text: { down: 0.0, hover: 1.0 }
+                    }
+                }
+                down = {
+                    from: { all: Forward { duration: 0.08 } }
+                    apply: {
+                        draw_bg: { down: 1.0, hover: 1.0 }
+                        draw_icon: { down: 1.0, hover: 1.0 }
+                        draw_text: { down: 1.0, hover: 1.0 }
+                    }
+                }
             }
         }
     }
 
-    SonoraPinBtn = <Button> {
+    FerricPinBtn = <Button> {
         width: Fill,
         height: 30,
         padding: { left: 11, right: 8 }
@@ -218,113 +266,210 @@ live_design! {
         draw_text: {
             color: #9A9CA8,
             color_hover: #F4F4F7,
-            text_style: { font_size: 12.0 }
-        }
-        draw_bg: {
-            instance active: 0.0
-            instance hover: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0);
-                let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), #1E202B, self.hover), #242636, self.active);
-                sdf.fill(col);
-                return sdf.result;
-            }
-        }
-    }
-
-    SonoraPrimaryBtn = <Button> {
-        width: Fit,
-        height: 34,
-        padding: { left: 15, right: 17 }
-        spacing: 7,
-        align: { x: 0.5, y: 0.5 }
-        icon_walk: { width: 13, height: Fit }
-        draw_icon: {
-            color: #0E0F13,
-            color_hover: #0E0F13,
-            color_down: #0E0F13
-        }
-        draw_text: {
-            color: #0E0F13,
-            color_hover: #0E0F13,
-            color_down: #0E0F13,
-            text_style: { font_size: 12.5 }
-        }
-        draw_bg: {
-            instance hover: 0.0
-            instance down: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = (self.rect_size.y - 1.0) * 0.25;
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                let c = mix(mix(#F4F4F7, #FFFFFF, self.hover), #DCDCE6, self.down);
-                sdf.fill(c);
-                return sdf.result;
-            }
-        }
-    }
-
-    SonoraBtn = <Button> {
-        width: Fit,
-        height: 32,
-        padding: { left: 12, right: 13 }
-        spacing: 7,
-        align: { x: 0.5, y: 0.5 }
-        icon_walk: { width: 13, height: Fit }
-        draw_icon: {
-            color: #9A9CA8,
-            color_hover: #F4F4F7,
-            color_down: #A882FF
-        }
-        draw_text: {
-            color: #DCDCE6,
-            color_hover: #FFFFFF,
+            color_focus: #F4F4F7,
             color_down: #FFFFFF,
             text_style: { font_size: 12.0 }
         }
         draw_bg: {
             instance active: 0.0
             instance hover: 0.0
+            instance down: 0.0
+            uniform glass_on: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.5);
-                let bg = mix(mix(#1B1C24, #252734, self.hover), #292540, self.active);
-                sdf.fill_keep(bg);
-                let border = mix(#2B2D3A, #A882FF, self.active * 0.85);
-                sdf.stroke(border, 1.0);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
+                let hov = mix(#161822, vec4(1.0, 1.0, 1.0, 0.09), self.glass_on);
+                let act = mix(#1E202E, vec4(1.0, 1.0, 1.0, 0.15), self.glass_on);
+                let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
+                sdf.fill(col);
                 return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: { all: Forward { duration: 0.16 } }
+                    apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
+                }
+                on = {
+                    from: { all: Forward { duration: 0.14 } }
+                    apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
+                }
+                down = {
+                    from: { all: Forward { duration: 0.08 } }
+                    apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
+                }
             }
         }
     }
 
-    SonoraChipBtn = <Button> {
+    FerricPrimaryBtn = <Button> {
         width: Fit,
-        height: 30,
-        padding: { left: 12, right: 12 }
-        spacing: 0,
+        height: 34,
+        padding: { left: 15, right: 17 }
+        spacing: 7,
         align: { x: 0.5, y: 0.5 }
+        icon_walk: { width: Fit, height: 13 }
+        draw_icon: {
+            color: #09090D,
+            color_hover: #09090D,
+            color_focus: #09090D,
+            color_down: #09090D
+        }
         draw_text: {
-            color: #C8CAD6,
+            color: #09090D,
+            color_hover: #09090D,
+            color_focus: #09090D,
+            color_down: #09090D,
+            text_style: { font_size: 12.0 }
+        }
+        draw_bg: {
+            instance hover: 0.0
+            instance down: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let r = (self.rect_size.y - 1.0) * 0.28;
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let c = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D8DAE4, self.down);
+                sdf.fill(c);
+                return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: { all: Forward { duration: 0.14 } }
+                    apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_icon: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
+                }
+                on = {
+                    from: { all: Forward { duration: 0.12 } }
+                    apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_icon: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
+                }
+                down = {
+                    from: { all: Forward { duration: 0.06 } }
+                    apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_icon: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
+                }
+            }
+        }
+    }
+
+    FerricBtn = <Button> {
+        width: Fit,
+        height: 32,
+        padding: { left: 12, right: 13 }
+        spacing: 7,
+        align: { x: 0.5, y: 0.5 }
+        icon_walk: { width: Fit, height: 13 }
+        draw_icon: {
+            color: #9A9CA8,
+            color_hover: #F4F4F7,
+            color_focus: #F4F4F7,
+            color_down: #A882FF
+        }
+        draw_text: {
+            color: #DCDCE6,
             color_hover: #FFFFFF,
-            color_down: #0E0F13,
+            color_focus: #FFFFFF,
+            color_down: #FFFFFF,
             text_style: { font_size: 12.0 }
         }
         draw_bg: {
             instance active: 0.0
             instance hover: 0.0
+            instance down: 0.0
+            uniform glass_on: 0.0
+            uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
-                let bg = mix(mix(#1B1C24, #262834, self.hover), #F4F4F7, self.active);
+                let r = mix(6.0, 8.0, self.glass_on);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let solid_idle = mix(#14151D, #1E202C, self.hover);
+                let solid_act = mix(#231E3A, vec4(self.accent_col.xyz, 0.24), 0.35);
+                let glass_idle = mix(vec4(1.0, 1.0, 1.0, 0.08), vec4(1.0, 1.0, 1.0, 0.16), self.hover);
+                let glass_act = vec4(self.accent_col.xyz, 0.28);
+                let bg = mix(mix(solid_idle, solid_act, self.active), mix(glass_idle, glass_act, self.active), self.glass_on);
                 sdf.fill_keep(bg);
-                sdf.stroke(mix(#292B38, #F4F4F7, self.active), 1.0);
+                let rim = smoothstep(0.65, 0.0, self.pos.y);
+                let solid_b = mix(#252734, vec4(self.accent_col.xyz, 0.85), self.active);
+                let glass_b = mix(vec4(1.0, 1.0, 1.0, 0.12 + 0.16 * rim), vec4(self.accent_col.xyz, 0.88), self.active);
+                sdf.stroke(mix(solid_b, glass_b, self.glass_on), 1.0);
                 return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: { all: Forward { duration: 0.16 } }
+                    apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_icon: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
+                }
+                on = {
+                    from: { all: Forward { duration: 0.14 } }
+                    apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_icon: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
+                }
+                down = {
+                    from: { all: Forward { duration: 0.06 } }
+                    apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_icon: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
+                }
             }
         }
     }
 
-    SonoraIconBtn = <Button> {
+    FerricChipBtn = <Button> {
+        width: Fit,
+        height: 30,
+        padding: { left: 13, right: 13 }
+        spacing: 0,
+        align: { x: 0.5, y: 0.5 }
+        draw_text: {
+            color: #C8CAD6,
+            color_hover: #FFFFFF,
+            color_focus: #FFFFFF,
+            color_down: #FFFFFF,
+            text_style: { font_size: 12.0 }
+        }
+        draw_bg: {
+            instance active: 0.0
+            instance hover: 0.0
+            instance down: 0.0
+            uniform glass_on: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let r = (self.rect_size.y - 1.0) * 0.25;
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let solid_idle = mix(#14151D, #20222F, self.hover);
+                let glass_idle = mix(vec4(1.0, 1.0, 1.0, 0.08), vec4(1.0, 1.0, 1.0, 0.16), self.hover);
+                let idle = mix(solid_idle, glass_idle, self.glass_on);
+                let bg = mix(idle, #F4F4F7, self.active);
+                sdf.fill_keep(bg);
+                let rim = smoothstep(0.60, 0.0, self.pos.y);
+                let idle_b = mix(#242633, vec4(1.0, 1.0, 1.0, 0.14 + 0.18 * rim), self.glass_on);
+                sdf.stroke(mix(idle_b, #FFFFFF, self.active), 1.0);
+                return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: { all: Forward { duration: 0.16 } }
+                    apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
+                }
+                on = {
+                    from: { all: Forward { duration: 0.14 } }
+                    apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
+                }
+                down = {
+                    from: { all: Forward { duration: 0.06 } }
+                    apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
+                }
+            }
+        }
+    }
+
+    FerricIconBtn = <Button> {
         width: 30,
         height: 30,
         padding: 0,
@@ -332,41 +477,65 @@ live_design! {
         align: { x: 0.5, y: 0.5 }
         text: ""
         label_walk: { width: 0, height: 0 }
-        icon_walk: { width: 15, height: Fit }
+        icon_walk: { width: Fit, height: 14 }
         draw_icon: {
             color: #9A9CA8,
             color_hover: #F4F4F7,
+            color_focus: #F4F4F7,
             color_down: #A882FF
         }
         draw_bg: {
             instance active: 0.0
             instance hover: 0.0
+            instance down: 0.0
+            uniform glass_on: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.5);
-                let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), #222430, self.hover), #292540, self.active);
-                sdf.fill(bg);
+                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 6.0);
+                let hov = mix(#1C1E28, vec4(1.0, 1.0, 1.0, 0.14), self.glass_on);
+                let act = mix(#231E3A, vec4(1.0, 1.0, 1.0, 0.20), self.glass_on);
+                let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
+                sdf.fill_keep(bg);
+                let rim = vec4(1.0, 1.0, 1.0, (0.14 * self.hover + 0.18 * self.active) * self.glass_on);
+                sdf.stroke(rim, 1.0);
                 return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: { all: Forward { duration: 0.15 } }
+                    apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_icon: { down: 0.0, hover: 0.0 } }
+                }
+                on = {
+                    from: { all: Forward { duration: 0.13 } }
+                    apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_icon: { down: 0.0, hover: 1.0 } }
+                }
+                down = {
+                    from: { all: Forward { duration: 0.06 } }
+                    apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_icon: { down: 1.0, hover: 1.0 } }
+                }
             }
         }
     }
 
-    SonoraInput = <TextInput> {
+    FerricInput = <TextInput> {
         width: Fill,
         height: 36,
         draw_bg: {
-            color: #111218,
-            color_empty: #111218,
-            color_hover: #151720,
-            color_focus: #161822,
-            border_radius: 5.0,
+            color: #090A0F,
+            color_empty: #090A0F,
+            color_hover: #10121A,
+            color_focus: #12141F,
+            border_radius: 6.0,
             border_size: 1.0,
-            border_color_1: #282A38,
-            border_color_2: #282A38,
-            border_color_1_empty: #282A38,
-            border_color_2_empty: #282A38,
-            border_color_1_hover: #3B3E52,
-            border_color_2_hover: #3B3E52,
+            border_color_1: #232634,
+            border_color_2: #232634,
+            border_color_1_empty: #232634,
+            border_color_2_empty: #232634,
+            border_color_1_hover: #35384B,
+            border_color_2_hover: #35384B,
             border_color_1_focus: #A882FF,
             border_color_2_focus: #A882FF
         }
@@ -378,7 +547,7 @@ live_design! {
         draw_cursor: { color: #A882FF }
     }
 
-    // Sonora 2x4 Home Quick Picks Song Tile (Real 46x46 Cover Art + Title + Artist)
+    // 2x4 Home Quick Picks Song Tile (46x46 Cover Art + Title + Artist + Liquid Glass support)
     QuickPickTile = <View> {
         width: Fill,
         height: 58,
@@ -390,12 +559,23 @@ live_design! {
         cursor: Hand,
         draw_bg: {
             instance active: 0.0
+            uniform glass_on: 0.0
+            uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
-                let col = mix(#13141B, #221E36, self.active);
+                let r = mix(6.0, 9.0, self.glass_on);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let top_sheen = smoothstep(0.45, 0.0, self.pos.y) * 0.06;
+                let solid_idle = vec4(0.047, 0.051, 0.071, 1.0);
+                let solid_act = mix(vec4(0.11, 0.10, 0.18, 1.0), vec4(self.accent_col.xyz, 0.22), 0.35);
+                let glass_idle = vec4(clamp(vec3(0.10, 0.11, 0.16) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0), 0.48);
+                let glass_act = vec4(clamp(mix(vec3(0.14, 0.14, 0.20), self.accent_col.xyz, 0.28) + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0), 0.62);
+                let col = mix(mix(solid_idle, solid_act, self.active), mix(glass_idle, glass_act, self.active), self.glass_on);
                 sdf.fill_keep(col);
-                sdf.stroke(mix(#1E202A, #5B4B8A, self.active), 1.0);
+                let rim = smoothstep(0.60, 0.0, self.pos.y);
+                let solid_b = mix(#1A1C26, vec4(self.accent_col.xyz, 0.60), self.active);
+                let glass_b = mix(vec4(1.0, 1.0, 1.0, 0.10 + 0.16 * rim), vec4(self.accent_col.xyz, 0.78), self.active);
+                sdf.stroke(mix(solid_b, glass_b, self.glass_on), 1.0);
                 return sdf.result;
             }
         }
@@ -411,7 +591,7 @@ live_design! {
             spacing: 2,
             title = <Label> {
                 width: Fill,
-                draw_text: { color: #F4F4F7, text_style: { font_size: 12.5 } }
+                draw_text: { color: #F4F4F7, text_style: { font_size: 13.0 } }
                 text: ""
             }
             sub = <Label> {
@@ -422,27 +602,36 @@ live_design! {
         }
     }
 
-    // Sonora Horizontal Album / Playlist Shelf Card (Real Square Cover Art!)
+    // Horizontal Album / Playlist Shelf Card (Balanced cover proportion + Liquid Glass support)
     ShelfCard = <View> {
         width: Fill,
-        height: 196,
-        padding: 8,
+        height: 222,
+        padding: 10,
         flow: Down,
         spacing: 6,
         show_bg: true,
         cursor: Hand,
         draw_bg: {
+            uniform glass_on: 0.0
+            uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
-                sdf.fill_keep(#14151C);
-                sdf.stroke(#1F212D, 1.0);
+                let r = mix(7.0, 11.0, self.glass_on);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let top_sheen = smoothstep(0.38, 0.0, self.pos.y) * 0.065;
+                let solid_fill = vec4(0.051, 0.055, 0.075, 1.0);
+                let glass_fill = vec4(clamp(vec3(0.095, 0.102, 0.145) + self.accent_col.xyz * 0.03 + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0), 0.50);
+                sdf.fill_keep(mix(solid_fill, glass_fill, self.glass_on));
+                let rim = smoothstep(0.55, 0.0, self.pos.y);
+                let solid_b = #1B1D27;
+                let glass_b = vec4(1.0, 1.0, 1.0, 0.10 + 0.18 * rim);
+                sdf.stroke(mix(solid_b, glass_b, self.glass_on), 1.0);
                 return sdf.result;
             }
         }
         art = <FerricCoverArt> {
             width: Fill,
-            height: 122,
+            height: 144,
             draw_bg: { radius: 8.0 }
         }
         title = <Label> {
@@ -452,7 +641,7 @@ live_design! {
         }
         sub = <Label> {
             width: Fill,
-            draw_text: { color: #8A8D9B, text_style: { font_size: 10.5 } }
+            draw_text: { color: #8A8D9B, text_style: { font_size: 11.0 } }
             text: ""
         }
     }
@@ -460,24 +649,33 @@ live_design! {
     // Visual Grid Card for Albums / Artists / Playlists pages
     GridCard = <View> {
         width: Fill,
-        height: 226,
+        height: 236,
         padding: 10,
         flow: Down,
         spacing: 6,
         show_bg: true,
         cursor: Hand,
         draw_bg: {
+            uniform glass_on: 0.0
+            uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
-                sdf.fill_keep(#14151C);
-                sdf.stroke(#212330, 1.0);
+                let r = mix(7.0, 11.0, self.glass_on);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                let top_sheen = smoothstep(0.38, 0.0, self.pos.y) * 0.065;
+                let solid_fill = vec4(0.051, 0.055, 0.075, 1.0);
+                let glass_fill = vec4(clamp(vec3(0.095, 0.102, 0.145) + self.accent_col.xyz * 0.03 + vec3(top_sheen, top_sheen, top_sheen), 0.0, 1.0), 0.50);
+                sdf.fill_keep(mix(solid_fill, glass_fill, self.glass_on));
+                let rim = smoothstep(0.55, 0.0, self.pos.y);
+                let solid_b = #1C1E28;
+                let glass_b = vec4(1.0, 1.0, 1.0, 0.10 + 0.18 * rim);
+                sdf.stroke(mix(solid_b, glass_b, self.glass_on), 1.0);
                 return sdf.result;
             }
         }
         art = <FerricCoverArt> {
             width: Fill,
-            height: 144,
+            height: 158,
             draw_bg: { radius: 10.0 }
         }
         title = <Label> {
@@ -492,7 +690,7 @@ live_design! {
         }
     }
 
-    // Compact Right Sidebar Queue / History Row with 34x34 real cover art
+    // Compact Right Sidebar Queue / History Row with 36x36 cover art + Liquid Glass support
     QueueMiniRow = <View> {
         width: Fill,
         height: 52,
@@ -505,12 +703,16 @@ live_design! {
         draw_bg: {
             instance active: 0.0
             uniform accent_col: #A882FF
+            uniform glass_on: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
-                let act = mix(#1F1E2E, vec4(self.accent_col.xyz, 0.22), 0.32);
-                sdf.fill_keep(mix(vec4(0.0, 0.0, 0.0, 0.0), act, self.active));
-                sdf.stroke(mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(self.accent_col.xyz, 0.45), self.active), 1.0);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
+                let idle = mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(1.0, 1.0, 1.0, 0.055), self.glass_on);
+                let act = mix(#1A1928, vec4(self.accent_col.xyz, 0.24), mix(0.32, 0.55, self.glass_on));
+                sdf.fill_keep(mix(idle, act, self.active));
+                let g_rim = vec4(1.0, 1.0, 1.0, 0.10 * self.glass_on);
+                let a_rim = vec4(self.accent_col.xyz, 0.50);
+                sdf.stroke(mix(g_rim, a_rim, self.active), 1.0);
                 return sdf.result;
             }
         }
@@ -526,7 +728,7 @@ live_design! {
             spacing: 2,
             title = <Label> {
                 width: Fill,
-                draw_text: { color: #ECEEF5, text_style: { font_size: 11.5 } }
+                draw_text: { color: #ECEEF5, text_style: { font_size: 12.0 } }
                 text: ""
             }
             sub = <Label> {
@@ -537,7 +739,7 @@ live_design! {
         }
         dur = <Label> {
             width: Fit,
-            draw_text: { color: #6E7180, text_style: { font_size: 10.0 } }
+            draw_text: { color: #6E7180, text_style: { font_size: 10.5 } }
             text: ""
         }
     }
@@ -546,7 +748,7 @@ live_design! {
         ui: <Root> {
             main_window = <Window> {
                 window: { title: "Ferric", inner_size: vec2(1280, 780) }
-                pass: { clear_color: #0E0F13 }
+                pass: { clear_color: #000000 }
                 caption_bar = {
                     visible: false,
                     height: 0,
@@ -559,32 +761,33 @@ live_design! {
                     flow: Overlay,
                     show_bg: true,
                     draw_bg: {
-                        uniform canvas_col: #0E0F13
+                        uniform canvas_col: #000000
                         uniform glass_bg: 0.0
                         uniform accent_col: #A882FF
                         fn pixel(self) -> vec4 {
                             if (self.glass_bg < 0.5) {
                                 return self.canvas_col;
                             }
-                            let d1 = length(self.pos - vec2(0.16, 0.18));
-                            let d2 = length(self.pos - vec2(0.84, 0.24));
-                            let d3 = length(self.pos - vec2(0.55, 0.92));
-                            let g1 = exp(-d1 * d1 * 6.0) * self.accent_col.xyz * 0.28;
-                            let g2 = exp(-d2 * d2 * 6.5) * vec3(0.16, 0.32, 0.72) * 0.20;
-                            let g3 = exp(-d3 * d3 * 7.0) * vec3(0.62, 0.18, 0.44) * 0.18;
-                            return vec4(self.canvas_col.xyz + g1 + g2 + g3, 1.0);
+                            let base = vec3(0.025, 0.028, 0.045);
+                            let d1 = length((self.pos - vec2(0.18, 0.16)) * vec2(0.95, 1.15));
+                            let d2 = length((self.pos - vec2(0.82, 0.24)) * vec2(1.05, 1.10));
+                            let d3 = length((self.pos - vec2(0.52, 0.88)) * vec2(0.85, 1.25));
+                            let g1 = exp(-d1 * d1 * 4.5) * self.accent_col.xyz * 0.42;
+                            let g2 = exp(-d2 * d2 * 5.0) * vec3(0.16, 0.36, 0.78) * 0.28;
+                            let g3 = exp(-d3 * d3 * 5.2) * mix(self.accent_col.xyz, vec3(0.58, 0.20, 0.52), 0.5) * 0.26;
+                            return vec4(clamp(base + g1 + g2 + g3, 0.0, 1.0), 1.0);
                         }
                     }
 
                     // ================================================================
-                    // MAIN SONORA 3-PANE DESKTOP SHELL
+                    // MAIN FERRIC 3-PANE DESKTOP SHELL
                     // ================================================================
                     shell_col = <View> {
                         width: Fill,
                         height: Fill,
                         flow: Down,
 
-                        // 1. MINIMAL SONORA TOP CHROME (44px)
+                        // 1. MINIMAL TOP CHROME (44px)
                         top_bar = <FerricSurface> {
                             width: Fill,
                             height: 44,
@@ -592,7 +795,7 @@ live_design! {
                             flow: Right,
                             align: { y: 0.5 }
                             spacing: 6,
-                            draw_bg: { base_col: #14151C, radius: 0.0 }
+                            draw_bg: { base_col: #09090D, glass_alpha: 0.62, radius: 0.0 }
 
                             top_left_grp = <View> {
                                 width: Fit,
@@ -601,19 +804,19 @@ live_design! {
                                 align: { y: 0.5 }
                                 spacing: 4,
 
-                                toggle_left_btn = <SonoraIconBtn> {
+                                toggle_left_btn = <FerricIconBtn> {
                                     width: 30, height: 28,
                                     draw_icon: { svg_path: "M3 5H21V19H3V5ZM5 7V17H9V7H5ZM11 7V17H19V7H11Z" }
                                 }
-                                nav_back_btn = <SonoraIconBtn> {
+                                nav_back_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" }
                                 }
-                                nav_fwd_btn = <SonoraIconBtn> {
+                                nav_fwd_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" }
                                 }
-                                refresh_btn = <SonoraIconBtn> {
+                                refresh_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_icon: { svg_path: "M17.65 6.35C16.2 4.9 14.21 4 12 4C7.58 4 4.01 7.58 4.01 12C4.01 16.42 7.58 20 12 20C15.73 20 18.84 17.45 19.73 14H17.65C16.83 16.33 14.61 18 12 18C8.69 18 6 15.31 6 12C6 8.69 8.69 6 12 6C13.66 6 15.14 6.69 16.22 7.78L13 11H20V4L17.65 6.35Z" }
                                 }
@@ -636,31 +839,56 @@ live_design! {
                                 height: Fill,
                                 align: { x: 0.5, y: 0.5 }
                                 top_search_pill = <Button> {
-                                    width: 260,
+                                    width: 268,
                                     height: 28,
                                     padding: { left: 12, right: 12 }
                                     spacing: 8,
                                     align: { x: 0.0, y: 0.5 }
                                     text: "Search music... (Ctrl+K)"
-                                    icon_walk: { width: 13, height: Fit }
+                                    icon_walk: { width: Fit, height: 13 }
                                     draw_icon: {
                                         svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
                                         color: #7D8090
                                         color_hover: #F4F4F7
+                                        color_focus: #F4F4F7
                                     }
                                     draw_text: {
                                         color: #7D8090,
-                                        color_hover: #C8CAD6,
+                                        color_hover: #D4D6E2,
+                                        color_focus: #D4D6E2,
                                         text_style: { font_size: 11.5 }
                                     }
                                     draw_bg: {
                                         instance hover: 0.0
+                                        instance down: 0.0
+                                        uniform glass_on: 0.0
                                         fn pixel(self) -> vec4 {
                                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
-                                            sdf.fill_keep(mix(#0E0F14, #181A24, self.hover));
-                                            sdf.stroke(#252734, 1.0);
+                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 7.0);
+                                            let solid_c = mix(#06070A, #12141C, self.hover);
+                                            let glass_c = mix(vec4(1.0, 1.0, 1.0, 0.07), vec4(1.0, 1.0, 1.0, 0.14), self.hover);
+                                            sdf.fill_keep(mix(solid_c, glass_c, self.glass_on));
+                                            let rim = smoothstep(0.60, 0.0, self.pos.y);
+                                            let b_col = mix(#1F212E, vec4(1.0, 1.0, 1.0, 0.14 + 0.16 * rim), self.glass_on);
+                                            sdf.stroke(b_col, 1.0);
                                             return sdf.result;
+                                        }
+                                    }
+                                    animator: {
+                                        hover = {
+                                            default: off,
+                                            off = {
+                                                from: { all: Forward { duration: 0.16 } }
+                                                apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_icon: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
+                                            }
+                                            on = {
+                                                from: { all: Forward { duration: 0.14 } }
+                                                apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_icon: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
+                                            }
+                                            down = {
+                                                from: { all: Forward { duration: 0.06 } }
+                                                apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_icon: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
+                                            }
                                         }
                                     }
                                 }
@@ -673,14 +901,14 @@ live_design! {
                                 align: { y: 0.5 }
                                 spacing: 4,
 
-                                update_badge_btn = <SonoraPrimaryBtn> {
+                                update_badge_btn = <FerricPrimaryBtn> {
                                     visible: false,
                                     height: 26,
                                     padding: { left: 10, right: 10 }
                                     text: "Update"
                                     draw_text: { text_style: { font_size: 11.0 } }
                                 }
-                                top_account_btn = <SonoraBtn> {
+                                top_account_btn = <FerricBtn> {
                                     height: 28,
                                     padding: { left: 9, right: 11 }
                                     text: "Sign in"
@@ -690,11 +918,11 @@ live_design! {
                                     }
                                     draw_text: { text_style: { font_size: 11.5 } }
                                 }
-                                top_settings_btn = <SonoraIconBtn> {
+                                top_settings_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_icon: { svg_path: "M19.14 12.94C19.18 12.64 19.2 12.33 19.2 12C19.2 11.68 19.18 11.36 19.13 11.06L21.16 9.48C21.34 9.34 21.39 9.07 21.28 8.87L19.36 5.55C19.24 5.33 18.99 5.26 18.77 5.33L16.38 6.29C15.88 5.91 15.35 5.59 14.76 5.35L14.4 2.81C14.36 2.57 14.16 2.4 13.92 2.4H10.08C9.84 2.4 9.65 2.57 9.61 2.81L9.25 5.35C8.66 5.59 8.12 5.92 7.63 6.29L5.24 5.33C5.02 5.25 4.77 5.33 4.65 5.55L2.74 8.87C2.62 9.08 2.66 9.34 2.86 9.48L4.89 11.06C4.84 11.36 4.8 11.69 4.8 12C4.8 12.31 4.82 12.64 4.87 12.94L2.84 14.52C2.66 14.66 2.61 14.93 2.72 15.13L4.64 18.45C4.76 18.67 5.01 18.74 5.23 18.67L7.62 17.71C8.12 18.09 8.65 18.41 9.24 18.65L9.6 21.19C9.65 21.43 9.84 21.6 10.08 21.6H13.92C14.16 21.6 14.36 21.43 14.39 21.19L14.75 18.65C15.34 18.41 15.88 18.09 16.37 17.71L18.76 18.67C18.98 18.75 19.23 18.67 19.35 18.45L21.27 15.13C21.39 14.91 21.34 14.66 21.15 14.52L19.14 12.94ZM12 15.6C10.02 15.6 8.4 13.98 8.4 12C8.4 10.02 10.02 8.4 12 8.4C13.98 8.4 15.6 10.02 15.6 12C15.6 13.98 13.98 15.6 12 15.6Z" }
                                 }
-                                toggle_right_btn = <SonoraIconBtn> {
+                                toggle_right_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_bg: { active: 1.0 }
                                     draw_icon: {
@@ -702,7 +930,7 @@ live_design! {
                                         color: #F4F4F7
                                     }
                                 }
-                                <SolidView> { width: 1, height: 16, margin: { left: 4, right: 4 }, draw_bg: { color: #292B38 } }
+                                <SolidView> { width: 1, height: 16, margin: { left: 4, right: 4 }, draw_bg: { color: #242634 } }
                                 win_mini_btn = <FerricWinBtn> { width: 30, height: 28, draw_bg: { kind: 3.0 } }
                                 win_min_btn = <FerricWinBtn> { width: 34, height: 28, draw_bg: { kind: 0.0 } }
                                 win_max_btn = <FerricWinBtn> { width: 34, height: 28, draw_bg: { kind: 1.0 } }
@@ -718,16 +946,16 @@ live_design! {
                             height: Fill,
                             flow: Right,
 
-                            // LEFT SIDEBAR (196px, Pure Music Nav — Exact Sonora Structure)
+                            // LEFT SIDEBAR (196px, Pure Music Nav)
                             left_sidebar = <FerricSurface> {
                                 width: 196,
                                 height: Fill,
                                 padding: { left: 10, right: 10, top: 12, bottom: 10 }
                                 flow: Down,
                                 spacing: 2,
-                                draw_bg: { base_col: #14151C, radius: 0.0 }
+                                draw_bg: { base_col: #09090D, glass_alpha: 0.56, radius: 0.0 }
 
-                                nav_home = <SonoraNavItem> {
+                                nav_home = <FerricNavItem> {
                                     text: "Home"
                                     draw_bg: { active: 1.0 }
                                     draw_icon: {
@@ -736,11 +964,11 @@ live_design! {
                                     }
                                     draw_text: { color: #F4F4F7 }
                                 }
-                                nav_search = <SonoraNavItem> {
+                                nav_search = <FerricNavItem> {
                                     text: "Search"
                                     draw_icon: { svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z" }
                                 }
-                                nav_recents = <SonoraNavItem> {
+                                nav_recents = <FerricNavItem> {
                                     text: "Recents"
                                     draw_icon: { svg_path: "M13 3C8.03 3 4 7.03 4 12H1L4.89 15.89L4.96 16.03L9 12H6C6 8.13 9.13 5 13 5C16.87 5 20 8.13 20 12C20 15.87 16.87 19 13 19C11.07 19 9.32 18.21 8.06 16.94L6.64 18.36C8.27 19.99 10.51 21 13 21C17.97 21 22 16.97 22 12C22 7.03 17.97 3 13 3ZM12 8V13L16.28 15.54L17 14.33L13.5 12.25V8H12Z" }
                                 }
@@ -750,19 +978,19 @@ live_design! {
                                     draw_text: { color: #6E7180, text_style: { font_size: 10.5 } }
                                     text: "Library"
                                 }
-                                nav_songs = <SonoraNavItem> {
+                                nav_songs = <FerricNavItem> {
                                     text: "Songs"
                                     draw_icon: { svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z" }
                                 }
-                                nav_albums = <SonoraNavItem> {
+                                nav_albums = <FerricNavItem> {
                                     text: "Albums"
                                     draw_icon: { svg_path: "M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM12 14.5C10.62 14.5 9.5 13.38 9.5 12C9.5 10.62 10.62 9.5 12 9.5C13.38 9.5 14.5 10.62 14.5 12C14.5 13.38 13.38 14.5 12 14.5Z" }
                                 }
-                                nav_artists = <SonoraNavItem> {
+                                nav_artists = <FerricNavItem> {
                                     text: "Artists"
                                     draw_icon: { svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z" }
                                 }
-                                nav_playlists = <SonoraNavItem> {
+                                nav_playlists = <FerricNavItem> {
                                     text: "Playlists"
                                     draw_icon: { svg_path: "M4 6H18V8H4V6ZM4 11H18V13H4V11ZM4 16H14V18H4V16ZM16 16V22L21 19L16 16Z" }
                                 }
@@ -777,21 +1005,21 @@ live_design! {
                                     height: Fill,
                                     flow: Down,
                                     spacing: 2,
-                                    pin_liked_btn = <SonoraPinBtn> { text: "Liked Songs" }
-                                    pin_local_btn = <SonoraPinBtn> { text: "Local Lossless" }
-                                    pin_slot_0 = <SonoraPinBtn> { visible: false, text: "" }
-                                    pin_slot_1 = <SonoraPinBtn> { visible: false, text: "" }
-                                    pin_slot_2 = <SonoraPinBtn> { visible: false, text: "" }
-                                    pin_slot_3 = <SonoraPinBtn> { visible: false, text: "" }
-                                    pin_slot_4 = <SonoraPinBtn> { visible: false, text: "" }
+                                    pin_liked_btn = <FerricPinBtn> { text: "Liked Songs" }
+                                    pin_local_btn = <FerricPinBtn> { text: "Local Lossless" }
+                                    pin_slot_0 = <FerricPinBtn> { visible: false, text: "" }
+                                    pin_slot_1 = <FerricPinBtn> { visible: false, text: "" }
+                                    pin_slot_2 = <FerricPinBtn> { visible: false, text: "" }
+                                    pin_slot_3 = <FerricPinBtn> { visible: false, text: "" }
+                                    pin_slot_4 = <FerricPinBtn> { visible: false, text: "" }
                                 }
 
                                 <FerricDividerH> { margin: { top: 6, bottom: 6 } }
-                                nav_settings = <SonoraNavItem> {
+                                nav_settings = <FerricNavItem> {
                                     text: "Settings"
                                     draw_icon: { svg_path: "M19.14 12.94C19.18 12.64 19.2 12.33 19.2 12C19.2 11.68 19.18 11.36 19.13 11.06L21.16 9.48C21.34 9.34 21.39 9.07 21.28 8.87L19.36 5.55C19.24 5.33 18.99 5.26 18.77 5.33L16.38 6.29C15.88 5.91 15.35 5.59 14.76 5.35L14.4 2.81C14.36 2.57 14.16 2.4 13.92 2.4H10.08C9.84 2.4 9.65 2.57 9.61 2.81L9.25 5.35C8.66 5.59 8.12 5.92 7.63 6.29L5.24 5.33C5.02 5.25 4.77 5.33 4.65 5.55L2.74 8.87C2.62 9.08 2.66 9.34 2.86 9.48L4.89 11.06C4.84 11.36 4.8 11.69 4.8 12C4.8 12.31 4.82 12.64 4.87 12.94L2.84 14.52C2.66 14.66 2.61 14.93 2.72 15.13L4.64 18.45C4.76 18.67 5.01 18.74 5.23 18.67L7.62 17.71C8.12 18.09 8.65 18.41 9.24 18.65L9.6 21.19C9.65 21.43 9.84 21.6 10.08 21.6H13.92C14.16 21.6 14.36 21.43 14.39 21.19L14.75 18.65C15.34 18.41 15.88 18.09 16.37 17.71L18.76 18.67C18.98 18.75 19.23 18.67 19.35 18.45L21.27 15.13C21.39 14.91 21.34 14.66 21.15 14.52L19.14 12.94ZM12 15.6C10.02 15.6 8.4 13.98 8.4 12C8.4 10.02 10.02 8.4 12 8.4C13.98 8.4 15.6 10.02 15.6 12C15.6 13.98 13.98 15.6 12 15.6Z" }
                                 }
-                                sidebar_add_folder_btn = <SonoraNavItem> {
+                                sidebar_add_folder_btn = <FerricNavItem> {
                                     text: "Add Folder"
                                     draw_icon: { svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z" }
                                 }
@@ -800,43 +1028,43 @@ live_design! {
                             left_divider = <FerricDividerV> {}
 
                             // ============================================================
-                            // CENTER STAGE (All Sonora Views)
+                            // CENTER STAGE (All Ferric Views + Native Video Stage)
                             // ============================================================
                             center_stage = <FerricSurface> {
                                 width: Fill,
                                 height: Fill,
                                 flow: Overlay,
-                                draw_bg: { base_col: #0E0F13, radius: 0.0 }
+                                draw_bg: { base_col: #000000, glass_alpha: 0.28, radius: 0.0 }
 
                                 // --------------------------------------------------------
-                                // PAGE 1: HOME (Default View — Mood Chips + Quick Picks + Cover Shelves!)
+                                // PAGE 1: HOME (Mood Chips + Quick Picks + Cover Shelves)
                                 // --------------------------------------------------------
                                 page_home = <ScrollYView> {
                                     visible: true,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 18, bottom: 26 }
+                                    padding: { left: 24, right: 24, top: 18, bottom: 36 }
                                     flow: Down,
                                     spacing: 22,
 
-                                    // Mood & Genre Filter Chips (Live YouTube Music FEmusic_home!)
+                                    // Mood & Genre Filter Chips (Live YouTube Music FEmusic_home)
                                     mood_chips_row = <View> {
                                         width: Fill,
                                         height: Fit,
                                         flow: Right,
                                         spacing: 7,
-                                        chip_0 = <SonoraChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #0E0F13 } }
-                                        chip_1 = <SonoraChipBtn> { text: "Feel good" }
-                                        chip_2 = <SonoraChipBtn> { text: "Relax" }
-                                        chip_3 = <SonoraChipBtn> { text: "Energize" }
-                                        chip_4 = <SonoraChipBtn> { text: "Workout" }
-                                        chip_5 = <SonoraChipBtn> { text: "Focus" }
-                                        chip_6 = <SonoraChipBtn> { text: "Commute" }
-                                        chip_7 = <SonoraChipBtn> { text: "Sad" }
-                                        chip_8 = <SonoraChipBtn> { text: "Party" }
+                                        chip_0 = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                        chip_1 = <FerricChipBtn> { text: "Feel good" }
+                                        chip_2 = <FerricChipBtn> { text: "Relax" }
+                                        chip_3 = <FerricChipBtn> { text: "Energize" }
+                                        chip_4 = <FerricChipBtn> { text: "Workout" }
+                                        chip_5 = <FerricChipBtn> { text: "Focus" }
+                                        chip_6 = <FerricChipBtn> { text: "Commute" }
+                                        chip_7 = <FerricChipBtn> { text: "Sad" }
+                                        chip_8 = <FerricChipBtn> { text: "Party" }
                                     }
 
-                                    // SECTION 1: QUICK PICKS (2x4 Grid w/ Real 46x46 Album Covers)
+                                    // SECTION 1: QUICK PICKS (2x4 Grid w/ 46x46 Album Covers)
                                     <View> {
                                         width: Fill,
                                         height: Fit,
@@ -847,19 +1075,19 @@ live_design! {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                             <Label> {
                                                 width: Fill,
-                                                draw_text: { color: #F4F4F7, text_style: { font_size: 18.0 } }
+                                                draw_text: { color: #F4F4F7, text_style: { font_size: 17.0 } }
                                                 text: "Quick picks"
                                             }
                                             home_status_lbl = <Label> {
-                                                draw_text: { color: #7C8090, text_style: { font_size: 11.5 } }
+                                                draw_text: { color: #7C8090, text_style: { font_size: 11.0 } }
                                                 text: "Loading YouTube Music..."
                                             }
-                                            home_play_all_btn = <SonoraBtn> { height: 28, padding: { left: 10, right: 11 }, text: "Play all" }
-                                            qp_prev_btn = <SonoraIconBtn> {
+                                            home_play_all_btn = <FerricBtn> { height: 28, padding: { left: 10, right: 11 }, text: "Play all" }
+                                            qp_prev_btn = <FerricIconBtn> {
                                                 width: 28, height: 28,
                                                 draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" }
                                             }
-                                            qp_next_btn = <SonoraIconBtn> {
+                                            qp_next_btn = <FerricIconBtn> {
                                                 width: 28, height: 28,
                                                 draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" }
                                             }
@@ -884,21 +1112,21 @@ live_design! {
                                         }
                                     }
 
-                                    // SECTION 2: HORIZONTAL SHELF 0 (Trending / Community Playlists)
+                                    // SECTION 2: HORIZONTAL SHELF 0
                                     shelf0_wrap = <View> {
                                         width: Fill, height: Fit, flow: Down, spacing: 10,
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                             sh0_title_lbl = <Label> {
                                                 width: Fill,
-                                                draw_text: { color: #F4F4F7, text_style: { font_size: 17.5 } }
+                                                draw_text: { color: #F4F4F7, text_style: { font_size: 17.0 } }
                                                 text: "Trending playlists & mixes"
                                             }
-                                            sh0_prev_btn = <SonoraIconBtn> {
+                                            sh0_prev_btn = <FerricIconBtn> {
                                                 width: 28, height: 28,
                                                 draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" }
                                             }
-                                            sh0_next_btn = <SonoraIconBtn> {
+                                            sh0_next_btn = <FerricIconBtn> {
                                                 width: 28, height: 28,
                                                 draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" }
                                             }
@@ -913,21 +1141,21 @@ live_design! {
                                         }
                                     }
 
-                                    // SECTION 3: HORIZONTAL SHELF 1 (New Albums & Singles)
+                                    // SECTION 3: HORIZONTAL SHELF 1
                                     shelf1_wrap = <View> {
                                         width: Fill, height: Fit, flow: Down, spacing: 10,
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                             sh1_title_lbl = <Label> {
                                                 width: Fill,
-                                                draw_text: { color: #F4F4F7, text_style: { font_size: 17.5 } }
+                                                draw_text: { color: #F4F4F7, text_style: { font_size: 17.0 } }
                                                 text: "New albums & singles"
                                             }
-                                            sh1_prev_btn = <SonoraIconBtn> {
+                                            sh1_prev_btn = <FerricIconBtn> {
                                                 width: 28, height: 28,
                                                 draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" }
                                             }
-                                            sh1_next_btn = <SonoraIconBtn> {
+                                            sh1_next_btn = <FerricIconBtn> {
                                                 width: 28, height: 28,
                                                 draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" }
                                             }
@@ -942,21 +1170,21 @@ live_design! {
                                         }
                                     }
 
-                                    // SECTION 4: HORIZONTAL SHELF 2 (Song Mixes / Discover More)
+                                    // SECTION 4: HORIZONTAL SHELF 2
                                     shelf2_wrap = <View> {
                                         width: Fill, height: Fit, flow: Down, spacing: 10,
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                             sh2_title_lbl = <Label> {
                                                 width: Fill,
-                                                draw_text: { color: #F4F4F7, text_style: { font_size: 17.5 } }
+                                                draw_text: { color: #F4F4F7, text_style: { font_size: 17.0 } }
                                                 text: "Discover more"
                                             }
-                                            sh2_prev_btn = <SonoraIconBtn> {
+                                            sh2_prev_btn = <FerricIconBtn> {
                                                 width: 28, height: 28,
                                                 draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" }
                                             }
-                                            sh2_next_btn = <SonoraIconBtn> {
+                                            sh2_next_btn = <FerricIconBtn> {
                                                 width: 28, height: 28,
                                                 draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" }
                                             }
@@ -973,38 +1201,38 @@ live_design! {
                                 }
 
                                 // --------------------------------------------------------
-                                // PAGE 2: SEARCH (Dedicated Sonora Instant Search + Category Tabs + Cards)
+                                // PAGE 2: SEARCH (Instant Search + Category Tabs + Cards)
                                 // --------------------------------------------------------
                                 page_search = <View> {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 18, bottom: 14 }
+                                    padding: { left: 24, right: 24, top: 18, bottom: 16 }
                                     flow: Down,
                                     spacing: 12,
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                        search_page_input = <SonoraInput> {
+                                        search_page_input = <FerricInput> {
                                             width: Fill,
                                             height: 40,
                                             empty_text: "Search YouTube Music, local library, or paste Spotify / YouTube link..."
                                         }
-                                        search_go_btn = <SonoraPrimaryBtn> { height: 40, text: "Search" }
-                                        search_clear_btn = <SonoraBtn> { height: 40, text: "Clear" }
+                                        search_go_btn = <FerricPrimaryBtn> { height: 40, text: "Search" }
+                                        search_clear_btn = <FerricBtn> { height: 40, text: "Clear" }
                                     }
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 7,
-                                        sf_all_btn = <SonoraChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #0E0F13 } }
-                                        sf_songs_btn = <SonoraChipBtn> { text: "Songs" }
-                                        sf_albums_btn = <SonoraChipBtn> { text: "Albums" }
-                                        sf_artists_btn = <SonoraChipBtn> { text: "Artists" }
-                                        sf_playlists_btn = <SonoraChipBtn> { text: "Playlists" }
-                                        sf_local_btn = <SonoraChipBtn> { text: "Local" }
+                                        sf_all_btn = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                        sf_songs_btn = <FerricChipBtn> { text: "Songs" }
+                                        sf_albums_btn = <FerricChipBtn> { text: "Albums" }
+                                        sf_artists_btn = <FerricChipBtn> { text: "Artists" }
+                                        sf_playlists_btn = <FerricChipBtn> { text: "Playlists" }
+                                        sf_local_btn = <FerricChipBtn> { text: "Local" }
                                         <View> { width: Fill, height: 1 }
                                         search_status_lbl = <Label> {
-                                            draw_text: { color: #848796, text_style: { font_size: 11.5 } }
+                                            draw_text: { color: #848796, text_style: { font_size: 11.0 } }
                                             text: "Instant YouTube Music + Local Search"
                                         }
                                     }
@@ -1012,19 +1240,19 @@ live_design! {
                                     // Recent searches row
                                     recent_searches_row = <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                        <Label> { draw_text: { color: #6E7180, text_style: { font_size: 11.5 } }, text: "Recent:" }
-                                        rsrch_0 = <SonoraBtn> { visible: false, height: 26, text: "" }
-                                        rsrch_1 = <SonoraBtn> { visible: false, height: 26, text: "" }
-                                        rsrch_2 = <SonoraBtn> { visible: false, height: 26, text: "" }
-                                        rsrch_3 = <SonoraBtn> { visible: false, height: 26, text: "" }
-                                        rsrch_4 = <SonoraBtn> { visible: false, height: 26, text: "" }
+                                        <Label> { draw_text: { color: #6E7180, text_style: { font_size: 11.0 } }, text: "Recent:" }
+                                        rsrch_0 = <FerricBtn> { visible: false, height: 26, text: "" }
+                                        rsrch_1 = <FerricBtn> { visible: false, height: 26, text: "" }
+                                        rsrch_2 = <FerricBtn> { visible: false, height: 26, text: "" }
+                                        rsrch_3 = <FerricBtn> { visible: false, height: 26, text: "" }
+                                        rsrch_4 = <FerricBtn> { visible: false, height: 26, text: "" }
                                     }
 
                                     // Search Album / Artist / Playlist cards strip
                                     search_cards_wrap = <View> {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 8,
-                                        <Label> { draw_text: { color: #C5C7D4, text_style: { font_size: 13.5 } }, text: "Albums, Artists & Playlists" }
+                                        <Label> { draw_text: { color: #C5C7D4, text_style: { font_size: 13.0 } }, text: "Albums, Artists & Playlists" }
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, spacing: 10,
                                             sc_0 = <ShelfCard> {}
@@ -1045,7 +1273,7 @@ live_design! {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 20, bottom: 14 }
+                                    padding: { left: 24, right: 24, top: 20, bottom: 16 }
                                     flow: Down,
                                     spacing: 14,
 
@@ -1056,8 +1284,8 @@ live_design! {
                                             <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }, text: "Recents" }
                                             recents_sub_lbl = <Label> { draw_text: { color: #8A8D9B, text_style: { font_size: 12.0 } }, text: "Your recently played songs" }
                                         }
-                                        recents_play_btn = <SonoraPrimaryBtn> { text: "Play All" }
-                                        recents_clear_btn = <SonoraBtn> { text: "Clear History" }
+                                        recents_play_btn = <FerricPrimaryBtn> { text: "Play All" }
+                                        recents_clear_btn = <FerricBtn> { text: "Clear History" }
                                     }
                                     <FerricDividerH> {}
                                     recents_track_list = <TrackList> { width: Fill, height: Fill }
@@ -1070,7 +1298,7 @@ live_design! {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 20, bottom: 14 }
+                                    padding: { left: 24, right: 24, top: 20, bottom: 16 }
                                     flow: Down,
                                     spacing: 12,
 
@@ -1081,23 +1309,23 @@ live_design! {
                                             songs_title_lbl = <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }, text: "Songs" }
                                             songs_sub_lbl = <Label> { draw_text: { color: #8A8D9B, text_style: { font_size: 12.0 } }, text: "0 songs · 6.0s Bass-Swap Automix" }
                                         }
-                                        play_all_btn = <SonoraPrimaryBtn> {
+                                        play_all_btn = <FerricPrimaryBtn> {
                                             text: "Play All"
                                             draw_icon: { svg_path: "M8 5V19L19 12L8 5Z" }
                                         }
-                                        hero_shuffle_btn = <SonoraBtn> { text: "Shuffle" }
-                                        add_folder_btn = <SonoraBtn> { text: "Add Folder" }
+                                        hero_shuffle_btn = <FerricBtn> { text: "Shuffle" }
+                                        add_folder_btn = <FerricBtn> { text: "Add Folder" }
                                     }
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 7,
-                                        flt_all_btn = <SonoraChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #0E0F13 } }
-                                        flt_liked_btn = <SonoraChipBtn> { text: "Liked" }
-                                        flt_local_btn = <SonoraChipBtn> { text: "Local" }
-                                        flt_spotify_btn = <SonoraChipBtn> { text: "Spotify" }
-                                        flt_youtube_btn = <SonoraChipBtn> { text: "YouTube" }
+                                        flt_all_btn = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                        flt_liked_btn = <FerricChipBtn> { text: "Liked" }
+                                        flt_local_btn = <FerricChipBtn> { text: "Local" }
+                                        flt_spotify_btn = <FerricChipBtn> { text: "Spotify" }
+                                        flt_youtube_btn = <FerricChipBtn> { text: "YouTube" }
                                         <View> { width: Fill, height: 1 }
-                                        sort_cycle_btn = <SonoraBtn> { height: 30, text: "Sort: Artist" }
+                                        sort_cycle_btn = <FerricBtn> { height: 30, text: "Sort: Artist" }
                                     }
 
                                     <FerricDividerH> {}
@@ -1111,7 +1339,7 @@ live_design! {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 20, bottom: 24 }
+                                    padding: { left: 24, right: 24, top: 20, bottom: 36 }
                                     flow: Down,
                                     spacing: 14,
 
@@ -1122,8 +1350,8 @@ live_design! {
                                             <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }, text: "Albums" }
                                             albums_sub_lbl = <Label> { draw_text: { color: #8A8D9B, text_style: { font_size: 12.0 } }, text: "Grouped from your catalog" }
                                         }
-                                        alb_prev_btn = <SonoraIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
-                                        alb_next_btn = <SonoraIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
+                                        alb_prev_btn = <FerricIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
+                                        alb_next_btn = <FerricIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                     }
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 12,
@@ -1148,7 +1376,7 @@ live_design! {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 20, bottom: 24 }
+                                    padding: { left: 24, right: 24, top: 20, bottom: 36 }
                                     flow: Down,
                                     spacing: 14,
 
@@ -1159,8 +1387,8 @@ live_design! {
                                             <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }, text: "Artists" }
                                             artists_sub_lbl = <Label> { draw_text: { color: #8A8D9B, text_style: { font_size: 12.0 } }, text: "Artists in your library" }
                                         }
-                                        art_prev_btn = <SonoraIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
-                                        art_next_btn = <SonoraIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
+                                        art_prev_btn = <FerricIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
+                                        art_next_btn = <FerricIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                     }
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 12,
@@ -1185,18 +1413,18 @@ live_design! {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 20, bottom: 24 }
+                                    padding: { left: 24, right: 24, top: 20, bottom: 36 }
                                     flow: Down,
                                     spacing: 14,
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                         <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }, text: "Playlists" }
-                                        pl_new_input = <SonoraInput> { width: 210, height: 34, empty_text: "New playlist name..." }
-                                        pl_create_btn = <SonoraPrimaryBtn> { height: 34, text: "+ Create" }
-                                        pl_import_btn = <SonoraBtn> { height: 34, text: "Import M3U/CSV" }
-                                        pl_prev_btn = <SonoraIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
-                                        pl_next_btn = <SonoraIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
+                                        pl_new_input = <FerricInput> { width: 210, height: 34, empty_text: "New playlist name..." }
+                                        pl_create_btn = <FerricPrimaryBtn> { height: 34, text: "+ Create" }
+                                        pl_import_btn = <FerricBtn> { height: 34, text: "Import M3U/CSV" }
+                                        pl_prev_btn = <FerricIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
+                                        pl_next_btn = <FerricIconBtn> { width: 30, height: 30, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                     }
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 12,
@@ -1215,13 +1443,13 @@ live_design! {
                                 }
 
                                 // --------------------------------------------------------
-                                // PAGE 8: DETAIL VIEW (Album / Playlist / Artist — Local & Remote YTM)
+                                // PAGE 8: DETAIL VIEW (Album / Playlist / Artist)
                                 // --------------------------------------------------------
                                 page_detail = <View> {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 20, bottom: 14 }
+                                    padding: { left: 24, right: 24, top: 20, bottom: 16 }
                                     flow: Down,
                                     spacing: 14,
 
@@ -1235,15 +1463,15 @@ live_design! {
                                         <View> {
                                             width: Fill, height: Fit, flow: Down, spacing: 6,
                                             detail_kind_lbl = <Label> { draw_text: { color: #A882FF, text_style: { font_size: 11.0 } }, text: "PLAYLIST" }
-                                            detail_title_lbl = <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 24.0 } }, text: "Collection" }
-                                            detail_sub_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: { font_size: 12.5 } }, text: "" }
+                                            detail_title_lbl = <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 22.0 } }, text: "Collection" }
+                                            detail_sub_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "" }
                                             <View> {
                                                 width: Fill, height: Fit, margin: { top: 6 }, flow: Right, spacing: 8,
-                                                detail_play_btn = <SonoraPrimaryBtn> { text: "Play", draw_icon: { svg_path: "M8 5V19L19 12L8 5Z" } }
-                                                detail_shuffle_btn = <SonoraBtn> { height: 34, text: "Shuffle" }
-                                                detail_radio_btn = <SonoraBtn> { height: 34, text: "Start Radio" }
-                                                detail_pin_btn = <SonoraBtn> { height: 34, text: "Pin" }
-                                                detail_queue_btn = <SonoraBtn> { height: 34, text: "+ Queue" }
+                                                detail_play_btn = <FerricPrimaryBtn> { text: "Play", draw_icon: { svg_path: "M8 5V19L19 12L8 5Z" } }
+                                                detail_shuffle_btn = <FerricBtn> { height: 34, text: "Shuffle" }
+                                                detail_radio_btn = <FerricBtn> { height: 34, text: "Start Radio" }
+                                                detail_pin_btn = <FerricBtn> { height: 34, text: "Pin" }
+                                                detail_queue_btn = <FerricBtn> { height: 34, text: "+ Queue" }
                                             }
                                         }
                                     }
@@ -1252,13 +1480,13 @@ live_design! {
                                 }
 
                                 // --------------------------------------------------------
-                                // PAGE 9: TABBED SETTINGS HUB (Keeps Left Sidebar Clean!)
+                                // PAGE 9: TABBED SETTINGS HUB
                                 // --------------------------------------------------------
                                 page_settings = <ScrollYView> {
                                     visible: false,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { left: 24, right: 24, top: 20, bottom: 26 }
+                                    padding: { left: 24, right: 24, top: 20, bottom: 36 }
                                     flow: Down,
                                     spacing: 16,
 
@@ -1266,12 +1494,12 @@ live_design! {
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 7,
-                                        st_accounts_btn = <SonoraChipBtn> { text: "Accounts", draw_bg: { active: 1.0 }, draw_text: { color: #0E0F13 } }
-                                        st_playback_btn = <SonoraChipBtn> { text: "Playback & Fade-In" }
-                                        st_eq_btn = <SonoraChipBtn> { text: "Equalizer" }
-                                        st_appearance_btn = <SonoraChipBtn> { text: "Appearance" }
-                                        st_storage_btn = <SonoraChipBtn> { text: "Storage & Updates" }
-                                        st_connect_btn = <SonoraChipBtn> { text: "Connect" }
+                                        st_accounts_btn = <FerricChipBtn> { text: "Accounts", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                        st_playback_btn = <FerricChipBtn> { text: "Playback & Fade-In" }
+                                        st_eq_btn = <FerricChipBtn> { text: "Equalizer" }
+                                        st_appearance_btn = <FerricChipBtn> { text: "Appearance" }
+                                        st_storage_btn = <FerricChipBtn> { text: "Storage & Updates" }
+                                        st_connect_btn = <FerricChipBtn> { text: "Connect" }
                                     }
 
                                     // TAB A: ACCOUNTS & SOURCES
@@ -1279,11 +1507,11 @@ live_design! {
                                         visible: true,
                                         width: Fill, height: Fit, flow: Down, spacing: 14,
 
-                                        <SonoraCard> {
+                                        card_acct_yt = <FerricCard> {
                                             flow: Down, spacing: 10,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 15.5 } }, text: "YouTube Music & Google Account" }
+                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "YouTube Music & Google Account" }
                                                 yt_state_lbl = <Label> { draw_text: { color: #A882FF, text_style: { font_size: 12.0 } }, text: "Guest Mode (Optional)" }
                                             }
                                             <Label> {
@@ -1293,10 +1521,10 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                yt_login_btn = <SonoraPrimaryBtn> { text: "Sign in with Google" }
-                                                yt_sync_btn = <SonoraBtn> { height: 34, text: "Sync Library" }
-                                                yt_logout_btn = <SonoraBtn> { height: 34, text: "Sign Out" }
-                                                guest_refresh_btn = <SonoraBtn> { height: 34, text: "Refresh Home Feed" }
+                                                yt_login_btn = <FerricPrimaryBtn> { text: "Sign in with Google" }
+                                                yt_sync_btn = <FerricBtn> { height: 34, text: "Sync Library" }
+                                                yt_logout_btn = <FerricBtn> { height: 34, text: "Sign Out" }
+                                                guest_refresh_btn = <FerricBtn> { height: 34, text: "Refresh Home Feed" }
                                             }
                                             oauth_status_lbl = <Label> {
                                                 width: Fill,
@@ -1305,72 +1533,99 @@ live_design! {
                                             }
                                         }
 
-                                        <SonoraCard> {
+                                        card_acct_import = <FerricCard> {
                                             flow: Down, spacing: 10,
                                             <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Instant Spotify & YouTube Playlist Import" }
-                                            quick_sync_input = <SonoraInput> {
+                                            quick_sync_input = <FerricInput> {
                                                 empty_text: "Paste public Spotify or YouTube playlist / album / track URL..."
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                quick_spotify_btn = <SonoraBtn> { text: "Import Spotify Link" }
-                                                quick_youtube_btn = <SonoraBtn> { text: "Import YouTube Link" }
-                                                match_local_btn = <SonoraBtn> { text: "Match Cloud to Local FLAC" }
-                                                rescan_btn = <SonoraBtn> { text: "Rescan Local Folders" }
+                                                quick_spotify_btn = <FerricBtn> { text: "Import Spotify Link" }
+                                                quick_youtube_btn = <FerricBtn> { text: "Import YouTube Link" }
+                                                match_local_btn = <FerricBtn> { text: "Match Cloud to Local FLAC" }
+                                                rescan_btn = <FerricBtn> { text: "Rescan Local Folders" }
                                             }
                                         }
 
-                                        <SonoraCard> {
+                                        card_acct_sub = <FerricCard> {
                                             flow: Down, spacing: 10,
                                             <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "OpenSubsonic / Navidrome Self-Hosted Server" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                sub_url_input = <SonoraInput> { width: Fill, empty_text: "https://music.example.lan" }
-                                                sub_user_input = <SonoraInput> { width: 150, empty_text: "Username" }
-                                                sub_pass_input = <SonoraInput> { width: 150, is_password: true, empty_text: "Password" }
-                                                sub_sync_btn = <SonoraBtn> { height: 36, text: "Connect" }
+                                                sub_url_input = <FerricInput> { width: Fill, empty_text: "https://music.example.lan" }
+                                                sub_user_input = <FerricInput> { width: 150, empty_text: "Username" }
+                                                sub_pass_input = <FerricInput> { width: 150, is_password: true, empty_text: "Password" }
+                                                sub_sync_btn = <FerricBtn> { height: 36, text: "Connect" }
                                             }
                                         }
                                     }
 
-                                    // TAB B: PLAYBACK & SEAMLESS FADE-IN DSP
+                                    // TAB B: PLAYBACK, STREAM QUALITY, CROSSFADE & TRAY
                                     tab_playback = <View> {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 14,
 
-                                        <SonoraCard> {
+                                        card_pb_xfade = <FerricCard> {
                                             flow: Down, spacing: 12,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 15.5 } }, text: "Seamless Dual-Deck Fade-In & Crossfade" }
-                                                xfade_val_lbl = <Label> { draw_text: { color: #A882FF, text_style: { font_size: 13.5 } }, text: "6.0 s" }
+                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Seamless Dual-Deck Fade-In & Crossfade" }
+                                                xfade_val_lbl = <Label> { draw_text: { color: #A882FF, text_style: { font_size: 13.0 } }, text: "6.0 s" }
                                             }
                                             xfade_slider = <FerricBarSlider> { min: 0.0, max: 12.0, value: 6.0 }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                xf_0_btn = <SonoraBtn> { text: "0s Gapless" }
-                                                xf_3_btn = <SonoraBtn> { text: "3s Crisp" }
-                                                xf_6_btn = <SonoraBtn> { text: "6s Seamless" }
-                                                xf_10_btn = <SonoraBtn> { text: "10s Club Mix" }
+                                                xf_0_btn = <FerricBtn> { text: "0s Gapless" }
+                                                xf_3_btn = <FerricBtn> { text: "3s Crisp" }
+                                                xf_6_btn = <FerricBtn> { text: "6s Seamless" }
+                                                xf_10_btn = <FerricBtn> { text: "10s Club Mix" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                                 <Label> { draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "Transition Curve:" }
-                                                curve_bass_btn = <SonoraBtn> { text: "Bass-Swap Automix" }
-                                                curve_eqp_btn = <SonoraBtn> { text: "Equal-Power" }
-                                                curve_velvet_btn = <SonoraBtn> { text: "S-Curve Velvet" }
+                                                curve_bass_btn = <FerricBtn> { text: "Bass-Swap Automix" }
+                                                curve_eqp_btn = <FerricBtn> { text: "Equal-Power" }
+                                                curve_velvet_btn = <FerricBtn> { text: "S-Curve Velvet" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #C8CAD6, text_style: { font_size: 12.5 } }, text: "Soft Play / Resume Fade-In (ms)" }
-                                                fadein_val_lbl = <Label> { draw_text: { color: #A882FF, text_style: { font_size: 12.5 } }, text: "240 ms" }
+                                                <Label> { width: Fill, draw_text: { color: #C8CAD6, text_style: { font_size: 12.0 } }, text: "Soft Play / Resume Fade-In (ms)" }
+                                                fadein_val_lbl = <Label> { draw_text: { color: #A882FF, text_style: { font_size: 12.0 } }, text: "240 ms" }
                                             }
                                             fadein_slider = <FerricBarSlider> { min: 0.0, max: 1000.0, value: 240.0 }
                                         }
 
-                                        <SonoraCard> {
+                                        card_pb_quality = <FerricCard> {
+                                            flow: Down, spacing: 11,
+                                            <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Audio & In-App Video Clip Quality" }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 7,
+                                                <Label> { width: 154, draw_text: { color: #C8CAD6, text_style: { font_size: 12.0 } }, text: "Streaming Audio Quality" }
+                                                aq_low_btn = <FerricChipBtn> { height: 28, text: "Low 64k" }
+                                                aq_norm_btn = <FerricChipBtn> { height: 28, text: "Normal 128k" }
+                                                aq_high_btn = <FerricChipBtn> { height: 28, text: "High 160k" }
+                                                aq_best_btn = <FerricChipBtn> { height: 28, text: "Best" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 7,
+                                                <Label> { width: 154, draw_text: { color: #C8CAD6, text_style: { font_size: 12.0 } }, text: "Default Video Quality" }
+                                                svq_auto_btn = <FerricChipBtn> { height: 28, text: "Auto" }
+                                                svq_360_btn = <FerricChipBtn> { height: 28, text: "360p" }
+                                                svq_480_btn = <FerricChipBtn> { height: 28, text: "480p" }
+                                                svq_720_btn = <FerricChipBtn> { height: 28, text: "720p" }
+                                                svq_1080_btn = <FerricChipBtn> { height: 28, text: "1080p" }
+                                            }
+                                        }
+
+                                        card_pb_behavior = <FerricCard> {
                                             flow: Down, spacing: 10,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Playback Behavior & Radio" }
+                                            <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Playback Behavior, Radio & System Tray" }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "Keep running in System Tray when clicking Close (X)" }
+                                                close_to_tray_toggle = <FerricToggle> { is_on: false }
+                                            }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
                                                 <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "Autoplay Infinite Radio (YouTube Music Next)" }
@@ -1378,8 +1633,8 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "0ms Gapless Album Lock (Keep consecutive album transitions exact)" }
-                                                gapless_lock_toggle = <FerricToggle> { is_on: true }
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "0ms Gapless Album Lock (Local consecutive albums only)" }
+                                                gapless_lock_toggle = <FerricToggle> { is_on: false }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
@@ -1398,38 +1653,38 @@ live_design! {
                                             }
                                         }
 
-                                        <SonoraCard> {
+                                        card_pb_speed = <FerricCard> {
                                             flow: Down, spacing: 10,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                                 <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 14.0 } }, text: "Playback Speed" }
-                                                spd_075_btn = <SonoraBtn> { text: "0.75x" }
-                                                spd_100_btn = <SonoraBtn> { text: "1.0x" }
-                                                spd_125_btn = <SonoraBtn> { text: "1.25x" }
-                                                spd_150_btn = <SonoraBtn> { text: "1.5x" }
+                                                spd_075_btn = <FerricBtn> { text: "0.75x" }
+                                                spd_100_btn = <FerricBtn> { text: "1.0x" }
+                                                spd_125_btn = <FerricBtn> { text: "1.25x" }
+                                                spd_150_btn = <FerricBtn> { text: "1.5x" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                                 sleep_status_lbl = <Label> { width: Fill, draw_text: { color: #C8CAD6, text_style: { font_size: 13.0 } }, text: "Sleep Timer: Off" }
-                                                slp_off_btn = <SonoraBtn> { text: "Off" }
-                                                slp_15_btn = <SonoraBtn> { text: "15m" }
-                                                slp_30_btn = <SonoraBtn> { text: "30m" }
-                                                slp_60_btn = <SonoraBtn> { text: "60m" }
-                                                slp_eot_btn = <SonoraBtn> { text: "End of Track" }
+                                                slp_off_btn = <FerricBtn> { text: "Off" }
+                                                slp_15_btn = <FerricBtn> { text: "15m" }
+                                                slp_30_btn = <FerricBtn> { text: "30m" }
+                                                slp_60_btn = <FerricBtn> { text: "60m" }
+                                                slp_eot_btn = <FerricBtn> { text: "End of Track" }
                                             }
                                         }
                                     }
 
-                                    // TAB C: 10-BAND PARAMETRIC EQUALIZER + ALL 12 SONORA PRESETS + AUTOEQ
+                                    // TAB C: 10-BAND PARAMETRIC EQUALIZER + 13 STUDIO PRESETS + AUTOEQ
                                     tab_eq = <View> {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 14,
 
-                                        <SonoraCard> {
+                                        card_eq_main = <FerricCard> {
                                             flow: Down, spacing: 12,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 15.5 } }, text: "10-Band Parametric Biquad Equalizer" }
+                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "10-Band Parametric Biquad Equalizer" }
                                                 eq_status_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }, text: "Preset: Flat" }
                                                 eq_enable_toggle = <FerricToggle> { is_on: true }
                                             }
@@ -1442,25 +1697,25 @@ live_design! {
                                                 eq_preamp_lbl = <Label> { width: 58, draw_text: { color: #A882FF, text_style: { font_size: 12.0 } }, text: "+0.0 dB" }
                                             }
 
-                                            // 12 Sonora EQ Presets (2 clean rows of 6)
+                                            // 13 EQ Presets
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 6,
-                                                eq_pre_flat = <SonoraBtn> { height: 28, text: "Flat" }
-                                                eq_pre_bass = <SonoraBtn> { height: 28, text: "Bass Boost" }
-                                                eq_pre_bassred = <SonoraBtn> { height: 28, text: "Bass Reducer" }
-                                                eq_pre_treble = <SonoraBtn> { height: 28, text: "Treble Boost" }
-                                                eq_pre_vocal = <SonoraBtn> { height: 28, text: "Vocal Clarity" }
-                                                eq_pre_rock = <SonoraBtn> { height: 28, text: "Rock" }
-                                                eq_pre_pop = <SonoraBtn> { height: 28, text: "Pop" }
+                                                eq_pre_flat = <FerricBtn> { height: 28, text: "Flat" }
+                                                eq_pre_bass = <FerricBtn> { height: 28, text: "Bass Boost" }
+                                                eq_pre_bassred = <FerricBtn> { height: 28, text: "Bass Reducer" }
+                                                eq_pre_treble = <FerricBtn> { height: 28, text: "Treble Boost" }
+                                                eq_pre_vocal = <FerricBtn> { height: 28, text: "Vocal Clarity" }
+                                                eq_pre_rock = <FerricBtn> { height: 28, text: "Rock" }
+                                                eq_pre_pop = <FerricBtn> { height: 28, text: "Pop" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 6,
-                                                eq_pre_jazz = <SonoraBtn> { height: 28, text: "Jazz" }
-                                                eq_pre_classical = <SonoraBtn> { height: 28, text: "Classical" }
-                                                eq_pre_elec = <SonoraBtn> { height: 28, text: "Electronic" }
-                                                eq_pre_acoustic = <SonoraBtn> { height: 28, text: "Acoustic" }
-                                                eq_pre_loudness = <SonoraBtn> { height: 28, text: "Loudness" }
-                                                eq_pre_copper = <SonoraBtn> { height: 28, text: "Warm Copper" }
+                                                eq_pre_jazz = <FerricBtn> { height: 28, text: "Jazz" }
+                                                eq_pre_classical = <FerricBtn> { height: 28, text: "Classical" }
+                                                eq_pre_elec = <FerricBtn> { height: 28, text: "Electronic" }
+                                                eq_pre_acoustic = <FerricBtn> { height: 28, text: "Acoustic" }
+                                                eq_pre_loudness = <FerricBtn> { height: 28, text: "Loudness" }
+                                                eq_pre_copper = <FerricBtn> { height: 28, text: "Warm Copper" }
                                             }
 
                                             // 10 Vertical Faders
@@ -1480,46 +1735,55 @@ live_design! {
 
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                autoeq_input = <SonoraInput> { width: Fill, empty_text: "AutoEq Headphone Lookup (e.g. Sony WH-1000XM5, HD 650, AirPods Pro)..." }
-                                                autoeq_apply_btn = <SonoraBtn> { height: 36, text: "Apply AutoEq" }
-                                                eq_import_btn = <SonoraBtn> { height: 36, text: "Import APO" }
-                                                eq_export_btn = <SonoraBtn> { height: 36, text: "Export APO" }
+                                                autoeq_input = <FerricInput> { width: Fill, empty_text: "AutoEq Headphone Lookup (e.g. Sony WH-1000XM5, HD 650, AirPods Pro)..." }
+                                                autoeq_apply_btn = <FerricBtn> { height: 36, text: "Apply AutoEq" }
+                                                eq_import_btn = <FerricBtn> { height: 36, text: "Import APO" }
+                                                eq_export_btn = <FerricBtn> { height: 36, text: "Export APO" }
                                             }
                                         }
                                     }
 
-                                    // TAB D: APPEARANCE, ADAPTIVE ARTWORK & LIQUID GLASS
+                                    // TAB D: APPEARANCE, UI ZOOM, ADAPTIVE ARTWORK & FULL LIQUID GLASS
                                     tab_appearance = <View> {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 14,
 
-                                        <SonoraCard> {
+                                        card_app_theme = <FerricCard> {
                                             flow: Down, spacing: 12,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.5 } }, text: "Theme & Adaptive Artwork Accent" }
+                                            <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Theme, Interface Zoom & Full Liquid Glass" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                pal_sonora_btn = <SonoraBtn> { text: "Sonora Midnight" }
-                                                pal_amoled_btn = <SonoraBtn> { text: "Pure AMOLED" }
-                                                pal_cream_btn = <SonoraBtn> { text: "Warm Cream" }
-                                                theme_import_btn = <SonoraBtn> { text: "Import JSON" }
-                                                theme_export_btn = <SonoraBtn> { text: "Export JSON" }
+                                                pal_amoled_btn = <FerricBtn> { text: "AMOLED Black" }
+                                                pal_obsidian_btn = <FerricBtn> { text: "Obsidian Studio" }
+                                                pal_glass_btn = <FerricBtn> { text: "Liquid Glass" }
+                                                pal_cream_btn = <FerricBtn> { text: "Warm Cream" }
+                                                theme_import_btn = <FerricBtn> { text: "Import JSON" }
+                                                theme_export_btn = <FerricBtn> { text: "Export JSON" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "Interface Zoom (Ctrl - / Ctrl + / Ctrl 0)" }
+                                                zoom_out_btn = <FerricBtn> { height: 28, padding: { left: 11, right: 11 }, text: "-" }
+                                                zoom_val_lbl = <Label> { width: 48, align: { x: 0.5, y: 0.5 }, draw_text: { color: #A882FF, text_style: { font_size: 12.5 } }, text: "100%" }
+                                                zoom_in_btn = <FerricBtn> { height: 28, padding: { left: 11, right: 11 }, text: "+" }
+                                                zoom_reset_btn = <FerricBtn> { height: 28, text: "Reset" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "Adaptive Artwork Accent (Tint player glow, seekbar & lyrics from active cover art)" }
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "Adaptive Artwork Accent (Smoothly tint player glow, seekbar & lyrics from cover art)" }
                                                 adaptive_art_toggle = <FerricToggle> { is_on: true }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "Liquid Glass Optical Refraction (Snell IOR + Prism Dispersion)" }
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: { font_size: 12.5 } }, text: "Full-App Liquid Glass (Frosted translucent cards, pills, sidebars & player dock)" }
                                                 liquid_glass_toggle = <FerricToggle> { is_on: false }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                lg_pre_crystal = <SonoraBtn> { height: 28, text: "Crystal Pure" }
-                                                lg_pre_prism = <SonoraBtn> { height: 28, text: "Prismatic" }
-                                                lg_pre_copper = <SonoraBtn> { height: 28, text: "Smoked Copper" }
-                                                lg_pre_frost = <SonoraBtn> { height: 28, text: "Ultra Frosted" }
+                                                lg_pre_crystal = <FerricBtn> { height: 28, text: "Crystal Pure" }
+                                                lg_pre_prism = <FerricBtn> { height: 28, text: "Prismatic" }
+                                                lg_pre_copper = <FerricBtn> { height: 28, text: "Smoked Copper" }
+                                                lg_pre_frost = <FerricBtn> { height: 28, text: "Ultra Frosted" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
@@ -1536,7 +1800,7 @@ live_design! {
                                                 lg_rad_slider = <FerricBarSlider> { min: 0.0, max: 32.0, value: 12.0 }
                                                 lg_rim_lbl = <Label> { width: 86, draw_text: { color: #C8CAD6, text_style: { font_size: 11.5 } }, text: "78% · 12px" }
                                             }
-                                            lg_preview = <LiquidGlassPreview> { height: 260 }
+                                            lg_preview = <LiquidGlassPreview> { height: 240 }
                                         }
                                     }
 
@@ -1545,19 +1809,19 @@ live_design! {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 14,
 
-                                        <SonoraCard> {
+                                        card_st_cache = <FerricCard> {
                                             flow: Down, spacing: 10,
                                             <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Local Disk Cache" }
-                                            cache_stats_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: { font_size: 12.5 } }, text: "Audio Stream Cache: 0 KB · Artwork Cache: 0 KB" }
+                                            cache_stats_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "Audio Stream Cache: 0 KB · Artwork Cache: 0 KB" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                clear_audio_cache_btn = <SonoraBtn> { text: "Clear Audio Cache" }
-                                                clear_art_cache_btn = <SonoraBtn> { text: "Clear Artwork Cache" }
-                                                load_demo_btn = <SonoraBtn> { text: "Load Offline Demo Tracks" }
+                                                clear_audio_cache_btn = <FerricBtn> { text: "Clear Audio Cache" }
+                                                clear_art_cache_btn = <FerricBtn> { text: "Clear Artwork Cache" }
+                                                load_demo_btn = <FerricBtn> { text: "Load Offline Demo Tracks" }
                                             }
                                         }
 
-                                        <SonoraCard> {
+                                        card_st_update = <FerricCard> {
                                             flow: Down, spacing: 10,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
@@ -1567,15 +1831,15 @@ live_design! {
                                             update_status_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "SHA-256 verified GitHub Releases MSI updater" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                check_updates_btn = <SonoraBtn> { text: "Check for Updates" }
-                                                open_releases_btn = <SonoraBtn> { text: "Open GitHub Releases" }
+                                                check_updates_btn = <FerricBtn> { text: "Check for Updates" }
+                                                open_releases_btn = <FerricBtn> { text: "Open GitHub Releases" }
                                             }
                                         }
 
-                                        <SonoraCard> {
+                                        card_st_keys = <FerricCard> {
                                             flow: Down, spacing: 6,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 14.5 } }, text: "Keyboard Shortcuts" }
-                                            <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "Space: Play / Pause  ·  Ctrl+K: Powerbar  ·  Ctrl+F: Search  ·  Ctrl+Q: Toggle Queue Sidebar  ·  Ctrl+L: Toggle Lyrics  ·  Ctrl+,: Settings  ·  F11: Fullscreen Now Playing  ·  Alt+Left / Alt+Right: Back / Forward  ·  Shift+Left / Shift+Right: Prev / Next Track  ·  Ctrl+Up / Ctrl+Down: Volume" }
+                                            <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Keyboard Shortcuts" }
+                                            <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "Space: Play / Pause  ·  Ctrl+K: Powerbar  ·  Ctrl+F: Search  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down: Volume" }
                                         }
                                     }
 
@@ -1583,20 +1847,70 @@ live_design! {
                                     tab_connect = <View> {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 14,
-                                        <SonoraCard> {
+                                        card_conn_main = <FerricCard> {
                                             flow: Right, align: { y: 0.5 }, spacing: 20,
                                             connect_qr_view = <FerricQrView> { width: 156, height: 156 }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Down, spacing: 8,
-                                                <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 16.0 } }, text: "Ferric Connect (Local LAN Pairing)" }
-                                                connect_lan_ip_lbl = <Label> { draw_text: { color: #A882FF, text_style: { font_size: 12.5 } }, text: "LAN: Ready" }
+                                                <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Ferric Connect (Local LAN Pairing)" }
+                                                connect_lan_ip_lbl = <Label> { draw_text: { color: #A882FF, text_style: { font_size: 12.0 } }, text: "LAN: Ready" }
                                                 connect_peers_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "Listening for Ferric devices on local Wi-Fi..." }
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, spacing: 8,
-                                                    connect_gen_pair_btn = <SonoraBtn> { text: "Regenerate QR" }
-                                                    connect_copy_pair_btn = <SonoraBtn> { text: "Copy Pairing URI" }
+                                                    connect_gen_pair_btn = <FerricBtn> { text: "Regenerate QR" }
+                                                    connect_copy_pair_btn = <FerricBtn> { text: "Copy Pairing URI" }
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+
+                                // --------------------------------------------------------
+                                // NATIVE IN-APP VIDEO CLIP STAGE (Docked inside Center Stage, Audio stays in Rust WASAPI)
+                                // --------------------------------------------------------
+                                video_overlay = <View> {
+                                    visible: false,
+                                    width: Fill,
+                                    height: Fill,
+                                    flow: Down,
+                                    show_bg: true,
+                                    draw_bg: { color: #000000 }
+
+                                    vid_header = <FerricSurface> {
+                                        width: Fill,
+                                        height: 48,
+                                        padding: { left: 16, right: 16 }
+                                        flow: Right,
+                                        align: { y: 0.5 }
+                                        spacing: 8,
+                                        draw_bg: { base_col: #09090D, glass_alpha: 0.72, radius: 0.0 }
+
+                                        vid_title_lbl = <Label> {
+                                            width: Fill,
+                                            draw_text: { color: #F4F4F7, text_style: { font_size: 13.5 } }
+                                            text: "Music Video"
+                                        }
+                                        vid_status_lbl = <Label> {
+                                            draw_text: { color: #8E909E, text_style: { font_size: 11.0 } }
+                                            text: "Synced to WASAPI"
+                                        }
+                                        vq_auto_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "Auto", draw_text: { text_style: { font_size: 11.0 } } }
+                                        vq_360_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "360p", draw_text: { text_style: { font_size: 11.0 } } }
+                                        vq_480_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "480p", draw_text: { text_style: { font_size: 11.0 } } }
+                                        vq_720_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "720p", draw_text: { text_style: { font_size: 11.0 } } }
+                                        vq_1080_btn = <FerricChipBtn> { height: 26, padding: { left: 9, right: 9 }, text: "1080p", draw_text: { text_style: { font_size: 11.0 } } }
+                                        vid_close_btn = <FerricBtn> { height: 28, text: "Close Video" }
+                                    }
+                                    <FerricDividerH> {}
+                                    video_stage_slot = <View> {
+                                        width: Fill,
+                                        height: Fill,
+                                        align: { x: 0.5, y: 0.5 }
+                                        show_bg: true,
+                                        draw_bg: { color: #000000 }
+                                        vid_stage_hint_lbl = <Label> {
+                                            draw_text: { color: #7C8090, text_style: { font_size: 13.0 } }
+                                            text: "Loading native in-app video stage..."
                                         }
                                     }
                                 }
@@ -1605,24 +1919,24 @@ live_design! {
                             right_divider = <FerricDividerV> {}
 
                             // ============================================================
-                            // DOCKED RIGHT SIDEBAR (292px, OPEN BY DEFAULT — Exact Sonora Queue & Lyrics!)
+                            // DOCKED RIGHT SIDEBAR (296px — Queue & Synced Lyrics)
                             // ============================================================
                             right_sidebar = <FerricSurface> {
                                 visible: true,
-                                width: 292,
+                                width: 296,
                                 height: Fill,
                                 padding: { left: 10, right: 10, top: 10, bottom: 10 }
                                 flow: Down,
                                 spacing: 8,
-                                draw_bg: { base_col: #14151C, radius: 0.0 }
+                                draw_bg: { base_col: #09090D, glass_alpha: 0.56, radius: 0.0 }
 
                                 // Right Sidebar Header Tabs: [Queue] [Lyrics] + [Radio] [Clear]
                                 <View> {
                                     width: Fill, height: 32, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                    rs_tab_queue = <SonoraChipBtn> { height: 28, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { color: #0E0F13 } }
-                                    rs_tab_lyrics = <SonoraChipBtn> { height: 28, text: "Lyrics" }
+                                    rs_tab_queue = <FerricChipBtn> { height: 28, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { color: #09090D, color_hover: #09090D, color_focus: #09090D, color_down: #09090D } }
+                                    rs_tab_lyrics = <FerricChipBtn> { height: 28, text: "Lyrics" }
                                     <View> { width: Fill, height: 1 }
-                                    rs_radio_btn = <SonoraIconBtn> {
+                                    rs_radio_btn = <FerricIconBtn> {
                                         width: 28, height: 28,
                                         draw_bg: { active: 1.0 }
                                         draw_icon: {
@@ -1630,7 +1944,7 @@ live_design! {
                                             color: #A882FF
                                         }
                                     }
-                                    rs_clear_btn = <SonoraIconBtn> {
+                                    rs_clear_btn = <FerricIconBtn> {
                                         width: 28, height: 28,
                                         draw_icon: { svg_path: "M6 19C6 20.1 6.9 21 8 21H16C17.1 21 18 20.1 18 19V7H6V19ZM19 4H15.5L14.5 3H9.5L8.5 4H5V6H19V4Z" }
                                     }
@@ -1638,12 +1952,12 @@ live_design! {
 
                                 <FerricDividerH> {}
 
-                                // TAB 1: SONORA QUEUE (History -> Now Playing -> Up Next)
+                                // TAB 1: QUEUE (History -> Now Playing -> Up Next)
                                 rs_queue_view = <ScrollYView> {
                                     visible: true,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { top: 4, bottom: 8 }
+                                    padding: { top: 4, bottom: 12 }
                                     flow: Down,
                                     spacing: 5,
 
@@ -1679,7 +1993,7 @@ live_design! {
                                             text: "Up next"
                                         }
                                         q_radio_status = <Label> {
-                                            draw_text: { color: #6E7180, text_style: { font_size: 10.0 } }
+                                            draw_text: { color: #6E7180, text_style: { font_size: 10.5 } }
                                             text: "Radio On"
                                         }
                                     }
@@ -1707,53 +2021,53 @@ live_design! {
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 4,
                                         rs_lyr_source = <Label> { width: Fill, draw_text: { color: #8A8D9B, text_style: { font_size: 10.5 } }, text: "Synced Lyrics" }
-                                        rs_lyr_minus = <SonoraBtn> { height: 24, padding: { left: 6, right: 6 }, text: "-0.5s", draw_text: { text_style: { font_size: 10.5 } } }
-                                        rs_lyr_plus = <SonoraBtn> { height: 24, padding: { left: 6, right: 6 }, text: "+0.5s", draw_text: { text_style: { font_size: 10.5 } } }
-                                        rs_lyr_expand = <SonoraBtn> { height: 24, padding: { left: 7, right: 7 }, text: "Full", draw_text: { text_style: { font_size: 10.5 } } }
+                                        rs_lyr_minus = <FerricBtn> { height: 24, padding: { left: 6, right: 6 }, text: "-0.5s", draw_text: { text_style: { font_size: 10.5 } } }
+                                        rs_lyr_plus = <FerricBtn> { height: 24, padding: { left: 6, right: 6 }, text: "+0.5s", draw_text: { text_style: { font_size: 10.5 } } }
+                                        rs_lyr_expand = <FerricBtn> { height: 24, padding: { left: 7, right: 7 }, text: "Full", draw_text: { text_style: { font_size: 10.5 } } }
                                     }
 
                                     <View> {
                                         width: Fill, height: Fill, flow: Down, align: { y: 0.5 }, spacing: 11,
-                                        rs_lyr_0 = <Label> { width: Fill, draw_text: { color: #4A4D5C, text_style: { font_size: 12.5 } }, text: "" }
-                                        rs_lyr_1 = <Label> { width: Fill, draw_text: { color: #6E7182, text_style: { font_size: 13.5 } }, text: "" }
-                                        rs_lyr_2 = <Label> { width: Fill, draw_text: { color: #A6A9B8, text_style: { font_size: 14.5 } }, text: "" }
-                                        rs_lyr_3 = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 17.0 } }, text: "Play a song to view synced lyrics" }
-                                        rs_lyr_4 = <Label> { width: Fill, draw_text: { color: #A6A9B8, text_style: { font_size: 14.5 } }, text: "" }
-                                        rs_lyr_5 = <Label> { width: Fill, draw_text: { color: #6E7182, text_style: { font_size: 13.5 } }, text: "" }
-                                        rs_lyr_6 = <Label> { width: Fill, draw_text: { color: #4A4D5C, text_style: { font_size: 12.5 } }, text: "" }
+                                        rs_lyr_0 = <Label> { width: Fill, draw_text: { color: #4A4D5C, text_style: { font_size: 12.0 } }, text: "" }
+                                        rs_lyr_1 = <Label> { width: Fill, draw_text: { color: #6E7182, text_style: { font_size: 13.0 } }, text: "" }
+                                        rs_lyr_2 = <Label> { width: Fill, draw_text: { color: #A6A9B8, text_style: { font_size: 14.0 } }, text: "" }
+                                        rs_lyr_3 = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 16.5 } }, text: "Play a song to view synced lyrics" }
+                                        rs_lyr_4 = <Label> { width: Fill, draw_text: { color: #A6A9B8, text_style: { font_size: 14.0 } }, text: "" }
+                                        rs_lyr_5 = <Label> { width: Fill, draw_text: { color: #6E7182, text_style: { font_size: 13.0 } }, text: "" }
+                                        rs_lyr_6 = <Label> { width: Fill, draw_text: { color: #4A4D5C, text_style: { font_size: 12.0 } }, text: "" }
                                     }
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 6,
-                                        rs_lyr_copy = <SonoraBtn> { height: 28, text: "Copy Lyrics" }
-                                        rs_watch_video = <SonoraBtn> { height: 28, text: "Video Clip" }
+                                        rs_lyr_copy = <FerricBtn> { height: 28, text: "Copy Lyrics" }
+                                        rs_watch_video = <FerricBtn> { height: 28, text: "Video Clip" }
                                     }
                                 }
                             }
                         }
 
                         // ============================================================
-                        // 3. SLEEK SINGLE-ROW AMBIENT BOTTOM PLAYER BAR (68px — Sonora Signature!)
+                        // 3. SINGLE-ROW AMBIENT BOTTOM PLAYER BAR (74px, ZERO CLIPPING)
                         // ============================================================
                         bottom_bar = <AmbientBottomBar> {
-                            // Left: 44x44 Real Cover Art + Title + Heart + Artist
+                            // Left: 46x46 Cover Art + Title/Artist + Heart
                             <View> {
-                                width: 286,
+                                width: 280,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
                                 spacing: 11,
 
                                 np_art = <FerricCoverArt> {
-                                    width: 44,
-                                    height: 44,
+                                    width: 46,
+                                    height: 46,
                                     draw_bg: { radius: 8.0 }
                                 }
                                 <View> {
                                     width: Fill,
                                     height: Fit,
                                     flow: Down,
-                                    spacing: 2,
+                                    spacing: 3,
                                     np_title_lbl = <Label> {
                                         width: Fill,
                                         draw_text: { color: #F4F4F7, text_style: { font_size: 13.0 } }
@@ -1761,11 +2075,11 @@ live_design! {
                                     }
                                     np_artist_lbl = <Label> {
                                         width: Fill,
-                                        draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }
+                                        draw_text: { color: #9A9CA8, text_style: { font_size: 11.0 } }
                                         text: "Pick a song to play"
                                     }
                                 }
-                                np_like_btn = <SonoraIconBtn> {
+                                np_like_btn = <FerricIconBtn> {
                                     width: 30, height: 30,
                                     draw_icon: {
                                         svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
@@ -1774,7 +2088,7 @@ live_design! {
                                 }
                             }
 
-                            // Center: Single-Row Transport + Inline Seekbar (Exact Sonora Ergonomics!)
+                            // Center: Single-Row Transport + Inline Seekbar
                             <View> {
                                 width: Fill,
                                 height: Fill,
@@ -1782,22 +2096,22 @@ live_design! {
                                 align: { x: 0.5, y: 0.5 }
                                 spacing: 8,
 
-                                shuffle_btn = <SonoraIconBtn> {
+                                shuffle_btn = <FerricIconBtn> {
                                     width: 30, height: 30,
                                     draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z" }
                                 }
-                                prev_btn = <SonoraIconBtn> {
+                                prev_btn = <FerricIconBtn> {
                                     width: 30, height: 30,
                                     draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z" }
                                 }
                                 play_pause_btn = <FerricPlayBtn> {
                                     width: 36, height: 36,
                                 }
-                                next_btn = <SonoraIconBtn> {
+                                next_btn = <FerricIconBtn> {
                                     width: 30, height: 30,
                                     draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z" }
                                 }
-                                repeat_btn = <SonoraIconBtn> {
+                                repeat_btn = <FerricIconBtn> {
                                     width: 30, height: 30,
                                     draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z" }
                                 }
@@ -1820,42 +2134,46 @@ live_design! {
                                     align: { x: 0.5, y: 0.5 }
                                     text: "00:00"
                                     draw_bg: { fn pixel(self) -> vec4 { return vec4(0.0, 0.0, 0.0, 0.0); } }
-                                    draw_text: { color: #9A9CA8, color_hover: #F4F4F7, text_style: { font_size: 11.0 } }
+                                    draw_text: { color: #9A9CA8, color_hover: #F4F4F7, color_focus: #F4F4F7, text_style: { font_size: 11.0 } }
                                 }
                             }
 
-                            // Right: Codec Pill + Lyrics + Queue + Volume + Fullscreen
+                            // Right: Codec Pill + Video Clip + Lyrics + Queue + Volume + Fullscreen
                             <View> {
-                                width: 266,
+                                width: 304,
                                 height: Fill,
                                 flow: Right,
                                 align: { x: 1.0, y: 0.5 }
                                 spacing: 4,
 
-                                codec_pill_btn = <SonoraBtn> {
+                                codec_pill_btn = <FerricBtn> {
                                     height: 24,
                                     padding: { left: 8, right: 8 }
                                     text: "READY"
-                                    draw_text: { color: #B4B6C4, color_hover: #FFFFFF, text_style: { font_size: 10.0 } }
+                                    draw_text: { color: #B4B6C4, color_hover: #FFFFFF, text_style: { font_size: 10.5 } }
                                 }
-                                bar_lyrics_btn = <SonoraIconBtn> {
+                                bar_video_btn = <FerricIconBtn> {
+                                    width: 28, height: 28,
+                                    draw_icon: { svg_path: "M18 4L20 8H17L15 4H13L15 8H12L10 4H8L10 8H7L5 4H4C2.9 4 2.01 4.9 2.01 6L2 18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V4H18Z" }
+                                }
+                                bar_lyrics_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_icon: { svg_path: "M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2C10.34 2 9 3.34 9 5V11C9 12.66 10.34 14 12 14ZM17 11C17 13.76 14.76 16 12 16C9.24 16 7 13.76 7 11H5C5 14.53 7.61 17.43 11 17.92V21H13V17.92C16.39 17.43 19 14.53 19 11H17Z" }
                                 }
-                                bar_queue_btn = <SonoraIconBtn> {
+                                bar_queue_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_icon: { svg_path: "M3 10H14V12H3V10ZM3 6H14V8H3V6ZM3 14H10V16H3V14ZM16 13V21L22 17L16 13Z" }
                                 }
-                                vol_mute_btn = <SonoraIconBtn> {
+                                vol_mute_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" }
                                 }
                                 vol_slider = <FerricBarSlider> {
-                                    width: 72,
+                                    width: 70,
                                     height: 20,
                                     min: 0.0, max: 1.0, value: 0.85
                                 }
-                                bar_fullscreen_btn = <SonoraIconBtn> {
+                                bar_fullscreen_btn = <FerricIconBtn> {
                                     width: 28, height: 28,
                                     draw_icon: { svg_path: "M7 14H5V19H10V17H7V14ZM5 10H7V7H10V5H5V10ZM17 17H14V19H19V14H17V17ZM14 5V7H17V10H19V5H14Z" }
                                 }
@@ -1879,9 +2197,9 @@ live_design! {
                             fn pixel(self) -> vec4 {
                                 let d1 = length((self.pos - vec2(0.24, 0.42)) * vec2(1.1, 1.3));
                                 let d2 = length((self.pos - vec2(0.78, 0.65)) * vec2(1.2, 1.4));
-                                let glow1 = exp(-d1 * d1 * 2.8) * 0.28;
-                                let glow2 = exp(-d2 * d2 * 3.2) * 0.14;
-                                let rgb = vec3(0.055, 0.058, 0.075) + self.accent_col.xyz * (glow1 + glow2);
+                                let glow1 = exp(-d1 * d1 * 2.8) * 0.24;
+                                let glow2 = exp(-d2 * d2 * 3.2) * 0.12;
+                                let rgb = vec3(0.025, 0.028, 0.040) + self.accent_col.xyz * (glow1 + glow2);
                                 return vec4(clamp(rgb, 0.0, 1.0), 1.0);
                             }
                         }
@@ -1891,12 +2209,12 @@ live_design! {
                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
                             <Label> { draw_text: { color: #F4F4F7, text_style: { font_size: 16.0 } }, text: "Now Playing" }
                             signal_path_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 11.5 } }, text: "Signal Path: WASAPI 48.0 kHz · 6.0s Bass-Swap" }
-                            fs_radio_btn = <SonoraBtn> { height: 32, text: "Start Radio" }
-                            fs_video_btn = <SonoraBtn> { height: 32, text: "Watch Video Clip" }
-                            fs_close_btn = <SonoraBtn> { height: 32, text: "Close (Esc)" }
+                            fs_radio_btn = <FerricBtn> { height: 32, text: "Start Radio" }
+                            fs_video_btn = <FerricBtn> { height: 32, text: "Watch Video Clip" }
+                            fs_close_btn = <FerricBtn> { height: 32, text: "Close (Esc)" }
                         }
 
-                        // Split Stage: Large Real Cover + Spectrum | Live Synced Karaoke Lyrics
+                        // Split Stage: Large Cover + Capsule Spectrum | Live Synced Lyrics
                         <View> {
                             width: Fill, height: Fill, flow: Right, align: { y: 0.5 }, spacing: 36,
 
@@ -1921,7 +2239,7 @@ live_design! {
                                 }
                                 np_canvas = <FerricNowPlayingCanvas> {
                                     width: Fill,
-                                    height: 92,
+                                    height: 86,
                                 }
                             }
 
@@ -1930,9 +2248,9 @@ live_design! {
                                 <View> {
                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                     fs_lyr_source = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "Synced Lyrics" }
-                                    fs_lyr_minus = <SonoraBtn> { height: 28, text: "-0.5s" }
-                                    fs_lyr_plus = <SonoraBtn> { height: 28, text: "+0.5s" }
-                                    fs_lyr_copy = <SonoraBtn> { height: 28, text: "Copy" }
+                                    fs_lyr_minus = <FerricBtn> { height: 28, text: "-0.5s" }
+                                    fs_lyr_plus = <FerricBtn> { height: 28, text: "+0.5s" }
+                                    fs_lyr_copy = <FerricBtn> { height: 28, text: "Copy" }
                                 }
                                 fs_lyr_0 = <Label> { width: Fill, draw_text: { color: #545768, text_style: { font_size: 15.0 } }, text: "" }
                                 fs_lyr_1 = <Label> { width: Fill, draw_text: { color: #7C8094, text_style: { font_size: 17.0 } }, text: "" }
@@ -1956,7 +2274,7 @@ live_design! {
                         show_bg: true,
                         draw_bg: { color: #000000A8 }
 
-                        <SonoraCard> {
+                        card_cmdk = <FerricCard> {
                             width: 540,
                             padding: 18,
                             flow: Down,
@@ -1964,28 +2282,28 @@ live_design! {
                             <View> {
                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
                                 <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: { font_size: 15.0 } }, text: "Ferric Powerbar" }
-                                cmdk_close_btn = <SonoraBtn> { height: 26, text: "Esc" }
+                                cmdk_close_btn = <FerricBtn> { height: 26, text: "Esc" }
                             }
-                            cmdk_input = <SonoraInput> {
+                            cmdk_input = <FerricInput> {
                                 height: 38,
                                 empty_text: "Type a song/artist and press Enter to search YouTube Music..."
                             }
                             <View> {
                                 width: Fill, height: Fit, flow: Right, spacing: 7,
-                                cmdk_home_btn = <SonoraBtn> { height: 30, text: "Home" }
-                                cmdk_search_btn = <SonoraBtn> { height: 30, text: "Search" }
-                                cmdk_songs_btn = <SonoraBtn> { height: 30, text: "Songs" }
-                                cmdk_albums_btn = <SonoraBtn> { height: 30, text: "Albums" }
-                                cmdk_artists_btn = <SonoraBtn> { height: 30, text: "Artists" }
-                                cmdk_playlists_btn = <SonoraBtn> { height: 30, text: "Playlists" }
+                                cmdk_home_btn = <FerricBtn> { height: 30, text: "Home" }
+                                cmdk_search_btn = <FerricBtn> { height: 30, text: "Search" }
+                                cmdk_songs_btn = <FerricBtn> { height: 30, text: "Songs" }
+                                cmdk_albums_btn = <FerricBtn> { height: 30, text: "Albums" }
+                                cmdk_artists_btn = <FerricBtn> { height: 30, text: "Artists" }
+                                cmdk_playlists_btn = <FerricBtn> { height: 30, text: "Playlists" }
                             }
                             <View> {
                                 width: Fill, height: Fit, flow: Right, spacing: 7,
-                                cmdk_eq_btn = <SonoraBtn> { height: 30, text: "Equalizer" }
-                                cmdk_fade_btn = <SonoraBtn> { height: 30, text: "Fade-In DSP" }
-                                cmdk_google_btn = <SonoraBtn> { height: 30, text: "Google Login" }
-                                cmdk_fs_btn = <SonoraBtn> { height: 30, text: "Fullscreen" }
-                                cmdk_demo_btn = <SonoraBtn> { height: 30, text: "Offline Demo" }
+                                cmdk_eq_btn = <FerricBtn> { height: 30, text: "Equalizer" }
+                                cmdk_fade_btn = <FerricBtn> { height: 30, text: "Fade-In DSP" }
+                                cmdk_google_btn = <FerricBtn> { height: 30, text: "Google Login" }
+                                cmdk_fs_btn = <FerricBtn> { height: 30, text: "Fullscreen" }
+                                cmdk_demo_btn = <FerricBtn> { height: 30, text: "Offline Demo" }
                             }
                         }
                     }
@@ -1997,19 +2315,22 @@ live_design! {
                         visible: false,
                         width: Fill,
                         height: Fill,
-                        padding: { right: 20, bottom: 82 }
+                        padding: { right: 20, bottom: 86 }
                         align: { x: 1.0, y: 1.0 }
-                        <View> {
+                        toast_pill = <View> {
                             width: Fit,
                             height: Fit,
                             padding: { left: 14, right: 16, top: 9, bottom: 9 }
                             show_bg: true,
                             draw_bg: {
+                                uniform glass_on: 0.0
                                 fn pixel(self) -> vec4 {
                                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
-                                    sdf.fill_keep(#1D1F2B);
-                                    sdf.stroke(#424560, 1.0);
+                                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
+                                    let fill_c = mix(vec4(0.08, 0.09, 0.13, 0.96), vec4(0.14, 0.15, 0.22, 0.72), self.glass_on);
+                                    let stroke_c = mix(#2C2E40, vec4(1.0, 1.0, 1.0, 0.28), self.glass_on);
+                                    sdf.fill_keep(fill_c);
+                                    sdf.stroke(stroke_c, 1.0);
                                     return sdf.result;
                                 }
                             }
@@ -2031,7 +2352,7 @@ live_design! {
                         show_bg: true,
                         draw_bg: { color: #000000B8 }
 
-                        <SonoraCard> {
+                        card_update_popup = <FerricCard> {
                             width: 480,
                             padding: 22,
                             flow: Down,
@@ -2041,9 +2362,9 @@ live_design! {
                             update_popup_notes = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "" }
                             <View> {
                                 width: Fill, height: Fit, margin: { top: 8 }, flow: Right, spacing: 8,
-                                update_now_btn = <SonoraPrimaryBtn> { text: "Download & Install" }
-                                update_whats_new_btn = <SonoraBtn> { height: 34, text: "Release Notes" }
-                                update_popup_close_btn = <SonoraBtn> { height: 34, text: "Later" }
+                                update_now_btn = <FerricPrimaryBtn> { text: "Download & Install" }
+                                update_whats_new_btn = <FerricBtn> { height: 34, text: "Release Notes" }
+                                update_popup_close_btn = <FerricBtn> { height: 34, text: "Later" }
                             }
                         }
                     }
@@ -2138,6 +2459,22 @@ pub struct App {
     #[rust]
     startup_auto_played: bool,
     #[rust]
+    video_player: Option<NativeVideoPlayer>,
+    #[rust]
+    video_open: bool,
+    #[rust]
+    video_track_id: Option<String>,
+    #[rust]
+    video_streams: Vec<VideoStreamOption>,
+    #[rust]
+    last_video_sync: Option<Instant>,
+    #[rust]
+    displayed_accent: Vec4,
+    #[rust]
+    started_at: Option<Instant>,
+    #[rust]
+    startup_trim_done: bool,
+    #[rust]
     lease: Option<ActiveSpeakerLease>,
     #[rust]
     lan_beacon: Option<LanDiscoveryBeacon>,
@@ -2212,13 +2549,41 @@ impl App {
     }
 
     fn sync_maximized_chrome_padding(&self, cx: &mut Cx, is_max: bool) {
-        let right_pad = if is_max { 20.0 } else { 8.0 };
+        let right_pad = if is_max { 12.0 } else { 8.0 };
         self.ui
             .view(id!(top_bar))
             .apply_over(cx, live! { padding: { left: 10.0, right: (right_pad) } });
     }
 
-    fn current_accent(&self) -> Vec4 {
+    fn style_chip_btn(&self, cx: &mut Cx, btn_id: &[LiveId], active: bool) {
+        let dark = vec4(0.035, 0.038, 0.050, 1.0);
+        let light = vec4(0.800, 0.812, 0.855, 1.0);
+        let white = vec4(1.0, 1.0, 1.0, 1.0);
+        let glass = if self.theme.material.liquid_glass {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        if active {
+            self.ui.button(btn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: 1.0, glass_on: (glass) }
+                    draw_text: { color: (dark), color_hover: (dark), color_focus: (dark), color_down: (dark) }
+                },
+            );
+        } else {
+            self.ui.button(btn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: 0.0, glass_on: (glass) }
+                    draw_text: { color: (light), color_hover: (white), color_focus: (white), color_down: (white) }
+                },
+            );
+        }
+    }
+
+    fn target_accent(&self) -> Vec4 {
         if self.theme.adaptive_album_art
             && let Some(cur) = self.queue.current()
             && let Some(art_cache) = &self.artwork
@@ -2229,10 +2594,446 @@ impl App {
         rgba_vec4(&self.theme.accent_hex)
     }
 
+    fn current_accent(&self) -> Vec4 {
+        if self.displayed_accent.w > 0.5 {
+            self.displayed_accent
+        } else {
+            self.target_accent()
+        }
+    }
+
     fn show_toast(&mut self, cx: &mut Cx, message: &str) {
         self.toast_until = Some(Instant::now() + Duration::from_secs(3));
         self.ui.label(id!(toast_lbl)).set_text(cx, message);
         self.ui.view(id!(toast_wrap)).set_visible(cx, true);
+        self.ui.redraw(cx);
+    }
+
+    fn adjust_ui_zoom(&mut self, cx: &mut Cx, delta: f32) {
+        let next = ((self.theme.ui_zoom + delta) * 10.0).round() / 10.0;
+        self.set_ui_zoom(cx, next);
+    }
+
+    fn set_ui_zoom(&mut self, cx: &mut Cx, zoom: f32) {
+        let clamped = zoom.clamp(0.80, 1.40);
+        self.theme.ui_zoom = clamped;
+        self.apply_ui_zoom(cx);
+        if let Some(db) = &self.db {
+            let _ = db.save_theme(&self.theme);
+        }
+        self.show_toast(cx, &format!("UI Zoom: {:.0}%", clamped * 100.0));
+    }
+
+    fn apply_ui_zoom(&self, cx: &mut Cx) {
+        let z = self.theme.ui_zoom.clamp(0.80, 1.40) as f64;
+        self.ui
+            .label(id!(zoom_val_lbl))
+            .set_text(cx, &format!("{:.0}%", z * 100.0));
+
+        self.ui
+            .view(id!(top_bar))
+            .apply_over(cx, live! { height: (44.0 * z) });
+        self.ui
+            .view(id!(left_sidebar))
+            .apply_over(cx, live! { width: (196.0 * z) });
+        self.ui
+            .view(id!(right_sidebar))
+            .apply_over(cx, live! { width: (296.0 * z) });
+        self.ui
+            .view(id!(bottom_bar))
+            .apply_over(cx, live! { height: (74.0 * z) });
+        self.ui
+            .ferric_cover_art(id!(np_art))
+            .apply_over(cx, live! { width: (46.0 * z), height: (46.0 * z) });
+        self.ui
+            .ferric_play_btn(id!(play_pause_btn))
+            .apply_over(cx, live! { width: (36.0 * z), height: (36.0 * z) });
+        self.ui.label(id!(np_title_lbl)).apply_over(
+            cx,
+            live! { draw_text: { text_style: { font_size: (13.0 * z) } } },
+        );
+        self.ui.label(id!(np_artist_lbl)).apply_over(
+            cx,
+            live! { draw_text: { text_style: { font_size: (11.0 * z) } } },
+        );
+
+        for nid in [
+            id!(nav_home),
+            id!(nav_search),
+            id!(nav_recents),
+            id!(nav_songs),
+            id!(nav_albums),
+            id!(nav_artists),
+            id!(nav_playlists),
+            id!(nav_settings),
+            id!(sidebar_add_folder_btn),
+        ] {
+            self.ui.button(nid).apply_over(
+                cx,
+                live! {
+                    height: (34.0 * z),
+                    draw_text: { text_style: { font_size: (13.0 * z) } }
+                },
+            );
+        }
+
+        for vid in [
+            id!(qp_0),
+            id!(qp_1),
+            id!(qp_2),
+            id!(qp_3),
+            id!(qp_4),
+            id!(qp_5),
+            id!(qp_6),
+            id!(qp_7),
+        ] {
+            self.ui.view(vid).apply_over(
+                cx,
+                live! {
+                    height: (58.0 * z),
+                    art = { width: (46.0 * z), height: (46.0 * z) }
+                    title = { draw_text: { text_style: { font_size: (13.0 * z) } } }
+                    sub = { draw_text: { text_style: { font_size: (11.0 * z) } } }
+                },
+            );
+        }
+
+        for cid in [
+            id!(sh0_c0),
+            id!(sh0_c1),
+            id!(sh0_c2),
+            id!(sh0_c3),
+            id!(sh0_c4),
+            id!(sh1_c0),
+            id!(sh1_c1),
+            id!(sh1_c2),
+            id!(sh1_c3),
+            id!(sh1_c4),
+            id!(sh2_c0),
+            id!(sh2_c1),
+            id!(sh2_c2),
+            id!(sh2_c3),
+            id!(sh2_c4),
+            id!(sc_0),
+            id!(sc_1),
+            id!(sc_2),
+            id!(sc_3),
+            id!(sc_4),
+        ] {
+            self.ui.view(cid).apply_over(
+                cx,
+                live! {
+                    height: (222.0 * z),
+                    art = { height: (144.0 * z) }
+                    title = { draw_text: { text_style: { font_size: (12.0 * z) } } }
+                    sub = { draw_text: { text_style: { font_size: (11.0 * z) } } }
+                },
+            );
+        }
+
+        for gid in [
+            id!(alb_0),
+            id!(alb_1),
+            id!(alb_2),
+            id!(alb_3),
+            id!(alb_4),
+            id!(alb_5),
+            id!(alb_6),
+            id!(alb_7),
+            id!(art_0),
+            id!(art_1),
+            id!(art_2),
+            id!(art_3),
+            id!(art_4),
+            id!(art_5),
+            id!(art_6),
+            id!(art_7),
+            id!(plc_0),
+            id!(plc_1),
+            id!(plc_2),
+            id!(plc_3),
+            id!(plc_4),
+            id!(plc_5),
+            id!(plc_6),
+            id!(plc_7),
+        ] {
+            self.ui.view(gid).apply_over(
+                cx,
+                live! {
+                    height: (236.0 * z),
+                    art = { height: (158.0 * z) }
+                    title = { draw_text: { text_style: { font_size: (12.5 * z) } } }
+                    sub = { draw_text: { text_style: { font_size: (11.0 * z) } } }
+                },
+            );
+        }
+
+        for qid in [
+            id!(qh_0),
+            id!(qh_1),
+            id!(qh_2),
+            id!(q_now_row),
+            id!(qu_0),
+            id!(qu_1),
+            id!(qu_2),
+            id!(qu_3),
+            id!(qu_4),
+            id!(qu_5),
+            id!(qu_6),
+            id!(qu_7),
+            id!(qu_8),
+            id!(qu_9),
+        ] {
+            self.ui.view(qid).apply_over(
+                cx,
+                live! {
+                    height: (52.0 * z),
+                    art = { width: (36.0 * z), height: (36.0 * z) }
+                    title = { draw_text: { text_style: { font_size: (12.0 * z) } } }
+                    sub = { draw_text: { text_style: { font_size: (10.5 * z) } } }
+                },
+            );
+        }
+
+        self.ui.redraw(cx);
+    }
+
+    fn compute_video_viewport_rect(&self, cx: &Cx) -> Option<VideoViewportRect> {
+        let client = win32_client_rect_screen()?;
+        let slot = self.ui.view(id!(video_stage_slot)).area().rect(cx);
+        let scale = client.dpi_scale.max(0.5);
+        if slot.size.x > 40.0 && slot.size.y > 40.0 {
+            Some(VideoViewportRect {
+                x: client.left + (slot.pos.x as f32 * scale).round() as i32,
+                y: client.top + (slot.pos.y as f32 * scale).round() as i32,
+                width: (slot.size.x as f32 * scale).round() as i32,
+                height: (slot.size.y as f32 * scale).round() as i32,
+            })
+        } else {
+            let z = self.theme.ui_zoom.clamp(0.80, 1.40);
+            let left_px = if self.left_sidebar_open {
+                (197.0 * z * scale).round() as i32
+            } else {
+                0
+            };
+            let right_px = if self.right_sidebar_open {
+                (297.0 * z * scale).round() as i32
+            } else {
+                0
+            };
+            let top_px = ((45.0 * z + 49.0) * scale).round() as i32;
+            let bot_px = (75.0 * z * scale).round() as i32;
+            Some(VideoViewportRect {
+                x: client.left + left_px,
+                y: client.top + top_px,
+                width: (client.width - left_px - right_px).max(320),
+                height: (client.height - top_px - bot_px).max(180),
+            })
+        }
+    }
+
+    fn refresh_video_quality_buttons(&self, cx: &mut Cx) {
+        let cur_q = self.dsp.video_quality;
+        for (btn, q) in [
+            (id!(vq_auto_btn), VideoQuality::Auto),
+            (id!(vq_360_btn), VideoQuality::P360),
+            (id!(vq_480_btn), VideoQuality::P480),
+            (id!(vq_720_btn), VideoQuality::P720),
+            (id!(vq_1080_btn), VideoQuality::P1080),
+            (id!(svq_auto_btn), VideoQuality::Auto),
+            (id!(svq_360_btn), VideoQuality::P360),
+            (id!(svq_480_btn), VideoQuality::P480),
+            (id!(svq_720_btn), VideoQuality::P720),
+            (id!(svq_1080_btn), VideoQuality::P1080),
+        ] {
+            self.style_chip_btn(cx, btn, cur_q == q);
+        }
+    }
+
+    fn pick_best_video_stream(&self) -> Option<&VideoStreamOption> {
+        if self.video_streams.is_empty() {
+            return None;
+        }
+        let target_h = self.dsp.video_quality.target_height();
+        if let Some(exact) = self
+            .video_streams
+            .iter()
+            .find(|s| s.quality == self.dsp.video_quality)
+        {
+            return Some(exact);
+        }
+        self.video_streams
+            .iter()
+            .min_by_key(|s| s.height.abs_diff(target_h))
+    }
+
+    fn load_selected_video_quality(&mut self, cx: &mut Cx) {
+        self.refresh_video_quality_buttons(cx);
+        let Some(chosen) = self.pick_best_video_stream().cloned() else {
+            return;
+        };
+        let Some(rect) = self.compute_video_viewport_rect(cx) else {
+            return;
+        };
+        let (pos_sec, playing) = self
+            .audio
+            .as_ref()
+            .map(|a| {
+                let s = a.telemetry();
+                (s.position_ms as f64 / 1000.0, s.is_playing)
+            })
+            .unwrap_or((0.0, true));
+        self.ui.label(id!(vid_status_lbl)).set_text(
+            cx,
+            &format!(
+                "{} ({}p · {} kbps) · Synced to WASAPI",
+                chosen.label, chosen.height, chosen.bitrate_kbps
+            ),
+        );
+        self.ui.label(id!(vid_stage_hint_lbl)).set_text(cx, "");
+        let owner = win32_main_hwnd_raw();
+        if let Some(vp) = &mut self.video_player {
+            vp.open_or_load(owner, rect, chosen.url, pos_sec, playing);
+        }
+        self.last_video_sync = Some(Instant::now());
+    }
+
+    fn sync_video_bounds(&self, cx: &Cx) {
+        if !self.video_open {
+            return;
+        }
+        let Some(vp) = &self.video_player else {
+            return;
+        };
+        if !vp.is_open() {
+            return;
+        }
+        let obstructed = self.fullscreen_open
+            || self.cmdk_open
+            || self.update_popup_visible
+            || self.compact_mini_mode
+            || win32_is_window_hidden_or_minimized();
+        if obstructed {
+            vp.set_visible(false);
+            return;
+        }
+        if let Some(rect) = self.compute_video_viewport_rect(cx) {
+            vp.set_bounds(rect);
+            vp.set_visible(true);
+        }
+    }
+
+    fn open_native_video_stage(&mut self, cx: &mut Cx) {
+        let Some(cur) = self.queue.current().cloned() else {
+            self.show_toast(cx, "Play a song first to watch its video clip");
+            return;
+        };
+        if self.fullscreen_open {
+            self.set_fullscreen(cx, false);
+        }
+        self.video_open = true;
+        self.ui.view(id!(video_overlay)).set_visible(cx, true);
+        self.ui.label(id!(vid_title_lbl)).set_text(
+            cx,
+            &format!(
+                "{} — {}",
+                clip_text(&cur.title, 34),
+                clip_text(&cur.artist, 26)
+            ),
+        );
+        self.refresh_video_quality_buttons(cx);
+        let accent = self.current_accent();
+        self.ui.button(id!(bar_video_btn)).apply_over(
+            cx,
+            live! { draw_bg: { active: 1.0 }, draw_icon: { color: (accent) } },
+        );
+
+        // Reuse already loaded streams for the same track
+        if self.video_track_id.as_deref() == Some(cur.id.as_str()) && !self.video_streams.is_empty()
+        {
+            self.load_selected_video_quality(cx);
+            self.ui.redraw(cx);
+            return;
+        }
+
+        // Check for local sidecar video file (.mp4 / .webm / .mkv) next to audio file first
+        if let Some(local_p) = &cur.path {
+            for ext in ["mp4", "webm", "mkv"] {
+                let cand = local_p.with_extension(ext);
+                if cand.is_file() {
+                    let uri = format!("file:///{}", cand.to_string_lossy().replace('\\', "/"));
+                    self.video_track_id = Some(cur.id.clone());
+                    self.video_streams = vec![VideoStreamOption {
+                        quality: VideoQuality::P1080,
+                        label: "Local HD".to_string(),
+                        width: 1920,
+                        height: 1080,
+                        bitrate_kbps: 0,
+                        url: uri,
+                        mime: "video/mp4".to_string(),
+                    }];
+                    self.load_selected_video_quality(cx);
+                    self.ui.redraw(cx);
+                    return;
+                }
+            }
+        }
+
+        self.video_track_id = Some(cur.id.clone());
+        self.video_streams.clear();
+        self.ui
+            .label(id!(vid_status_lbl))
+            .set_text(cx, "Resolving native MP4 video streams...");
+        self.ui
+            .label(id!(vid_stage_hint_lbl))
+            .set_text(cx, "Loading in-app video clip...");
+        self.ui.redraw(cx);
+
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        let session = self.current_ytm_session();
+        let track_id = cur.id.clone();
+        let artist = cur.artist.clone();
+        let title = cur.title.clone();
+        let existing_vid = cur.youtube_video_id.clone();
+        thread::spawn(move || {
+            let res = (|| {
+                let vid = match existing_vid {
+                    Some(v) if !v.trim().is_empty() => v,
+                    _ => resolve_best_video_id_for_track(&session, &artist, &title)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| "No official music video found for this song".to_string())?,
+                };
+                let streams = fetch_video_streams(&vid, &session).map_err(|e| e.to_string())?;
+                Ok::<_, String>((vid, streams))
+            })();
+            match res {
+                Ok((video_id, streams)) => {
+                    let _ = tx.send(BgMessage::VideoStreamsLoaded {
+                        track_id,
+                        video_id,
+                        streams,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(BgMessage::VideoStreamsFailed { track_id, error });
+                }
+            }
+        });
+    }
+
+    fn close_native_video_stage(&mut self, cx: &mut Cx) {
+        self.video_open = false;
+        self.ui.view(id!(video_overlay)).set_visible(cx, false);
+        if let Some(vp) = &mut self.video_player {
+            vp.close();
+        }
+        let muted = vec4(0.604, 0.612, 0.659, 1.0);
+        self.ui.button(id!(bar_video_btn)).apply_over(
+            cx,
+            live! { draw_bg: { active: 0.0 }, draw_icon: { color: (muted) } },
+        );
         self.ui.redraw(cx);
     }
 
@@ -2241,6 +3042,8 @@ impl App {
             return;
         }
         self.initialized = true;
+        self.started_at = Some(Instant::now());
+        self.startup_trim_done = false;
         self.active_page = MainPage::Home;
         self.active_settings_tab = SettingsTab::Accounts;
         self.nav_history = Some(NavHistory::new(MainPage::Home));
@@ -2250,7 +3053,11 @@ impl App {
         self.pre_mute_volume = 0.85;
         self.queue_context = "Quick picks".to_string();
         self.artwork = Some(ArtworkCache::new());
+        self.video_player = Some(NativeVideoPlayer::new(
+            app_data_dir().join("webview2_video"),
+        ));
         self.hide_native_makepad_caption(cx);
+        win32_install_window_hooks();
 
         let db_path = app_data_dir().join("ferric.db");
         let db = LibraryDb::open(&db_path)
@@ -2259,12 +3066,16 @@ impl App {
 
         if let Some(store) = &db {
             self.theme = store.load_theme().unwrap_or_default();
-            // Upgrade pre-Sonora legacy orange/glass configs cleanly to Sonora Midnight
-            if self.theme.name != "Sonora Midnight"
-                && self.theme.name != "Pure AMOLED"
-                && self.theme.name != "Warm Cream Light"
-            {
+            // Upgrade legacy theme names cleanly to AMOLED Black default
+            if !matches!(
+                self.theme.name.as_str(),
+                "AMOLED Black" | "Obsidian Studio" | "Ferric Liquid Glass" | "Warm Cream Light"
+            ) {
                 self.theme = ThemeConfig::default();
+                let _ = store.save_theme(&self.theme);
+            }
+            if !(0.80..=1.40).contains(&self.theme.ui_zoom) {
+                self.theme.ui_zoom = 1.0;
             }
             self.eq = store.load_eq().unwrap_or_default();
             self.dsp = store.load_playback_dsp().unwrap_or_default();
@@ -2274,6 +3085,8 @@ impl App {
             self.all_tracks = store.list_tracks("").unwrap_or_default();
             self.playlists = store.list_playlists().unwrap_or_default();
         }
+        self.displayed_accent = rgba_vec4(&self.theme.accent_hex);
+        win32_set_close_to_tray(self.dsp.close_to_tray);
         self.queue.shuffle = self.session_state.shuffle;
         self.queue.repeat = self.session_state.repeat;
         self.db = db;
@@ -2306,10 +3119,11 @@ impl App {
         }
         self.sync_controls_from_state(cx);
         self.apply_theme_live(cx);
+        self.apply_ui_zoom(cx);
         self.refresh_home_ui(cx);
         self.refresh_right_sidebar(cx);
         self.refresh_storage_stats(cx);
-        self.tick_timer = cx.start_interval(0.10);
+        self.tick_timer = cx.start_interval(0.05);
 
         if startup_load_demo() {
             self.load_and_play_demo_suite(cx);
@@ -2376,8 +3190,20 @@ impl App {
             "now" | "lyrics" | "fullscreen" => {
                 self.set_fullscreen(cx, true);
             }
+            "lyrics-tab" => {
+                self.set_right_sidebar(cx, true, true);
+            }
+            "video" => {
+                self.open_native_video_stage(cx);
+            }
             "glass" => {
-                self.theme.material.liquid_glass = true;
+                self.theme = ThemeConfig::smoked_copper_glass();
+                self.sync_controls_from_state(cx);
+                self.apply_theme_live(cx);
+                self.navigate_to(cx, MainPage::Home, false);
+            }
+            "glass-settings" => {
+                self.theme = ThemeConfig::smoked_copper_glass();
                 self.sync_controls_from_state(cx);
                 self.apply_theme_live(cx);
                 self.navigate_to(cx, MainPage::Settings, false);
@@ -2398,6 +3224,9 @@ impl App {
     }
 
     fn navigate_to(&mut self, cx: &mut Cx, target: MainPage, push_history: bool) {
+        if self.video_open {
+            self.close_native_video_stage(cx);
+        }
         self.active_page = target;
         if push_history && let Some(hist) = &mut self.nav_history {
             hist.push(target);
@@ -2421,6 +3250,11 @@ impl App {
         let bright = vec4(0.957, 0.957, 0.969, 1.0);
         let muted = vec4(0.635, 0.647, 0.706, 1.0);
         let icon_muted = vec4(0.533, 0.545, 0.600, 1.0);
+        let glass = if self.theme.material.liquid_glass {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
         let nav_map = [
             (MainPage::Home, id!(nav_home)),
             (MainPage::Search, id!(nav_search)),
@@ -2436,7 +3270,7 @@ impl App {
             self.ui.button(btn_id).apply_over(
                 cx,
                 live! {
-                    draw_bg: { active: (if active { 1.0 } else { 0.0 }) }
+                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), glass_on: (glass) }
                     draw_icon: { color: (if active { bright } else { icon_muted }) }
                     draw_text: { color: (if active { bright } else { muted }) }
                 },
@@ -2458,6 +3292,15 @@ impl App {
         );
 
         match target {
+            MainPage::Home => self.refresh_home_ui(cx),
+            MainPage::Songs => {
+                let visible: Vec<Track> = self.filtered_tracks.iter().take(14).cloned().collect();
+                self.request_artwork_for_tracks(&visible);
+            }
+            MainPage::Recents => {
+                let visible: Vec<Track> = self.recents_tracks.iter().take(14).cloned().collect();
+                self.request_artwork_for_tracks(&visible);
+            }
             MainPage::Albums => self.refresh_albums_grid(cx),
             MainPage::Artists => self.refresh_artists_grid(cx),
             MainPage::Playlists => self.refresh_playlists_grid(cx),
@@ -2465,6 +3308,8 @@ impl App {
                 if self.search_tracks.is_empty() {
                     self.search_tracks = Rc::new(self.home_quick_picks_pool());
                 }
+                let visible: Vec<Track> = self.search_tracks.iter().take(14).cloned().collect();
+                self.request_artwork_for_tracks(&visible);
                 self.refresh_search_ui(cx);
             }
             MainPage::Settings => self.refresh_storage_stats(cx),
@@ -2475,8 +3320,6 @@ impl App {
 
     fn switch_settings_tab(&mut self, cx: &mut Cx, tab: SettingsTab) {
         self.active_settings_tab = tab;
-        let dark = vec4(0.055, 0.059, 0.075, 1.0);
-        let light = vec4(0.784, 0.792, 0.839, 1.0);
         let defs = [
             (
                 SettingsTab::Accounts,
@@ -2500,13 +3343,7 @@ impl App {
         for (t, vid, bid) in defs {
             let active = t == tab;
             self.ui.view(vid).set_visible(cx, active);
-            self.ui.button(bid).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: (if active { 1.0 } else { 0.0 }) }
-                    draw_text: { color: (if active { dark } else { light }) }
-                },
-            );
+            self.style_chip_btn(cx, bid, active);
         }
         if tab == SettingsTab::Storage {
             self.refresh_storage_stats(cx);
@@ -2526,22 +3363,9 @@ impl App {
             .view(id!(rs_lyrics_view))
             .set_visible(cx, lyrics_tab);
 
-        let dark = vec4(0.055, 0.059, 0.075, 1.0);
-        let light = vec4(0.784, 0.792, 0.839, 1.0);
-        self.ui.button(id!(rs_tab_queue)).apply_over(
-            cx,
-            live! {
-                draw_bg: { active: (if !lyrics_tab { 1.0 } else { 0.0 }) }
-                draw_text: { color: (if !lyrics_tab { dark } else { light }) }
-            },
-        );
-        self.ui.button(id!(rs_tab_lyrics)).apply_over(
-            cx,
-            live! {
-                draw_bg: { active: (if lyrics_tab { 1.0 } else { 0.0 }) }
-                draw_text: { color: (if lyrics_tab { dark } else { light }) }
-            },
-        );
+        self.style_chip_btn(cx, id!(rs_tab_queue), !lyrics_tab);
+        self.style_chip_btn(cx, id!(rs_tab_lyrics), lyrics_tab);
+
         let accent = self.current_accent();
         let muted = vec4(0.604, 0.612, 0.659, 1.0);
         self.ui.button(id!(toggle_right_btn)).apply_over(
@@ -2559,6 +3383,7 @@ impl App {
             cx,
             live! { draw_icon: { color: (if open && !lyrics_tab { accent } else { muted }) } },
         );
+        self.sync_video_bounds(cx);
         self.ui.redraw(cx);
     }
 
@@ -2566,11 +3391,13 @@ impl App {
         self.fullscreen_open = open;
         self.ui.view(id!(shell_col)).set_visible(cx, !open);
         self.ui.view(id!(fullscreen_overlay)).set_visible(cx, open);
+        self.sync_video_bounds(cx);
         self.ui.redraw(cx);
     }
 
     fn toggle_compact_mini_mode(&mut self, cx: &mut Cx) {
         self.compact_mini_mode = !self.compact_mini_mode;
+        win32_set_mini_mode_flag(self.compact_mini_mode);
         let show_full = !self.compact_mini_mode;
         self.ui.view(id!(workspace_row)).set_visible(cx, show_full);
         let new_size = if self.compact_mini_mode {
@@ -2579,6 +3406,7 @@ impl App {
             dvec2(1280.0, 780.0)
         };
         self.ui.window(id!(main_window)).resize(cx, new_size);
+        self.sync_video_bounds(cx);
         self.ui.redraw(cx);
     }
 
@@ -2591,9 +3419,11 @@ impl App {
         }
     }
 
+    /// Request cover art strictly lazily for currently visible items (never bulk-loading hundreds
+    /// of covers into RAM) so working set stays strictly under 100 MB.
     fn request_artwork_for_tracks(&mut self, tracks: &[Track]) {
         if let Some(cache) = &mut self.artwork {
-            for t in tracks.iter().take(240) {
+            for t in tracks.iter().take(14) {
                 let _ = cache.request_for_track(t);
             }
         }
@@ -2601,7 +3431,7 @@ impl App {
 
     fn request_artwork_for_cards(&mut self, cards: &[YtmShelfCard]) {
         if let Some(cache) = &mut self.artwork {
-            for c in cards.iter().take(30) {
+            for c in cards.iter().take(6) {
                 if let Some(url) = c.thumbnail_url.as_deref() {
                     let _ = cache.request_url(url);
                 }
@@ -2642,10 +3472,9 @@ impl App {
             self.artwork_snapshot = Rc::new(cache.snapshot());
         }
         self.apply_adaptive_accent_live(cx);
-        self.refresh_home_ui(cx);
-        self.refresh_right_sidebar(cx);
-        self.refresh_detail_hero(cx);
-        if self.active_page == MainPage::Albums {
+        if self.active_page == MainPage::Home {
+            self.refresh_home_ui(cx);
+        } else if self.active_page == MainPage::Albums {
             self.refresh_albums_grid(cx);
         } else if self.active_page == MainPage::Artists {
             self.refresh_artists_grid(cx);
@@ -2653,7 +3482,10 @@ impl App {
             self.refresh_playlists_grid(cx);
         } else if self.active_page == MainPage::Search {
             self.refresh_search_ui(cx);
+        } else if self.active_page == MainPage::Detail {
+            self.refresh_detail_hero(cx);
         }
+        self.refresh_right_sidebar(cx);
         let is_playing = self
             .audio
             .as_ref()
@@ -2683,11 +3515,20 @@ impl App {
 
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
         let accent = self.current_accent();
+        let glass_f = if self.theme.material.liquid_glass {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        self.ui
+            .view(id!(body))
+            .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
         self.ui.view(id!(bottom_bar)).apply_over(
             cx,
             live! {
                 draw_bg: {
                     accent_col: (accent),
+                    glass_on: (glass_f),
                     glow_amt: (if self.queue.current().is_some() { 0.28 } else { 0.14 })
                 }
             },
@@ -2701,18 +3542,20 @@ impl App {
         self.ui
             .ferric_bar_slider(id!(vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
-        self.ui
-            .view(id!(q_now_row))
-            .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+        self.ui.view(id!(q_now_row)).apply_over(
+            cx,
+            live! { draw_bg: { accent_col: (accent), glass_on: (glass_f) } },
+        );
         self.ui
             .label(id!(q_now_header))
             .apply_over(cx, live! { draw_text: { color: (accent) } });
         self.ui
             .label(id!(rs_lyr_3))
             .apply_over(cx, live! { draw_text: { color: (accent) } });
-        self.ui
-            .view(id!(np_canvas))
-            .apply_over(cx, live! { draw_bg: { accent: (accent) } });
+        self.ui.view(id!(np_canvas)).apply_over(
+            cx,
+            live! { draw_bg: { accent: (accent), glass_on: (glass_f) } },
+        );
         self.ui
             .ferric_eq_graph(id!(eq_graph))
             .apply_over(cx, live! { draw_bg: { accent: (accent) } });
@@ -2783,8 +3626,6 @@ impl App {
             &format!("{} songs · {} min · {}", list.len(), mins, xfade_txt),
         );
 
-        let dark = vec4(0.055, 0.059, 0.075, 1.0);
-        let light = vec4(0.784, 0.792, 0.839, 1.0);
         for (btn, active) in [
             (id!(flt_all_btn), self.active_filter == LibraryFilter::All),
             (
@@ -2804,13 +3645,7 @@ impl App {
                 self.active_filter == LibraryFilter::YouTube,
             ),
         ] {
-            self.ui.button(btn).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: (if active { 1.0 } else { 0.0 }) }
-                    draw_text: { color: (if active { dark } else { light }) }
-                },
-            );
+            self.style_chip_btn(cx, btn, active);
         }
         self.ui
             .button(id!(sort_cycle_btn))
@@ -2836,30 +3671,9 @@ impl App {
         );
         self.recents_tracks = Rc::new(recents);
 
-        // Album & Artist groups
+        // Album & Artist groups (artwork loaded lazily when viewing those pages)
         self.album_groups = build_album_groups(&self.all_tracks);
         self.artist_groups = build_artist_groups(&self.all_tracks);
-        if let Some(cache) = &mut self.artwork {
-            for t in self.recents_tracks.iter().take(12) {
-                let _ = cache.request_for_track(t);
-            }
-            for g in self.album_groups.iter().take(24) {
-                if let Some(url) = g.thumbnail_url.as_deref() {
-                    let _ = cache.request_url(url);
-                }
-            }
-            for g in self.artist_groups.iter().take(24) {
-                if let Some(url) = g.thumbnail_url.as_deref() {
-                    let _ = cache.request_url(url);
-                }
-            }
-            for pl in self.playlists.iter().take(16) {
-                if let Some(url) = pl.thumbnail_url.as_deref() {
-                    let _ = cache.request_url(url);
-                }
-            }
-        }
-        self.request_artwork_for_tracks(&self.all_tracks.clone());
 
         // Sidebar Pinned slots
         let pin_slots = [
@@ -2920,9 +3734,7 @@ impl App {
             .collect()
     }
 
-    fn refresh_home_ui(&self, cx: &mut Cx) {
-        let dark = vec4(0.055, 0.059, 0.075, 1.0);
-        let light = vec4(0.784, 0.792, 0.839, 1.0);
+    fn refresh_home_ui(&mut self, cx: &mut Cx) {
         let chip_ids = [
             id!(chip_0),
             id!(chip_1),
@@ -2943,27 +3755,40 @@ impl App {
             if let Some(txt) = label {
                 self.ui.button(cid).set_visible(cx, true);
                 self.ui.button(cid).set_text(cx, &txt);
-                let active = self.active_mood_idx == i;
-                self.ui.button(cid).apply_over(
-                    cx,
-                    live! {
-                        draw_bg: { active: (if active { 1.0 } else { 0.0 }) }
-                        draw_text: { color: (if active { dark } else { light }) }
-                    },
-                );
+                self.style_chip_btn(cx, cid, self.active_mood_idx == i);
             } else if i > 0 && !self.rich_home.chips.is_empty() {
                 self.ui.button(cid).set_visible(cx, false);
             }
         }
 
-        // Quick Picks 2x4 grid
+        // Quick Picks 2x4 grid (request artwork lazily only for the 8 visible tiles)
         let pool = self.home_quick_picks_pool();
+        let start = self.qp_page * 8;
+        if let Some(cache) = &mut self.artwork {
+            for t in pool.iter().skip(start).take(8) {
+                let _ = cache.request_for_track(t);
+            }
+            for (si, shelf) in self.rich_home.shelves.iter().take(3).enumerate() {
+                let off = self.shelf_pages[si] * 5;
+                for card in shelf.cards.iter().skip(off).take(5) {
+                    if let Some(url) = card.thumbnail_url.as_deref() {
+                        let _ = cache.request_url(url);
+                    }
+                }
+            }
+        }
+
         let active_id = self.queue.current().map(|t| t.id.as_str());
         let is_playing = self
             .audio
             .as_ref()
             .is_some_and(|a| a.telemetry().is_playing);
-        let start = self.qp_page * 8;
+        let glass_f = if self.theme.material.liquid_glass {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        let accent = self.current_accent();
         let qp_ids = [
             id!(qp_0),
             id!(qp_1),
@@ -2981,7 +3806,7 @@ impl App {
                 let is_act = active_id == Some(track.id.as_str());
                 v.apply_over(
                     cx,
-                    live! { draw_bg: { active: (if is_act { 1.0 } else { 0.0 }) } },
+                    live! { draw_bg: { active: (if is_act { 1.0 } else { 0.0 }), glass_on: (glass_f), accent_col: (accent) } },
                 );
                 v.label(id!(title))
                     .set_text(cx, &clip_text(&track.title, 28));
@@ -3054,12 +3879,16 @@ impl App {
                     let card_v = self.ui.view(cid);
                     if let Some(card) = shelf.cards.get(offset + ci) {
                         card_v.set_visible(cx, true);
+                        card_v.apply_over(
+                            cx,
+                            live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+                        );
                         card_v
                             .label(id!(title))
-                            .set_text(cx, &clip_text(&card.title, 12));
+                            .set_text(cx, &clip_text(&card.title, 18));
                         card_v
                             .label(id!(sub))
-                            .set_text(cx, &clip_text(&card.subtitle, 15));
+                            .set_text(cx, &clip_text(&card.subtitle, 22));
                         self.bind_cover_art_url(
                             cx,
                             card_v.ferric_cover_art(id!(art)),
@@ -3079,23 +3908,38 @@ impl App {
         }
     }
 
-    fn refresh_right_sidebar(&self, cx: &mut Cx) {
+    fn refresh_right_sidebar(&mut self, cx: &mut Cx) {
         let is_playing = self
             .audio
             .as_ref()
             .is_some_and(|a| a.telemetry().is_playing);
         let accent = self.current_accent();
+        let glass_f = if self.theme.material.liquid_glass {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
 
         // History (last 3 played tracks excluding current)
-        let cur_id = self.queue.current().map(|t| t.id.as_str());
+        let cur_id = self.queue.current().map(|t| t.id.clone());
         let hist: Vec<Track> = self
             .session_state
             .recent_track_ids
             .iter()
-            .filter(|id| Some(id.as_str()) != cur_id)
+            .filter(|id| cur_id.as_deref() != Some(id.as_str()))
             .filter_map(|id| self.all_tracks.iter().find(|t| &t.id == id).cloned())
             .take(3)
             .collect();
+        let upcoming: Vec<Track> = self.queue.peek_upcoming(10).into_iter().cloned().collect();
+        if let Some(cache) = &mut self.artwork {
+            for t in &hist {
+                let _ = cache.request_for_track(t);
+            }
+            for t in upcoming.iter().take(6) {
+                let _ = cache.request_for_track(t);
+            }
+        }
+
         self.ui
             .view(id!(qh_header))
             .set_visible(cx, !hist.is_empty());
@@ -3103,8 +3947,12 @@ impl App {
             let rv = self.ui.view(rid);
             if let Some(t) = hist.get(i) {
                 rv.set_visible(cx, true);
-                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 17));
-                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 19));
+                rv.apply_over(
+                    cx,
+                    live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+                );
+                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 18));
+                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 20));
                 rv.label(id!(dur)).set_text(
                     cx,
                     &if t.duration_ms > 0 {
@@ -3133,17 +3981,21 @@ impl App {
             &format!("Now playing · {}", clip_text(&self.queue_context, 20)),
         );
         let now_v = self.ui.view(id!(q_now_row));
-        if let Some(cur) = self.queue.current() {
+        now_v.apply_over(
+            cx,
+            live! { draw_bg: { active: 1.0, glass_on: (glass_f), accent_col: (accent) } },
+        );
+        if let Some(cur) = self.queue.current().cloned() {
             now_v.set_visible(cx, true);
             now_v
                 .label(id!(title))
-                .set_text(cx, &clip_text(&cur.title, 17));
+                .set_text(cx, &clip_text(&cur.title, 18));
             now_v
                 .label(id!(title))
                 .apply_over(cx, live! { draw_text: { color: (accent) } });
             now_v
                 .label(id!(sub))
-                .set_text(cx, &clip_text(&cur.artist, 19));
+                .set_text(cx, &clip_text(&cur.artist, 20));
             now_v.label(id!(dur)).set_text(
                 cx,
                 &if cur.duration_ms > 0 {
@@ -3156,7 +4008,7 @@ impl App {
                 cx,
                 now_v.ferric_cover_art(id!(art)),
                 cur.thumbnail_url.as_deref(),
-                Some(cur),
+                Some(&cur),
                 is_playing,
                 0.6,
                 false,
@@ -3172,7 +4024,6 @@ impl App {
         }
 
         // Up next (10 rows)
-        let upcoming = self.queue.peek_upcoming(10);
         self.ui
             .label(id!(q_upnext_header))
             .set_text(cx, &format!("Up next ({})", upcoming.len()));
@@ -3187,7 +4038,7 @@ impl App {
         self.ui.button(id!(rs_radio_btn)).apply_over(
             cx,
             live! {
-                draw_bg: { active: (if self.session_state.autoplay_radio { 1.0 } else { 0.0 }) }
+                draw_bg: { active: (if self.session_state.autoplay_radio { 1.0 } else { 0.0 }), glass_on: (glass_f) }
                 draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { vec4(0.55, 0.56, 0.62, 1.0) }) }
             },
         );
@@ -3208,8 +4059,12 @@ impl App {
             let rv = self.ui.view(rid);
             if let Some(t) = upcoming.get(i) {
                 rv.set_visible(cx, true);
-                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 17));
-                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 19));
+                rv.apply_over(
+                    cx,
+                    live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+                );
+                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 18));
+                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 20));
                 rv.label(id!(dur)).set_text(
                     cx,
                     &if t.duration_ms > 0 {
@@ -3233,12 +4088,19 @@ impl App {
         }
     }
 
-    fn refresh_albums_grid(&self, cx: &mut Cx) {
+    fn refresh_albums_grid(&mut self, cx: &mut Cx) {
         self.ui.label(id!(albums_sub_lbl)).set_text(
             cx,
             &format!("{} albums in your library", self.album_groups.len()),
         );
         let start = self.albums_page * 8;
+        if let Some(cache) = &mut self.artwork {
+            for g in self.album_groups.iter().skip(start).take(8) {
+                if let Some(url) = g.thumbnail_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+            }
+        }
         let ids = [
             id!(alb_0),
             id!(alb_1),
@@ -3275,12 +4137,19 @@ impl App {
         }
     }
 
-    fn refresh_artists_grid(&self, cx: &mut Cx) {
+    fn refresh_artists_grid(&mut self, cx: &mut Cx) {
         self.ui.label(id!(artists_sub_lbl)).set_text(
             cx,
             &format!("{} artists in your library", self.artist_groups.len()),
         );
         let start = self.artists_page * 8;
+        if let Some(cache) = &mut self.artwork {
+            for g in self.artist_groups.iter().skip(start).take(8) {
+                if let Some(url) = g.thumbnail_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+            }
+        }
         let ids = [
             id!(art_0),
             id!(art_1),
@@ -3317,8 +4186,15 @@ impl App {
         }
     }
 
-    fn refresh_playlists_grid(&self, cx: &mut Cx) {
+    fn refresh_playlists_grid(&mut self, cx: &mut Cx) {
         let start = self.playlists_page * 8;
+        if let Some(cache) = &mut self.artwork {
+            for pl in self.playlists.iter().skip(start).take(8) {
+                if let Some(url) = pl.thumbnail_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+            }
+        }
         let ids = [
             id!(plc_0),
             id!(plc_1),
@@ -3354,8 +4230,6 @@ impl App {
     }
 
     fn refresh_search_ui(&self, cx: &mut Cx) {
-        let dark = vec4(0.055, 0.059, 0.075, 1.0);
-        let light = vec4(0.784, 0.792, 0.839, 1.0);
         for (btn, f) in [
             (id!(sf_all_btn), SearchFilter::All),
             (id!(sf_songs_btn), SearchFilter::Songs),
@@ -3364,14 +4238,7 @@ impl App {
             (id!(sf_playlists_btn), SearchFilter::Playlists),
             (id!(sf_local_btn), SearchFilter::Local),
         ] {
-            let active = self.search_filter == f;
-            self.ui.button(btn).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: (if active { 1.0 } else { 0.0 }) }
-                    draw_text: { color: (if active { dark } else { light }) }
-                },
-            );
+            self.style_chip_btn(cx, btn, self.search_filter == f);
         }
 
         // Recent searches chips
@@ -3422,7 +4289,7 @@ impl App {
             if let Some(card) = filtered_cards.get(i) {
                 cv.set_visible(cx, true);
                 cv.label(id!(title))
-                    .set_text(cx, &clip_text(&card.title, 20));
+                    .set_text(cx, &clip_text(&card.title, 18));
                 cv.label(id!(sub))
                     .set_text(cx, &clip_text(&card.subtitle, 22));
                 self.bind_cover_art_url(
@@ -3620,6 +4487,20 @@ impl App {
             );
         }
 
+        // Streaming Audio Quality & Default Video Clip Quality chips
+        for (btn, q) in [
+            (id!(aq_low_btn), AudioQuality::Low),
+            (id!(aq_norm_btn), AudioQuality::Normal),
+            (id!(aq_high_btn), AudioQuality::High),
+            (id!(aq_best_btn), AudioQuality::Best),
+        ] {
+            self.style_chip_btn(cx, btn, self.dsp.audio_quality == q);
+        }
+        self.refresh_video_quality_buttons(cx);
+
+        self.ui
+            .ferric_toggle(id!(close_to_tray_toggle))
+            .set_active(cx, self.dsp.close_to_tray);
         self.ui
             .ferric_toggle(id!(radio_toggle))
             .set_active(cx, self.session_state.autoplay_radio);
@@ -3679,6 +4560,28 @@ impl App {
         self.ui
             .label(id!(eq_status_lbl))
             .set_text(cx, &format!("Preset: {}", self.eq.preset_name));
+
+        // Theme buttons active indicator
+        for (btn, active) in [
+            (
+                id!(pal_amoled_btn),
+                self.theme.name == "AMOLED Black" && !self.theme.material.liquid_glass,
+            ),
+            (
+                id!(pal_obsidian_btn),
+                self.theme.name == "Obsidian Studio" && !self.theme.material.liquid_glass,
+            ),
+            (id!(pal_glass_btn), self.theme.material.liquid_glass),
+            (id!(pal_cream_btn), self.theme.name == "Warm Cream Light"),
+        ] {
+            self.ui.button(btn).apply_over(
+                cx,
+                live! { draw_bg: { active: (if active { 1.0 } else { 0.0 }) } },
+            );
+        }
+        self.ui
+            .label(id!(zoom_val_lbl))
+            .set_text(cx, &format!("{:.0}%", self.theme.ui_zoom * 100.0));
 
         self.ui
             .ferric_toggle(id!(adaptive_art_toggle))
@@ -3761,7 +4664,7 @@ impl App {
         let border = rgba_vec4(&self.theme.border_hex);
         let accent = self.current_accent();
         let rad = if g.liquid_glass {
-            self.theme.corner_radius_px.max(12.0)
+            self.theme.corner_radius_px.clamp(8.0, 22.0)
         } else {
             0.0
         };
@@ -3773,11 +4676,12 @@ impl App {
             },
         );
 
-        for (pid, flat_col) in [
-            (id!(top_bar), surface),
-            (id!(left_sidebar), surface),
-            (id!(center_stage), canvas),
-            (id!(right_sidebar), surface),
+        for (pid, flat_col, alpha) in [
+            (id!(top_bar), surface, 0.62_f32),
+            (id!(left_sidebar), surface, 0.56_f32),
+            (id!(center_stage), canvas, 0.28_f32),
+            (id!(right_sidebar), surface, 0.56_f32),
+            (id!(vid_header), surface, 0.72_f32),
         ] {
             self.ui.view(pid).apply_over(
                 cx,
@@ -3787,6 +4691,7 @@ impl App {
                         border_col: (border),
                         accent_col: (accent),
                         glass_enabled: (glass_f),
+                        glass_alpha: (alpha),
                         glass_ior: (g.ior),
                         glass_disp: (g.dispersion),
                         glass_rim: (g.specular_rim),
@@ -3795,6 +4700,252 @@ impl App {
                     }
                 },
             );
+        }
+
+        // Propagate cohesive Liquid Glass material to EVERY card, tile, shelf, grid, queue row & pill
+        for card_id in [
+            id!(card_acct_yt),
+            id!(card_acct_import),
+            id!(card_acct_sub),
+            id!(card_pb_xfade),
+            id!(card_pb_quality),
+            id!(card_pb_behavior),
+            id!(card_pb_speed),
+            id!(card_eq_main),
+            id!(card_app_theme),
+            id!(card_st_cache),
+            id!(card_st_update),
+            id!(card_st_keys),
+            id!(card_conn_main),
+            id!(card_cmdk),
+            id!(card_update_popup),
+            id!(qp_0),
+            id!(qp_1),
+            id!(qp_2),
+            id!(qp_3),
+            id!(qp_4),
+            id!(qp_5),
+            id!(qp_6),
+            id!(qp_7),
+            id!(sh0_c0),
+            id!(sh0_c1),
+            id!(sh0_c2),
+            id!(sh0_c3),
+            id!(sh0_c4),
+            id!(sh1_c0),
+            id!(sh1_c1),
+            id!(sh1_c2),
+            id!(sh1_c3),
+            id!(sh1_c4),
+            id!(sh2_c0),
+            id!(sh2_c1),
+            id!(sh2_c2),
+            id!(sh2_c3),
+            id!(sh2_c4),
+            id!(sc_0),
+            id!(sc_1),
+            id!(sc_2),
+            id!(sc_3),
+            id!(sc_4),
+            id!(alb_0),
+            id!(alb_1),
+            id!(alb_2),
+            id!(alb_3),
+            id!(alb_4),
+            id!(alb_5),
+            id!(alb_6),
+            id!(alb_7),
+            id!(art_0),
+            id!(art_1),
+            id!(art_2),
+            id!(art_3),
+            id!(art_4),
+            id!(art_5),
+            id!(art_6),
+            id!(art_7),
+            id!(plc_0),
+            id!(plc_1),
+            id!(plc_2),
+            id!(plc_3),
+            id!(plc_4),
+            id!(plc_5),
+            id!(plc_6),
+            id!(plc_7),
+            id!(qh_0),
+            id!(qh_1),
+            id!(qh_2),
+            id!(q_now_row),
+            id!(qu_0),
+            id!(qu_1),
+            id!(qu_2),
+            id!(qu_3),
+            id!(qu_4),
+            id!(qu_5),
+            id!(qu_6),
+            id!(qu_7),
+            id!(qu_8),
+            id!(qu_9),
+        ] {
+            self.ui.view(card_id).apply_over(
+                cx,
+                live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+            );
+        }
+
+        self.ui
+            .view(id!(toast_pill))
+            .apply_over(cx, live! { draw_bg: { glass_on: (glass_f) } });
+        self.ui
+            .button(id!(top_search_pill))
+            .apply_over(cx, live! { draw_bg: { glass_on: (glass_f) } });
+
+        for btn_id in [
+            id!(top_account_btn),
+            id!(home_play_all_btn),
+            id!(search_clear_btn),
+            id!(recents_clear_btn),
+            id!(hero_shuffle_btn),
+            id!(add_folder_btn),
+            id!(sort_cycle_btn),
+            id!(pl_import_btn),
+            id!(detail_shuffle_btn),
+            id!(detail_radio_btn),
+            id!(detail_pin_btn),
+            id!(detail_queue_btn),
+            id!(yt_sync_btn),
+            id!(yt_logout_btn),
+            id!(guest_refresh_btn),
+            id!(quick_spotify_btn),
+            id!(quick_youtube_btn),
+            id!(match_local_btn),
+            id!(rescan_btn),
+            id!(sub_sync_btn),
+            id!(xf_0_btn),
+            id!(xf_3_btn),
+            id!(xf_6_btn),
+            id!(xf_10_btn),
+            id!(curve_bass_btn),
+            id!(curve_eqp_btn),
+            id!(curve_velvet_btn),
+            id!(spd_075_btn),
+            id!(spd_100_btn),
+            id!(spd_125_btn),
+            id!(spd_150_btn),
+            id!(slp_off_btn),
+            id!(slp_15_btn),
+            id!(slp_30_btn),
+            id!(slp_60_btn),
+            id!(slp_eot_btn),
+            id!(pal_amoled_btn),
+            id!(pal_obsidian_btn),
+            id!(pal_glass_btn),
+            id!(pal_cream_btn),
+            id!(theme_import_btn),
+            id!(theme_export_btn),
+            id!(zoom_out_btn),
+            id!(zoom_in_btn),
+            id!(zoom_reset_btn),
+            id!(lg_pre_crystal),
+            id!(lg_pre_prism),
+            id!(lg_pre_copper),
+            id!(lg_pre_frost),
+            id!(clear_audio_cache_btn),
+            id!(clear_art_cache_btn),
+            id!(load_demo_btn),
+            id!(check_updates_btn),
+            id!(open_releases_btn),
+            id!(connect_gen_pair_btn),
+            id!(connect_copy_pair_btn),
+            id!(rs_lyr_minus),
+            id!(rs_lyr_plus),
+            id!(rs_lyr_expand),
+            id!(rs_lyr_copy),
+            id!(rs_watch_video),
+            id!(codec_pill_btn),
+            id!(vid_close_btn),
+        ] {
+            self.ui.button(btn_id).apply_over(
+                cx,
+                live! { draw_bg: { glass_on: (glass_f), accent_col: (accent) } },
+            );
+        }
+
+        for chip_or_nav_id in [
+            id!(nav_home),
+            id!(nav_search),
+            id!(nav_recents),
+            id!(nav_songs),
+            id!(nav_albums),
+            id!(nav_artists),
+            id!(nav_playlists),
+            id!(nav_settings),
+            id!(sidebar_add_folder_btn),
+            id!(pin_liked_btn),
+            id!(pin_local_btn),
+            id!(pin_slot_0),
+            id!(pin_slot_1),
+            id!(pin_slot_2),
+            id!(pin_slot_3),
+            id!(pin_slot_4),
+            id!(chip_0),
+            id!(chip_1),
+            id!(chip_2),
+            id!(chip_3),
+            id!(chip_4),
+            id!(chip_5),
+            id!(chip_6),
+            id!(chip_7),
+            id!(chip_8),
+            id!(sf_all_btn),
+            id!(sf_songs_btn),
+            id!(sf_albums_btn),
+            id!(sf_artists_btn),
+            id!(sf_playlists_btn),
+            id!(sf_local_btn),
+            id!(flt_all_btn),
+            id!(flt_liked_btn),
+            id!(flt_local_btn),
+            id!(flt_spotify_btn),
+            id!(flt_youtube_btn),
+            id!(st_accounts_btn),
+            id!(st_playback_btn),
+            id!(st_eq_btn),
+            id!(st_appearance_btn),
+            id!(st_storage_btn),
+            id!(st_connect_btn),
+            id!(rs_tab_queue),
+            id!(rs_tab_lyrics),
+            id!(aq_low_btn),
+            id!(aq_norm_btn),
+            id!(aq_high_btn),
+            id!(aq_best_btn),
+            id!(vq_auto_btn),
+            id!(vq_360_btn),
+            id!(vq_480_btn),
+            id!(vq_720_btn),
+            id!(vq_1080_btn),
+            id!(svq_auto_btn),
+            id!(svq_360_btn),
+            id!(svq_480_btn),
+            id!(svq_720_btn),
+            id!(svq_1080_btn),
+            id!(toggle_left_btn),
+            id!(nav_back_btn),
+            id!(nav_fwd_btn),
+            id!(refresh_btn),
+            id!(top_settings_btn),
+            id!(toggle_right_btn),
+            id!(rs_radio_btn),
+            id!(rs_clear_btn),
+            id!(bar_video_btn),
+            id!(bar_lyrics_btn),
+            id!(bar_queue_btn),
+            id!(vol_mute_btn),
+            id!(bar_fullscreen_btn),
+        ] {
+            self.ui
+                .button(chip_or_nav_id)
+                .apply_over(cx, live! { draw_bg: { glass_on: (glass_f) } });
         }
 
         self.ui.view(id!(lg_preview)).apply_over(
@@ -3876,8 +5027,12 @@ impl App {
         };
         if let Some(next_track) = next_opt {
             let valid_path = next_track.path.as_ref().filter(|p| p.is_file()).cloned();
+            // Only lock 0ms gapless album transitions for true Local albums (never streaming playlists
+            // whose album labels like "Quick picks" or "YouTube Music" would wrongly disable crossfade).
             let same_album = self.queue.current().is_some_and(|cur| {
-                !cur.album.is_empty()
+                cur.source == TrackSource::Local
+                    && next_track.source == TrackSource::Local
+                    && !cur.album.is_empty()
                     && cur.album != "Unknown Album"
                     && cur.album == next_track.album
                     && cur.id != next_track.id
@@ -3885,11 +5040,13 @@ impl App {
             audio.send(EngineCommand::QueueNextTrack {
                 path: valid_path,
                 same_album_consecutive: same_album,
+                fallback_duration_ms: next_track.duration_ms,
             });
         } else {
             audio.send(EngineCommand::QueueNextTrack {
                 path: None,
                 same_album_consecutive: false,
+                fallback_duration_ms: 0,
             });
         }
     }
@@ -3955,6 +5112,7 @@ impl App {
         };
         let session = self.current_ytm_session();
         let cache_dir = app_data_dir().join("stream_cache");
+        let audio_quality = self.dsp.audio_quality;
         let track_id = track.id;
         let artist = track.artist;
         let title = track.title;
@@ -3968,8 +5126,13 @@ impl App {
                         .map_err(|e| e.to_string())?
                         .ok_or_else(|| format!("No YouTube Music stream found for '{title}'"))?,
                 };
-                let stream = resolve_and_cache_audio_stream(&vid, &session, &cache_dir)
-                    .map_err(|e| e.to_string())?;
+                let stream = resolve_and_cache_audio_stream_with_quality(
+                    &vid,
+                    &session,
+                    &cache_dir,
+                    audio_quality,
+                )
+                .map_err(|e| e.to_string())?;
                 Ok::<_, String>((vid, stream))
             })();
 
@@ -3993,18 +5156,39 @@ impl App {
         });
     }
 
+    fn send_play_or_crossfade(
+        &self,
+        path: PathBuf,
+        replay_gain_db: i32,
+        fallback_duration_ms: u64,
+    ) {
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        let currently_playing = audio.telemetry().is_playing;
+        if currently_playing && self.dsp.crossfade_ms >= 500 {
+            audio.send(EngineCommand::CrossfadeToTrack {
+                path,
+                replay_gain_db,
+                fallback_duration_ms,
+                overlap_ms: self.dsp.crossfade_ms.clamp(1_200, 3_000),
+            });
+        } else {
+            audio.send(EngineCommand::LoadAndPlayTrack {
+                path,
+                replay_gain_db,
+                fallback_duration_ms,
+            });
+        }
+    }
+
     fn play_track(&mut self, cx: &mut Cx, track: Track) {
         if let Some(cache) = &mut self.artwork {
-            let _ = cache.request_for_track(&track);
+            cache.pin_active_track(Some(&track));
         }
         if let Some(path) = track.path.as_ref().filter(|p| p.is_file()).cloned() {
             self.pending_stream_track_id = None;
-            if let Some(audio) = &self.audio {
-                audio.send(EngineCommand::LoadAndPlayTrack {
-                    path,
-                    replay_gain_db: track.replay_gain_db,
-                });
-            }
+            self.send_play_or_crossfade(path, track.replay_gain_db, track.duration_ms);
             self.sync_next_deck_to_engine();
             self.prefetch_next_online_track();
             self.maybe_fetch_radio_for_track(&track, false);
@@ -4021,10 +5205,10 @@ impl App {
             self.pending_stream_track_id = Some(track.id.clone());
             self.ui
                 .label(id!(np_title_lbl))
-                .set_text(cx, &clip_text(&track.title, 20));
+                .set_text(cx, &clip_text(&track.title, 22));
             self.ui.label(id!(np_artist_lbl)).set_text(
                 cx,
-                &clip_text(&format!("{} · Buffering...", track.artist), 23),
+                &clip_text(&format!("{} · Buffering...", track.artist), 24),
             );
             self.ui
                 .button(id!(codec_pill_btn))
@@ -4059,6 +5243,11 @@ impl App {
         if let Some(db) = &self.db {
             let _ = db.save_session_state(&self.session_state);
         }
+        if let Some(cache) = &mut self.artwork {
+            cache.pin_active_track(Some(track));
+        }
+
+        win32_update_tray_tooltip(&format!("Ferric — {} · {}", track.title, track.artist));
 
         let out_rate = self
             .audio
@@ -4066,10 +5255,10 @@ impl App {
             .map_or(48_000, |a| a.telemetry().output_rate);
         self.ui
             .label(id!(np_title_lbl))
-            .set_text(cx, &clip_text(&track.title, 20));
+            .set_text(cx, &clip_text(&track.title, 22));
         self.ui
             .label(id!(np_artist_lbl))
-            .set_text(cx, &clip_text(&track.artist, 22));
+            .set_text(cx, &clip_text(&track.artist, 24));
         self.ui.label(id!(fs_title_lbl)).set_text(cx, &track.title);
         self.ui
             .label(id!(fs_artist_lbl))
@@ -4132,6 +5321,11 @@ impl App {
         self.rebuild_library_views(cx);
         self.refresh_home_ui(cx);
         self.refresh_right_sidebar(cx);
+
+        // If native in-app video clip stage is open, follow the newly playing track automatically
+        if self.video_open && self.video_track_id.as_deref() != Some(track.id.as_str()) {
+            self.open_native_video_stage(cx);
+        }
         self.ui.redraw(cx);
     }
 
@@ -4592,11 +5786,87 @@ impl App {
     }
 
     fn handle_tick(&mut self, cx: &mut Cx) {
-        // 0. Poll async GPU artwork cache
-        if let Some(cache) = &mut self.artwork
+        // 0a. One-shot post-startup working-set trim (releases DX11 shader compiler scratch pages)
+        if !self.startup_trim_done
+            && self
+                .started_at
+                .is_some_and(|t| t.elapsed() >= Duration::from_millis(2_400))
+        {
+            self.startup_trim_done = true;
+            win32_trim_working_set();
+        }
+
+        // 0b. Poll System Tray & Win32 subclass events
+        for tray_ev in win32_poll_tray_events() {
+            match tray_ev {
+                TrayEvent::HiddenToTray => {
+                    if self.video_open {
+                        self.close_native_video_stage(cx);
+                    }
+                    if let Some(cache) = &mut self.artwork {
+                        cache.trim_non_active();
+                        self.artwork_snapshot = Rc::new(cache.snapshot());
+                    }
+                    win32_trim_working_set();
+                }
+                TrayEvent::ShowWindow => {
+                    self.refresh_all_artwork_slots(cx);
+                    self.sync_video_bounds(cx);
+                    cx.redraw_all();
+                }
+                TrayEvent::TogglePlayPause => {
+                    if let Some(a) = &self.audio {
+                        a.send(EngineCommand::TogglePlayPause);
+                    }
+                }
+                TrayEvent::NextTrack => {
+                    if let Some(next) = self.queue.next_track().cloned() {
+                        self.play_track(cx, next);
+                    }
+                }
+                TrayEvent::PrevTrack => {
+                    if let Some(prev) = self.queue.prev_track().cloned() {
+                        self.play_track(cx, prev);
+                    }
+                }
+                TrayEvent::QuitApp => {
+                    self.close_native_video_stage(cx);
+                    win32_force_quit();
+                    cx.quit();
+                    return;
+                }
+                TrayEvent::WindowMovedOrResized => {
+                    self.sync_video_bounds(cx);
+                }
+            }
+        }
+
+        let window_hidden = win32_is_window_hidden_or_minimized();
+
+        // 0c. Poll async GPU artwork cache (skip uploads while minimized/hidden in tray)
+        if !window_hidden
+            && let Some(cache) = &mut self.artwork
             && cache.poll(cx)
         {
             self.refresh_all_artwork_slots(cx);
+        }
+
+        // 0d. Smooth exponential accent color lerp when switching tracks
+        if !window_hidden {
+            let target = self.target_accent();
+            let diff = (target.x - self.displayed_accent.x).abs()
+                + (target.y - self.displayed_accent.y).abs()
+                + (target.z - self.displayed_accent.z).abs();
+            if diff > 0.008 {
+                let k = 0.16_f32;
+                self.displayed_accent = vec4(
+                    self.displayed_accent.x + (target.x - self.displayed_accent.x) * k,
+                    self.displayed_accent.y + (target.y - self.displayed_accent.y) * k,
+                    self.displayed_accent.z + (target.z - self.displayed_accent.z) * k,
+                    1.0,
+                );
+                self.apply_adaptive_accent_live(cx);
+            }
         }
 
         // Auto-hide toast after 3s
@@ -4700,11 +5970,6 @@ impl App {
                         self.playlists = db.list_playlists().unwrap_or_default();
                     }
 
-                    // Request real album cover artwork for all visible Quick Picks & Shelf cards!
-                    self.request_artwork_for_tracks(&merged.quick_picks);
-                    for shelf in &merged.shelves {
-                        self.request_artwork_for_cards(&shelf.cards);
-                    }
                     self.rich_home = merged;
 
                     if self.queue.is_empty() && !self.rich_home.quick_picks.is_empty() {
@@ -4807,7 +6072,6 @@ impl App {
                     seed_title,
                     tracks,
                 } => {
-                    self.request_artwork_for_tracks(&tracks);
                     if let Some(db) = &mut self.db {
                         let _ = db.upsert_tracks(&tracks);
                         self.all_tracks = db.list_tracks("").unwrap_or_default();
@@ -4932,12 +6196,10 @@ impl App {
                     {
                         self.pending_stream_track_id = None;
                         let rg = updated_track.as_ref().map_or(0, |t| t.replay_gain_db);
-                        if let Some(audio) = &self.audio {
-                            audio.send(EngineCommand::LoadAndPlayTrack {
-                                path: stream.path,
-                                replay_gain_db: rg,
-                            });
-                        }
+                        let dur_ms = updated_track.as_ref().map_or(stream.duration_ms, |t| {
+                            t.duration_ms.max(stream.duration_ms)
+                        });
+                        self.send_play_or_crossfade(stream.path, rg, dur_ms);
                         self.sync_next_deck_to_engine();
                         self.prefetch_next_online_track();
                         if let Some(tr) = updated_track.or_else(|| self.queue.current().cloned()) {
@@ -4971,6 +6233,33 @@ impl App {
                             self.ui.button(id!(codec_pill_btn)).set_text(cx, "OFFLINE");
                             self.show_toast(cx, &format!("Stream failed: {error}"));
                         }
+                    }
+                }
+                BgMessage::VideoStreamsLoaded {
+                    track_id,
+                    video_id,
+                    streams,
+                } => {
+                    if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == track_id)
+                        && t.youtube_video_id.is_none()
+                    {
+                        t.youtube_video_id = Some(video_id);
+                    }
+                    if self.video_open && self.video_track_id.as_deref() == Some(track_id.as_str())
+                    {
+                        self.video_streams = streams;
+                        self.load_selected_video_quality(cx);
+                    }
+                }
+                BgMessage::VideoStreamsFailed { track_id, error } => {
+                    if self.video_open && self.video_track_id.as_deref() == Some(track_id.as_str())
+                    {
+                        self.ui
+                            .label(id!(vid_status_lbl))
+                            .set_text(cx, "Video unavailable");
+                        self.ui
+                            .label(id!(vid_stage_hint_lbl))
+                            .set_text(cx, &format!("Could not load video clip: {error}"));
                     }
                 }
                 BgMessage::PublicSyncCompleted { provider, payload } => {
@@ -5059,7 +6348,8 @@ impl App {
                     DownloadEvent::Ready(msi_path) => {
                         self.update_download_in_flight = false;
                         if launch_verified_installer(&msi_path).is_ok() {
-                            win32_close_active_window();
+                            self.close_native_video_stage(cx);
+                            win32_force_quit();
                             cx.quit();
                         }
                     }
@@ -5134,7 +6424,8 @@ impl App {
         }
 
         // 4. Periodic LAN beacon when Connect settings tab is visible
-        if self.active_page == MainPage::Settings
+        if !window_hidden
+            && self.active_page == MainPage::Settings
             && self.active_settings_tab == SettingsTab::Connect
         {
             let should_ping = self
@@ -5168,11 +6459,13 @@ impl App {
         }
 
         // 5. Sync Window Maximize / Restore Glyph
-        self.ui
-            .ferric_win_btn(id!(win_max_btn))
-            .set_maximized(cx, win32_is_active_window_maximized());
+        if !window_hidden {
+            self.ui
+                .ferric_win_btn(id!(win_max_btn))
+                .set_maximized(cx, win32_is_active_window_maximized());
+        }
 
-        // 6. Audio Telemetry, Auto-Transition, Lyrics & Live Spectrum
+        // 6. Audio Telemetry, Zero-Gap Crossfade Auto-Transition, Prefetch, Video Sync & Spectrum
         if let Some(audio) = &self.audio {
             let snap = audio.telemetry();
             if snap.track_finished_seq != self.last_finished_seq {
@@ -5199,6 +6492,38 @@ impl App {
                 }
             }
 
+            // Proactively prefetch the next online song well before crossfade begins (<= 45s left)
+            if snap.is_playing
+                && snap.duration_ms > 0
+                && snap.duration_ms.saturating_sub(snap.position_ms) <= 45_000
+            {
+                self.prefetch_next_online_track();
+            }
+
+            // Keep native in-app video clip tightly synced to Ferric's Rust WASAPI audio clock
+            if self.video_open
+                && self
+                    .last_video_sync
+                    .is_none_or(|t| t.elapsed() >= Duration::from_millis(400))
+            {
+                self.last_video_sync = Some(Instant::now());
+                if let Some(vp) = &self.video_player
+                    && vp.is_open()
+                {
+                    vp.sync_playback(snap.position_ms as f64 / 1000.0, snap.is_playing);
+                }
+                self.sync_video_bounds(cx);
+            }
+
+            if let Some(smtc) = &mut self.smtc {
+                smtc.set_playing(snap.is_playing);
+            }
+
+            // Skip GPU UI telemetry redraws when hidden in tray / minimized -> near-0% idle GPU/CPU
+            if window_hidden {
+                return;
+            }
+
             if snap.duration_ms > 0 {
                 let ratio = (snap.position_ms as f64 / snap.duration_ms as f64).clamp(0.0, 1.0);
                 self.ui
@@ -5223,9 +6548,19 @@ impl App {
                 .ferric_play_btn(id!(play_pause_btn))
                 .set_playing(cx, snap.is_playing);
 
+            if snap.is_crossfading {
+                self.ui.button(id!(codec_pill_btn)).set_text(cx, "XFADE");
+            } else if let Some(cur) = self.queue.current()
+                && self.pending_stream_track_id.is_none()
+            {
+                self.ui
+                    .button(id!(codec_pill_btn))
+                    .set_text(cx, &cur.quality_badge());
+            }
+
             let accent = self.current_accent();
             if snap.is_playing {
-                self.canvas_phase = (self.canvas_phase + 0.09) % 628.0;
+                self.canvas_phase = (self.canvas_phase + 0.08) % 628.0;
                 let norm = |i: usize| (snap.spectrum_bins[i] as f32 / 1_000.0).clamp(0.05, 1.0);
                 let avg = (norm(0) + norm(1) + norm(2)) / 3.0;
                 self.ui
@@ -5257,10 +6592,6 @@ impl App {
                     .ferric_cover_art(id!(art))
                     .set_state(cx, false, 0.3, accent, false);
             }
-
-            if let Some(smtc) = &mut self.smtc {
-                smtc.set_playing(snap.is_playing);
-            }
         }
     }
 
@@ -5280,8 +6611,13 @@ impl App {
             return;
         }
         if self.ui.ferric_win_btn(id!(win_close_btn)).clicked(actions) {
-            win32_close_active_window();
-            cx.quit();
+            if self.dsp.close_to_tray {
+                win32_close_active_window();
+            } else {
+                self.close_native_video_stage(cx);
+                win32_force_quit();
+                cx.quit();
+            }
             return;
         }
         if self.ui.ferric_win_btn(id!(win_mini_btn)).clicked(actions) {
@@ -5298,6 +6634,7 @@ impl App {
             self.ui
                 .view(id!(left_divider))
                 .set_visible(cx, self.left_sidebar_open);
+            self.sync_video_bounds(cx);
             self.ui.redraw(cx);
         }
         if self.ui.button(id!(toggle_right_btn)).clicked(actions) {
@@ -5328,6 +6665,7 @@ impl App {
         if self.ui.button(id!(top_search_pill)).clicked(actions) {
             self.cmdk_open = true;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, true);
+            self.sync_video_bounds(cx);
             self.ui.redraw(cx);
         }
         if self.ui.button(id!(top_account_btn)).clicked(actions) {
@@ -6169,9 +7507,17 @@ impl App {
             .released(actions)
             && let Some(audio) = &self.audio
         {
-            let dur = audio.telemetry().duration_ms;
+            let snap = audio.telemetry();
+            let dur = snap.duration_ms;
             if dur > 0 {
-                audio.send(EngineCommand::SeekMs((pos_ratio * dur as f64) as u64));
+                let target_ms = (pos_ratio * dur as f64) as u64;
+                audio.send(EngineCommand::SeekMs(target_ms));
+                if self.video_open
+                    && let Some(vp) = &self.video_player
+                    && vp.is_open()
+                {
+                    vp.sync_playback(target_ms as f64 / 1000.0, snap.is_playing);
+                }
             }
         }
         if let Some(vol) = self.ui.ferric_bar_slider(id!(vol_slider)).changed(actions) {
@@ -6230,16 +7576,42 @@ impl App {
             let _ = copy_text_to_clipboard(&full);
             self.show_toast(cx, "Lyrics copied to clipboard");
         }
-        if (self.ui.button(id!(rs_watch_video)).clicked(actions)
-            || self.ui.button(id!(fs_video_btn)).clicked(actions))
-            && let Some(cur) = self.queue.current()
+        if self.ui.button(id!(bar_video_btn)).clicked(actions) {
+            if self.video_open {
+                self.close_native_video_stage(cx);
+            } else {
+                self.open_native_video_stage(cx);
+            }
+        }
+        if self.ui.button(id!(rs_watch_video)).clicked(actions)
+            || self.ui.button(id!(fs_video_btn)).clicked(actions)
         {
-            let _ = open_track_video_clip(
-                cur.path.as_deref(),
-                cur.youtube_video_id.as_deref(),
-                &cur.artist,
-                &cur.title,
-            );
+            self.open_native_video_stage(cx);
+        }
+        if self.ui.button(id!(vid_close_btn)).clicked(actions) {
+            self.close_native_video_stage(cx);
+        }
+        for (btn, vq) in [
+            (id!(vq_auto_btn), VideoQuality::Auto),
+            (id!(vq_360_btn), VideoQuality::P360),
+            (id!(vq_480_btn), VideoQuality::P480),
+            (id!(vq_720_btn), VideoQuality::P720),
+            (id!(vq_1080_btn), VideoQuality::P1080),
+            (id!(svq_auto_btn), VideoQuality::Auto),
+            (id!(svq_360_btn), VideoQuality::P360),
+            (id!(svq_480_btn), VideoQuality::P480),
+            (id!(svq_720_btn), VideoQuality::P720),
+            (id!(svq_1080_btn), VideoQuality::P1080),
+        ] {
+            if self.ui.button(btn).clicked(actions) {
+                self.dsp.video_quality = vq;
+                self.apply_dsp_live(cx);
+                self.refresh_video_quality_buttons(cx);
+                if self.video_open {
+                    self.load_selected_video_quality(cx);
+                }
+                self.show_toast(cx, &format!("Video quality: {}", vq.label()));
+            }
         }
         if self.ui.button(id!(fs_radio_btn)).clicked(actions)
             && let Some(cur) = self.queue.current().cloned()
@@ -6252,6 +7624,7 @@ impl App {
         if self.ui.button(id!(cmdk_close_btn)).clicked(actions) {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
+            self.sync_video_bounds(cx);
             self.ui.redraw(cx);
         }
         if let Some((submitted, _)) = self.ui.text_input(id!(cmdk_input)).returned(actions) {
@@ -6456,6 +7829,36 @@ impl App {
                 self.apply_dsp_live(cx);
             }
         }
+        for (btn, aq) in [
+            (id!(aq_low_btn), AudioQuality::Low),
+            (id!(aq_norm_btn), AudioQuality::Normal),
+            (id!(aq_high_btn), AudioQuality::High),
+            (id!(aq_best_btn), AudioQuality::Best),
+        ] {
+            if self.ui.button(btn).clicked(actions) {
+                self.dsp.audio_quality = aq;
+                self.sync_controls_from_state(cx);
+                self.apply_dsp_live(cx);
+                self.show_toast(cx, &format!("Audio quality: {}", aq.label()));
+            }
+        }
+        if let Some(on) = self
+            .ui
+            .ferric_toggle(id!(close_to_tray_toggle))
+            .toggled(actions)
+        {
+            self.dsp.close_to_tray = on;
+            win32_set_close_to_tray(on);
+            self.apply_dsp_live(cx);
+            self.show_toast(
+                cx,
+                if on {
+                    "Close (X) will keep Ferric running in System Tray"
+                } else {
+                    "Close (X) will exit Ferric"
+                },
+            );
+        }
         if let Some(on) = self.ui.ferric_toggle(id!(radio_toggle)).toggled(actions) {
             self.session_state.autoplay_radio = on;
             if let Some(db) = &self.db {
@@ -6530,7 +7933,7 @@ impl App {
                 .set_text(cx, "Sleep Timer: Stop after current song");
         }
 
-        // Equalizer Tab (ALL 12 Sonora Presets + AutoEq + APO!)
+        // Equalizer Tab (13 Studio Presets + AutoEq + APO)
         if let Some(on) = self
             .ui
             .ferric_toggle(id!(eq_enable_toggle))
@@ -6613,20 +8016,42 @@ impl App {
         }
 
         // Appearance Tab
-        if self.ui.button(id!(pal_sonora_btn)).clicked(actions) {
-            self.theme = ThemeConfig::default();
+        if self.ui.button(id!(pal_amoled_btn)).clicked(actions) {
+            let z = self.theme.ui_zoom;
+            self.theme = ThemeConfig::pure_amoled();
+            self.theme.ui_zoom = z;
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
-        if self.ui.button(id!(pal_amoled_btn)).clicked(actions) {
-            self.theme = ThemeConfig::pure_amoled();
+        if self.ui.button(id!(pal_obsidian_btn)).clicked(actions) {
+            let z = self.theme.ui_zoom;
+            self.theme = ThemeConfig::obsidian_slate();
+            self.theme.ui_zoom = z;
+            self.sync_controls_from_state(cx);
+            self.apply_theme_live(cx);
+        }
+        if self.ui.button(id!(pal_glass_btn)).clicked(actions) {
+            let z = self.theme.ui_zoom;
+            self.theme = ThemeConfig::smoked_copper_glass();
+            self.theme.ui_zoom = z;
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
         if self.ui.button(id!(pal_cream_btn)).clicked(actions) {
+            let z = self.theme.ui_zoom;
             self.theme = ThemeConfig::cream_light();
+            self.theme.ui_zoom = z;
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
+        }
+        if self.ui.button(id!(zoom_out_btn)).clicked(actions) {
+            self.adjust_ui_zoom(cx, -0.10);
+        }
+        if self.ui.button(id!(zoom_in_btn)).clicked(actions) {
+            self.adjust_ui_zoom(cx, 0.10);
+        }
+        if self.ui.button(id!(zoom_reset_btn)).clicked(actions) {
+            self.set_ui_zoom(cx, 1.0);
         }
         if let Some(on) = self
             .ui
@@ -6783,12 +8208,14 @@ impl AppMain for App {
                 .ferric_win_btn(id!(win_max_btn))
                 .set_maximized(cx, is_max);
             self.sync_maximized_chrome_padding(cx, is_max);
+            self.sync_video_bounds(cx);
         }
 
-        // Native Windows 11 Frameless Drag & Aero Snap on empty regions of our 44px top_bar
+        // Native Windows 11 Frameless Drag & Aero Snap on empty regions of top_bar
+        let top_bar_h = 44.0 * self.theme.ui_zoom.clamp(0.80, 1.40) as f64;
         if let Event::WindowDragQuery(dq) = event
             && dq.abs.y >= 0.0
-            && dq.abs.y <= 44.0
+            && dq.abs.y <= top_bar_h
         {
             let left_r = self.ui.view(id!(top_left_grp)).area().rect(cx);
             let pill_r = self.ui.button(id!(top_search_pill)).area().rect(cx);
@@ -6808,13 +8235,28 @@ impl AppMain for App {
             self.handle_tick(cx);
         }
 
-        // Full Sonora Keyboard Shortcuts
+        // Keyboard Shortcuts (including Ctrl+ / Ctrl- / Ctrl+0 UI Zoom)
         if let Event::KeyDown(ke) = event {
+            if ke.modifiers.control && matches!(ke.key_code, KeyCode::Equals | KeyCode::NumpadAdd) {
+                self.adjust_ui_zoom(cx, 0.10);
+                return;
+            }
+            if ke.modifiers.control
+                && matches!(ke.key_code, KeyCode::Minus | KeyCode::NumpadSubtract)
+            {
+                self.adjust_ui_zoom(cx, -0.10);
+                return;
+            }
+            if ke.modifiers.control && matches!(ke.key_code, KeyCode::Key0 | KeyCode::Numpad0) {
+                self.set_ui_zoom(cx, 1.0);
+                return;
+            }
             if ke.modifiers.control && ke.key_code == KeyCode::KeyK {
                 self.cmdk_open = !self.cmdk_open;
                 self.ui
                     .view(id!(cmdk_modal))
                     .set_visible(cx, self.cmdk_open);
+                self.sync_video_bounds(cx);
                 self.ui.redraw(cx);
                 return;
             }
@@ -6896,6 +8338,7 @@ impl AppMain for App {
                 && !ke.modifiers.alt
                 && !self.cmdk_open
                 && (self.fullscreen_open
+                    || self.video_open
                     || !matches!(
                         self.active_page,
                         MainPage::Search | MainPage::Playlists | MainPage::Settings
@@ -6909,7 +8352,10 @@ impl AppMain for App {
                 if self.cmdk_open {
                     self.cmdk_open = false;
                     self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
+                    self.sync_video_bounds(cx);
                     self.ui.redraw(cx);
+                } else if self.video_open {
+                    self.close_native_video_stage(cx);
                 } else if self.fullscreen_open {
                     self.set_fullscreen(cx, false);
                 } else if self.update_popup_visible {
@@ -6928,6 +8374,12 @@ impl AppMain for App {
             is_playing: snap_opt.is_some_and(|s| s.is_playing),
             audio_level: avg_lvl,
             accent: self.current_accent(),
+            glass_on: if self.theme.material.liquid_glass {
+                1.0
+            } else {
+                0.0
+            },
+            ui_zoom: self.theme.ui_zoom.clamp(0.80, 1.40),
             artworks: Rc::clone(&self.artwork_snapshot),
         };
         {

@@ -93,8 +93,13 @@ impl LiquidGlassConfig {
     }
 }
 
+fn default_ui_zoom() -> f32 {
+    1.0
+}
+
 /// Complete theme contract matching `.ferric-theme.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ThemeConfig {
     pub name: String,
     pub canvas_hex: String,
@@ -110,17 +115,19 @@ pub struct ThemeConfig {
     pub adaptive_album_art: bool,
     pub zero_gpu_minimize_saver: bool,
     pub sync_theme_to_android: bool,
+    #[serde(default = "default_ui_zoom")]
+    pub ui_zoom: f32,
     pub material: LiquidGlassConfig,
 }
 
 impl Default for ThemeConfig {
-    /// Sonora Midnight obsidian dark surface with adaptive album-art accent (WCAG AAA > 17.4:1).
+    /// Pure AMOLED Black canvas (#000000) with crisp obsidian surfaces and adaptive accent (WCAG AAA > 19:1).
     fn default() -> Self {
         Self {
-            name: "Sonora Midnight".to_string(),
-            canvas_hex: "#0E0F13".to_string(),
-            surface_hex: "#15161C".to_string(),
-            border_hex: "#23252F".to_string(),
+            name: "AMOLED Black".to_string(),
+            canvas_hex: "#000000".to_string(),
+            surface_hex: "#09090D".to_string(),
+            border_hex: "#1C1D25".to_string(),
             text_primary_hex: "#F4F4F7".to_string(),
             text_secondary_hex: "#9A9CA8".to_string(),
             accent_hex: "#A882FF".to_string(),
@@ -131,6 +138,7 @@ impl Default for ThemeConfig {
             adaptive_album_art: true,
             zero_gpu_minimize_saver: true,
             sync_theme_to_android: true,
+            ui_zoom: 1.0,
             material: LiquidGlassConfig::default(),
         }
     }
@@ -138,28 +146,29 @@ impl Default for ThemeConfig {
 
 impl ThemeConfig {
     pub fn pure_amoled() -> Self {
+        Self::default()
+    }
+
+    pub fn obsidian_slate() -> Self {
         Self {
-            name: "Ferric Pure AMOLED".to_string(),
-            canvas_hex: "#000000".to_string(),
-            surface_hex: "#09090B".to_string(),
-            border_hex: "#1D1E24".to_string(),
-            text_primary_hex: "#F3EEE3".to_string(),
-            text_secondary_hex: "#ABA59B".to_string(),
-            accent_hex: "#D9541E".to_string(),
-            adaptive_album_art: false,
+            name: "Obsidian Studio".to_string(),
+            canvas_hex: "#0D0E12".to_string(),
+            surface_hex: "#14151C".to_string(),
+            border_hex: "#232530".to_string(),
             ..Self::default()
         }
     }
 
     pub fn cream_light() -> Self {
         Self {
-            name: "LivelyDesk Cream Light".to_string(),
+            name: "Warm Cream Light".to_string(),
             canvas_hex: "#F3EEE3".to_string(),
             surface_hex: "#EAE3D4".to_string(),
             border_hex: "#D5CCB9".to_string(),
             text_primary_hex: "#111111".to_string(),
             text_secondary_hex: "#524B42".to_string(),
             accent_hex: "#D9541E".to_string(),
+            adaptive_album_art: false,
             ..Self::default()
         }
     }
@@ -169,7 +178,10 @@ impl ThemeConfig {
         material.apply_preset(LiquidGlassPreset::PrismaticLiquid);
         Self {
             name: "Ferric Liquid Glass".to_string(),
-            corner_radius_px: 18.0,
+            canvas_hex: "#040508".to_string(),
+            surface_hex: "#0E1018".to_string(),
+            border_hex: "#2B2F42".to_string(),
+            corner_radius_px: 16.0,
             material,
             ..Self::default()
         }

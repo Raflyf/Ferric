@@ -470,7 +470,7 @@ live_design! {
 
     pub FerricNowPlayingCanvas = <View> {
         width: Fill,
-        height: 220,
+        height: 96,
         show_bg: true,
         draw_bg: {
             instance mode: 1.0
@@ -484,76 +484,73 @@ live_design! {
             instance s6: 0.30
             instance s7: 0.24
             uniform accent: #A882FF
+            uniform glass_on: 0.0
 
             fn bin_val(self, i: float) -> float {
-                if i < 0.5 { return self.s0; }
-                if i < 1.5 { return self.s1; }
-                if i < 2.5 { return self.s2; }
-                if i < 3.5 { return self.s3; }
-                if i < 4.5 { return self.s4; }
-                if i < 5.5 { return self.s5; }
-                if i < 6.5 { return self.s6; }
+                if (i < 0.5) { return self.s0; }
+                if (i < 1.5) { return self.s1; }
+                if (i < 2.5) { return self.s2; }
+                if (i < 3.5) { return self.s3; }
+                if (i < 4.5) { return self.s4; }
+                if (i < 5.5) { return self.s5; }
+                if (i < 6.5) { return self.s6; }
                 return self.s7;
             }
 
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
-
                 let uv = self.pos;
-                let c = self.rect_size * 0.5;
                 let energy = (self.s0 + self.s1 + self.s2 + self.s3) * 0.25;
 
-                // Mode 0: Static Minimalist Studio Artwork Card
-                if self.mode < 0.5 {
-                    sdf.fill_keep(#080808);
-                    sdf.stroke(#222222, 1.0);
-                    let r_outer = min(self.rect_size.x, self.rect_size.y) * 0.34;
-                    sdf.circle(c.x, c.y, r_outer);
-                    sdf.fill_keep(#140A06);
-                    sdf.stroke(self.accent, 2.2);
-                    sdf.circle(c.x, c.y, r_outer * 0.32);
-                    sdf.fill(self.accent);
-                    return sdf.result;
-                }
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 12.0);
+                let wave = clamp(0.5 + 0.5 * sin(uv.x * 4.0 + self.phase * 1.15), 0.0, 1.0);
+                let base_dark = mix(vec3(0.035, 0.037, 0.048), vec3(0.08, 0.085, 0.115), self.glass_on);
+                let ambient = self.accent.xyz * (0.08 + 0.14 * energy * wave);
+                let glass_sheen = self.glass_on * smoothstep(0.32, 0.0, uv.y) * 0.07;
+                let bg = clamp(base_dark + ambient + vec3(glass_sheen, glass_sheen, glass_sheen), 0.0, 1.0);
+                sdf.fill_keep(vec4(bg, mix(0.96, 0.72, self.glass_on)));
 
-                // Mode 1: Animated Audio-Reactive Motion Canvas + 8-Band Spectrum (Spotify Canvas / Sonora style)
-                let wave1 = sin(uv.x * 5.2 + self.phase * 1.4) * cos(uv.y * 3.8 - self.phase * 0.9);
-                let wave2 = cos(uv.x * 3.4 - self.phase * 1.1 + uv.y * 4.2);
-                let glow = clamp(0.5 + 0.5 * wave1, 0.0, 1.0) * (0.20 + 0.38 * energy);
-                let deep = clamp(0.5 + 0.5 * wave2, 0.0, 1.0) * 0.14;
-                let mut rgb = vec3(0.03, 0.025, 0.025)
-                    + self.accent.xyz * glow
-                    + vec3(0.95, 0.72, 0.52) * (deep * energy);
+                // Clean top-catchlight border
+                let rim = mix(vec4(self.accent.xyz, 0.24), vec4(1.0, 1.0, 1.0, 0.34), self.glass_on * smoothstep(0.6, 0.0, uv.y));
+                sdf.stroke(rim, 1.0);
 
-                // Spinning vinyl / magnetic reel rings in center
-                let d = length(p - c);
-                let ring_r = min(self.rect_size.x, self.rect_size.y) * (0.24 + 0.04 * energy);
-                let ring_line = smoothstep(2.2, 0.4, abs(d - ring_r));
-                let inner_line = smoothstep(1.8, 0.3, abs(d - ring_r * 0.42));
-                rgb = mix(rgb, self.accent.xyz, ring_line * 0.85);
-                rgb = mix(rgb, vec3(0.95, 0.93, 0.89), inner_line * 0.75);
+                // Smooth 24-bar centered rounded capsule spectrum visualizer (no overlapping circle clutter)
+                let pad_x = 18.0;
+                let span_x = max(self.rect_size.x - pad_x * 2.0, 24.0);
+                let cy = self.rect_size.y * 0.5;
+                let max_half = self.rect_size.y * 0.36;
+                let bars = 24.0;
+                let cell_w = span_x / bars;
+                let bar_w = max(cell_w * 0.44, 3.0);
 
-                // Bottom 16-bar mirrored audio spectrum visualizer
-                let margin_x = self.rect_size.x * 0.14;
-                let span_x = max(self.rect_size.x - margin_x * 2.0, 20.0);
-                if (p.x >= margin_x && p.x <= (self.rect_size.x - margin_x)) {
-                    let norm_x = (p.x - margin_x) / span_x;
-                    let slot = floor(norm_x * 16.0);
-                    let cell_x = fract(norm_x * 16.0);
-                    let sym_idx = abs(slot - 7.5);
-                    let bv = clamp(self.bin_val(min(sym_idx, 7.0)), 0.06, 1.0);
-                    let bar_h = self.rect_size.y * 0.34 * bv;
-                    let base_y = self.rect_size.y - 18.0;
-                    if (cell_x > 0.18 && cell_x < 0.82 && p.y <= base_y && p.y >= (base_y - bar_h)) {
-                        let t_bar = (base_y - p.y) / max(bar_h, 1.0);
-                        rgb = mix(self.accent.xyz, vec3(0.96, 0.93, 0.88), t_bar * 0.55);
+                if (p.x >= pad_x && p.x <= (self.rect_size.x - pad_x)) {
+                    let norm_x = (p.x - pad_x) / span_x;
+                    let slot = floor(norm_x * bars);
+                    let cell_local = (norm_x * bars - slot) * cell_w;
+                    let sym_f = abs(slot - (bars * 0.5 - 0.5)) / (bars * 0.5) * 7.0;
+                    let i0 = floor(sym_f);
+                    let i1 = min(i0 + 1.0, 7.0);
+                    let f = sym_f - i0;
+                    let raw_bv = mix(self.bin_val(i0), self.bin_val(i1), f);
+                    let pulse = 0.08 * sin(self.phase * 1.9 + slot * 0.45) * (0.35 + energy);
+                    let bv = clamp(raw_bv * 1.15 + pulse, 0.08, 1.0);
+                    let half_h = max(max_half * bv, 3.5);
+                    let dx = abs(cell_local - cell_w * 0.5) - bar_w * 0.5;
+                    let dy = abs(p.y - cy) - half_h;
+                    let r_cap = bar_w * 0.5;
+                    let qx = max(dx + r_cap, 0.0);
+                    let qy = max(dy + r_cap, 0.0);
+                    let dist = length(vec2(qx, qy)) - r_cap;
+                    let alpha = 1.0 - smoothstep(-0.7, 0.7, dist);
+                    if (alpha > 0.01) {
+                        let t_v = 1.0 - clamp(abs(p.y - cy) / max(half_h, 1.0), 0.0, 1.0);
+                        let bar_col = mix(self.accent.xyz, vec3(0.97, 0.97, 0.99), t_v * 0.52);
+                        let out_rgb = mix(sdf.result.xyz, bar_col, alpha * 0.95);
+                        return vec4(out_rgb, sdf.result.w);
                     }
                 }
 
-                sdf.fill_keep(vec4(clamp(rgb, 0.0, 1.0), 1.0));
-                sdf.stroke(vec4(self.accent.xyz, 0.45), 1.0);
                 return sdf.result;
             }
         }

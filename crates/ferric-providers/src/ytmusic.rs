@@ -3,7 +3,7 @@
 
 use crate::yt_cleaner::clean_youtube_metadata;
 use crate::{ProviderError, ProviderResult};
-use ferric_core::models::{Playlist, Track, TrackSource};
+use ferric_core::models::{AudioQuality, Playlist, Track, TrackSource, VideoQuality};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -63,6 +63,17 @@ pub struct CachedAudioStream {
     pub codec: String,
     pub bitrate_kbps: u32,
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoStreamOption {
+    pub quality: VideoQuality,
+    pub label: String,
+    pub width: u32,
+    pub height: u32,
+    pub bitrate_kbps: u32,
+    pub url: String,
+    pub mime: String,
 }
 
 #[derive(Debug, Clone)]
@@ -141,13 +152,20 @@ pub fn normalize_ytm_thumbnail_url(raw: &str) -> String {
             && let Some(eq_rel) = no_query[slash_idx..].find('=')
         {
             let base = &no_query[..slash_idx + eq_rel];
-            return format!("{base}=w300-h300-l90-rj");
+            return format!("{base}=w180-h180-l85-rj");
         }
-        return format!("{no_query}=w300-h300-l90-rj");
+        return format!("{no_query}=w180-h180-l85-rj");
     }
 
     if full.contains("i.ytimg.com") || full.contains("i9.ytimg.com") {
         let no_query = full.split('?').next().unwrap_or(&full);
+        // Clamp 1280x720 maxresdefault/sddefault/hqdefault to compact 320x180 mqdefault.jpg
+        // so artwork decodes 12x faster and consumes minimal RAM.
+        for heavy in ["maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg"] {
+            if let Some(prefix) = no_query.strip_suffix(heavy) {
+                return format!("{prefix}mqdefault.jpg");
+            }
+        }
         return no_query.to_string();
     }
 
@@ -457,7 +475,7 @@ pub fn fetch_home_feed(session: &YtmSession) -> ProviderResult<YtmHomeFeed> {
     })
 }
 
-/// Fetch Sonora-style rich YouTube Music Home feed: Mood Chips, Quick Picks songs,
+/// Fetch rich YouTube Music Home feed: Mood Chips, Quick Picks songs,
 /// and horizontal Album/Playlist/Song-Mix shelves (plus `FEmusic_explore` New Albums & Singles).
 pub fn fetch_rich_home(
     session: &YtmSession,
@@ -812,33 +830,11 @@ pub fn fetch_account_library(session: &YtmSession) -> ProviderResult<YtmAccountL
     })
 }
 
-/// Resolve direct YouTube audio stream via `VISIONOS 1.02` (zero PO-token, zero 403) and download
-/// in 6 parallel 512KB Range chunks into `cache_dir`, returning a local audio file playable by `ferric-audio`.
-pub fn resolve_and_cache_audio_stream(
-    video_id: &str,
-    session: &YtmSession,
-    cache_dir: &Path,
-) -> ProviderResult<CachedAudioStream> {
+fn fetch_player_root(video_id: &str, session: &YtmSession) -> ProviderResult<Value> {
     if !is_valid_video_id(video_id) {
         return Err(ProviderError::Metadata(
             "Invalid YouTube video ID".to_string(),
         ));
-    }
-    fs::create_dir_all(cache_dir)?;
-
-    // 0 ms cache hit if already downloaded
-    for (ext, codec, br) in [("m4a", "AAC", 128), ("webm", "OPUS", 150)] {
-        let candidate = cache_dir.join(format!("{video_id}.{ext}"));
-        if let Ok(meta) = fs::metadata(&candidate)
-            && meta.len() > 16_384
-        {
-            return Ok(CachedAudioStream {
-                path: candidate,
-                codec: codec.to_string(),
-                bitrate_kbps: br,
-                duration_ms: 0,
-            });
-        }
     }
 
     // Ensure fresh visitorData (required by VISIONOS 1.02)
@@ -923,12 +919,68 @@ pub fn resolve_and_cache_audio_stream(
         )));
     }
 
-    let selected = select_best_audio_format(&root).ok_or_else(|| {
+    Ok(root)
+}
+
+/// Resolve direct YouTube audio stream via `VISIONOS 1.02` at the requested `AudioQuality` tier
+/// and download in parallel Range chunks into `cache_dir`.
+pub fn resolve_and_cache_audio_stream_with_quality(
+    video_id: &str,
+    session: &YtmSession,
+    cache_dir: &Path,
+    quality: AudioQuality,
+) -> ProviderResult<CachedAudioStream> {
+    if !is_valid_video_id(video_id) {
+        return Err(ProviderError::Metadata(
+            "Invalid YouTube video ID".to_string(),
+        ));
+    }
+    fs::create_dir_all(cache_dir)?;
+
+    let suffix = quality.cache_suffix();
+    for (ext, codec, fallback_br) in [("webm", "OPUS", 150u32), ("m4a", "AAC", 128u32)] {
+        let candidate = cache_dir.join(format!("{video_id}_{suffix}.{ext}"));
+        if let Ok(meta) = fs::metadata(&candidate)
+            && meta.len() > 16_384
+        {
+            let br = match quality {
+                AudioQuality::Low => 64,
+                AudioQuality::Normal => 128,
+                AudioQuality::High | AudioQuality::Best => fallback_br,
+            };
+            return Ok(CachedAudioStream {
+                path: candidate,
+                codec: codec.to_string(),
+                bitrate_kbps: br,
+                duration_ms: 0,
+            });
+        }
+    }
+
+    // Legacy cache compatibility for Normal/High if already downloaded
+    if matches!(quality, AudioQuality::Normal | AudioQuality::High) {
+        for (ext, codec, br) in [("m4a", "AAC", 128), ("webm", "OPUS", 150)] {
+            let legacy = cache_dir.join(format!("{video_id}.{ext}"));
+            if let Ok(meta) = fs::metadata(&legacy)
+                && meta.len() > 16_384
+            {
+                return Ok(CachedAudioStream {
+                    path: legacy,
+                    codec: codec.to_string(),
+                    bitrate_kbps: br,
+                    duration_ms: 0,
+                });
+            }
+        }
+    }
+
+    let root = fetch_player_root(video_id, session)?;
+    let selected = select_audio_format_for_quality(&root, quality).ok_or_else(|| {
         ProviderError::Metadata("No playable audio format found in stream response".to_string())
     })?;
 
-    let dest_path = cache_dir.join(format!("{video_id}.{}", selected.ext));
-    let part_path = cache_dir.join(format!("{video_id}.{}.part", selected.ext));
+    let dest_path = cache_dir.join(format!("{video_id}_{suffix}.{}", selected.ext));
+    let part_path = cache_dir.join(format!("{video_id}_{suffix}.{}.part", selected.ext));
     download_ranged_parallel(&selected.url, selected.content_length, &part_path)?;
     fs::rename(&part_path, &dest_path)?;
 
@@ -940,6 +992,90 @@ pub fn resolve_and_cache_audio_stream(
     })
 }
 
+/// Convenience wrapper using default High audio quality.
+pub fn resolve_and_cache_audio_stream(
+    video_id: &str,
+    session: &YtmSession,
+    cache_dir: &Path,
+) -> ProviderResult<CachedAudioStream> {
+    resolve_and_cache_audio_stream_with_quality(video_id, session, cache_dir, AudioQuality::High)
+}
+
+/// Fetch direct hardware-decodable MP4/WebM video stream URLs for 360p, 480p, 720p, and 1080p
+/// so Ferric plays official music videos natively inside the app with instant quality switching.
+pub fn fetch_video_streams(
+    video_id: &str,
+    session: &YtmSession,
+) -> ProviderResult<Vec<VideoStreamOption>> {
+    let root = fetch_player_root(video_id, session)?;
+    let Some(formats) = root
+        .pointer("/streamingData/adaptiveFormats")
+        .and_then(Value::as_array)
+    else {
+        return Err(ProviderError::Metadata(
+            "No adaptive video streams available".to_string(),
+        ));
+    };
+
+    let mut best_by_tier: Vec<(VideoQuality, u32, VideoStreamOption)> = Vec::new();
+    for fmt in formats {
+        let Some(url) = fmt.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        let mime = fmt.get("mimeType").and_then(Value::as_str).unwrap_or("");
+        if !mime.starts_with("video/") {
+            continue;
+        }
+        let height = fmt.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let width = fmt.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let bitrate = fmt.get("bitrate").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let tier = match height {
+            320..=400 => VideoQuality::P360,
+            401..=540 => VideoQuality::P480,
+            541..=800 => VideoQuality::P720,
+            801..=1200 => VideoQuality::P1080,
+            _ => continue,
+        };
+        // Strongly prefer H.264 MP4 (`avc1`) for universal DXVA hardware decode in WebView2,
+        // falling back to VP9 WebM if unavailable.
+        let codec_rank = if mime.contains("avc1") {
+            3_000_000_u32
+        } else if mime.starts_with("video/mp4") && !mime.contains("av01") {
+            2_000_000_u32
+        } else if mime.contains("vp9") {
+            1_000_000_u32
+        } else {
+            250_000_u32
+        };
+        let score = codec_rank.saturating_add(bitrate / 1_000);
+        let opt = VideoStreamOption {
+            quality: tier,
+            label: tier.label().to_string(),
+            width,
+            height,
+            bitrate_kbps: bitrate / 1_000,
+            url: url.to_string(),
+            mime: mime.to_string(),
+        };
+        if let Some(slot) = best_by_tier.iter_mut().find(|(q, _, _)| *q == tier) {
+            if score > slot.1 {
+                *slot = (tier, score, opt);
+            }
+        } else {
+            best_by_tier.push((tier, score, opt));
+        }
+    }
+
+    best_by_tier.sort_by_key(|(q, _, _)| q.target_height());
+    let out: Vec<VideoStreamOption> = best_by_tier.into_iter().map(|(_, _, o)| o).collect();
+    if out.is_empty() {
+        return Err(ProviderError::Metadata(
+            "No compatible video streams found".to_string(),
+        ));
+    }
+    Ok(out)
+}
+
 struct SelectedStreamFormat {
     url: String,
     ext: &'static str,
@@ -949,7 +1085,10 @@ struct SelectedStreamFormat {
     duration_ms: u64,
 }
 
-fn select_best_audio_format(root: &Value) -> Option<SelectedStreamFormat> {
+fn select_audio_format_for_quality(
+    root: &Value,
+    quality: AudioQuality,
+) -> Option<SelectedStreamFormat> {
     let formats = root
         .pointer("/streamingData/adaptiveFormats")
         .and_then(Value::as_array)?;
@@ -965,6 +1104,7 @@ fn select_best_audio_format(root: &Value) -> Option<SelectedStreamFormat> {
         }
         let itag = fmt.get("itag").and_then(Value::as_u64).unwrap_or(0);
         let bitrate = fmt.get("bitrate").and_then(Value::as_u64).unwrap_or(0);
+        let kbps = (bitrate / 1_000) as u32;
         let content_length = fmt
             .get("contentLength")
             .and_then(Value::as_str)
@@ -976,23 +1116,69 @@ fn select_best_audio_format(root: &Value) -> Option<SelectedStreamFormat> {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (ext, codec, priority) = if itag == 140 {
-            ("m4a", "AAC", 100)
-        } else if mime.starts_with("audio/mp4") {
-            ("m4a", "AAC", 80)
-        } else if itag == 251 {
-            ("webm", "OPUS", 70)
+        let (ext, codec) = if mime.starts_with("audio/mp4") {
+            ("m4a", "AAC")
         } else if mime.starts_with("audio/webm") {
-            ("webm", "OPUS", 50)
+            ("webm", "OPUS")
         } else {
             continue;
         };
-        let score = priority * 1_000_000 + (bitrate.min(999_999) as u32);
+
+        let score: u32 = match quality {
+            AudioQuality::Low => {
+                // Prefer compact 48-72 kbps AAC/Opus streams for low bandwidth
+                if itag == 139 {
+                    950_000
+                } else if itag == 250 || itag == 249 {
+                    920_000
+                } else if kbps <= 80 {
+                    850_000 - kbps
+                } else {
+                    400_000u32.saturating_sub(kbps)
+                }
+            }
+            AudioQuality::Normal => {
+                // Standard 128 kbps AAC (itag 140)
+                if itag == 140 {
+                    980_000
+                } else if (96..=135).contains(&kbps) {
+                    900_000 + kbps
+                } else {
+                    500_000u32.saturating_sub(kbps.abs_diff(128))
+                }
+            }
+            AudioQuality::High => {
+                // High transparency Opus (itag 251) or top AAC
+                if itag == 251 {
+                    990_000 + kbps
+                } else if itag == 140 {
+                    920_000 + kbps
+                } else if codec == "OPUS" {
+                    880_000 + kbps
+                } else {
+                    800_000 + kbps
+                }
+            }
+            AudioQuality::Best => {
+                // Absolute highest bitrate available (256k AAC/Opus -> 160k Opus -> 128k AAC)
+                let bonus = if itag == 141 || itag == 774 {
+                    200_000
+                } else if itag == 251 {
+                    80_000
+                } else if itag == 140 {
+                    40_000
+                } else {
+                    0
+                };
+                bonus + (bitrate.min(999_999) as u32)
+            }
+        };
+
         let candidate = SelectedStreamFormat {
             url: url.to_string(),
             ext,
             codec,
-            bitrate_kbps: (bitrate / 1_000) as u32,
+            bitrate_kbps: kbps,
             content_length,
             duration_ms,
         };
@@ -1831,7 +2017,11 @@ mod tests {
         );
         assert_eq!(
             norm,
-            "https://lh3.googleusercontent.com/abc123XYZ=w300-h300-l90-rj"
+            "https://lh3.googleusercontent.com/abc123XYZ=w180-h180-l85-rj"
+        );
+        assert_eq!(
+            normalize_ytm_thumbnail_url("https://i.ytimg.com/vi/abc12345678/maxresdefault.jpg"),
+            "https://i.ytimg.com/vi/abc12345678/mqdefault.jpg"
         );
 
         let radio_sample = json!({
@@ -1854,7 +2044,7 @@ mod tests {
         assert_eq!(tracks[0].duration_ms, 215_000);
         assert_eq!(
             tracks[0].thumbnail_url.as_deref(),
-            Some("https://lh3.googleusercontent.com/cover99=w300-h300-l90-rj")
+            Some("https://lh3.googleusercontent.com/cover99=w180-h180-l85-rj")
         );
     }
 }

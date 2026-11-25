@@ -3255,6 +3255,8 @@ pub struct App {
     #[rust]
     track_menu_open: bool,
     #[rust]
+    modal_dismissed_swallow_up: bool,
+    #[rust]
     track_menu_target: Option<Track>,
     #[rust]
     songs_filter_query: String,
@@ -11407,6 +11409,65 @@ impl AppMain for App {
                 .set_maximized(cx, is_max);
             self.sync_maximized_chrome_padding(cx, is_max);
             self.sync_video_bounds(cx);
+        }
+
+        // Modal Backdrop Isolation:
+        // When any modal popup is open, block all pointer interaction with the background UI,
+        // and dismiss the popup cleanly whenever the user clicks outside the modal card.
+        let active_modal: Option<(&'static [LiveId], &'static [LiveId])> = if self.track_menu_open {
+            Some((id!(track_menu_modal), id!(card_track_menu)))
+        } else if self.cmdk_open {
+            Some((id!(cmdk_modal), id!(card_cmdk)))
+        } else if self.update_popup_visible {
+            Some((id!(update_popup), id!(card_update_popup)))
+        } else {
+            None
+        };
+
+        if self.modal_dismissed_swallow_up && matches!(event, Event::MouseUp(_)) {
+            self.modal_dismissed_swallow_up = false;
+            return;
+        }
+
+        if let Some((modal_id, card_id)) = active_modal {
+            match event {
+                Event::WindowDragQuery(_) => {
+                    // Never drag the window while a modal backdrop is active
+                    return;
+                }
+                Event::MouseDown(md) => {
+                    let card_r = self.ui.view(card_id).area().rect(cx);
+                    if card_r.size.x > 0.0 && !card_r.contains(md.abs) {
+                        if self.track_menu_open {
+                            self.close_track_menu(cx);
+                        } else if self.cmdk_open {
+                            self.cmdk_open = false;
+                            self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
+                            self.sync_video_bounds(cx);
+                            self.ui.redraw(cx);
+                        } else if self.update_popup_visible {
+                            self.dismiss_update_popup(cx);
+                        }
+                        self.modal_dismissed_swallow_up = true;
+                        return;
+                    }
+                    // Click is inside the modal card: route strictly to the modal overlay so
+                    // background tracks/buttons underneath can never be clicked through.
+                    let mut scope = Scope::empty();
+                    self.ui.view(modal_id).handle_event(cx, event, &mut scope);
+                    return;
+                }
+                Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) => {
+                    if let Event::Scroll(se) = event {
+                        se.handled_y.set(true);
+                        se.handled_x.set(true);
+                    }
+                    let mut scope = Scope::empty();
+                    self.ui.view(modal_id).handle_event(cx, event, &mut scope);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // Native Windows 11 Frameless Drag & Aero Snap on empty regions of top_bar

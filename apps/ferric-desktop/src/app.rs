@@ -1751,6 +1751,38 @@ live_design! {
                                         pl_prev_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
                                         pl_next_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                     }
+                                    playlists_empty_card = <FerricCard> {
+                                        visible: false,
+                                        width: Fill,
+                                        height: Fit,
+                                        padding: { left: 22, right: 22, top: 24, bottom: 24 }
+                                        margin: { top: 8 }
+                                        flow: Down,
+                                        align: { x: 0.0, y: 0.5 }
+                                        spacing: 10,
+                                        lbl_t_pl_empty = <Label> {
+                                            width: Fill,
+                                            padding: 0,
+                                            draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 13.0 } }
+                                            text: "No playlists yet"
+                                        }
+                                        lbl_m_pl_empty = <Label> {
+                                            width: Fill,
+                                            padding: 0,
+                                            draw_text: { wrap: Word, color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 9.0, line_spacing: 1.35 } }
+                                            text: "Enter a playlist name in the bar above and click + Create to start building your own collection, import an existing M3U/CSV playlist, or sign in with Google in Settings to sync your YouTube Music playlists."
+                                        }
+                                        <View> {
+                                            width: Fill,
+                                            height: Fit,
+                                            margin: { top: 4 }
+                                            flow: Right,
+                                            spacing: 8,
+                                            pl_empty_focus_btn = <FerricPrimaryBtn> { height: 28, text: "+ Create Playlist" }
+                                            pl_empty_import_btn = <FerricBtn> { height: 28, text: "Import M3U/CSV" }
+                                            pl_empty_google_btn = <FerricBtn> { height: 28, text: "Sync from Google" }
+                                        }
+                                    }
                                     plc_row_0 = <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 8,
                                         plc_0 = <GridCard> {}
@@ -2291,14 +2323,14 @@ live_design! {
                                                 lbl_t_disc_id = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Discord Application ID" }
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                    discord_client_id_input = <FerricInput> { width: Fill, height: 28, empty_text: "Paste 18-19 digit Discord Application ID (e.g. from Discord Developer Portal)..." }
+                                                    discord_client_id_input = <FerricInput> { width: Fill, height: 28, empty_text: "Optional custom Discord App ID (built-in Ferric ID active by default)..." }
                                                     discord_save_id_btn = <FerricPrimaryBtn> { height: 28, text: "Save ID" }
                                                     discord_portal_btn = <FerricBtn> { height: 28, text: "Create App ID" }
                                                 }
                                                 lbl_m_disc_hint = <Label> {
                                                     width: Fill,
-                                                    draw_text: { color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
-                                                    text: "Click 'Create App ID' -> New Application (name it 'Ferric') -> copy Application ID -> paste here & click Save ID."
+                                                    draw_text: { wrap: Word, color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
+                                                    text: "Ferric's official Discord Application ID is built in — simply enable 'Show on Discord' above. Leave blank for automatic connection, or paste a custom ID to override."
                                                 }
                                             }
                                         }
@@ -2811,15 +2843,17 @@ live_design! {
                                         }
                                     }
 
-                                    // Clean Centered Title + Like Heart & Artist directly below Cover Art
+                                    // Clean Centered Wrapping Title + Like Heart & Artist directly below Cover Art (never clips long titles!)
                                     <View> {
-                                        width: 312, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3,
+                                        width: 344, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 4,
                                         <View> {
-                                            width: Fit, height: Fit, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 6,
+                                            width: Fill, height: Fit, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 6,
+                                            <View> { width: 24, height: 1 }
                                             fs_title_lbl = <Label> {
+                                                width: Fill,
                                                 padding: 0,
                                                 align: { x: 0.5, y: 0.5 }
-                                                draw_text: { color: #FFFFFF, text_style: <THEME_FONT_DISPLAY> { font_size: 14.5, line_spacing: 1.05 } }
+                                                draw_text: { wrap: Word, color: #FFFFFF, text_style: <THEME_FONT_DISPLAY> { font_size: 13.8, line_spacing: 1.14 } }
                                                 text: "No track playing"
                                             }
                                             fs_like_btn = <FerricIconBtn> {
@@ -2834,7 +2868,7 @@ live_design! {
                                             width: Fill,
                                             padding: 0,
                                             align: { x: 0.5, y: 0.5 }
-                                            draw_text: { color: #FFFFFF8C, text_style: <THEME_FONT_REGULAR> { font_size: 9.6, line_spacing: 1.05 } }
+                                            draw_text: { wrap: Word, color: #FFFFFF8C, text_style: <THEME_FONT_REGULAR> { font_size: 9.6, line_spacing: 1.12 } }
                                             text: ""
                                         }
                                     }
@@ -5950,6 +5984,9 @@ impl App {
     fn refresh_playlists_grid(&mut self, cx: &mut Cx) {
         const PER_PAGE: usize = 20;
         let total = self.playlists.len();
+        self.ui
+            .view(id!(playlists_empty_card))
+            .set_visible(cx, total == 0);
         let start = self.playlists_page * PER_PAGE;
         if let Some(cache) = &mut self.artwork {
             for pl in self.playlists.iter().skip(start).take(PER_PAGE) {
@@ -6621,6 +6658,7 @@ impl App {
             id!(card_st_update),
             id!(card_st_keys),
             id!(card_conn_main),
+            id!(playlists_empty_card),
         ] {
             self.ui.view(card_id).apply_over(
                 cx,
@@ -6945,6 +6983,7 @@ impl App {
             id!(recents_play_btn),
             id!(play_all_btn),
             id!(pl_create_btn),
+            id!(pl_empty_focus_btn),
             id!(detail_play_btn),
             id!(yt_login_btn),
             id!(discord_save_id_btn),
@@ -6974,6 +7013,8 @@ impl App {
             id!(add_folder_btn),
             id!(sort_cycle_btn),
             id!(pl_import_btn),
+            id!(pl_empty_import_btn),
+            id!(pl_empty_google_btn),
             id!(detail_shuffle_btn),
             id!(detail_radio_btn),
             id!(detail_pin_btn),
@@ -7428,6 +7469,7 @@ impl App {
             id!(lbl_t_albums),
             id!(lbl_t_artists),
             id!(lbl_t_playlists),
+            id!(lbl_t_pl_empty),
             id!(detail_title_lbl),
             id!(lbl_t_settings),
             id!(lbl_t_acct_yt),
@@ -7496,6 +7538,7 @@ impl App {
             id!(songs_sub_lbl),
             id!(albums_sub_lbl),
             id!(artists_sub_lbl),
+            id!(lbl_m_pl_empty),
             id!(detail_sub_lbl),
             id!(lbl_m_acct_desc),
             id!(oauth_status_lbl),
@@ -10765,7 +10808,16 @@ impl App {
                 self.show_toast(cx, &format!("Created playlist '{name}'"));
             }
         }
-        if self.ui.button(id!(pl_import_btn)).clicked(actions)
+        if self.ui.button(id!(pl_empty_focus_btn)).clicked(actions) {
+            self.ui.widget(id!(pl_new_input)).set_key_focus(cx);
+            self.show_toast(cx, "Type a playlist name above and press Enter to create");
+        }
+        if self.ui.button(id!(pl_empty_google_btn)).clicked(actions) {
+            self.navigate_to(cx, MainPage::Settings, true);
+            self.switch_settings_tab(cx, SettingsTab::Accounts);
+        }
+        if (self.ui.button(id!(pl_import_btn)).clicked(actions)
+            || self.ui.button(id!(pl_empty_import_btn)).clicked(actions))
             && let Some(file) = rfd::FileDialog::new()
                 .set_title("Import Playlist (.m3u, .m3u8, .csv)")
                 .add_filter("Playlist Files", &["m3u", "m3u8", "csv"])
@@ -12110,9 +12162,9 @@ impl App {
                 self.show_toast(
                     cx,
                     if trimmed.is_empty() {
-                        "Discord Application ID cleared"
+                        "Using built-in Ferric Discord Application ID — connecting..."
                     } else {
-                        "Discord Application ID saved — connecting..."
+                        "Custom Discord Application ID saved — connecting..."
                     },
                 );
             } else {

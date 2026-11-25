@@ -20,10 +20,9 @@ const OP_CLOSE: u32 = 2;
 const OP_PING: u32 = 3;
 const OP_PONG: u32 = 4;
 
-/// Optional built-in Ferric Discord Application ID.
-/// Once registered on Discord Developer Portal, embedding the public numeric Application ID here
-/// enables zero-config 1-toggle Rich Presence for every user without manual setup.
-pub const BUILTIN_DISCORD_APP_ID: &str = "";
+/// Official built-in Ferric Discord Application ID (public numeric client identifier).
+/// Enables zero-config 1-toggle Rich Presence out of the box without manual setup.
+pub const BUILTIN_DISCORD_APP_ID: &str = "1575176866413940806";
 
 pub fn effective_client_id(cfg: &DiscordRpcSettings) -> &str {
     let custom = cfg.client_id.trim();
@@ -625,5 +624,18 @@ mod tests {
         let len = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]) as usize;
         assert_eq!(op, OP_HANDSHAKE);
         assert_eq!(len, frame.len() - 8);
+    }
+
+    #[test]
+    fn builtin_discord_app_id_is_used_automatically_and_overridable() {
+        let default_cfg = DiscordRpcSettings::default();
+        assert_eq!(effective_client_id(&default_cfg), BUILTIN_DISCORD_APP_ID);
+        assert!(is_valid_client_id(effective_client_id(&default_cfg)));
+
+        let custom_cfg = DiscordRpcSettings {
+            client_id: "1234567890123456789".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(effective_client_id(&custom_cfg), "1234567890123456789");
     }
 }

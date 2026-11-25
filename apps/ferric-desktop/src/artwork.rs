@@ -480,29 +480,41 @@ pub fn extract_vibrant_accent_rgb(buffer: &ImageBuffer) -> [f32; 3] {
             return FALLBACK;
         };
 
-    // Preserve hue vibrancy while lifting deep covers so accent reads crisply on dark surfaces
-    let max_c = r.max(g).max(b);
-    let min_c = r.min(g).min(b);
-    let avg = (r + g + b) / 3.0;
-    if boost_sat || (max_c - min_c) / max_c.max(1e-4) < 0.38 {
-        let sat_boost = if boost_sat { 1.65 } else { 1.28 };
+    // Lift brightness multiplicatively (preserving HSV hue & saturation instead of washing out with white!)
+    let max_c = r.max(g).max(b).max(1e-4);
+    let target_peak = 0.90_f32;
+    if max_c < target_peak {
+        let gain = (target_peak / max_c).min(6.0);
+        r = (r * gain).clamp(0.0, 1.0);
+        g = (g * gain).clamp(0.0, 1.0);
+        b = (b * gain).clamp(0.0, 1.0);
+    }
+
+    // Ensure chromatic vibrancy for subtle/pastel covers while keeping authentic hue
+    let peak = r.max(g).max(b).max(1e-4);
+    let valley = r.min(g).min(b);
+    let sat_now = (peak - valley) / peak;
+    if boost_sat || sat_now < 0.44 {
+        let avg = (r + g + b) / 3.0;
+        let sat_boost = if boost_sat { 1.75 } else { 1.38 };
         r = (avg + (r - avg) * sat_boost).clamp(0.0, 1.0);
         g = (avg + (g - avg) * sat_boost).clamp(0.0, 1.0);
         b = (avg + (b - avg) * sat_boost).clamp(0.0, 1.0);
     }
 
+    // Final gentle luminance floor for WCAG AA on dark surfaces (e.g. pure deep indigo/red)
     let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    if lum < 0.44 {
-        let lift = ((0.50 - lum) / (1.0 - lum).max(0.1)).clamp(0.0, 0.72);
+    if lum < 0.42 {
+        let lift = ((0.44 - lum) / (1.0 - lum).max(0.1)).clamp(0.0, 0.45);
         r += (1.0 - r) * lift;
         g += (1.0 - g) * lift;
         b += (1.0 - b) * lift;
     }
 
     [
-        r.clamp(0.14, 0.98),
-        g.clamp(0.14, 0.98),
-        b.clamp(0.14, 0.98),
+        r.clamp(0.10, 0.98),
+        g.clamp(0.10, 0.98),
+        b.clamp(0.10, 0.98),
     ]
 }
 

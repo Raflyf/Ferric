@@ -245,6 +245,54 @@ impl LibraryDb {
         Ok(removed)
     }
 
+    /// One-time cleanup migration that purges unplayed, unliked ephemeral YouTube Music discovery/radio
+    /// dumps (such as unrelated music videos cached by older builds) while strictly preserving all local
+    /// files, liked tracks, playlist tracks, and recently played history.
+    pub fn prune_ephemeral_discovery_bloat(
+        &mut self,
+        keep_recent_ids: &[String],
+    ) -> CoreResult<usize> {
+        const MIGRATION_KEY: &str = "migration_pruned_ephemeral_v1";
+        if self.get_setting::<bool>(MIGRATION_KEY)?.unwrap_or(false) {
+            return Ok(0);
+        }
+        let keep: std::collections::HashSet<&str> =
+            keep_recent_ids.iter().map(String::as_str).collect();
+        let tx = self.conn.transaction()?;
+        let mut stale_ids = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT id, title FROM tracks \
+                 WHERE source = 'YT MUSIC' \
+                   AND liked = 0 \
+                   AND file_path IS NULL \
+                   AND id NOT IN (SELECT track_id FROM playlist_tracks)",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, title) = row?;
+                if !keep.contains(id.as_str()) || title.to_ascii_lowercase().contains("minecraft") {
+                    stale_ids.push(id);
+                }
+            }
+        }
+        let mut removed = 0usize;
+        {
+            let mut del = tx.prepare("DELETE FROM tracks WHERE id = ?1")?;
+            for id in &stale_ids {
+                removed += del.execute([id])?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, 'true')",
+            [MIGRATION_KEY],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn upsert_playlist(&mut self, playlist: &Playlist, track_ids: &[String]) -> CoreResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -858,5 +906,58 @@ mod tests {
         let dsp = PlaybackDspSettings::default();
         db.save_playback_dsp(&dsp).expect("save dsp");
         assert_eq!(db.load_playback_dsp().expect("load dsp"), dsp);
+
+        // Verify one-time ephemeral YouTube discovery bloat pruning preserves local, liked, playlist, and recent tracks
+        let junk = Track {
+            id: "yt:video:junk1111111".to_string(),
+            title: "Random Minecraft Parody".to_string(),
+            artist: "A Minecraft Music Video".to_string(),
+            album: "YouTube Music".to_string(),
+            duration_ms: 180_000,
+            path: None,
+            source: TrackSource::YouTubeMusic,
+            codec: "YT AAC".to_string(),
+            sample_rate: 44_100,
+            bit_depth: 16,
+            bitrate_kbps: 128,
+            isrc: None,
+            spotify_id: None,
+            youtube_video_id: Some("junk1111111".to_string()),
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked: false,
+        };
+        let recent_yt = Track {
+            id: "yt:video:real2222222".to_string(),
+            title: "STAY".to_string(),
+            artist: "The Kid LAROI".to_string(),
+            album: "F*CK LOVE 3".to_string(),
+            duration_ms: 141_000,
+            path: None,
+            source: TrackSource::YouTubeMusic,
+            codec: "YT AAC".to_string(),
+            sample_rate: 44_100,
+            bit_depth: 16,
+            bitrate_kbps: 128,
+            isrc: None,
+            spotify_id: None,
+            youtube_video_id: Some("real2222222".to_string()),
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked: false,
+        };
+        db.upsert_tracks(&[junk, recent_yt]).expect("upsert yt");
+        let pruned = db
+            .prune_ephemeral_discovery_bloat(&["yt:video:real2222222".to_string()])
+            .expect("prune");
+        assert_eq!(pruned, 1);
+        assert_eq!(
+            db.prune_ephemeral_discovery_bloat(&[])
+                .expect("idempotent second prune"),
+            0
+        );
+        let remaining = db.list_tracks("").expect("list remaining");
+        assert!(remaining.iter().any(|t| t.id == "yt:video:real2222222"));
+        assert!(!remaining.iter().any(|t| t.id == "yt:video:junk1111111"));
     }
 }

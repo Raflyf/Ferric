@@ -29,57 +29,67 @@ live_design! {
             acrylic_on: 0.0
 
             fn sample_blur(self, uv: vec2) -> vec3 {
-                let c0 = sample2d(self.image, clamp(uv, vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz;
-                let r1 = 0.075;
-                let r2 = 0.155;
-                let mut acc = c0 * 0.16;
-                acc += sample2d(self.image, clamp(uv + vec2(r1, 0.0), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.09;
-                acc += sample2d(self.image, clamp(uv - vec2(r1, 0.0), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.09;
-                acc += sample2d(self.image, clamp(uv + vec2(0.0, r1), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.09;
-                acc += sample2d(self.image, clamp(uv - vec2(0.0, r1), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.09;
-                acc += sample2d(self.image, clamp(uv + vec2(r1 * 0.72, r1 * 0.72), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.07;
-                acc += sample2d(self.image, clamp(uv + vec2(-r1 * 0.72, r1 * 0.72), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.07;
-                acc += sample2d(self.image, clamp(uv + vec2(r1 * 0.72, -r1 * 0.72), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.07;
-                acc += sample2d(self.image, clamp(uv + vec2(-r1 * 0.72, -r1 * 0.72), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.07;
-                acc += sample2d(self.image, clamp(uv + vec2(r2, 0.05), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.05;
-                acc += sample2d(self.image, clamp(uv - vec2(r2, 0.05), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.05;
-                acc += sample2d(self.image, clamp(uv + vec2(0.05, r2), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.05;
-                acc += sample2d(self.image, clamp(uv - vec2(0.05, r2), vec2(0.01, 0.01), vec2(0.99, 0.99))).xyz * 0.05;
+                let c0 = sample2d(self.image, clamp(uv, vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz;
+                let r1 = 0.14;
+                let r2 = 0.28;
+                let r3 = 0.42;
+                let mut acc = c0 * 0.08;
+                acc += sample2d(self.image, clamp(uv + vec2(r1, 0.0), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.06;
+                acc += sample2d(self.image, clamp(uv - vec2(r1, 0.0), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.06;
+                acc += sample2d(self.image, clamp(uv + vec2(0.0, r1), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.06;
+                acc += sample2d(self.image, clamp(uv - vec2(0.0, r1), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.06;
+                acc += sample2d(self.image, clamp(uv + vec2(r1 * 0.72, r1 * 0.72), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.055;
+                acc += sample2d(self.image, clamp(uv + vec2(-r1 * 0.72, r1 * 0.72), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.055;
+                acc += sample2d(self.image, clamp(uv + vec2(r1 * 0.72, -r1 * 0.72), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.055;
+                acc += sample2d(self.image, clamp(uv + vec2(-r1 * 0.72, -r1 * 0.72), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.055;
+                acc += sample2d(self.image, clamp(uv + vec2(r2, 0.06), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.045;
+                acc += sample2d(self.image, clamp(uv - vec2(r2, 0.06), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.045;
+                acc += sample2d(self.image, clamp(uv + vec2(0.06, r2), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.045;
+                acc += sample2d(self.image, clamp(uv - vec2(0.06, r2), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.045;
+                acc += sample2d(self.image, clamp(uv + vec2(r2 * 0.70, r2 * 0.70), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.04;
+                acc += sample2d(self.image, clamp(uv + vec2(-r2 * 0.70, r2 * 0.70), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.04;
+                acc += sample2d(self.image, clamp(uv + vec2(r2 * 0.70, -r2 * 0.70), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.04;
+                acc += sample2d(self.image, clamp(uv + vec2(-r2 * 0.70, -r2 * 0.70), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.04;
+                acc += sample2d(self.image, clamp(uv + vec2(r3, -0.08), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.03;
+                acc += sample2d(self.image, clamp(uv - vec2(r3, -0.08), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.03;
+                acc += sample2d(self.image, clamp(uv + vec2(-0.08, r3), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.03;
+                acc += sample2d(self.image, clamp(uv - vec2(-0.08, r3), vec2(0.02, 0.02), vec2(0.98, 0.98))).xyz * 0.03;
                 return acc;
             }
 
             fn pixel(self) -> vec4 {
                 let uv = self.pos;
-                let drift = vec2(sin(self.phase * 0.28) * 0.042, cos(self.phase * 0.21) * 0.036);
-                let mut col = mix(vec3(0.024, 0.025, 0.032), vec3(0.045, 0.047, 0.062), self.acrylic_on);
+                let drift = vec2(sin(self.phase * 0.24) * 0.036, cos(self.phase * 0.19) * 0.030);
+                let mut col = mix(vec3(0.020, 0.022, 0.028), vec3(0.034, 0.036, 0.048), self.acrylic_on);
 
                 if self.has_image > 0.5 {
-                    let uv1 = (uv - 0.5) * 0.76 + 0.5 + drift;
-                    let uv2 = (vec2(1.0 - uv.x, uv.y) - 0.5) * 0.88 + 0.5 - drift * 0.85;
+                    let uv1 = (uv - 0.5) * 0.58 + 0.5 + drift;
+                    let uv2 = (vec2(1.0 - uv.x, 1.0 - uv.y) - 0.5) * 0.64 + 0.5 - drift * 0.80;
                     let b1 = self.sample_blur(uv1);
                     let b2 = self.sample_blur(uv2);
-                    let blended = mix(b1, b2, 0.34);
-                    // Rich cinematic dark ambient wash with guaranteed contrast for white lyrics
+                    let blended = mix(b1, b2, 0.45);
+                    // Dissolve cover details into silky dark aurora wash with dark velvet lyrics scrim
                     let luma = dot(blended, vec3(0.299, 0.587, 0.114));
-                    let sat = mix(vec3(luma, luma, luma), blended, 1.42);
-                    col = mix(vec3(0.028, 0.026, 0.030), clamp(sat, 0.0, 1.0) * 0.42, 0.84);
+                    let sat = mix(vec3(luma, luma, luma), blended, 1.28);
+                    let right_scrim = mix(0.28, 0.145, smoothstep(0.28, 0.62, uv.x));
+                    col = mix(vec3(0.018, 0.019, 0.024), clamp(sat, 0.0, 1.0) * right_scrim, 0.88);
                 } else {
                     let d1 = length((uv - (vec2(0.26, 0.44) + drift)) * vec2(0.95, 1.15));
                     let d2 = length((uv - (vec2(0.76, 0.62) - drift)) * vec2(1.05, 1.2));
-                    let g1 = exp(-d1 * d1 * 2.4) * 0.26;
-                    let g2 = exp(-d2 * d2 * 2.8) * 0.16;
-                    col += self.accent.xyz * g1 + vec3(0.28, 0.22, 0.38) * g2;
+                    let g1 = exp(-d1 * d1 * 2.4) * 0.22;
+                    let g2 = exp(-d2 * d2 * 2.8) * 0.12;
+                    col += self.accent.xyz * g1 + vec3(0.24, 0.20, 0.34) * g2;
                 }
 
                 // Subtle interactive mouse-tracked ambient spotlight across the stage
                 let dm = length((uv - vec2(self.mouse_x, self.mouse_y)) * vec2(1.35, 1.0));
-                let spot = exp(-dm * dm * 6.5) * 0.095 * self.hover_amt;
+                let spot = exp(-dm * dm * 6.5) * 0.065 * self.hover_amt;
                 let spot_col = mix(vec3(1.0, 0.96, 0.92), self.accent.xyz, 0.42);
                 col += spot_col * spot;
 
                 // Soft atmospheric edge vignette so cover art and lyrics float in clean depth
                 let dv = length((uv - vec2(0.50, 0.48)) * vec2(1.08, 1.22));
-                let vig = clamp(1.0 - dv * dv * 0.52, 0.42, 1.0);
+                let vig = clamp(1.0 - dv * dv * 0.46, 0.48, 1.0);
                 col *= vig;
                 return vec4(clamp(col, 0.0, 1.0), 1.0);
             }
@@ -2258,23 +2268,23 @@ impl Widget for FerricLyricsView {
                 + hover_v * (1.0 - focus) * if self.compact { 0.02 } else { 0.018 })
                 * press_scale;
 
-            // Depth-of-field optical blur on inactive lines, snapping to razor sharp on mouse hover!
+            // Gentle optical depth-of-field blur on distant lines, keeping adjacent ±1 lines crisp
             let base_blur = if self.compact {
                 0.0
             } else {
-                ((dist - 0.15).max(0.0) * 0.34).clamp(0.0, 0.96)
+                ((dist - 0.85).max(0.0) * 0.18).clamp(0.0, 0.48)
             };
             let blur_amt = base_blur * (1.0 - focus) * (1.0 - hover_v);
 
-            // Clean luminance hierarchy: active 100%, hover 86%, nearby 34%, distant 18%
+            // High-legibility luminance hierarchy: active 100%, hover 92%, nearby 56-64%, distant 28%
             let base_alpha = if self.compact {
-                (0.72 - dist * 0.10).clamp(0.28, 0.72)
+                (0.76 - dist * 0.10).clamp(0.32, 0.76)
             } else {
-                (0.42 - dist * 0.065).clamp(0.16, 0.42)
+                (0.64 - dist * 0.08).clamp(0.28, 0.64)
             };
             let target_alpha = base_alpha
                 + (1.0 - base_alpha) * focus
-                + (0.86 - base_alpha).max(0.0) * hover_v * (1.0 - focus);
+                + (0.92 - base_alpha).max(0.0) * hover_v * (1.0 - focus);
             let alpha = target_alpha.clamp(0.0, 1.0) * edge_fade;
 
             let x_shift = if self.compact {
@@ -2388,7 +2398,7 @@ impl Widget for FerricLyricsView {
                 };
 
             let bright_col = vec4(1.0, 1.0, 1.0, alpha);
-            let dim_active_col = vec4(0.92, 0.93, 0.96, (0.44 * edge_fade).clamp(0.0, 1.0));
+            let dim_active_col = vec4(0.95, 0.96, 1.0, (0.58 * edge_fade).clamp(0.0, 1.0));
 
             let draw_rect = if use_active_draw {
                 self.draw_active.blur_amt = 0.0;

@@ -59,6 +59,7 @@ pub enum SearchFilter {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SortField {
     #[default]
+    Recent,
     Artist,
     Title,
     Album,
@@ -68,15 +69,17 @@ pub enum SortField {
 impl SortField {
     pub fn next(self) -> Self {
         match self {
+            Self::Recent => Self::Artist,
             Self::Artist => Self::Title,
             Self::Title => Self::Album,
             Self::Album => Self::Duration,
-            Self::Duration => Self::Artist,
+            Self::Duration => Self::Recent,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Recent => "Sort: Recent",
             Self::Artist => "Sort: Artist",
             Self::Title => "Sort: Title",
             Self::Album => "Sort: Album",
@@ -280,14 +283,43 @@ fn resolved_track_thumb(track: &Track) -> Option<String> {
     None
 }
 
+fn is_bogus_album_label(raw: &str) -> bool {
+    let low = raw.trim().to_ascii_lowercase();
+    if low.is_empty() {
+        return true;
+    }
+    matches!(
+        low.as_str(),
+        "unknown album"
+            | "youtube music"
+            | "youtube music radio"
+            | "music video"
+            | "trending"
+            | "quick picks"
+            | "single"
+            | "singles"
+            | "discover"
+            | "radio"
+    ) || low.contains(" likes")
+        || low.contains(" views")
+        || low.contains(" plays")
+        || low.contains(" watching")
+        || low.contains(" subscribers")
+}
+
 /// Group all library tracks into visual Album cards with real cover artwork.
 pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
-    let mut map: HashMap<String, CollectionGroup> = HashMap::new();
+    let mut map: HashMap<String, (bool, CollectionGroup)> = HashMap::new();
     for track in tracks {
-        let album_name = if track.album.trim().is_empty() {
-            "Singles".to_string()
+        let raw_album = track.album.trim();
+        let (is_single, album_name) = if is_bogus_album_label(raw_album) {
+            let fallback = track.title.trim();
+            if fallback.is_empty() {
+                continue;
+            }
+            (true, fallback.to_string())
         } else {
-            track.album.trim().to_string()
+            (false, raw_album.to_string())
         };
         let key = format!(
             "{}::{}",
@@ -295,23 +327,35 @@ pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
             track.artist.trim().to_ascii_lowercase()
         );
         let thumb = resolved_track_thumb(track);
-        let entry = map.entry(key).or_insert_with(|| CollectionGroup {
-            id: format!("album:{}", album_name.to_ascii_lowercase()),
-            title: album_name.clone(),
-            subtitle: track.artist.clone(),
-            kind: YtmCardKind::Album,
-            thumbnail_url: thumb.clone(),
-            tracks: Vec::new(),
+        let entry = map.entry(key).or_insert_with(|| {
+            (
+                is_single,
+                CollectionGroup {
+                    id: format!("album:{}", album_name.to_ascii_lowercase()),
+                    title: album_name.clone(),
+                    subtitle: track.artist.clone(),
+                    kind: YtmCardKind::Album,
+                    thumbnail_url: thumb.clone(),
+                    tracks: Vec::new(),
+                },
+            )
         });
-        if entry.thumbnail_url.is_none() && thumb.is_some() {
-            entry.thumbnail_url = thumb;
+        if entry.1.thumbnail_url.is_none() && thumb.is_some() {
+            entry.1.thumbnail_url = thumb;
         }
-        entry.tracks.push(track.clone());
+        entry.1.tracks.push(track.clone());
     }
-    let mut out: Vec<CollectionGroup> = map.into_values().collect();
-    for g in &mut out {
-        g.subtitle = format!("{} · {} songs", g.subtitle, g.tracks.len());
-    }
+    let mut out: Vec<CollectionGroup> = map
+        .into_values()
+        .map(|(is_single, mut g)| {
+            g.subtitle = if is_single && g.tracks.len() == 1 {
+                format!("{} · Single", g.subtitle)
+            } else {
+                format!("{} · {} songs", g.subtitle, g.tracks.len())
+            };
+            g
+        })
+        .collect();
     out.sort_by(|a, b| {
         b.tracks.len().cmp(&a.tracks.len()).then_with(|| {
             a.title

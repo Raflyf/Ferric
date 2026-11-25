@@ -400,10 +400,9 @@ impl Win32Window {
                 }
             },
             WM_NCCALCSIZE => {
-                // check if we are maximised
-                if window.get_is_maximized() {
-                    return DefWindowProcW(hwnd, msg, wparam, lparam);
-                }
+                // Keep frameless client geometry on both normal and maximized states;
+                // falling through to DefWindowProcW when maximized triggers native DWM
+                // titlebar caption glyphs over Native Acrylic windows.
                 if wparam == WPARAM(1) {
                     let margins = MARGINS {
                         cxLeftWidth: -1,

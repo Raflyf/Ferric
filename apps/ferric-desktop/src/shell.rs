@@ -89,8 +89,8 @@ mod win_impl {
         SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
         TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE,
         WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE, WM_NCCALCSIZE,
-        WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED, WS_CAPTION,
-        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        WM_NCHITTEST, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED,
+        WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
     use windows::core::{PCWSTR, s, w};
 
@@ -98,6 +98,11 @@ mod win_impl {
     const TRAY_ICON_ID: u32 = 1;
     const WM_TRAYICON: u32 = WM_APP + 42;
     const ERROR_ALREADY_EXISTS: u32 = 183;
+    const HTCLIENT: isize = 1;
+    const HTSYSMENU: isize = 3;
+    const HTMINBUTTON: isize = 8;
+    const HTMAXBUTTON: isize = 9;
+    const HTCLOSE: isize = 20;
 
     const CMD_SHOW: u32 = 1001;
     const CMD_PLAY_PAUSE: u32 = 1002;
@@ -474,13 +479,14 @@ mod win_impl {
         let ok = unsafe { SetWindowSubclass(hwnd, ferric_subclass_proc, SUBCLASS_ID, 0) };
         if ok != 0 {
             HOOK_INSTALLED.store(true, Ordering::Release);
-            // Upgrade WS_POPUP -> WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU
-            // while WM_NCCALCSIZE keeps the window 100% frameless, unlocking native Windows 11 DWM
-            // maximize / restore / minimize fly-zoom animations and Aero Snap!
+            // Keep WS_POPUP (strip WS_CAPTION explicitly!) with WS_THICKFRAME | WS_MINIMIZEBOX |
+            // WS_MAXIMIZEBOX | WS_SYSMENU so Windows 11 DWM provides rounded corners, Aero Snap,
+            // and smooth maximize/restore animations WITHOUT ever painting native ghost caption
+            // buttons (`—`, `❐`, `×`) over Ferric's custom Acrylic top bar.
             unsafe {
                 let cur_style = GetWindowLongW(hwnd, GWL_STYLE);
-                let next_style = (cur_style & !(WS_POPUP.0 as i32))
-                    | (WS_CAPTION.0
+                let next_style = (cur_style & !(WS_CAPTION.0 as i32))
+                    | (WS_POPUP.0
                         | WS_THICKFRAME.0
                         | WS_MINIMIZEBOX.0
                         | WS_MAXIMIZEBOX.0
@@ -736,8 +742,9 @@ mod win_impl {
                     }
                 }
                 WM_NCCALCSIZE => {
-                    // When maximized, clamp client area strictly to monitor rcWork (stops above taskbar,
-                    // eliminates the WS_THICKFRAME ~9px border overshoot on all 4 sides).
+                    // Keep the entire window 100% client area (zero OS non-client titlebar/caption
+                    // frame) on both normal and maximized states; when maximized, clamp strictly to
+                    // monitor rcWork so the window stops cleanly above the Windows Taskbar.
                     if wparam.0 != 0 {
                         let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
                         if !params.is_null() {
@@ -753,11 +760,25 @@ mod win_impl {
                                     && r.top < mi.rcWork.top;
                                 if IsZoomed(hwnd.0) != 0 || overshoots_work {
                                     (*params).rgrc[0] = mi.rcWork;
-                                    return LRESULT(0);
                                 }
                             }
                         }
+                        let margins = DwmMargins {
+                            cx_left_width: -1,
+                            cx_right_width: -1,
+                            cy_top_height: -1,
+                            cy_bottom_height: -1,
+                        };
+                        let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+                        return LRESULT(0);
                     }
+                }
+                WM_NCHITTEST => {
+                    let hit = DefSubclassProc(hwnd, msg, wparam, lparam);
+                    if matches!(hit.0, HTSYSMENU | HTMINBUTTON | HTMAXBUTTON | HTCLOSE) {
+                        return LRESULT(HTCLIENT);
+                    }
+                    return hit;
                 }
                 WM_SIZE => {
                     apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);

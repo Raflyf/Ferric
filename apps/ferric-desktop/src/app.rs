@@ -167,10 +167,10 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
                 let solid_fill = vec4(0.052, 0.056, 0.076, 1.0);
-                let acrylic_fill = vec4(0.078, 0.084, 0.118, 0.62);
+                let acrylic_fill = vec4(1.0, 1.0, 1.0, 0.036);
                 sdf.fill_keep(mix(solid_fill, acrylic_fill, self.acrylic_on));
                 let solid_border = vec4(0.114, 0.122, 0.161, 1.0);
-                let acrylic_border = vec4(1.0, 1.0, 1.0, 0.12);
+                let acrylic_border = vec4(1.0, 1.0, 1.0, 0.075);
                 sdf.stroke(mix(solid_border, acrylic_border, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -569,16 +569,16 @@ live_design! {
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 7.0);
                 let solid_idle = mix(vec4(0.050, 0.054, 0.074, 1.0), vec4(0.112, 0.120, 0.168, 1.0), self.hover);
                 let solid_act = mix(vec4(0.105, 0.098, 0.175, 1.0), vec4(self.accent_col.xyz, 0.24), 0.36);
-                let acr_idle = mix(vec4(0.076, 0.082, 0.116, 0.58), vec4(0.145, 0.156, 0.220, 0.78), self.hover);
-                let acr_act = vec4(mix(vec3(0.12, 0.12, 0.18), self.accent_col.xyz, 0.30), 0.80);
+                let acr_idle = mix(vec4(1.0, 1.0, 1.0, 0.030), vec4(1.0, 1.0, 1.0, 0.095), self.hover);
+                let acr_act = vec4(mix(vec3(0.14, 0.14, 0.22), self.accent_col.xyz, 0.34), 0.36);
                 let col = mix(mix(solid_idle, solid_act, self.active), mix(acr_idle, acr_act, self.active), self.acrylic_on);
-                let sheen = smoothstep(0.55, 0.0, self.pos.y) * self.hover * 0.075;
+                let sheen = smoothstep(0.55, 0.0, self.pos.y) * self.hover * 0.065;
                 let lifted = vec4(clamp(col.xyz + vec3(sheen), 0.0, 1.0), col.w);
                 let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.16), self.down * 0.22);
                 sdf.fill_keep(pressed);
                 let hov_rim = mix(#3D435E, self.accent_col, 0.24);
                 let solid_b = mix(mix(#1A1C26, hov_rim, self.hover), vec4(self.accent_col.xyz, 0.78), self.active);
-                let acr_b = mix(vec4(1.0, 1.0, 1.0, 0.08 + 0.18 * self.hover), vec4(self.accent_col.xyz, 0.84), self.active);
+                let acr_b = mix(vec4(1.0, 1.0, 1.0, 0.055 + 0.14 * self.hover), vec4(self.accent_col.xyz, 0.68), self.active);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -645,15 +645,15 @@ live_design! {
                 let inset = 0.5 + self.down * 1.4;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
                 let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover);
-                let acr_fill = mix(vec4(0.076, 0.082, 0.116, 0.58), vec4(0.148, 0.158, 0.222, 0.78), self.hover);
+                let acr_fill = mix(vec4(1.0, 1.0, 1.0, 0.032), vec4(1.0, 1.0, 1.0, 0.095), self.hover);
                 let fill = mix(solid_fill, acr_fill, self.acrylic_on);
-                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.085;
+                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.075;
                 let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
                 let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
                 sdf.fill_keep(pressed);
                 let hov_rim = mix(#434966, self.accent_col, 0.28);
                 let solid_b = mix(#1B1D27, hov_rim, self.hover);
-                let acr_b = vec4(1.0, 1.0, 1.0, 0.08 + 0.20 * self.hover);
+                let acr_b = vec4(1.0, 1.0, 1.0, 0.058 + 0.15 * self.hover);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -703,10 +703,10 @@ live_design! {
         }
     }
 
-    // Visual Grid Card for Albums / Artists / Playlists pages
+    // Visual Grid Card for Albums / Artists / Playlists pages (5-col balanced, ghost-spacer safe)
     GridCard = <View> {
         width: Fill,
-        height: 184,
+        height: 194,
         padding: 8,
         flow: Down,
         spacing: 6,
@@ -715,22 +715,26 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
+            uniform ghost: 0.0
             uniform acrylic_on: 0.0
             uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
+                if self.ghost > 0.5 {
+                    return vec4(0.0, 0.0, 0.0, 0.0);
+                }
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 1.4;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
                 let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover);
-                let acr_fill = mix(vec4(0.076, 0.082, 0.116, 0.58), vec4(0.148, 0.158, 0.222, 0.78), self.hover);
+                let acr_fill = mix(vec4(1.0, 1.0, 1.0, 0.032), vec4(1.0, 1.0, 1.0, 0.095), self.hover);
                 let fill = mix(solid_fill, acr_fill, self.acrylic_on);
-                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.085;
+                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.075;
                 let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
                 let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
                 sdf.fill_keep(pressed);
                 let hov_rim = mix(#434966, self.accent_col, 0.28);
                 let solid_b = mix(#1C1E28, hov_rim, self.hover);
-                let acr_b = vec4(1.0, 1.0, 1.0, 0.08 + 0.20 * self.hover);
+                let acr_b = vec4(1.0, 1.0, 1.0, 0.058 + 0.15 * self.hover);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -747,29 +751,35 @@ live_design! {
                 on = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { down: 1.0 } } }
             }
         }
-        art = <FerricCoverArt> {
+        inner = <View> {
             width: Fill,
-            height: 124,
-            draw_bg: { radius: 8.0 }
-        }
-        <View> {
-            width: Fill,
-            height: Fit,
+            height: Fill,
             flow: Down,
-            spacing: 2,
-            title = <Label> {
+            spacing: 6,
+            art = <FerricCoverArt> {
                 width: Fill,
-                flow: Right,
-                padding: 0,
-                draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 9.0, line_spacing: 1.0 } }
-                text: ""
+                height: 136,
+                draw_bg: { radius: 8.0 }
             }
-            sub = <Label> {
+            <View> {
                 width: Fill,
-                flow: Right,
-                padding: 0,
-                draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 8.0, line_spacing: 1.0 } }
-                text: ""
+                height: Fit,
+                flow: Down,
+                spacing: 2,
+                title = <Label> {
+                    width: Fill,
+                    flow: Right,
+                    padding: 0,
+                    draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 9.0, line_spacing: 1.0 } }
+                    text: ""
+                }
+                sub = <Label> {
+                    width: Fill,
+                    flow: Right,
+                    padding: 0,
+                    draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 8.0, line_spacing: 1.0 } }
+                    text: ""
+                }
             }
         }
     }
@@ -794,12 +804,12 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
                 let solid_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(0.095, 0.102, 0.140, 1.0), self.hover);
-                let acr_idle = mix(vec4(1.0, 1.0, 1.0, 0.03), vec4(1.0, 1.0, 1.0, 0.11), self.hover);
+                let acr_idle = mix(vec4(1.0, 1.0, 1.0, 0.024), vec4(1.0, 1.0, 1.0, 0.090), self.hover);
                 let idle = mix(solid_idle, acr_idle, self.acrylic_on);
                 let act_solid = mix(#1A1928, vec4(self.accent_col.xyz, 0.24), 0.34);
-                let act_acr = vec4(mix(vec3(0.12, 0.12, 0.18), self.accent_col.xyz, 0.30), 0.72);
+                let act_acr = vec4(mix(vec3(0.14, 0.14, 0.22), self.accent_col.xyz, 0.34), 0.36);
                 sdf.fill_keep(mix(idle, mix(act_solid, act_acr, self.acrylic_on), self.active));
-                let i_rim = vec4(1.0, 1.0, 1.0, (0.06 + 0.08 * self.hover) * self.acrylic_on);
+                let i_rim = vec4(1.0, 1.0, 1.0, (0.045 + 0.08 * self.hover) * self.acrylic_on);
                 let a_rim = vec4(self.accent_col.xyz, 0.62);
                 sdf.stroke(mix(i_rim, a_rim, self.active), 1.0);
                 return sdf.result;
@@ -1522,7 +1532,7 @@ live_design! {
                                             empty_text: "Filter songs..."
                                             draw_text: { text_style: <THEME_FONT_REGULAR> { font_size: 8.4, line_spacing: 1.0 } }
                                         }
-                                        sort_cycle_btn = <FerricBtn> { height: 24, text: "Sort: Artist" }
+                                        sort_cycle_btn = <FerricBtn> { height: 24, text: "Sort: Recent" }
                                     }
 
                                     <FerricDividerH> {}
@@ -1530,7 +1540,7 @@ live_design! {
                                 }
 
                                 // --------------------------------------------------------
-                                // PAGE 5: LIBRARY -> ALBUMS GRID
+                                // PAGE 5: LIBRARY -> ALBUMS GRID (5 cols x 4 rows = 20/page)
                                 // --------------------------------------------------------
                                 page_albums = <FerricScrollYView> {
                                     visible: false,
@@ -1550,24 +1560,42 @@ live_design! {
                                         alb_prev_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
                                         alb_next_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                     }
-                                    <View> {
+                                    alb_row_0 = <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 8,
                                         alb_0 = <GridCard> {}
                                         alb_1 = <GridCard> {}
                                         alb_2 = <GridCard> {}
                                         alb_3 = <GridCard> {}
-                                    }
-                                    <View> {
-                                        width: Fill, height: Fit, flow: Right, spacing: 8,
                                         alb_4 = <GridCard> {}
+                                    }
+                                    alb_row_1 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
                                         alb_5 = <GridCard> {}
                                         alb_6 = <GridCard> {}
                                         alb_7 = <GridCard> {}
+                                        alb_8 = <GridCard> {}
+                                        alb_9 = <GridCard> {}
+                                    }
+                                    alb_row_2 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
+                                        alb_10 = <GridCard> {}
+                                        alb_11 = <GridCard> {}
+                                        alb_12 = <GridCard> {}
+                                        alb_13 = <GridCard> {}
+                                        alb_14 = <GridCard> {}
+                                    }
+                                    alb_row_3 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
+                                        alb_15 = <GridCard> {}
+                                        alb_16 = <GridCard> {}
+                                        alb_17 = <GridCard> {}
+                                        alb_18 = <GridCard> {}
+                                        alb_19 = <GridCard> {}
                                     }
                                 }
 
                                 // --------------------------------------------------------
-                                // PAGE 6: LIBRARY -> ARTISTS CIRCULAR GRID
+                                // PAGE 6: LIBRARY -> ARTISTS CIRCULAR GRID (5 cols x 4 rows = 20/page)
                                 // --------------------------------------------------------
                                 page_artists = <FerricScrollYView> {
                                     visible: false,
@@ -1587,24 +1615,42 @@ live_design! {
                                         art_prev_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
                                         art_next_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                     }
-                                    <View> {
+                                    art_row_0 = <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 8,
                                         art_0 = <GridCard> {}
                                         art_1 = <GridCard> {}
                                         art_2 = <GridCard> {}
                                         art_3 = <GridCard> {}
-                                    }
-                                    <View> {
-                                        width: Fill, height: Fit, flow: Right, spacing: 8,
                                         art_4 = <GridCard> {}
+                                    }
+                                    art_row_1 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
                                         art_5 = <GridCard> {}
                                         art_6 = <GridCard> {}
                                         art_7 = <GridCard> {}
+                                        art_8 = <GridCard> {}
+                                        art_9 = <GridCard> {}
+                                    }
+                                    art_row_2 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
+                                        art_10 = <GridCard> {}
+                                        art_11 = <GridCard> {}
+                                        art_12 = <GridCard> {}
+                                        art_13 = <GridCard> {}
+                                        art_14 = <GridCard> {}
+                                    }
+                                    art_row_3 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
+                                        art_15 = <GridCard> {}
+                                        art_16 = <GridCard> {}
+                                        art_17 = <GridCard> {}
+                                        art_18 = <GridCard> {}
+                                        art_19 = <GridCard> {}
                                     }
                                 }
 
                                 // --------------------------------------------------------
-                                // PAGE 7: LIBRARY -> PLAYLISTS GRID + CREATOR
+                                // PAGE 7: LIBRARY -> PLAYLISTS GRID + CREATOR (5 cols x 4 rows = 20/page)
                                 // --------------------------------------------------------
                                 page_playlists = <FerricScrollYView> {
                                     visible: false,
@@ -1623,19 +1669,37 @@ live_design! {
                                         pl_prev_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
                                         pl_next_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                     }
-                                    <View> {
+                                    plc_row_0 = <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 8,
                                         plc_0 = <GridCard> {}
                                         plc_1 = <GridCard> {}
                                         plc_2 = <GridCard> {}
                                         plc_3 = <GridCard> {}
-                                    }
-                                    <View> {
-                                        width: Fill, height: Fit, flow: Right, spacing: 8,
                                         plc_4 = <GridCard> {}
+                                    }
+                                    plc_row_1 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
                                         plc_5 = <GridCard> {}
                                         plc_6 = <GridCard> {}
                                         plc_7 = <GridCard> {}
+                                        plc_8 = <GridCard> {}
+                                        plc_9 = <GridCard> {}
+                                    }
+                                    plc_row_2 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
+                                        plc_10 = <GridCard> {}
+                                        plc_11 = <GridCard> {}
+                                        plc_12 = <GridCard> {}
+                                        plc_13 = <GridCard> {}
+                                        plc_14 = <GridCard> {}
+                                    }
+                                    plc_row_3 = <View> {
+                                        width: Fill, height: Fit, flow: Right, spacing: 8,
+                                        plc_15 = <GridCard> {}
+                                        plc_16 = <GridCard> {}
+                                        plc_17 = <GridCard> {}
+                                        plc_18 = <GridCard> {}
+                                        plc_19 = <GridCard> {}
                                     }
                                 }
 
@@ -3447,6 +3511,18 @@ impl App {
             id!(alb_5),
             id!(alb_6),
             id!(alb_7),
+            id!(alb_8),
+            id!(alb_9),
+            id!(alb_10),
+            id!(alb_11),
+            id!(alb_12),
+            id!(alb_13),
+            id!(alb_14),
+            id!(alb_15),
+            id!(alb_16),
+            id!(alb_17),
+            id!(alb_18),
+            id!(alb_19),
             id!(art_0),
             id!(art_1),
             id!(art_2),
@@ -3455,6 +3531,18 @@ impl App {
             id!(art_5),
             id!(art_6),
             id!(art_7),
+            id!(art_8),
+            id!(art_9),
+            id!(art_10),
+            id!(art_11),
+            id!(art_12),
+            id!(art_13),
+            id!(art_14),
+            id!(art_15),
+            id!(art_16),
+            id!(art_17),
+            id!(art_18),
+            id!(art_19),
             id!(plc_0),
             id!(plc_1),
             id!(plc_2),
@@ -3463,15 +3551,34 @@ impl App {
             id!(plc_5),
             id!(plc_6),
             id!(plc_7),
+            id!(plc_8),
+            id!(plc_9),
+            id!(plc_10),
+            id!(plc_11),
+            id!(plc_12),
+            id!(plc_13),
+            id!(plc_14),
+            id!(plc_15),
+            id!(plc_16),
+            id!(plc_17),
+            id!(plc_18),
+            id!(plc_19),
         ] {
-            self.ui.view(gid).apply_over(
+            let gv = self.ui.view(gid);
+            gv.apply_over(
                 cx,
                 live! {
-                    height: (184.0 * z),
-                    art = { height: (124.0 * z) }
-                    title = { draw_text: { text_style: { font_size: (9.0 * z) } } }
-                    sub = { draw_text: { text_style: { font_size: (8.0 * z) } } }
+                    height: (194.0 * z),
+                    inner = { art = { height: (136.0 * z) } }
                 },
+            );
+            gv.label(id!(title)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (9.0 * z) } } },
+            );
+            gv.label(id!(sub)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (8.0 * z) } } },
             );
         }
 
@@ -3807,6 +3914,7 @@ impl App {
             }
             self.update_settings = store.load_update_settings().unwrap_or_default();
             self.session_state = store.load_session_state().unwrap_or_default();
+            let _ = store.prune_ephemeral_discovery_bloat(&self.session_state.recent_track_ids);
             self.all_tracks = store.list_tracks("").unwrap_or_default();
             self.playlists = store.list_playlists().unwrap_or_default();
         }
@@ -4408,6 +4516,29 @@ impl App {
             .set_visible(cx, has_demo);
 
         match self.sort_field {
+            SortField::Recent => {
+                let recents = &self.session_state.recent_track_ids;
+                list.sort_by(|a, b| {
+                    let ra = recents
+                        .iter()
+                        .position(|id| id == &a.id)
+                        .unwrap_or(usize::MAX);
+                    let rb = recents
+                        .iter()
+                        .position(|id| id == &b.id)
+                        .unwrap_or(usize::MAX);
+                    ra.cmp(&rb)
+                        .then_with(|| b.liked.cmp(&a.liked))
+                        .then_with(|| {
+                            (b.source == TrackSource::Local).cmp(&(a.source == TrackSource::Local))
+                        })
+                        .then_with(|| {
+                            a.title
+                                .to_ascii_lowercase()
+                                .cmp(&b.title.to_ascii_lowercase())
+                        })
+                });
+            }
             SortField::Artist => list.sort_by(|a, b| {
                 a.artist
                     .to_ascii_lowercase()
@@ -4488,9 +4619,46 @@ impl App {
         );
         self.recents_tracks = Rc::new(recents);
 
-        // Album & Artist groups (artwork loaded lazily when viewing those pages)
-        self.album_groups = build_album_groups(&self.all_tracks);
-        self.artist_groups = build_artist_groups(&self.all_tracks);
+        // Album & Artist groups: user's saved library first, enriched with clean live Home catalog
+        // so Albums & Artists pages always show a lush multi-row visual gallery without bloating Songs.
+        let mut gallery_tracks: Vec<Track> = Vec::with_capacity(
+            self.all_tracks.len()
+                + self.rich_home.quick_picks.len()
+                + self.rich_home.all_tracks.len(),
+        );
+        let mut seen_gallery = std::collections::HashSet::new();
+        for t in self
+            .all_tracks
+            .iter()
+            .chain(self.rich_home.quick_picks.iter())
+            .chain(self.rich_home.all_tracks.iter())
+        {
+            let low_t = t.title.to_ascii_lowercase();
+            let low_a = t.artist.to_ascii_lowercase();
+            if low_t.contains("minecraft")
+                || low_a.contains("minecraft")
+                || low_a.contains("watching")
+            {
+                continue;
+            }
+            if seen_gallery.insert(t.id.clone()) {
+                gallery_tracks.push(t.clone());
+            }
+        }
+        self.album_groups = build_album_groups(&gallery_tracks);
+        self.artist_groups = build_artist_groups(&gallery_tracks);
+        let max_alb_page = self.album_groups.len().saturating_sub(1) / 20;
+        if self.albums_page > max_alb_page {
+            self.albums_page = max_alb_page;
+        }
+        let max_art_page = self.artist_groups.len().saturating_sub(1) / 20;
+        if self.artists_page > max_art_page {
+            self.artists_page = max_art_page;
+        }
+        let max_pl_page = self.playlists.len().saturating_sub(1) / 20;
+        if self.playlists_page > max_pl_page {
+            self.playlists_page = max_pl_page;
+        }
 
         // Sidebar Pinned slots
         let pin_slots = [
@@ -5030,18 +5198,30 @@ impl App {
     }
 
     fn refresh_albums_grid(&mut self, cx: &mut Cx) {
-        self.ui.label(id!(albums_sub_lbl)).set_text(
-            cx,
-            &format!("{} albums in your library", self.album_groups.len()),
-        );
-        let start = self.albums_page * 8;
+        const PER_PAGE: usize = 20;
+        let total = self.album_groups.len();
+        let total_pages = total.div_ceil(PER_PAGE).max(1);
+        let cur_page = (self.albums_page + 1).min(total_pages);
+        let sub_txt = if total_pages > 1 {
+            format!("{total} albums · Page {cur_page} / {total_pages}")
+        } else {
+            format!("{total} albums in your catalog")
+        };
+        self.ui.label(id!(albums_sub_lbl)).set_text(cx, &sub_txt);
+        let start = self.albums_page * PER_PAGE;
         if let Some(cache) = &mut self.artwork {
-            for g in self.album_groups.iter().skip(start).take(8) {
+            for g in self.album_groups.iter().skip(start).take(PER_PAGE) {
                 if let Some(url) = g.thumbnail_url.as_deref() {
                     let _ = cache.request_url(url);
                 }
             }
         }
+        let rows = [
+            id!(alb_row_0),
+            id!(alb_row_1),
+            id!(alb_row_2),
+            id!(alb_row_3),
+        ];
         let ids = [
             id!(alb_0),
             id!(alb_1),
@@ -5051,11 +5231,29 @@ impl App {
             id!(alb_5),
             id!(alb_6),
             id!(alb_7),
+            id!(alb_8),
+            id!(alb_9),
+            id!(alb_10),
+            id!(alb_11),
+            id!(alb_12),
+            id!(alb_13),
+            id!(alb_14),
+            id!(alb_15),
+            id!(alb_16),
+            id!(alb_17),
+            id!(alb_18),
+            id!(alb_19),
         ];
+        for (r_idx, rid) in rows.into_iter().enumerate() {
+            let row_has_any = start + r_idx * 5 < total;
+            self.ui.view(rid).set_visible(cx, row_has_any);
+        }
         for (i, vid) in ids.into_iter().enumerate() {
             let v = self.ui.view(vid);
             if let Some(g) = self.album_groups.get(start + i) {
                 v.set_visible(cx, true);
+                v.apply_over(cx, live! { draw_bg: { ghost: 0.0 } });
+                v.view(id!(inner)).set_visible(cx, true);
                 v.label(id!(title)).set_text(cx, &clip_text(&g.title, 20));
                 v.label(id!(sub)).set_text(cx, &clip_text(&g.subtitle, 23));
                 let best_track = g
@@ -5073,24 +5271,38 @@ impl App {
                     false,
                 );
             } else {
-                v.set_visible(cx, false);
+                v.set_visible(cx, true);
+                v.apply_over(cx, live! { draw_bg: { ghost: 1.0 } });
+                v.view(id!(inner)).set_visible(cx, false);
             }
         }
     }
 
     fn refresh_artists_grid(&mut self, cx: &mut Cx) {
-        self.ui.label(id!(artists_sub_lbl)).set_text(
-            cx,
-            &format!("{} artists in your library", self.artist_groups.len()),
-        );
-        let start = self.artists_page * 8;
+        const PER_PAGE: usize = 20;
+        let total = self.artist_groups.len();
+        let total_pages = total.div_ceil(PER_PAGE).max(1);
+        let cur_page = (self.artists_page + 1).min(total_pages);
+        let sub_txt = if total_pages > 1 {
+            format!("{total} artists · Page {cur_page} / {total_pages}")
+        } else {
+            format!("{total} artists in your catalog")
+        };
+        self.ui.label(id!(artists_sub_lbl)).set_text(cx, &sub_txt);
+        let start = self.artists_page * PER_PAGE;
         if let Some(cache) = &mut self.artwork {
-            for g in self.artist_groups.iter().skip(start).take(8) {
+            for g in self.artist_groups.iter().skip(start).take(PER_PAGE) {
                 if let Some(url) = g.thumbnail_url.as_deref() {
                     let _ = cache.request_url(url);
                 }
             }
         }
+        let rows = [
+            id!(art_row_0),
+            id!(art_row_1),
+            id!(art_row_2),
+            id!(art_row_3),
+        ];
         let ids = [
             id!(art_0),
             id!(art_1),
@@ -5100,11 +5312,29 @@ impl App {
             id!(art_5),
             id!(art_6),
             id!(art_7),
+            id!(art_8),
+            id!(art_9),
+            id!(art_10),
+            id!(art_11),
+            id!(art_12),
+            id!(art_13),
+            id!(art_14),
+            id!(art_15),
+            id!(art_16),
+            id!(art_17),
+            id!(art_18),
+            id!(art_19),
         ];
+        for (r_idx, rid) in rows.into_iter().enumerate() {
+            let row_has_any = start + r_idx * 5 < total;
+            self.ui.view(rid).set_visible(cx, row_has_any);
+        }
         for (i, vid) in ids.into_iter().enumerate() {
             let v = self.ui.view(vid);
             if let Some(g) = self.artist_groups.get(start + i) {
                 v.set_visible(cx, true);
+                v.apply_over(cx, live! { draw_bg: { ghost: 0.0 } });
+                v.view(id!(inner)).set_visible(cx, true);
                 v.label(id!(title)).set_text(cx, &clip_text(&g.title, 20));
                 v.label(id!(sub)).set_text(cx, &clip_text(&g.subtitle, 23));
                 let best_track = g
@@ -5122,20 +5352,30 @@ impl App {
                     true,
                 );
             } else {
-                v.set_visible(cx, false);
+                v.set_visible(cx, true);
+                v.apply_over(cx, live! { draw_bg: { ghost: 1.0 } });
+                v.view(id!(inner)).set_visible(cx, false);
             }
         }
     }
 
     fn refresh_playlists_grid(&mut self, cx: &mut Cx) {
-        let start = self.playlists_page * 8;
+        const PER_PAGE: usize = 20;
+        let total = self.playlists.len();
+        let start = self.playlists_page * PER_PAGE;
         if let Some(cache) = &mut self.artwork {
-            for pl in self.playlists.iter().skip(start).take(8) {
+            for pl in self.playlists.iter().skip(start).take(PER_PAGE) {
                 if let Some(url) = pl.thumbnail_url.as_deref() {
                     let _ = cache.request_url(url);
                 }
             }
         }
+        let rows = [
+            id!(plc_row_0),
+            id!(plc_row_1),
+            id!(plc_row_2),
+            id!(plc_row_3),
+        ];
         let ids = [
             id!(plc_0),
             id!(plc_1),
@@ -5145,11 +5385,29 @@ impl App {
             id!(plc_5),
             id!(plc_6),
             id!(plc_7),
+            id!(plc_8),
+            id!(plc_9),
+            id!(plc_10),
+            id!(plc_11),
+            id!(plc_12),
+            id!(plc_13),
+            id!(plc_14),
+            id!(plc_15),
+            id!(plc_16),
+            id!(plc_17),
+            id!(plc_18),
+            id!(plc_19),
         ];
+        for (r_idx, rid) in rows.into_iter().enumerate() {
+            let row_has_any = start + r_idx * 5 < total;
+            self.ui.view(rid).set_visible(cx, row_has_any);
+        }
         for (i, vid) in ids.into_iter().enumerate() {
             let v = self.ui.view(vid);
             if let Some(pl) = self.playlists.get(start + i) {
                 v.set_visible(cx, true);
+                v.apply_over(cx, live! { draw_bg: { ghost: 0.0 } });
+                v.view(id!(inner)).set_visible(cx, true);
                 v.label(id!(title)).set_text(cx, &clip_text(&pl.name, 22));
                 v.label(id!(sub)).set_text(
                     cx,
@@ -5165,7 +5423,9 @@ impl App {
                     false,
                 );
             } else {
-                v.set_visible(cx, false);
+                v.set_visible(cx, true);
+                v.apply_over(cx, live! { draw_bg: { ghost: 1.0 } });
+                v.view(id!(inner)).set_visible(cx, false);
             }
         }
     }
@@ -5749,6 +6009,18 @@ impl App {
             id!(alb_5),
             id!(alb_6),
             id!(alb_7),
+            id!(alb_8),
+            id!(alb_9),
+            id!(alb_10),
+            id!(alb_11),
+            id!(alb_12),
+            id!(alb_13),
+            id!(alb_14),
+            id!(alb_15),
+            id!(alb_16),
+            id!(alb_17),
+            id!(alb_18),
+            id!(alb_19),
             id!(art_0),
             id!(art_1),
             id!(art_2),
@@ -5757,6 +6029,18 @@ impl App {
             id!(art_5),
             id!(art_6),
             id!(art_7),
+            id!(art_8),
+            id!(art_9),
+            id!(art_10),
+            id!(art_11),
+            id!(art_12),
+            id!(art_13),
+            id!(art_14),
+            id!(art_15),
+            id!(art_16),
+            id!(art_17),
+            id!(art_18),
+            id!(art_19),
             id!(plc_0),
             id!(plc_1),
             id!(plc_2),
@@ -5765,6 +6049,18 @@ impl App {
             id!(plc_5),
             id!(plc_6),
             id!(plc_7),
+            id!(plc_8),
+            id!(plc_9),
+            id!(plc_10),
+            id!(plc_11),
+            id!(plc_12),
+            id!(plc_13),
+            id!(plc_14),
+            id!(plc_15),
+            id!(plc_16),
+            id!(plc_17),
+            id!(plc_18),
+            id!(plc_19),
             id!(qh_0),
             id!(qh_1),
             id!(qh_2),
@@ -5798,6 +6094,57 @@ impl App {
             cx,
             live! { draw_bg: { acrylic_on: (acr), accent_col: (accent) } },
         );
+
+        let (inp_bg, inp_hov, inp_foc, inp_b, inp_bh) = if self.theme.acrylic_enabled {
+            (
+                vec4(1.0, 1.0, 1.0, 0.055),
+                vec4(1.0, 1.0, 1.0, 0.095),
+                vec4(1.0, 1.0, 1.0, 0.115),
+                vec4(1.0, 1.0, 1.0, 0.095),
+                vec4(1.0, 1.0, 1.0, 0.19),
+            )
+        } else {
+            (
+                rgba_vec4("#090A0F"),
+                rgba_vec4("#10121A"),
+                rgba_vec4("#12141F"),
+                rgba_vec4("#232634"),
+                rgba_vec4("#3B3F56"),
+            )
+        };
+        for inp_id in [
+            id!(songs_filter_input),
+            id!(search_page_input),
+            id!(pl_new_input),
+            id!(detail_rename_input),
+            id!(quick_sync_input),
+            id!(sub_url_input),
+            id!(sub_user_input),
+            id!(sub_pass_input),
+            id!(autoeq_input),
+            id!(cmdk_input),
+            id!(tm_new_pl_input),
+        ] {
+            self.ui.text_input(inp_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        color: (inp_bg),
+                        color_empty: (inp_bg),
+                        color_hover: (inp_hov),
+                        color_focus: (inp_foc),
+                        border_color_1: (inp_b),
+                        border_color_2: (inp_b),
+                        border_color_1_empty: (inp_b),
+                        border_color_2_empty: (inp_b),
+                        border_color_1_hover: (inp_bh),
+                        border_color_2_hover: (inp_bh),
+                        border_color_1_focus: (accent),
+                        border_color_2_focus: (accent)
+                    }
+                },
+            );
+        }
 
         for btn_id in [
             id!(top_account_btn),
@@ -6544,7 +6891,62 @@ impl App {
         );
     }
 
+    fn persist_track_to_library(&mut self, track: &Track) {
+        let mut to_save = track.clone();
+        if let Some(existing) = self.all_tracks.iter().find(|t| t.id == track.id) {
+            to_save.liked = to_save.liked || existing.liked;
+            if to_save.path.is_none() {
+                to_save.path = existing.path.clone();
+            }
+        }
+        if let Some(db) = &mut self.db {
+            let _ = db.upsert_tracks(std::slice::from_ref(&to_save));
+        }
+        if let Some(slot) = self.all_tracks.iter_mut().find(|t| t.id == to_save.id) {
+            *slot = to_save;
+        } else {
+            self.all_tracks.push(to_save);
+        }
+    }
+
+    fn toggle_track_like(&mut self, cx: &mut Cx, target: &Track) -> bool {
+        let cur_liked = self
+            .all_tracks
+            .iter()
+            .find(|t| t.id == target.id)
+            .map_or(target.liked, |t| t.liked);
+        let next_liked = !cur_liked;
+        let mut saved = target.clone();
+        saved.liked = next_liked;
+        if let Some(db) = &mut self.db {
+            let _ = db.upsert_tracks(std::slice::from_ref(&saved));
+            let _ = db.set_track_liked(&saved.id, next_liked);
+        }
+        if let Some(slot) = self.all_tracks.iter_mut().find(|t| t.id == saved.id) {
+            slot.liked = next_liked;
+        } else {
+            self.all_tracks.push(saved.clone());
+        }
+        self.queue.set_track_liked(&saved.id, next_liked);
+        if self.queue.current().map(|t| t.id.as_str()) == Some(saved.id.as_str()) {
+            let accent = self.current_accent();
+            let like_col = if next_liked {
+                accent
+            } else {
+                vec4(0.439, 0.451, 0.510, 1.0)
+            };
+            for lbtn in [id!(np_like_btn), id!(fs_like_btn)] {
+                self.ui
+                    .button(lbtn)
+                    .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+            }
+        }
+        self.rebuild_library_views(cx);
+        next_liked
+    }
+
     fn update_now_playing_metadata(&mut self, cx: &mut Cx, track: &Track) {
+        self.persist_track_to_library(track);
         self.session_state.record_play(&track.id, track.duration_ms);
         if let Some(db) = &self.db {
             let _ = db.save_session_state(&self.session_state);
@@ -6580,7 +6982,12 @@ impl App {
             .set_text(cx, &track.quality_badge());
 
         let accent = self.current_accent();
-        let like_col = if track.liked {
+        let is_liked = self
+            .all_tracks
+            .iter()
+            .find(|t| t.id == track.id)
+            .map_or(track.liked, |t| t.liked);
+        let like_col = if is_liked {
             accent
         } else {
             vec4(0.439, 0.451, 0.510, 1.0)
@@ -7404,9 +7811,6 @@ impl App {
 
                     if let Some(db) = &mut self.db {
                         let _ = db.save_accounts(&self.accounts);
-                        let _ = db.upsert_tracks(&merged.all_tracks);
-                        let _ = db.match_cloud_tracks_to_local();
-                        self.all_tracks = db.list_tracks("").unwrap_or_default();
                         self.playlists = db.list_playlists().unwrap_or_default();
                     }
 
@@ -7501,11 +7905,10 @@ impl App {
                         self.rich_home.shelves[keep_head..].rotate_left(3);
                         self.shelf_pages = [0; 8];
                     }
-                    if let Some(db) = &mut self.db
-                        && !more.all_tracks.is_empty()
-                    {
-                        let _ = db.upsert_tracks(&more.all_tracks);
-                        self.all_tracks = db.list_tracks("").unwrap_or_default();
+                    for t in more.all_tracks {
+                        if !self.rich_home.all_tracks.iter().any(|x| x.id == t.id) {
+                            self.rich_home.all_tracks.push(t);
+                        }
                     }
                     self.ui.label(id!(home_status_lbl)).set_text(
                         cx,
@@ -7515,6 +7918,7 @@ impl App {
                             self.rich_home.shelves.len()
                         ),
                     );
+                    self.rebuild_library_views(cx);
                     self.refresh_home_ui(cx);
                     self.show_toast(
                         cx,
@@ -7536,12 +7940,6 @@ impl App {
                             && let Some(cache) = &mut self.artwork
                         {
                             let _ = cache.request_url(url);
-                        }
-                        if let Some(db) = &mut self.db
-                            && !detail.tracks.is_empty()
-                        {
-                            let _ = db.upsert_tracks(&detail.tracks);
-                            self.all_tracks = db.list_tracks("").unwrap_or_default();
                         }
                         self.detail_tracks = Rc::new(detail.tracks.clone());
                         self.detail_state = DetailViewState {
@@ -7572,13 +7970,6 @@ impl App {
                     // Priority-load Search album/artist/playlist cards first so top cards never look blank
                     self.request_artwork_for_cards(&result.cards);
                     self.request_artwork_for_tracks(&result.tracks);
-                    if let Some(db) = &mut self.db
-                        && !result.tracks.is_empty()
-                    {
-                        let _ = db.upsert_tracks(&result.tracks);
-                        let _ = db.match_cloud_tracks_to_local();
-                        self.all_tracks = db.list_tracks("").unwrap_or_default();
-                    }
                     self.search_tracks = Rc::new(result.tracks.clone());
                     self.search_result = result;
                     self.ui.label(id!(search_status_lbl)).set_text(
@@ -7598,10 +7989,6 @@ impl App {
                     seed_title,
                     tracks,
                 } => {
-                    if let Some(db) = &mut self.db {
-                        let _ = db.upsert_tracks(&tracks);
-                        self.all_tracks = db.list_tracks("").unwrap_or_default();
-                    }
                     let added = self.queue.append_tracks(tracks);
                     if added > 0
                         && self.queue.current().map(|t| t.id.as_str())
@@ -7653,7 +8040,6 @@ impl App {
                     if let Some(db) = &mut self.db {
                         let _ = db.save_accounts(&self.accounts);
                         let _ = db.upsert_tracks(&lib.liked_tracks);
-                        let _ = db.upsert_tracks(&lib.home_tracks);
                         for (pl, pl_tracks) in &lib.playlists {
                             let _ = db.upsert_tracks(pl_tracks);
                             let ids: Vec<String> = pl_tracks.iter().map(|t| t.id.clone()).collect();
@@ -8656,13 +9042,13 @@ impl App {
             }
         }
 
-        // Albums grid paging + click
+        // Albums grid paging + click (20 cards/page)
         if self.ui.button(id!(alb_prev_btn)).clicked(actions) && self.albums_page > 0 {
             self.albums_page -= 1;
             self.refresh_albums_grid(cx);
         }
         if self.ui.button(id!(alb_next_btn)).clicked(actions)
-            && (self.albums_page + 1) * 8 < self.album_groups.len()
+            && (self.albums_page + 1) * 20 < self.album_groups.len()
         {
             self.albums_page += 1;
             self.refresh_albums_grid(cx);
@@ -8676,6 +9062,18 @@ impl App {
             id!(alb_5),
             id!(alb_6),
             id!(alb_7),
+            id!(alb_8),
+            id!(alb_9),
+            id!(alb_10),
+            id!(alb_11),
+            id!(alb_12),
+            id!(alb_13),
+            id!(alb_14),
+            id!(alb_15),
+            id!(alb_16),
+            id!(alb_17),
+            id!(alb_18),
+            id!(alb_19),
         ]
         .into_iter()
         .enumerate()
@@ -8683,19 +9081,19 @@ impl App {
             let v = self.ui.view(vid);
             if (v.ferric_cover_art(id!(art)).clicked(actions)
                 || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
-                && let Some(g) = self.album_groups.get(self.albums_page * 8 + i).cloned()
+                && let Some(g) = self.album_groups.get(self.albums_page * 20 + i).cloned()
             {
                 self.open_local_detail(cx, g);
             }
         }
 
-        // Artists grid paging + click
+        // Artists grid paging + click (20 cards/page)
         if self.ui.button(id!(art_prev_btn)).clicked(actions) && self.artists_page > 0 {
             self.artists_page -= 1;
             self.refresh_artists_grid(cx);
         }
         if self.ui.button(id!(art_next_btn)).clicked(actions)
-            && (self.artists_page + 1) * 8 < self.artist_groups.len()
+            && (self.artists_page + 1) * 20 < self.artist_groups.len()
         {
             self.artists_page += 1;
             self.refresh_artists_grid(cx);
@@ -8709,6 +9107,18 @@ impl App {
             id!(art_5),
             id!(art_6),
             id!(art_7),
+            id!(art_8),
+            id!(art_9),
+            id!(art_10),
+            id!(art_11),
+            id!(art_12),
+            id!(art_13),
+            id!(art_14),
+            id!(art_15),
+            id!(art_16),
+            id!(art_17),
+            id!(art_18),
+            id!(art_19),
         ]
         .into_iter()
         .enumerate()
@@ -8716,7 +9126,7 @@ impl App {
             let v = self.ui.view(vid);
             if (v.ferric_cover_art(id!(art)).clicked(actions)
                 || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
-                && let Some(g) = self.artist_groups.get(self.artists_page * 8 + i).cloned()
+                && let Some(g) = self.artist_groups.get(self.artists_page * 20 + i).cloned()
             {
                 self.open_local_detail(cx, g);
             }
@@ -8786,7 +9196,7 @@ impl App {
             self.refresh_playlists_grid(cx);
         }
         if self.ui.button(id!(pl_next_btn)).clicked(actions)
-            && (self.playlists_page + 1) * 8 < self.playlists.len()
+            && (self.playlists_page + 1) * 20 < self.playlists.len()
         {
             self.playlists_page += 1;
             self.refresh_playlists_grid(cx);
@@ -8800,6 +9210,18 @@ impl App {
             id!(plc_5),
             id!(plc_6),
             id!(plc_7),
+            id!(plc_8),
+            id!(plc_9),
+            id!(plc_10),
+            id!(plc_11),
+            id!(plc_12),
+            id!(plc_13),
+            id!(plc_14),
+            id!(plc_15),
+            id!(plc_16),
+            id!(plc_17),
+            id!(plc_18),
+            id!(plc_19),
         ]
         .into_iter()
         .enumerate()
@@ -8807,7 +9229,7 @@ impl App {
             let v = self.ui.view(vid);
             if (v.ferric_cover_art(id!(art)).clicked(actions)
                 || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
-                && let Some(pl) = self.playlists.get(self.playlists_page * 8 + i).cloned()
+                && let Some(pl) = self.playlists.get(self.playlists_page * 20 + i).cloned()
             {
                 let tracks = self
                     .db
@@ -8976,16 +9398,8 @@ impl App {
                     }
                 }
                 TrackListAction::ToggleLike(idx) => {
-                    if let Some(target) = active_list.get(idx) {
-                        let next_liked = !target.liked;
-                        let tid = target.id.clone();
-                        if let Some(db) = &self.db {
-                            let _ = db.set_track_liked(&tid, next_liked);
-                        }
-                        if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == tid) {
-                            t.liked = next_liked;
-                        }
-                        self.rebuild_library_views(cx);
+                    if let Some(target) = active_list.get(idx).cloned() {
+                        let next_liked = self.toggle_track_like(cx, &target);
                         self.show_toast(
                             cx,
                             if next_liked {
@@ -9299,25 +9713,15 @@ impl App {
             || self.ui.button(id!(fs_like_btn)).clicked(actions))
             && let Some(cur) = self.queue.current().cloned()
         {
-            let next_liked = !cur.liked;
-            if let Some(db) = &self.db {
-                let _ = db.set_track_liked(&cur.id, next_liked);
-            }
-            if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == cur.id) {
-                t.liked = next_liked;
-            }
-            let accent = self.current_accent();
-            let like_col = if next_liked {
-                accent
-            } else {
-                vec4(0.439, 0.451, 0.510, 1.0)
-            };
-            for lbtn in [id!(np_like_btn), id!(fs_like_btn)] {
-                self.ui
-                    .button(lbtn)
-                    .apply_over(cx, live! { draw_icon: { color: (like_col) } });
-            }
-            self.rebuild_library_views(cx);
+            let next_liked = self.toggle_track_like(cx, &cur);
+            self.show_toast(
+                cx,
+                if next_liked {
+                    "Added to Liked Songs"
+                } else {
+                    "Removed from Liked"
+                },
+            );
         }
         if let Some(pos_ratio) = self
             .ui
@@ -10082,14 +10486,7 @@ impl App {
                     &format!("Started radio for '{}'", clip_text(&target.title, 22)),
                 );
             } else if self.ui.button(id!(tm_like_btn)).clicked(actions) {
-                let next_liked = !target.liked;
-                if let Some(db) = &self.db {
-                    let _ = db.set_track_liked(&target.id, next_liked);
-                }
-                if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == target.id) {
-                    t.liked = next_liked;
-                }
-                self.rebuild_library_views(cx);
+                let next_liked = self.toggle_track_like(cx, &target);
                 self.close_track_menu(cx);
                 self.show_toast(
                     cx,
@@ -10462,14 +10859,7 @@ impl AppMain for App {
                 if ke.key_code == KeyCode::KeyL
                     && let Some(cur) = self.queue.current().cloned()
                 {
-                    let next_liked = !cur.liked;
-                    if let Some(db) = &self.db {
-                        let _ = db.set_track_liked(&cur.id, next_liked);
-                    }
-                    if let Some(t) = self.all_tracks.iter_mut().find(|x| x.id == cur.id) {
-                        t.liked = next_liked;
-                    }
-                    self.rebuild_library_views(cx);
+                    let next_liked = self.toggle_track_like(cx, &cur);
                     self.show_toast(
                         cx,
                         if next_liked {

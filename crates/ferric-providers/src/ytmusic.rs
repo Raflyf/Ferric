@@ -5,7 +5,7 @@ use crate::yt_cleaner::clean_youtube_metadata;
 use crate::{ProviderError, ProviderResult};
 use ferric_core::models::{AudioQuality, Playlist, Track, TrackSource, VideoQuality};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1137,9 +1137,110 @@ pub fn fetch_browse_detail(
     })
 }
 
-fn is_low_quality_radio_candidate(title: &str, artist: &str) -> bool {
+static RADIO_FRESH_TICK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn normalize_core_title(title: &str) -> String {
+    let mut base = title.trim();
+    for sep in ["(", "[", "|", " - ", " – ", " — "] {
+        if let Some((head, _)) = base.split_once(sep) {
+            let trimmed = head.trim();
+            if !trimmed.is_empty() {
+                base = trimmed;
+            }
+        }
+    }
+    let low = base.to_ascii_lowercase();
+    let mut out = String::with_capacity(low.len());
+    let mut prev_space = false;
+    for tok in low.split_whitespace() {
+        if tok == "feat"
+            || tok == "feat."
+            || tok == "ft"
+            || tok == "ft."
+            || tok.starts_with("+1key")
+            || tok.starts_with("+2key")
+            || tok.starts_with("+3key")
+            || tok.starts_with("+4key")
+            || tok.starts_with("+5key")
+            || tok.starts_with("-1key")
+            || tok.starts_with("-2key")
+            || tok.starts_with("-3key")
+            || tok.starts_with("-4key")
+        {
+            break;
+        }
+        for ch in tok.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch);
+                prev_space = false;
+            } else if !prev_space && !out.is_empty() {
+                out.push(' ');
+                prev_space = true;
+            }
+        }
+        if !prev_space && !out.is_empty() {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
+fn is_same_song_variant(seed_core: &str, cand_core: &str) -> bool {
+    if seed_core.is_empty() || cand_core.is_empty() {
+        return false;
+    }
+    if seed_core == cand_core {
+        return true;
+    }
+    if seed_core.len() >= 4
+        && (cand_core.starts_with(&format!("{seed_core} "))
+            || seed_core.starts_with(&format!("{cand_core} ")))
+    {
+        return true;
+    }
+    false
+}
+
+fn extract_artist_tokens(artist: &str) -> Vec<String> {
+    let normalized = artist
+        .to_ascii_lowercase()
+        .replace(" feat. ", ",")
+        .replace(" feat ", ",")
+        .replace(" ft. ", ",")
+        .replace(" ft ", ",")
+        .replace(" with ", ",")
+        .replace(" x ", ",");
+    normalized
+        .split(&[',', '&', '•', ';', '/'][..])
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "unknown artist" && *s != "various artists")
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn primary_artist_key(artist: &str) -> String {
+    extract_artist_tokens(artist)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| artist.trim().to_ascii_lowercase())
+}
+
+fn is_low_quality_radio_candidate(
+    title: &str,
+    artist: &str,
+    seed_title: &str,
+    duration_ms: u64,
+) -> bool {
+    if duration_ms > 0 && !(75_000..=540_000).contains(&duration_ms) {
+        return true;
+    }
     let t = title.to_ascii_lowercase();
     let a = artist.to_ascii_lowercase();
+    let seed_is_remix = seed_title.to_ascii_lowercase().contains("remix");
+    if !seed_is_remix && (t.contains("remix") || a.contains("remix")) {
+        return true;
+    }
     for bad in [
         "karaoke",
         "sped up",
@@ -1159,9 +1260,48 @@ fn is_low_quality_radio_candidate(title: &str, artist: &str) -> bool {
         "tutorial",
         "ringtone",
         "dj tiktok",
+        "tiktok version",
         "full bass",
+        "bass boosted",
         "jedag jedug",
         "parody",
+        "+1key",
+        "+2key",
+        "+3key",
+        "+4key",
+        "+5key",
+        "-1key",
+        "-2key",
+        "-3key",
+        "-4key",
+        "key no",
+        "mini pop",
+        "kidz bop",
+        "metal version",
+        "metal cover",
+        "piano cover",
+        "guitar cover",
+        "acoustic cover",
+        "violin cover",
+        "drum cover",
+        "vocal cover",
+        "cover by",
+        "(cover)",
+        "[cover]",
+        "instrumental",
+        "backing track",
+        "lullaby",
+        "music box",
+        "8-bit",
+        "8 bit",
+        "minecraft",
+        "extended",
+        "tribute",
+        "chipmunk",
+        "edit audio",
+        "mashup",
+        "acapella",
+        "a cappella",
     ] {
         if t.contains(bad) || a.contains(bad) {
             return true;
@@ -1172,24 +1312,37 @@ fn is_low_quality_radio_candidate(title: &str, artist: &str) -> bool {
 
 fn filter_coherent_radio_tracks(
     seed_locale: MusicLocale,
+    seed_title: &str,
     seed_artist: &str,
     candidates: Vec<Track>,
     limit: usize,
 ) -> Vec<Track> {
-    let seed_artist_low = seed_artist.trim().to_ascii_lowercase();
-    let mut artist_counts: HashMap<String, usize> = HashMap::new();
-    let mut out = Vec::with_capacity(limit);
-    let mut overflow = Vec::new();
+    let seed_core = normalize_core_title(seed_title);
+    let seed_tokens = extract_artist_tokens(seed_artist);
+    let mut seen_artists: HashSet<String> = HashSet::new();
+    let mut seen_titles: HashSet<String> = HashSet::new();
+    let mut other_artists = Vec::with_capacity(limit);
+    let mut seed_artist_pick: Option<Track> = None;
 
     for t in candidates {
-        if is_low_quality_radio_candidate(&t.title, &t.artist) {
+        if is_low_quality_radio_candidate(&t.title, &t.artist, seed_title, t.duration_ms) {
+            continue;
+        }
+        let cand_core = normalize_core_title(&t.title);
+        if is_same_song_variant(&seed_core, &cand_core) {
+            continue;
+        }
+        if !cand_core.is_empty() && seen_titles.contains(&cand_core) {
             continue;
         }
         let cand_locale = detect_track_locale(&t.title, &t.artist, &t.album);
-        let artist_low = t.artist.trim().to_ascii_lowercase();
-        let same_artist = !seed_artist_low.is_empty()
-            && !artist_low.is_empty()
-            && (artist_low.contains(&seed_artist_low) || seed_artist_low.contains(&artist_low));
+        let cand_tokens = extract_artist_tokens(&t.artist);
+        let same_artist = !seed_tokens.is_empty()
+            && cand_tokens.iter().any(|ct| {
+                seed_tokens
+                    .iter()
+                    .any(|st| ct == st || (st.len() >= 4 && (ct.contains(st) || st.contains(ct))))
+            });
         if seed_locale == MusicLocale::GlobalEn
             && cand_locale == MusicLocale::Indonesian
             && !same_artist
@@ -1197,38 +1350,45 @@ fn filter_coherent_radio_tracks(
             continue;
         }
 
-        let artist_key = artist_low
-            .split(&[',', '&', '•'][..])
-            .next()
-            .unwrap_or(&artist_low)
-            .trim()
-            .to_string();
-        let count = artist_counts.entry(artist_key).or_insert(0);
-        if *count < 2 {
-            *count += 1;
-            out.push(t);
-            if out.len() >= limit {
-                break;
+        if same_artist {
+            // Keep at most 1 song by the seed artist, never spamming or dominating Up Next
+            if seed_artist_pick.is_none() {
+                if !cand_core.is_empty() {
+                    seen_titles.insert(cand_core);
+                }
+                seed_artist_pick = Some(t);
             }
-        } else if overflow.len() < limit {
-            overflow.push(t);
+            continue;
+        }
+
+        let artist_key = primary_artist_key(&t.artist);
+        if artist_key.is_empty() || !seen_artists.insert(artist_key) {
+            continue;
+        }
+        if !cand_core.is_empty() {
+            seen_titles.insert(cand_core);
+        }
+        other_artists.push(t);
+        if other_artists.len() >= limit {
+            break;
         }
     }
 
-    if out.len() < limit {
-        for t in overflow {
-            out.push(t);
-            if out.len() >= limit {
-                break;
-            }
-        }
+    let mut out = other_artists;
+    if let Some(seed_track) = seed_artist_pick
+        && out.len() < limit
+    {
+        // Place the single optional seed-artist track mid-queue (never #1) so playback feels diverse
+        let insert_pos = 4usize.min(out.len());
+        out.insert(insert_pos, seed_track);
     }
+    out.truncate(limit);
     out
 }
 
-/// Fetch locale- and vibe-coherent Radio / Up Next recommendations for a playing YouTube Music
-/// song via `youtubei/v1/next` so English songs queue matching international tracks and Indonesian
-/// songs queue matching Indonesian tracks.
+/// Fetch locale- and vibe-coherent, multi-artist Radio / Up Next recommendations for a playing
+/// YouTube Music song via `youtubei/v1/next` with second-hop artist expansion and strict
+/// single-track-per-artist diversity enforcement.
 pub fn fetch_radio_up_next_for_track(
     session: &YtmSession,
     video_id: &str,
@@ -1243,12 +1403,24 @@ pub fn fetch_radio_up_next_for_track(
             "Invalid videoId for radio".to_string(),
         ));
     }
+    let target_limit = limit.max(1);
     let seed_locale = detect_track_locale(seed_title, seed_artist, seed_album);
     let radio_session = if !session.is_signed_in() {
         YtmSession::guest(String::new())
     } else {
         session.clone()
     };
+    let tick = if force_fresh {
+        RADIO_FRESH_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
+    let fresh_params = [
+        "wAEB8gECKAE%3D", // Discover
+        "wAEB8gECGAE%3D", // Deep Cuts
+        "wAEB8gECIAE%3D", // Popular
+        "wAEB8gECMAE%3D", // Upbeat / Chill mix
+    ];
     let mut body = json!({
         "videoId": video_id,
         "playlistId": format!("RDAMVM{video_id}"),
@@ -1258,7 +1430,7 @@ pub fn fetch_radio_up_next_for_track(
         "context": web_remix_context_for_locale(&radio_session, seed_locale),
     });
     if force_fresh {
-        body["params"] = json!("wAEB8gECKAE%3D");
+        body["params"] = json!(fresh_params[tick % fresh_params.len()]);
     }
     let root = post_ytm_json("next", &body, &radio_session)?;
     let mut raw_tracks = Vec::new();
@@ -1266,17 +1438,72 @@ pub fn fetch_radio_up_next_for_track(
     seen.insert(video_id.to_string());
     collect_radio_panel_items(
         &root,
-        (limit.max(1) * 2).max(24),
+        (target_limit * 3).max(36),
         &mut seen,
         &mut raw_tracks,
     );
 
-    let mut coherent =
-        filter_coherent_radio_tracks(seed_locale, seed_artist, raw_tracks, limit.max(1));
+    // Second-hop artist expansion: pick a different artist from the primary radio panel and fetch
+    // their `RDAMVM` radio neighborhood too so queues always span 12-15 genuinely distinct artists.
+    let seed_tokens = extract_artist_tokens(seed_artist);
+    let hop_candidates: Vec<String> = raw_tracks
+        .iter()
+        .filter(|t| {
+            !is_low_quality_radio_candidate(&t.title, &t.artist, seed_title, t.duration_ms)
+                && !extract_artist_tokens(&t.artist)
+                    .iter()
+                    .any(|ct| seed_tokens.iter().any(|st| ct == st))
+        })
+        .filter_map(|t| t.youtube_video_id.clone())
+        .collect();
+    if !hop_candidates.is_empty() {
+        let hop_idx = tick % hop_candidates.len();
+        let hop_vid = &hop_candidates[hop_idx];
+        let mut hop_body = json!({
+            "videoId": hop_vid,
+            "playlistId": format!("RDAMVM{hop_vid}"),
+            "isAudioOnly": true,
+            "enablePersistentPlaylistPanel": true,
+            "tunerSettingValue": "AUTOMIX_SETTING_NORMAL",
+            "context": web_remix_context_for_locale(&radio_session, seed_locale),
+        });
+        if force_fresh {
+            hop_body["params"] = json!(fresh_params[(tick + 1) % fresh_params.len()]);
+        }
+        if let Ok(hop_root) = post_ytm_json_fast("next", &hop_body, &radio_session) {
+            collect_radio_panel_items(&hop_root, 28, &mut seen, &mut raw_tracks);
+        }
+    }
 
-    if coherent.len() < 8 && !seed_artist.trim().is_empty() {
+    let mut coherent = filter_coherent_radio_tracks(
+        seed_locale,
+        seed_title,
+        seed_artist,
+        raw_tracks,
+        target_limit,
+    );
+
+    // Locale-matched multi-artist fallback (NEVER raw `seed_artist` search, which spams same-artist covers)
+    if coherent.len() < target_limit.min(10) {
+        let fallback_queries: &[&str] = match seed_locale {
+            MusicLocale::GlobalEn => &[
+                "top pop hits radio",
+                "global pop songs mix",
+                "modern indie pop hits",
+                "chill pop favorites",
+                "r&b pop radio hits",
+            ],
+            MusicLocale::Indonesian => &[
+                "lagu pop indonesia populer",
+                "musik indie indonesia terbaik",
+                "hits pop indonesia terbaru",
+            ],
+            MusicLocale::Japanese => &["j-pop hits radio", "japanese pop songs"],
+            MusicLocale::Korean => &["k-pop hits radio", "korean pop songs"],
+        };
+        let query = fallback_queries[tick % fallback_queries.len()];
         let search_body = json!({
-            "query": seed_artist.trim(),
+            "query": query,
             "params": "EgWKAQIIAWoMEAMQBBAJEAoQBRAV",
             "context": web_remix_context_for_locale(&radio_session, seed_locale),
         });
@@ -1285,20 +1512,33 @@ pub fn fetch_radio_up_next_for_track(
             collect_music_items(
                 &search_root,
                 "YouTube Music Radio",
-                16,
+                24,
                 &mut seen,
                 &mut extra,
             );
-            let mut filtered_extra =
-                filter_coherent_radio_tracks(seed_locale, seed_artist, extra, limit.max(1));
+            let mut existing_artists: HashSet<String> = coherent
+                .iter()
+                .map(|c| primary_artist_key(&c.artist))
+                .collect();
+            let mut filtered_extra = filter_coherent_radio_tracks(
+                seed_locale,
+                seed_title,
+                seed_artist,
+                extra,
+                target_limit,
+            );
             if force_fresh && filtered_extra.len() > 2 {
                 fastrand::shuffle(&mut filtered_extra);
             }
             for t in filtered_extra {
-                if coherent.len() >= limit.max(1) {
+                if coherent.len() >= target_limit {
                     break;
                 }
-                if !coherent.iter().any(|c| c.id == t.id) {
+                let ak = primary_artist_key(&t.artist);
+                if !ak.is_empty()
+                    && existing_artists.insert(ak)
+                    && !coherent.iter().any(|c| c.id == t.id)
+                {
                     coherent.push(t);
                 }
             }
@@ -1307,6 +1547,15 @@ pub fn fetch_radio_up_next_for_track(
 
     if force_fresh && coherent.len() > 3 {
         fastrand::shuffle(&mut coherent);
+        // Ensure #1 Up Next is never the exact same artist as the currently playing song
+        if let Some(first_diff) = coherent.iter().position(|t| {
+            !extract_artist_tokens(&t.artist)
+                .iter()
+                .any(|ct| seed_tokens.iter().any(|st| ct == st))
+        }) && first_diff > 0
+        {
+            coherent.swap(0, first_diff);
+        }
     }
     Ok(coherent)
 }
@@ -2873,19 +3122,35 @@ mod tests {
             liked: false,
         };
         let mixed = vec![
+            make("s1", "Diva", "The Kid LAROI", "F*CK LOVE"),
+            make("s2", "WRONG", "The Kid LAROI", "F*CK LOVE"),
+            make("s3", "SPEED DEMON", "Justin Bieber", "Justice"),
+            make("s4", "Stay", "Mini Pop Kids", "Mini Pop Kids 19"),
+            make("s5", "Stay (Remix)", "Tanner Patrick", "Single"),
+            make("s6", "STAY +4Key No Vocal", "STAY +4Key", "Karaoke"),
+            make(
+                "s7",
+                "Stay (Extended)",
+                "The Kid LAROI & Justin Bieber",
+                "Single",
+            ),
             make("a", "Blinding Lights", "The Weeknd", "After Hours"),
+            make("a2", "Starboy", "The Weeknd", "Starboy"),
             make("b", "Hati-Hati di Jalan", "Tulus", "Manusia"),
             make("c", "STAY (Sped Up)", "TikTok Remix", "Single"),
             make("d", "As It Was", "Harry Styles", "Harry's House"),
         ];
         let out = filter_coherent_radio_tracks(
             MusicLocale::GlobalEn,
+            "STAY",
             "The Kid LAROI & Justin Bieber",
             mixed,
             10,
         );
-        assert_eq!(out.len(), 2);
+        // Only 1 song per artist, 0 same-song covers/pitch-shifts, and non-seed artist at #1
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].title, "Blinding Lights");
         assert_eq!(out[1].title, "As It Was");
+        assert_eq!(out[2].title, "Diva");
     }
 }

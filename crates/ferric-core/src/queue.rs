@@ -135,6 +135,15 @@ impl PlayQueue {
         self.tracks.is_empty()
     }
 
+    /// Update the `liked` flag for all queued occurrences of a track ID.
+    pub fn set_track_liked(&mut self, track_id: &str, liked: bool) {
+        for track in &mut self.tracks {
+            if track.id == track_id {
+                track.liked = liked;
+            }
+        }
+    }
+
     /// Update a queued track in-place after its online audio stream has been resolved and cached.
     pub fn update_track_cached_stream(
         &mut self,

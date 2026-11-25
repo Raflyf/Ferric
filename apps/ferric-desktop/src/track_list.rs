@@ -33,30 +33,37 @@ live_design! {
             uniform active_col: #261810
             uniform accent_col: #E86A2C
             uniform acrylic_on: 0.0
+            uniform light_mode: 0.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 7.0);
 
-                let solid_idle = mix(self.base_col, self.hover_col, self.hover);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.04, 0.05, 0.09), self.light_mode);
+                let solid_hov = mix(self.hover_col, vec4(0.04, 0.05, 0.09, 0.08), self.light_mode);
+                let solid_idle = mix(self.base_col, solid_hov, self.hover);
                 let acrylic_idle = mix(
-                    vec4(1.0, 1.0, 1.0, 0.02),
-                    vec4(1.0, 1.0, 1.0, 0.085),
+                    vec4(ink, 0.025 + 0.015 * self.light_mode),
+                    vec4(ink, 0.09 + 0.02 * self.light_mode),
                     self.hover
                 );
                 let idle_or_hover = mix(solid_idle, acrylic_idle, self.acrylic_on);
 
-                let active_solid = mix(self.active_col, vec4(self.accent_col.xyz, 0.22), 0.36);
+                let active_solid = mix(
+                    mix(self.active_col, vec4(self.accent_col.xyz, 0.16), self.light_mode),
+                    vec4(self.accent_col.xyz, 0.24),
+                    0.36
+                );
                 let active_acrylic = vec4(
-                    mix(vec3(0.14, 0.14, 0.20), self.accent_col.xyz, 0.28),
-                    0.34 + 0.06 * self.hover
+                    mix(mix(vec3(0.14, 0.14, 0.20), vec3(0.05, 0.06, 0.10), self.light_mode), self.accent_col.xyz, 0.34),
+                    0.26 + 0.06 * self.hover
                 );
                 let bg = mix(idle_or_hover, mix(active_solid, active_acrylic, self.acrylic_on), self.active);
-                let pressed = mix(bg, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
+                let pressed = mix(bg, vec4(ink, 0.16), self.down * 0.22);
                 sdf.fill_keep(pressed);
 
-                let idle_border = vec4(1.0, 1.0, 1.0, (0.045 * self.acrylic_on) + (0.075 * self.hover));
-                let act_border = vec4(self.accent_col.xyz, 0.55);
+                let idle_border = vec4(ink, (0.055 * self.acrylic_on) + (0.09 * self.hover));
+                let act_border = vec4(self.accent_col.xyz, 0.60);
                 sdf.stroke(mix(idle_border, act_border, self.active), 1.0);
                 return sdf.result;
             }
@@ -309,20 +316,27 @@ live_design! {
         spacing: 8,
         show_bg: true,
         draw_bg: {
+            uniform acrylic_on: 0.0
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 8.0);
-                sdf.fill_keep(#12141C);
-                sdf.stroke(#232530, 1.0);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_fill = mix(vec4(0.071, 0.078, 0.110, 1.0), vec4(0.91, 0.88, 0.83, 1.0), self.light_mode);
+                let acr_fill = vec4(ink, 0.045 + 0.045 * self.light_mode);
+                sdf.fill_keep(mix(solid_fill, acr_fill, self.acrylic_on));
+                let solid_b = mix(vec4(0.137, 0.145, 0.188, 1.0), vec4(0.08, 0.09, 0.14, 0.20), self.light_mode);
+                let acr_b = vec4(ink, 0.09 + 0.08 * self.light_mode);
+                sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
         }
-        <Label> {
+        empty_title_lbl = <Label> {
             padding: 0,
             draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 12.5 } }
             text: "No tracks here yet"
         }
-        <Label> {
+        empty_sub_lbl = <Label> {
             width: Fill,
             padding: 0,
             draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }
@@ -539,6 +553,11 @@ pub struct TrackListScope {
     pub audio_level: f32,
     pub accent: Vec4,
     pub acrylic_on: f32,
+    pub light_mode: f32,
+    pub text_primary: Vec4,
+    pub text_secondary: Vec4,
+    pub icon_idle: Vec4,
+    pub icon_hover: Vec4,
     pub ui_zoom: f32,
     pub artworks: Rc<HashMap<String, CachedArtwork>>,
     pub missing_art_tracks: Rc<RefCell<Vec<Track>>>,
@@ -668,36 +687,60 @@ impl Widget for TrackList {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let (tracks, active_id, is_playing, level, accent, acrylic_on, zoom, artworks, missing_art) =
-            scope
-                .props
-                .get::<TrackListScope>()
-                .map(|d| {
-                    (
-                        Rc::clone(&d.tracks),
-                        d.active_track_id.clone(),
-                        d.is_playing,
-                        d.audio_level,
-                        d.accent,
-                        d.acrylic_on,
-                        d.ui_zoom.clamp(0.65, 1.40),
-                        Rc::clone(&d.artworks),
-                        Some(Rc::clone(&d.missing_art_tracks)),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        Rc::new(Vec::new()),
-                        None,
-                        false,
-                        0.5,
-                        vec4(0.910, 0.416, 0.173, 1.0),
-                        0.0,
-                        1.0,
-                        Rc::new(HashMap::new()),
-                        None,
-                    )
-                });
+        let (
+            tracks,
+            active_id,
+            is_playing,
+            level,
+            accent,
+            acrylic_on,
+            light_mode,
+            text_primary,
+            text_secondary,
+            icon_idle,
+            icon_hover,
+            zoom,
+            artworks,
+            missing_art,
+        ) = scope
+            .props
+            .get::<TrackListScope>()
+            .map(|d| {
+                (
+                    Rc::clone(&d.tracks),
+                    d.active_track_id.clone(),
+                    d.is_playing,
+                    d.audio_level,
+                    d.accent,
+                    d.acrylic_on,
+                    d.light_mode,
+                    d.text_primary,
+                    d.text_secondary,
+                    d.icon_idle,
+                    d.icon_hover,
+                    d.ui_zoom.clamp(0.65, 1.40),
+                    Rc::clone(&d.artworks),
+                    Some(Rc::clone(&d.missing_art_tracks)),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    Rc::new(Vec::new()),
+                    None,
+                    false,
+                    0.5,
+                    vec4(0.910, 0.416, 0.173, 1.0),
+                    0.0,
+                    0.0,
+                    vec4(0.957, 0.957, 0.969, 1.0),
+                    vec4(0.604, 0.612, 0.659, 1.0),
+                    vec4(0.431, 0.443, 0.502, 1.0),
+                    vec4(0.957, 0.957, 0.969, 1.0),
+                    1.0,
+                    Rc::new(HashMap::new()),
+                    None,
+                )
+            });
         let count = tracks.len();
         let row_h = (46.0 * zoom) as f64;
         let art_sz = (34.0 * zoom) as f64;
@@ -711,6 +754,17 @@ impl Widget for TrackList {
                     while let Some(item_id) = list.next_visible_item(cx) {
                         if item_id == 0 {
                             let empty = list.item(cx, 0, live_id!(Empty));
+                            empty.apply_over(
+                                cx,
+                                live! {
+                                    draw_bg: {
+                                        acrylic_on: (acrylic_on),
+                                        light_mode: (light_mode)
+                                    }
+                                    empty_title_lbl = { draw_text: { color: (text_primary) } }
+                                    empty_sub_lbl = { draw_text: { color: (text_secondary) } }
+                                },
+                            );
                             empty.draw_all(cx, scope);
                         }
                     }
@@ -722,21 +776,9 @@ impl Widget for TrackList {
                         };
                         let row = list.item(cx, item_id, live_id!(Row));
                         let is_active = active_id.as_deref() == Some(track.id.as_str());
-                        let title_col = if is_active {
-                            accent
-                        } else {
-                            vec4(0.957, 0.957, 0.969, 1.0)
-                        };
-                        let idx_col = if is_active {
-                            accent
-                        } else {
-                            vec4(0.439, 0.451, 0.510, 1.0)
-                        };
-                        let like_col = if track.liked {
-                            accent
-                        } else {
-                            vec4(0.361, 0.373, 0.431, 1.0)
-                        };
+                        let title_col = if is_active { accent } else { text_primary };
+                        let idx_col = if is_active { accent } else { text_secondary };
+                        let like_col = if track.liked { accent } else { icon_idle };
 
                         row.apply_over(
                             cx,
@@ -745,15 +787,19 @@ impl Widget for TrackList {
                                 draw_bg: {
                                     active: (if is_active { 1.0 } else { 0.0 }),
                                     accent_col: (accent),
-                                    acrylic_on: (acrylic_on)
+                                    acrylic_on: (acrylic_on),
+                                    light_mode: (light_mode)
                                 }
                                 art_tile = { width: (art_sz), height: (art_sz) }
                                 idx_lbl = { draw_text: { color: (idx_col), text_style: { font_size: (sub_fs) } } }
                                 title_lbl = { draw_text: { color: (title_col), text_style: { font_size: (title_fs) } } }
-                                artist_lbl = { draw_text: { text_style: { font_size: (sub_fs) } } }
-                                album_lbl = { draw_text: { text_style: { font_size: (sub_fs) } } }
-                                dur_lbl = { draw_text: { text_style: { font_size: (sub_fs) } } }
-                                like_btn = { draw_icon: { color: (like_col) } }
+                                artist_lbl = { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
+                                album_lbl = { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
+                                dur_lbl = { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
+                                queue_add_btn = { draw_icon: { color: (icon_idle), color_hover: (icon_hover) } }
+                                like_btn = { draw_icon: { color: (like_col), color_hover: (icon_hover) } }
+                                pl_add_btn = { draw_icon: { color: (icon_idle), color_hover: (icon_hover) } }
+                                delete_btn = { draw_icon: { color: (icon_idle) } }
                             },
                         );
 

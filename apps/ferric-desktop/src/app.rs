@@ -34,7 +34,7 @@ use ferric_core::models::{
     primary_artist_key,
 };
 use ferric_core::queue::PlayQueue;
-use ferric_core::theme::{ThemeConfig, hex_to_rgba_f32, parse_hex_rgb};
+use ferric_core::theme::{AdaptivePalette, ThemeConfig, hex_to_rgba_f32, parse_hex_rgb};
 use ferric_providers::autoeq::search_autoeq_profiles;
 use ferric_providers::local_scanner::scan_local_folder;
 use ferric_providers::lyrics::{SyncedLyrics, fetch_best_free_lyrics};
@@ -128,20 +128,24 @@ live_design! {
             uniform acrylic_on: 0.0
             uniform acrylic_opacity: 0.72
             uniform acrylic_tint: #0B0D14
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 if (p.y < 1.0) {
                     if (self.acrylic_on > 0.5) {
-                        return vec4(0.14, 0.14, 0.16, 0.16);
+                        let line_dark = vec4(1.0, 1.0, 1.0, 0.14);
+                        let line_light = vec4(0.05, 0.06, 0.10, 0.18);
+                        return mix(line_dark, line_light, self.light_mode);
                     }
-                    return #181A22;
+                    return mix(#181A22, #D5CCB9, self.light_mode);
                 }
                 let d_left = length((self.pos - vec2(0.08, 0.55)) * vec2(1.4, 2.2));
                 let d_mid = length((self.pos - vec2(0.48, 0.85)) * vec2(0.9, 2.4));
-                let wash = (exp(-d_left * d_left * 2.4) * 0.55 + exp(-d_mid * d_mid * 1.8) * 0.35) * self.glow_amt;
+                let wash = (exp(-d_left * d_left * 2.4) * 0.55 + exp(-d_mid * d_mid * 1.8) * 0.35) * self.glow_amt * mix(1.0, 0.28, self.light_mode);
                 if (self.acrylic_on > 0.5) {
                     let a = clamp(self.acrylic_opacity * 0.62, 0.20, 0.80);
-                    let rgb = clamp(self.acrylic_tint.xyz * 1.12 + self.accent_col.xyz * wash, 0.0, 1.0);
+                    let base_t = mix(self.acrylic_tint.xyz * 1.12, self.acrylic_tint.xyz * 0.94, self.light_mode);
+                    let rgb = clamp(base_t + self.accent_col.xyz * wash, 0.0, 1.0);
                     return vec4(rgb * a, a);
                 }
                 let rgb = self.base_col.xyz + self.accent_col.xyz * wash;
@@ -170,14 +174,16 @@ live_design! {
         draw_bg: {
             uniform acrylic_on: 0.0
             uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
-                let solid_fill = vec4(0.052, 0.056, 0.076, 1.0);
-                let acrylic_fill = vec4(1.0, 1.0, 1.0, 0.036);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.918, 0.890, 0.835, 1.0), self.light_mode);
+                let acrylic_fill = vec4(ink, 0.036 + 0.044 * self.light_mode);
                 sdf.fill_keep(mix(solid_fill, acrylic_fill, self.acrylic_on));
-                let solid_border = vec4(0.114, 0.122, 0.161, 1.0);
-                let acrylic_border = vec4(1.0, 1.0, 1.0, 0.075);
+                let solid_border = mix(vec4(0.114, 0.122, 0.161, 1.0), vec4(0.80, 0.76, 0.69, 1.0), self.light_mode);
+                let acrylic_border = vec4(ink, 0.075 + 0.085 * self.light_mode);
                 sdf.stroke(mix(solid_border, acrylic_border, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -213,19 +219,21 @@ live_design! {
             instance down: 0.0
             uniform acrylic_on: 0.0
             uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 6.0);
-                let hov = mix(#161822, vec4(1.0, 1.0, 1.0, 0.075), self.acrylic_on);
-                let act_solid = mix(#1A1C28, vec4(self.accent_col.xyz, 0.24), 0.28);
-                let act_acr = vec4(mix(vec3(1.0, 1.0, 1.0), self.accent_col.xyz, 0.30), 0.16);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let hov = mix(mix(#161822, vec4(0.05, 0.06, 0.10, 0.07), self.light_mode), vec4(ink, 0.085), self.acrylic_on);
+                let act_solid = mix(mix(#1A1C28, vec4(0.05, 0.06, 0.10, 0.08), self.light_mode), vec4(self.accent_col.xyz, 0.24), 0.28);
+                let act_acr = vec4(mix(ink, self.accent_col.xyz, 0.34), 0.16);
                 let act = mix(act_solid, act_acr, self.acrylic_on);
                 let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
                 sdf.fill_keep(col);
-                let idle_rim = vec4(1.0, 1.0, 1.0, 0.05 * self.hover * self.acrylic_on);
-                let act_rim = vec4(self.accent_col.xyz, 0.34);
+                let idle_rim = vec4(ink, 0.06 * self.hover * self.acrylic_on);
+                let act_rim = vec4(self.accent_col.xyz, 0.42);
                 sdf.stroke(mix(idle_rim, act_rim, self.active), 1.0);
-                if self.active > 0.5 {
+                if (self.active > 0.5) {
                     sdf.box(2.5, 6.0, 2.5, max(self.rect_size.y - 12.0, 6.0), 1.25);
                     sdf.fill(vec4(self.accent_col.xyz, self.active));
                 }
@@ -281,11 +289,13 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             uniform acrylic_on: 0.0
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
-                let hov = mix(#161822, vec4(1.0, 1.0, 1.0, 0.075), self.acrylic_on);
-                let act = mix(#1E202F, vec4(1.0, 1.0, 1.0, 0.135), self.acrylic_on);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let hov = mix(mix(#161822, vec4(0.05, 0.06, 0.10, 0.07), self.light_mode), vec4(ink, 0.085), self.acrylic_on);
+                let act = mix(mix(#1E202F, vec4(0.05, 0.06, 0.10, 0.14), self.light_mode), vec4(ink, 0.145), self.acrylic_on);
                 let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
                 sdf.fill(col);
                 return sdf.result;
@@ -336,13 +346,15 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 0.65;
                 let r = (self.rect_size.y - inset * 2.0) * 0.28;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
-                let c = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D6D8E4, self.down);
-                sdf.fill(c);
+                let c_dark = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D6D8E4, self.down);
+                let c_light = mix(mix(#12151F, #232838, self.hover), #090B10, self.down);
+                sdf.fill(mix(c_dark, c_light, self.light_mode));
                 return sdf.result;
             }
         }
@@ -394,19 +406,21 @@ live_design! {
             instance down: 0.0
             uniform acrylic_on: 0.0
             uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 0.65;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
-                let solid_idle = mix(#14151D, #232737, self.hover);
-                let solid_act = mix(#2E1B11, vec4(self.accent_col.xyz, 0.28), 0.36);
-                let acrylic_idle = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.16), self.hover);
-                let acrylic_act = vec4(self.accent_col.xyz, 0.30);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_idle = mix(mix(#14151D, #232737, self.hover), mix(#E4DDD0, #D9D0C0, self.hover), self.light_mode);
+                let solid_act = mix(mix(#2E1B11, vec4(self.accent_col.xyz, 0.16), self.light_mode), vec4(self.accent_col.xyz, 0.28), 0.36);
+                let acrylic_idle = mix(vec4(ink, 0.065 + 0.025 * self.light_mode), vec4(ink, 0.16), self.hover);
+                let acrylic_act = vec4(self.accent_col.xyz, 0.26);
                 let bg = mix(mix(solid_idle, solid_act, self.active), mix(acrylic_idle, acrylic_act, self.active), self.acrylic_on);
-                let pressed = mix(bg, vec4(1.0, 1.0, 1.0, 0.18), self.down * 0.24);
+                let pressed = mix(bg, vec4(ink, 0.20), self.down * 0.24);
                 sdf.fill_keep(pressed);
-                let solid_b = mix(mix(#252734, #484E68, self.hover), vec4(self.accent_col.xyz, 0.88), self.active);
-                let acrylic_b = mix(vec4(1.0, 1.0, 1.0, 0.10 + 0.12 * self.hover), vec4(self.accent_col.xyz, 0.90), self.active);
+                let solid_b = mix(mix(mix(#252734, #484E68, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(self.accent_col.xyz, 0.88), self.active);
+                let acrylic_b = mix(vec4(ink, 0.11 + 0.07 * self.light_mode + 0.12 * self.hover), vec4(self.accent_col.xyz, 0.90), self.active);
                 sdf.stroke(mix(solid_b, acrylic_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -438,14 +452,17 @@ live_design! {
         align: { x: 0.5, y: 0.5 }
         draw_text: {
             instance active: 0.0
+            uniform light_mode: 0.0
             color: #C8CAD6,
             color_hover: #FFFFFF,
             color_focus: #FFFFFF,
             color_down: #FFFFFF,
             text_style: <THEME_FONT_MEDIUM> { font_size: 8.5 }
             fn get_color(self) -> vec4 {
-                let idle_c = mix(self.color, #FFFFFF, max(self.hover, self.down));
-                return mix(idle_c, #09090D, self.active);
+                let hov_c = mix(#FFFFFF, #06070B, self.light_mode);
+                let act_c = mix(#09090D, #FFFFFF, self.light_mode);
+                let idle_c = mix(self.color, hov_c, max(self.hover, self.down));
+                return mix(idle_c, act_c, self.active);
             }
         }
         draw_bg: {
@@ -453,18 +470,23 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             uniform acrylic_on: 0.0
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 0.65;
                 let r = (self.rect_size.y - inset * 2.0) * 0.28;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
-                let solid_idle = mix(#14151D, #25293A, self.hover);
-                let acrylic_idle = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.17), self.hover);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_idle = mix(mix(#14151D, #25293A, self.hover), mix(#E4DDD0, #D8CFC0, self.hover), self.light_mode);
+                let acrylic_idle = mix(vec4(ink, 0.065 + 0.025 * self.light_mode), vec4(ink, 0.17), self.hover);
                 let idle = mix(solid_idle, acrylic_idle, self.acrylic_on);
-                let bg = mix(idle, mix(#F4F5FA, #FFFFFF, self.hover), self.active);
+                let act_dark = mix(#F4F5FA, #FFFFFF, self.hover);
+                let act_light = mix(#11131A, #222634, self.hover);
+                let bg = mix(idle, mix(act_dark, act_light, self.light_mode), self.active);
                 sdf.fill_keep(bg);
-                let idle_b = mix(mix(#242633, #464B66, self.hover), vec4(1.0, 1.0, 1.0, 0.12 + 0.12 * self.hover), self.acrylic_on);
-                sdf.stroke(mix(idle_b, #FFFFFF, self.active), 1.0);
+                let idle_b = mix(mix(mix(#242633, #464B66, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(ink, 0.12 + 0.08 * self.light_mode + 0.12 * self.hover), self.acrylic_on);
+                let act_b = mix(#FFFFFF, #11131A, self.light_mode);
+                sdf.stroke(mix(idle_b, act_b, self.active), 1.0);
                 return sdf.result;
             }
         }
@@ -510,15 +532,17 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             uniform acrylic_on: 0.0
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 1.0 + self.down * 0.85;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
-                let hov = mix(#212432, vec4(1.0, 1.0, 1.0, 0.13), self.acrylic_on);
-                let act = mix(#321E14, vec4(1.0, 1.0, 1.0, 0.19), self.acrylic_on);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let hov = mix(mix(#212432, vec4(0.05, 0.06, 0.10, 0.09), self.light_mode), vec4(ink, 0.13), self.acrylic_on);
+                let act = mix(mix(#321E14, vec4(0.05, 0.06, 0.10, 0.14), self.light_mode), vec4(ink, 0.18), self.acrylic_on);
                 let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
-                sdf.fill_keep(mix(bg, vec4(1.0, 1.0, 1.0, 0.16), self.down * 0.25));
-                let rim = vec4(1.0, 1.0, 1.0, (0.11 * self.hover + 0.14 * self.active));
+                sdf.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.25));
+                let rim = vec4(ink, (0.12 * self.hover + 0.16 * self.active));
                 sdf.stroke(rim, 1.0);
                 return sdf.result;
             }
@@ -590,22 +614,24 @@ live_design! {
             instance down: 0.0
             uniform acrylic_on: 0.0
             uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 1.1;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 7.0);
-                let solid_idle = mix(vec4(0.050, 0.054, 0.074, 1.0), vec4(0.112, 0.120, 0.168, 1.0), self.hover);
-                let solid_act = mix(vec4(0.105, 0.098, 0.175, 1.0), vec4(self.accent_col.xyz, 0.24), 0.36);
-                let acr_idle = mix(vec4(1.0, 1.0, 1.0, 0.030), vec4(1.0, 1.0, 1.0, 0.095), self.hover);
-                let acr_act = vec4(mix(vec3(0.14, 0.14, 0.22), self.accent_col.xyz, 0.34), 0.36);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_idle = mix(mix(vec4(0.050, 0.054, 0.074, 1.0), vec4(0.112, 0.120, 0.168, 1.0), self.hover), mix(vec4(0.90, 0.87, 0.81, 1.0), vec4(0.84, 0.80, 0.74, 1.0), self.hover), self.light_mode);
+                let solid_act = mix(mix(vec4(0.105, 0.098, 0.175, 1.0), vec4(self.accent_col.xyz, 0.16), self.light_mode), vec4(self.accent_col.xyz, 0.24), 0.36);
+                let acr_idle = mix(vec4(ink, 0.032 + 0.035 * self.light_mode), vec4(ink, 0.10 + 0.03 * self.light_mode), self.hover);
+                let acr_act = vec4(mix(mix(vec3(0.14, 0.14, 0.22), vec3(0.05, 0.06, 0.10), self.light_mode), self.accent_col.xyz, 0.36), 0.28);
                 let col = mix(mix(solid_idle, solid_act, self.active), mix(acr_idle, acr_act, self.active), self.acrylic_on);
-                let sheen = smoothstep(0.55, 0.0, self.pos.y) * self.hover * 0.065;
+                let sheen = smoothstep(0.55, 0.0, self.pos.y) * self.hover * 0.055 * (1.0 - self.light_mode);
                 let lifted = vec4(clamp(col.xyz + vec3(sheen), 0.0, 1.0), col.w);
-                let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.16), self.down * 0.22);
+                let pressed = mix(lifted, vec4(ink, 0.16), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let hov_rim = mix(#3D435E, self.accent_col, 0.24);
-                let solid_b = mix(mix(#1A1C26, hov_rim, self.hover), vec4(self.accent_col.xyz, 0.78), self.active);
-                let acr_b = mix(vec4(1.0, 1.0, 1.0, 0.055 + 0.14 * self.hover), vec4(self.accent_col.xyz, 0.68), self.active);
+                let hov_rim = mix(mix(#3D435E, #A89E88, self.light_mode), self.accent_col, 0.24);
+                let solid_b = mix(mix(mix(#1A1C26, #D0C6B2, self.light_mode), hov_rim, self.hover), vec4(self.accent_col.xyz, 0.78), self.active);
+                let acr_b = mix(vec4(ink, 0.06 + 0.07 * self.light_mode + 0.12 * self.hover), vec4(self.accent_col.xyz, 0.72), self.active);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -664,23 +690,25 @@ live_design! {
             uniform ghost: 0.0
             uniform acrylic_on: 0.0
             uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
-                if self.ghost > 0.5 {
+                if (self.ghost > 0.5) {
                     return vec4(0.0, 0.0, 0.0, 0.0);
                 }
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 1.4;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
-                let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover);
-                let acr_fill = mix(vec4(1.0, 1.0, 1.0, 0.032), vec4(1.0, 1.0, 1.0, 0.095), self.hover);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_fill = mix(mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover), mix(vec4(0.90, 0.87, 0.81, 1.0), vec4(0.84, 0.80, 0.74, 1.0), self.hover), self.light_mode);
+                let acr_fill = mix(vec4(ink, 0.032 + 0.035 * self.light_mode), vec4(ink, 0.10 + 0.03 * self.light_mode), self.hover);
                 let fill = mix(solid_fill, acr_fill, self.acrylic_on);
-                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.075;
+                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.065 * (1.0 - self.light_mode);
                 let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
-                let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
+                let pressed = mix(lifted, vec4(ink, 0.15), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let hov_rim = mix(#434966, self.accent_col, 0.28);
-                let solid_b = mix(#1B1D27, hov_rim, self.hover);
-                let acr_b = vec4(1.0, 1.0, 1.0, 0.058 + 0.15 * self.hover);
+                let hov_rim = mix(mix(#434966, #A89E88, self.light_mode), self.accent_col, 0.28);
+                let solid_b = mix(mix(#1B1D27, #D0C6B2, self.light_mode), hov_rim, self.hover);
+                let acr_b = vec4(ink, 0.06 + 0.07 * self.light_mode + 0.14 * self.hover);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -745,23 +773,25 @@ live_design! {
             uniform ghost: 0.0
             uniform acrylic_on: 0.0
             uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
-                if self.ghost > 0.5 {
+                if (self.ghost > 0.5) {
                     return vec4(0.0, 0.0, 0.0, 0.0);
                 }
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 1.4;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
-                let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover);
-                let acr_fill = mix(vec4(1.0, 1.0, 1.0, 0.032), vec4(1.0, 1.0, 1.0, 0.095), self.hover);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_fill = mix(mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover), mix(vec4(0.90, 0.87, 0.81, 1.0), vec4(0.84, 0.80, 0.74, 1.0), self.hover), self.light_mode);
+                let acr_fill = mix(vec4(ink, 0.032 + 0.035 * self.light_mode), vec4(ink, 0.10 + 0.03 * self.light_mode), self.hover);
                 let fill = mix(solid_fill, acr_fill, self.acrylic_on);
-                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.075;
+                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.065 * (1.0 - self.light_mode);
                 let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
-                let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
+                let pressed = mix(lifted, vec4(ink, 0.15), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let hov_rim = mix(#434966, self.accent_col, 0.28);
-                let solid_b = mix(#1C1E28, hov_rim, self.hover);
-                let acr_b = vec4(1.0, 1.0, 1.0, 0.058 + 0.15 * self.hover);
+                let hov_rim = mix(mix(#434966, #A89E88, self.light_mode), self.accent_col, 0.28);
+                let solid_b = mix(mix(#1C1E28, #D0C6B2, self.light_mode), hov_rim, self.hover);
+                let acr_b = vec4(ink, 0.06 + 0.07 * self.light_mode + 0.14 * self.hover);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -827,17 +857,19 @@ live_design! {
             instance down: 0.0
             uniform accent_col: #E86A2C
             uniform acrylic_on: 0.0
+            uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
-                let solid_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(0.095, 0.102, 0.140, 1.0), self.hover);
-                let acr_idle = mix(vec4(1.0, 1.0, 1.0, 0.024), vec4(1.0, 1.0, 1.0, 0.090), self.hover);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), mix(vec4(0.095, 0.102, 0.140, 1.0), vec4(0.05, 0.06, 0.10, 0.09), self.light_mode), self.hover);
+                let acr_idle = mix(vec4(ink, 0.028 + 0.032 * self.light_mode), vec4(ink, 0.095 + 0.03 * self.light_mode), self.hover);
                 let idle = mix(solid_idle, acr_idle, self.acrylic_on);
-                let act_solid = mix(#1A1928, vec4(self.accent_col.xyz, 0.24), 0.34);
-                let act_acr = vec4(mix(vec3(0.14, 0.14, 0.22), self.accent_col.xyz, 0.34), 0.36);
+                let act_solid = mix(mix(#1A1928, vec4(self.accent_col.xyz, 0.16), self.light_mode), vec4(self.accent_col.xyz, 0.24), 0.34);
+                let act_acr = vec4(mix(mix(vec3(0.14, 0.14, 0.22), vec3(0.05, 0.06, 0.10), self.light_mode), self.accent_col.xyz, 0.36), 0.26);
                 sdf.fill_keep(mix(idle, mix(act_solid, act_acr, self.acrylic_on), self.active));
-                let i_rim = vec4(1.0, 1.0, 1.0, (0.045 + 0.08 * self.hover) * self.acrylic_on);
-                let a_rim = vec4(self.accent_col.xyz, 0.62);
+                let i_rim = vec4(ink, (0.05 + 0.06 * self.light_mode + 0.08 * self.hover) * self.acrylic_on);
+                let a_rim = vec4(self.accent_col.xyz, 0.68);
                 sdf.stroke(mix(i_rim, a_rim, self.active), 1.0);
                 return sdf.result;
             }
@@ -1019,13 +1051,13 @@ live_design! {
                                     height: 17,
                                     fit: Smallest
                                 }
-                                <Label> {
+                                brand_title_lbl = <Label> {
                                     margin: { left: 3, right: 6 }
                                     padding: 0,
                                     draw_text: { color: #EEF0F8, text_style: <THEME_FONT_BOLD> { font_size: 9.8 } }
                                     text: "Ferric"
                                 }
-                                <SolidView> { width: 1, height: 13, margin: { left: 1, right: 4 }, draw_bg: { color: #242634 } }
+                                div_top_l = <SolidView> { width: 1, height: 13, margin: { left: 1, right: 4 }, draw_bg: { color: #242634 } }
                                 toggle_left_btn = <FerricIconBtn> {
                                     width: 26, height: 26,
                                     draw_icon: { svg_path: "M3 5H21V19H3V5ZM5 7V17H9V7H5ZM11 7V17H19V7H11Z" }
@@ -1061,14 +1093,16 @@ live_design! {
                                         instance hover: 0.0
                                         uniform acrylic_on: 0.0
                                         uniform accent_col: #E86A2C
+                                        uniform light_mode: 0.0
                                         fn pixel(self) -> vec4 {
                                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                                             let r = (self.rect_size.y - 1.0) * 0.30;
                                             sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                                            let solid_c = mix(#07080C, #12141F, self.hover);
-                                            let acr_c = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.13), self.hover);
+                                            let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                                            let solid_c = mix(mix(#07080C, #12141F, self.hover), mix(#E4DDD0, #DAD1C1, self.hover), self.light_mode);
+                                            let acr_c = mix(vec4(ink, 0.065 + 0.03 * self.light_mode), vec4(ink, 0.14), self.hover);
                                             sdf.fill_keep(mix(solid_c, acr_c, self.acrylic_on));
-                                            let b_col = mix(mix(#212433, #3A3F57, self.hover), vec4(1.0, 1.0, 1.0, 0.14 + 0.08 * self.hover), self.acrylic_on);
+                                            let b_col = mix(mix(mix(#212433, #3A3F57, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(ink, 0.15 + 0.06 * self.light_mode + 0.08 * self.hover), self.acrylic_on);
                                             sdf.stroke(b_col, 1.0);
                                             return sdf.result;
                                         }
@@ -1080,7 +1114,7 @@ live_design! {
                                             on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0 } } }
                                         }
                                     }
-                                    <Icon> {
+                                    top_search_icon = <Icon> {
                                         icon_walk: { width: 13, height: 13 }
                                         draw_icon: {
                                             curve: 1.15,
@@ -1166,14 +1200,14 @@ live_design! {
                                         color: #F4F4F7
                                     }
                                 }
-                                <SolidView> { width: 1, height: 14, margin: { left: 3, right: 3 }, draw_bg: { color: #242634 } }
+                                div_top_r = <SolidView> { width: 1, height: 14, margin: { left: 3, right: 3 }, draw_bg: { color: #242634 } }
                                 win_min_btn = <FerricWinBtn> { width: 30, height: 24, draw_bg: { kind: 0.0 } }
                                 win_max_btn = <FerricWinBtn> { width: 30, height: 24, draw_bg: { kind: 1.0 } }
                                 win_close_btn = <FerricWinBtn> { width: 32, height: 24, draw_bg: { kind: 2.0 } }
                             }
                         }
 
-                        <FerricDividerH> {}
+                        div_h_top = <FerricDividerH> {}
 
                         // 2. THREE-PANE WORKSPACE (Collapsible Left Nav + Center Stage + Docked Right Queue/Lyrics)
                         workspace_row = <View> {
@@ -1208,7 +1242,7 @@ live_design! {
                                     draw_icon: { svg_path: "M13 3C8.03 3 4 7.03 4 12H1L4.89 15.89L4.96 16.03L9 12H6C6 8.13 9.13 5 13 5C16.87 5 20 8.13 20 12C20 15.87 16.87 19 13 19C11.07 19 9.32 18.21 8.06 16.94L6.64 18.36C8.27 19.99 10.51 21 13 21C17.97 21 22 16.97 22 12C22 7.03 17.97 3 13 3ZM12 8V13L16.28 15.54L17 14.33L13.5 12.25V8H12Z" }
                                 }
 
-                                <Label> {
+                                lbl_m_library = <Label> {
                                     margin: { left: 9, top: 10, bottom: 2 }
                                     draw_text: { color: #8A8EA2, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
                                     text: "LIBRARY"
@@ -1230,7 +1264,7 @@ live_design! {
                                     draw_icon: { svg_path: "M4 6H18V8H4V6ZM4 11H18V13H4V11ZM4 16H14V18H4V16ZM16 16V22L21 19L16 16Z" }
                                 }
 
-                                <Label> {
+                                lbl_m_pinned = <Label> {
                                     margin: { left: 9, top: 10, bottom: 2 }
                                     draw_text: { color: #8A8EA2, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
                                     text: "PINNED"
@@ -1249,7 +1283,7 @@ live_design! {
                                     pin_slot_4 = <FerricPinBtn> { visible: false, text: "" }
                                 }
 
-                                <FerricDividerH> { margin: { top: 4, bottom: 4 } }
+                                div_h_side = <FerricDividerH> { margin: { top: 4, bottom: 4 } }
                                 nav_settings = <FerricNavItem> {
                                     text: "Settings"
                                     draw_icon: { svg_path: "M19.14 12.94C19.18 12.64 19.2 12.33 19.2 12C19.2 11.68 19.18 11.36 19.13 11.06L21.16 9.48C21.34 9.34 21.39 9.07 21.28 8.87L19.36 5.55C19.24 5.33 18.99 5.26 18.77 5.33L16.38 6.29C15.88 5.91 15.35 5.59 14.76 5.35L14.4 2.81C14.36 2.57 14.16 2.4 13.92 2.4H10.08C9.84 2.4 9.65 2.57 9.61 2.81L9.25 5.35C8.66 5.59 8.12 5.92 7.63 6.29L5.24 5.33C5.02 5.25 4.77 5.33 4.65 5.55L2.74 8.87C2.62 9.08 2.66 9.34 2.86 9.48L4.89 11.06C4.84 11.36 4.8 11.69 4.8 12C4.8 12.31 4.82 12.64 4.87 12.94L2.84 14.52C2.66 14.66 2.61 14.93 2.72 15.13L4.64 18.45C4.76 18.67 5.01 18.74 5.23 18.67L7.62 17.71C8.12 18.09 8.65 18.41 9.24 18.65L9.6 21.19C9.65 21.43 9.84 21.6 10.08 21.6H13.92C14.16 21.6 14.36 21.43 14.39 21.19L14.75 18.65C15.34 18.41 15.88 18.09 16.37 17.71L18.76 18.67C18.98 18.75 19.23 18.67 19.35 18.45L21.27 15.13C21.39 14.91 21.34 14.66 21.15 14.52L19.14 12.94ZM12 15.6C10.02 15.6 8.4 13.98 8.4 12C8.4 10.02 10.02 8.4 12 8.4C13.98 8.4 15.6 10.02 15.6 12C15.6 13.98 13.98 15.6 12 15.6Z" }
@@ -1308,7 +1342,7 @@ live_design! {
 
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                            <Label> {
+                                            lbl_t_quick_picks = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 12.5 } }
                                                 text: "Quick picks"
@@ -1483,7 +1517,7 @@ live_design! {
                                     // Recent searches row (unified frosted glass chips)
                                     recent_searches_row = <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 5,
-                                        <Label> { draw_text: { color: #848796, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }, text: "Recent:" }
+                                        lbl_m_recent = <Label> { draw_text: { color: #848796, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }, text: "Recent:" }
                                         rsrch_0 = <FerricChipBtn> { visible: false, height: 22, text: "" }
                                         rsrch_1 = <FerricChipBtn> { visible: false, height: 22, text: "" }
                                         rsrch_2 = <FerricChipBtn> { visible: false, height: 22, text: "" }
@@ -1495,7 +1529,7 @@ live_design! {
                                     search_cards_wrap = <View> {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 6,
-                                        <Label> { draw_text: { color: #D4D6E2, text_style: <THEME_FONT_BOLD> { font_size: 10.2 } }, text: "Top Results · Artists, Albums & Playlists" }
+                                        lbl_t_top_results = <Label> { draw_text: { color: #D4D6E2, text_style: <THEME_FONT_BOLD> { font_size: 10.2 } }, text: "Top Results · Artists, Albums & Playlists" }
                                         <View> {
                                             width: Fill, height: Fit, flow: Right, spacing: 8,
                                             sc_0 = <ShelfCard> {}
@@ -1524,13 +1558,13 @@ live_design! {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                         <View> {
                                             width: Fill, height: Fit, flow: Down, spacing: 2,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Recents" }
+                                            lbl_t_recents = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Recents" }
                                             recents_sub_lbl = <Label> { draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Your recently played songs" }
                                         }
                                         recents_play_btn = <FerricPrimaryBtn> { text: "Play All" }
                                         recents_clear_btn = <FerricBtn> { text: "Clear History" }
                                     }
-                                    <FerricDividerH> {}
+                                    div_h_recents = <FerricDividerH> {}
                                     recents_track_list = <TrackList> { width: Fill, height: Fill }
                                 }
 
@@ -1583,7 +1617,7 @@ live_design! {
                                         sort_cycle_btn = <FerricBtn> { height: 24, text: "Sort: Recent" }
                                     }
 
-                                    <FerricDividerH> {}
+                                    div_h_songs = <FerricDividerH> {}
                                     songs_track_list = <TrackList> { width: Fill, height: Fill }
                                 }
 
@@ -1602,7 +1636,7 @@ live_design! {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                         <View> {
                                             width: Fill, height: Fit, flow: Down, spacing: 2,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Albums" }
+                                            lbl_t_albums = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Albums" }
                                             albums_sub_lbl = <Label> { draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Grouped from your catalog" }
                                         }
                                         alb_prev_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
@@ -1657,7 +1691,7 @@ live_design! {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                         <View> {
                                             width: Fill, height: Fit, flow: Down, spacing: 2,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Artists" }
+                                            lbl_t_artists = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Artists" }
                                             artists_sub_lbl = <Label> { draw_text: { color: #8A8D9B, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Artists in your library" }
                                         }
                                         art_prev_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
@@ -1710,7 +1744,7 @@ live_design! {
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                        <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Playlists" }
+                                        lbl_t_playlists = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Playlists" }
                                         pl_new_input = <FerricInput> { width: 180, height: 28, empty_text: "New playlist name..." }
                                         pl_create_btn = <FerricPrimaryBtn> { height: 28, text: "+ Create" }
                                         pl_import_btn = <FerricBtn> { height: 28, text: "Import M3U/CSV" }
@@ -1802,7 +1836,7 @@ live_design! {
                                             }
                                         }
                                     }
-                                    <FerricDividerH> {}
+                                    div_h_detail = <FerricDividerH> {}
                                     detail_track_list = <TrackList> { width: Fill, height: Fill }
                                 }
 
@@ -1817,7 +1851,7 @@ live_design! {
                                     flow: Down,
                                     spacing: 12,
 
-                                    <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Settings" }
+                                    lbl_t_settings = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 15.5 } }, text: "Settings" }
 
                                     <View> {
                                         width: Fill, height: Fit, flow: Right, spacing: 5,
@@ -1839,10 +1873,10 @@ live_design! {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "YouTube Music & Google Account" }
+                                                lbl_t_acct_yt = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "YouTube Music & Google Account" }
                                                 yt_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Guest Mode (Optional)" }
                                             }
-                                            <Label> {
+                                            lbl_m_acct_desc = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
                                                 text: "Music works out of the box without any account. Sign in with your regular Google account in one click to sync personal Liked Songs and Playlists."
@@ -1863,7 +1897,7 @@ live_design! {
 
                                         card_acct_import = <FerricCard> {
                                             flow: Down, spacing: 8,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Instant Spotify & YouTube Playlist Import" }
+                                            lbl_t_acct_import = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Instant Spotify & YouTube Playlist Import" }
                                             quick_sync_input = <FerricInput> {
                                                 empty_text: "Paste public Spotify or YouTube playlist / album / track URL..."
                                             }
@@ -1878,7 +1912,7 @@ live_design! {
 
                                         card_acct_sub = <FerricCard> {
                                             flow: Down, spacing: 8,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "OpenSubsonic / Navidrome Self-Hosted Server" }
+                                            lbl_t_acct_sub = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "OpenSubsonic / Navidrome Self-Hosted Server" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 6,
                                                 sub_url_input = <FerricInput> { width: Fill, empty_text: "https://music.example.lan" }
@@ -1898,7 +1932,7 @@ live_design! {
                                             flow: Down, spacing: 9,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Seamless Dual-Deck Fade-In & Crossfade" }
+                                                lbl_t_pb_xfade = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Seamless Dual-Deck Fade-In & Crossfade" }
                                                 xfade_val_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.2 } }, text: "6.0 s" }
                                             }
                                             xfade_slider = <FerricBarSlider> { min: 0.0, max: 12.0, value: 6.0 }
@@ -1911,14 +1945,14 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Transition Curve:" }
+                                                lbl_m_pb_curve = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Transition Curve:" }
                                                 curve_bass_btn = <FerricBtn> { text: "Bass-Swap Automix" }
                                                 curve_eqp_btn = <FerricBtn> { text: "Equal-Power" }
                                                 curve_velvet_btn = <FerricBtn> { text: "S-Curve Velvet" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Soft Play / Resume Fade-In (ms)" }
+                                                lbl_t_pb_fadein = <Label> { width: Fill, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Soft Play / Resume Fade-In (ms)" }
                                                 fadein_val_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "240 ms" }
                                             }
                                             fadein_slider = <FerricBarSlider> { min: 0.0, max: 1000.0, value: 240.0 }
@@ -1926,10 +1960,10 @@ live_design! {
 
                                         card_pb_quality = <FerricCard> {
                                             flow: Down, spacing: 8,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Audio & In-App Video Clip Quality" }
+                                            lbl_t_pb_qual = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Audio & In-App Video Clip Quality" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                <Label> { width: 140, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Streaming Audio Quality" }
+                                                lbl_t_pb_aq = <Label> { width: 140, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Streaming Audio Quality" }
                                                 aq_low_btn = <FerricChipBtn> { height: 24, text: "Low 64k" }
                                                 aq_norm_btn = <FerricChipBtn> { height: 24, text: "Normal 128k" }
                                                 aq_high_btn = <FerricChipBtn> { height: 24, text: "High 160k" }
@@ -1937,7 +1971,7 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                <Label> { width: 140, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Default Video Quality" }
+                                                lbl_t_pb_vq = <Label> { width: 140, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Default Video Quality" }
                                                 svq_auto_btn = <FerricChipBtn> { height: 24, text: "Auto" }
                                                 svq_360_btn = <FerricChipBtn> { height: 24, text: "360p" }
                                                 svq_480_btn = <FerricChipBtn> { height: 24, text: "480p" }
@@ -1948,35 +1982,35 @@ live_design! {
 
                                         card_pb_behavior = <FerricCard> {
                                             flow: Down, spacing: 7,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Playback Behavior, Radio & System Tray" }
+                                            lbl_t_pb_beh = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Playback Behavior, Radio & System Tray" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Keep running in System Tray when clicking Close (X)" }
+                                                lbl_t_pb_tray = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Keep running in System Tray when clicking Close (X)" }
                                                 close_to_tray_toggle = <FerricToggle> { is_on: false }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Autoplay Infinite Radio (YouTube Music Next)" }
+                                                lbl_t_pb_radio = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Autoplay Infinite Radio (YouTube Music Next)" }
                                                 radio_toggle = <FerricToggle> { is_on: true }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "0ms Gapless Album Lock (Local consecutive albums only)" }
+                                                lbl_t_pb_gapless = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "0ms Gapless Album Lock (Local consecutive albums only)" }
                                                 gapless_lock_toggle = <FerricToggle> { is_on: false }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Skip Leading & Trailing Silence" }
+                                                lbl_t_pb_trim = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Skip Leading & Trailing Silence" }
                                                 trim_silence_toggle = <FerricToggle> { is_on: true }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "ReplayGain Loudness Normalization" }
+                                                lbl_t_pb_rg = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "ReplayGain Loudness Normalization" }
                                                 replay_gain_toggle = <FerricToggle> { is_on: true }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Mono Downmix" }
+                                                lbl_t_pb_mono = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Mono Downmix" }
                                                 mono_toggle = <FerricToggle> { is_on: false }
                                             }
                                         }
@@ -1985,7 +2019,7 @@ live_design! {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.2 } }, text: "Playback Speed" }
+                                                lbl_t_pb_speed = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.2 } }, text: "Playback Speed" }
                                                 spd_075_btn = <FerricBtn> { text: "0.75x" }
                                                 spd_100_btn = <FerricBtn> { text: "1.0x" }
                                                 spd_125_btn = <FerricBtn> { text: "1.25x" }
@@ -2012,7 +2046,7 @@ live_design! {
                                             flow: Down, spacing: 9,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "10-Band Parametric Biquad Equalizer" }
+                                                lbl_t_eq_title = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "10-Band Parametric Biquad Equalizer" }
                                                 eq_status_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Preset: Flat" }
                                                 eq_enable_toggle = <FerricToggle> { is_on: true }
                                             }
@@ -2020,7 +2054,7 @@ live_design! {
 
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                <Label> { width: 68, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Preamp" }
+                                                lbl_t_eq_preamp = <Label> { width: 68, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Preamp" }
                                                 eq_preamp_slider = <FerricBarSlider> { min: -12.0, max: 12.0, value: 0.0 }
                                                 eq_preamp_lbl = <Label> { width: 48, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "+0.0 dB" }
                                             }
@@ -2049,16 +2083,16 @@ live_design! {
                                             // 10 Vertical Faders
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { x: 0.5 }, spacing: 12,
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v0 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b0 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "31" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v1 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b1 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "62" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v2 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b2 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "125" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v3 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b3 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "250" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v4 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b4 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "500" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v5 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b5 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "1k" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v6 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b6 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "2k" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v7 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b7 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "4k" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v8 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b8 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "8k" } }
-                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v9 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b9 = <FerricVertSlider> { height: 112 }, <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "16k" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v0 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b0 = <FerricVertSlider> { height: 112 }, eq_f0 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "31" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v1 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b1 = <FerricVertSlider> { height: 112 }, eq_f1 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "62" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v2 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b2 = <FerricVertSlider> { height: 112 }, eq_f2 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "125" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v3 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b3 = <FerricVertSlider> { height: 112 }, eq_f3 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "250" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v4 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b4 = <FerricVertSlider> { height: 112 }, eq_f4 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "500" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v5 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b5 = <FerricVertSlider> { height: 112 }, eq_f5 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "1k" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v6 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b6 = <FerricVertSlider> { height: 112 }, eq_f6 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "2k" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v7 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b7 = <FerricVertSlider> { height: 112 }, eq_f7 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "4k" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v8 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b8 = <FerricVertSlider> { height: 112 }, eq_f8 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "8k" } }
+                                                <View> { width: Fit, height: Fit, flow: Down, align: { x: 0.5 }, spacing: 3, eq_v9 = <Label> { draw_text: { color: #C8CAD6, text_style: { font_size: 8.0 } }, text: "+0.0" }, eq_b9 = <FerricVertSlider> { height: 112 }, eq_f9 = <Label> { draw_text: { color: #7C8090, text_style: { font_size: 8.0 } }, text: "16k" } }
                                             }
 
                                             <View> {
@@ -2078,7 +2112,7 @@ live_design! {
 
                                         card_app_theme = <FerricCard> {
                                             flow: Down, spacing: 10,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Theme, Interface Zoom & Native Windows Acrylic" }
+                                            lbl_t_app_title = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Theme, Interface Zoom & Native Windows Acrylic" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 6,
                                                 pal_amoled_btn = <FerricBtn> { text: "AMOLED Black" }
@@ -2088,7 +2122,7 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Interface Zoom (Ctrl - / Ctrl + / Ctrl 0)" }
+                                                lbl_t_app_zoom = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Interface Zoom (Ctrl - / Ctrl + / Ctrl 0)" }
                                                 zoom_out_btn = <FerricBtn> { height: 24, padding: { left: 9, right: 9 }, text: "-" }
                                                 zoom_val_lbl = <Label> { width: 42, align: { x: 0.5, y: 0.5 }, draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.0 } }, text: "100%" }
                                                 zoom_in_btn = <FerricBtn> { height: 24, padding: { left: 9, right: 9 }, text: "+" }
@@ -2096,12 +2130,12 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Native Windows 11 Acrylic Transparency (Real OS DWM blur behind window)" }
+                                                lbl_t_app_acr = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Native Windows 11 Acrylic Transparency (Real OS DWM blur behind window)" }
                                                 acrylic_toggle = <FerricToggle> { is_on: false }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                <Label> { width: 140, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Opacity" }
+                                                lbl_m_app_opacity = <Label> { width: 140, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Opacity" }
                                                 acrylic_opacity_slider = <FerricBarSlider> { min: 0.18, max: 0.94, value: 0.72, wheel_adjust: true, wheel_step: 0.04 }
                                                 acrylic_opacity_lbl = <Label> { width: 42, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "72%" }
                                             }
@@ -2109,17 +2143,19 @@ live_design! {
                                                 width: Fill, height: Fit, flow: Down, spacing: 6,
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                    <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Glass Tint Color (Custom RGB)" }
+                                                    lbl_t_app_tint = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Glass Tint Color (Custom RGB)" }
                                                     acrylic_tint_preview = <View> {
                                                         width: 18, height: 18,
                                                         show_bg: true,
                                                         draw_bg: {
                                                             uniform tint_col: #0B0D14
+                                                            uniform light_mode: 0.0
                                                             fn pixel(self) -> vec4 {
                                                                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                                                                 sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.5 - 1.0);
                                                                 sdf.fill_keep(self.tint_col);
-                                                                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.35), 1.0);
+                                                                let ring = mix(vec4(1.0, 1.0, 1.0, 0.35), vec4(0.05, 0.06, 0.10, 0.45), self.light_mode);
+                                                                sdf.stroke(ring, 1.0);
                                                                 return sdf.result;
                                                             }
                                                         }
@@ -2149,13 +2185,13 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Adaptive Artwork Accent (Tint seekbar, lyrics & active indicator from cover art)" }
+                                                lbl_t_app_adaptive = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Adaptive Artwork Accent (Tint seekbar, lyrics & active indicator from cover art)" }
                                                 adaptive_art_toggle = <FerricToggle> { is_on: true }
                                             }
-                                            <FerricDividerH> {}
+                                            div_h_app = <FerricDividerH> {}
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Custom Theme Profiles" }
+                                                lbl_m_app_profiles = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Custom Theme Profiles" }
                                                 theme_import_btn = <FerricBtn> { height: 24, text: "Import Theme JSON" }
                                                 theme_export_btn = <FerricBtn> { height: 24, text: "Export Theme JSON" }
                                             }
@@ -2171,7 +2207,7 @@ live_design! {
                                             flow: Down, spacing: 10,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Discord Rich Presence" }
+                                                lbl_t_disc_title = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Discord Rich Presence" }
                                                 discord_status_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.6 } }, text: "Disabled" }
                                             }
 
@@ -2183,13 +2219,15 @@ live_design! {
                                                 show_bg: true,
                                                 draw_bg: {
                                                     uniform acrylic_on: 0.0
+                                                    uniform light_mode: 0.0
                                                     fn pixel(self) -> vec4 {
                                                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                                                         sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 9.0);
-                                                        let solid_bg = vec4(0.085, 0.088, 0.112, 1.0);
-                                                        let acr_bg = vec4(1.0, 1.0, 1.0, 0.052);
+                                                        let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                                                        let solid_bg = mix(vec4(0.085, 0.088, 0.112, 1.0), vec4(0.87, 0.84, 0.78, 1.0), self.light_mode);
+                                                        let acr_bg = vec4(ink, 0.052 + 0.04 * self.light_mode);
                                                         sdf.fill_keep(mix(solid_bg, acr_bg, self.acrylic_on));
-                                                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.095), 1.0);
+                                                        sdf.stroke(vec4(ink, 0.10 + 0.08 * self.light_mode), 1.0);
                                                         return sdf.result;
                                                     }
                                                 }
@@ -2224,40 +2262,40 @@ live_design! {
 
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_MEDIUM> { font_size: 9.2 } }, text: "Show on Discord (Listening activity via local IPC)" }
+                                                lbl_t_disc_en = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_MEDIUM> { font_size: 9.2 } }, text: "Show on Discord (Listening activity via local IPC)" }
                                                 discord_enable_toggle = <FerricToggle> { is_on: false }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Status name display" }
+                                                lbl_t_disc_fmt = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Status name display" }
                                                 discord_format_btn = <FerricBtn> { height: 26, text: "Artist - Title" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Show when paused" }
+                                                lbl_t_disc_paused = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Show when paused" }
                                                 discord_paused_toggle = <FerricToggle> { is_on: false }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Show album cover art" }
+                                                lbl_t_disc_cover = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Show album cover art" }
                                                 discord_cover_toggle = <FerricToggle> { is_on: true }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Hide track details (Privacy mode)" }
+                                                lbl_t_disc_hide = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Hide track details (Privacy mode)" }
                                                 discord_hide_details_toggle = <FerricToggle> { is_on: false }
                                             }
-                                            <FerricDividerH> {}
+                                            div_h_disc = <FerricDividerH> {}
                                             <View> {
                                                 width: Fill, height: Fit, flow: Down, spacing: 6,
-                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Discord Application ID" }
+                                                lbl_t_disc_id = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Discord Application ID" }
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                                     discord_client_id_input = <FerricInput> { width: Fill, height: 28, empty_text: "Paste 18-19 digit Discord Application ID (e.g. from Discord Developer Portal)..." }
                                                     discord_save_id_btn = <FerricPrimaryBtn> { height: 28, text: "Save ID" }
                                                     discord_portal_btn = <FerricBtn> { height: 28, text: "Create App ID" }
                                                 }
-                                                <Label> {
+                                                lbl_m_disc_hint = <Label> {
                                                     width: Fill,
                                                     draw_text: { color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
                                                     text: "Click 'Create App ID' -> New Application (name it 'Ferric') -> copy Application ID -> paste here & click Save ID."
@@ -2273,7 +2311,7 @@ live_design! {
 
                                         card_st_cache = <FerricCard> {
                                             flow: Down, spacing: 8,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Local Disk Cache" }
+                                            lbl_t_st_cache = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Local Disk Cache" }
                                             cache_stats_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Audio Stream Cache: 0 KB · Artwork Cache: 0 KB" }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 6,
@@ -2295,7 +2333,7 @@ live_design! {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Software Updates (Ferric v0.1.0)" }
+                                                lbl_t_st_update = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Software Updates (Ferric v0.1.0)" }
                                                 auto_update_toggle = <FerricToggle> { is_on: true }
                                             }
                                             update_status_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "SHA-256 verified GitHub Releases MSI updater" }
@@ -2308,8 +2346,8 @@ live_design! {
 
                                         card_st_keys = <FerricCard> {
                                             flow: Down, spacing: 5,
-                                            <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Keyboard Shortcuts" }
-                                            <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Space: Play / Pause  ·  Ctrl+K: Focus Search  ·  Ctrl+F: Search Page  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down / Mouse Wheel: Volume" }
+                                            lbl_t_st_keys = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Keyboard Shortcuts" }
+                                            lbl_m_st_keys = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Space: Play / Pause  ·  Ctrl+K: Focus Search  ·  Ctrl+F: Search Page  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down / Mouse Wheel: Volume" }
                                         }
                                     }
 
@@ -2322,7 +2360,7 @@ live_design! {
                                             connect_qr_view = <FerricQrView> { width: 136, height: 136 }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Down, spacing: 6,
-                                                <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Ferric Connect (Local LAN Pairing)" }
+                                                lbl_t_conn_title = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Ferric Connect (Local LAN Pairing)" }
                                                 connect_lan_ip_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "LAN: Ready" }
                                                 connect_peers_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Listening for Ferric devices on local Wi-Fi..." }
                                                 <View> {
@@ -2374,7 +2412,7 @@ live_design! {
                                     }
                                 }
 
-                                <FerricDividerH> {}
+                                div_h_rs = <FerricDividerH> {}
 
                                 // TAB 1: QUEUE (History -> Now Playing -> Up Next)
                                 rs_queue_view = <FerricScrollYView> {
@@ -2390,7 +2428,7 @@ live_design! {
                                         width: Fill,
                                         height: Fit,
                                         margin: { left: 4, top: 2, bottom: 1 }
-                                        <Label> {
+                                        lbl_m_history = <Label> {
                                             padding: 0,
                                             draw_text: { color: #8A8EA2, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
                                             text: "HISTORY"
@@ -2473,9 +2511,9 @@ live_design! {
                         // 3. CENTERED 2-ROW AMBIENT BOTTOM PLAYER BAR (74px, GEOMETRIC SYMMETRY)
                         // ============================================================
                         bottom_bar = <AmbientBottomBar> {
-                            // Left (304px): 44x44 Cover Art + Title/Artist + Heart + Add Playlist
+                            // Left: 44x44 Cover Art + Title/Artist + Heart + Add Playlist
                             bottom_left_grp = <View> {
-                                width: 304,
+                                width: 280,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
@@ -2596,9 +2634,9 @@ live_design! {
                                 }
                             }
 
-                            // Right (304px matching Left width for exact geometric centering & zero icon clip at 65%-140% zoom!)
+                            // Right (Fit width guarantees zero clipping of codec pill, volume, or fullscreen icon at ANY zoom 65%-140%!)
                             bottom_right_grp = <View> {
-                                width: 304,
+                                width: Fit,
                                 height: Fill,
                                 flow: Right,
                                 align: { x: 1.0, y: 0.5 }
@@ -2950,7 +2988,7 @@ live_design! {
                             spacing: 10,
                             <View> {
                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Ferric Powerbar" }
+                                lbl_t_powerbar = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Ferric Powerbar" }
                                 cmdk_close_btn = <FerricBtn> { height: 22, text: "Esc" }
                             }
                             cmdk_input = <FerricInput> {
@@ -2998,16 +3036,19 @@ live_design! {
                                 uniform surface_col: #0F1016
                                 uniform border_col: #252734
                                 uniform accent_col: #E86A2C
+                                uniform light_mode: 0.0
                                 fn pixel(self) -> vec4 {
                                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                                     sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
-                                    if self.acrylic_on > 0.5 {
-                                        let a = clamp(self.acrylic_opacity * 0.70 + 0.18, 0.44, 0.88);
-                                        let glass = clamp(self.acrylic_tint.xyz * 1.15 + vec3(0.055, 0.058, 0.068), 0.0, 1.0);
+                                    let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                                    if (self.acrylic_on > 0.5) {
+                                        let a = clamp(self.acrylic_opacity * 0.72 + 0.20, 0.48, 0.90);
+                                        let lift = mix(vec3(0.055, 0.058, 0.068), vec3(-0.04, -0.04, -0.04), self.light_mode);
+                                        let glass = clamp(self.acrylic_tint.xyz + lift, 0.0, 1.0);
                                         sdf.fill_keep(vec4(glass * a, a));
-                                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.16), 1.0);
+                                        sdf.stroke(vec4(ink, 0.18 + 0.08 * self.light_mode), 1.0);
                                     } else {
-                                        let solid_fill = vec4(clamp(self.surface_col.xyz * 1.15 + vec3(0.02, 0.02, 0.024), 0.0, 1.0), 0.96);
+                                        let solid_fill = vec4(clamp(mix(self.surface_col.xyz * 1.15 + vec3(0.02, 0.02, 0.024), self.surface_col.xyz, self.light_mode), 0.0, 1.0), 0.96);
                                         sdf.fill_keep(solid_fill);
                                         sdf.stroke(mix(self.border_col, vec4(self.accent_col.xyz, 0.45), 0.25), 1.0);
                                     }
@@ -3504,6 +3545,16 @@ impl App {
         self.ui.redraw(cx);
     }
 
+    fn adaptive_palette(&self) -> AdaptivePalette {
+        let raw = self.current_accent();
+        let active_rgb = (
+            (raw.x * 255.0).round().clamp(0.0, 255.0) as u8,
+            (raw.y * 255.0).round().clamp(0.0, 255.0) as u8,
+            (raw.z * 255.0).round().clamp(0.0, 255.0) as u8,
+        );
+        self.theme.adaptive_palette(active_rgb)
+    }
+
     fn style_chip_btn(&self, cx: &mut Cx, btn_id: &[LiveId], active: bool) {
         let a = if active { 1.0_f32 } else { 0.0_f32 };
         let acr = if self.theme.acrylic_enabled {
@@ -3511,11 +3562,14 @@ impl App {
         } else {
             0.0_f32
         };
+        let pal = self.adaptive_palette();
+        let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
+        let txt = rgba_to_vec4(pal.text_secondary);
         self.ui.button(btn_id).apply_over(
             cx,
             live! {
-                draw_bg: { active: (a), acrylic_on: (acr) }
-                draw_text: { active: (a) }
+                draw_bg: { active: (a), acrylic_on: (acr), light_mode: (lm) }
+                draw_text: { active: (a), color: (txt), light_mode: (lm) }
             },
         );
     }
@@ -3583,9 +3637,10 @@ impl App {
         self.right_w_cur = self.right_w_target;
 
         let bar_h = (74.0 * z).max(64.0);
-        let side_grp_w = (304.0 * z).max(248.0);
+        let left_grp_w = (280.0 * z).max(190.0);
         let btn_sz = (28.0 * z).max(22.0);
         let icon_h = (15.0 * z).max(12.0);
+        let bar_pad_x = (14.0 * z).max(8.0);
         self.ui
             .view(id!(top_bar))
             .apply_over(cx, live! { height: ((36.0 * z).max(30.0)) });
@@ -3599,25 +3654,33 @@ impl App {
                 .view(id!(right_sidebar))
                 .apply_over(cx, live! { width: ((260.0 * z).max(210.0)) });
         }
-        self.ui
-            .view(id!(bottom_bar))
-            .apply_over(cx, live! { height: (bar_h) });
+        self.ui.view(id!(bottom_bar)).apply_over(
+            cx,
+            live! {
+                height: (bar_h),
+                padding: { left: (bar_pad_x), right: (bar_pad_x), top: 6.0, bottom: 6.0 },
+                spacing: ((10.0 * z).max(6.0))
+            },
+        );
         self.ui.view(id!(toast_wrap)).apply_over(
             cx,
             live! { padding: { right: 16.0, bottom: (bar_h + 12.0) } },
         );
         self.ui
             .view(id!(bottom_left_grp))
-            .apply_over(cx, live! { width: (side_grp_w) });
+            .apply_over(cx, live! { width: (left_grp_w) });
         self.ui
-            .view(id!(bottom_right_grp))
-            .apply_over(cx, live! { width: (side_grp_w) });
+            .label(id!(pos_lbl))
+            .apply_over(cx, live! { width: ((38.0 * z).max(30.0)) });
+        self.ui
+            .button(id!(dur_btn))
+            .apply_over(cx, live! { width: ((40.0 * z).max(32.0)) });
         self.ui.button(id!(codec_pill_btn)).apply_over(
             cx,
             live! {
                 height: ((22.0 * z).max(18.0)),
-                padding: { left: ((7.0 * z).max(5.0)), right: ((7.0 * z).max(5.0)) },
-                draw_text: { text_style: { font_size: ((7.8 * z).max(6.8)) } }
+                padding: { left: ((7.0 * z).max(4.5)), right: ((7.0 * z).max(4.5)) },
+                draw_text: { text_style: { font_size: ((7.8 * z).max(6.6)) } }
             },
         );
         for b_id in [
@@ -3642,7 +3705,7 @@ impl App {
         }
         self.ui
             .ferric_bar_slider(id!(vol_slider))
-            .apply_over(cx, live! { width: ((62.0 * z).max(44.0)) });
+            .apply_over(cx, live! { width: ((62.0 * z).max(46.0)) });
         let art_sz = (44.0 * z).max(34.0);
         let play_sz = (34.0 * z).max(28.0);
         self.ui
@@ -3879,13 +3942,18 @@ impl App {
             );
         }
 
-        let accent = self.current_accent();
-        self.ui
-            .ferric_lyrics_view(id!(rs_lyrics_scroll))
-            .set_style(cx, accent, z as f32);
+        let raw_accent = self.current_accent();
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
+        self.ui.ferric_lyrics_view(id!(rs_lyrics_scroll)).set_style(
+            cx,
+            accent,
+            z as f32,
+            pal.is_light,
+        );
         self.ui
             .ferric_lyrics_view(id!(fs_lyrics_scroll))
-            .set_style(cx, accent, z as f32);
+            .set_style(cx, raw_accent, z as f32, false);
 
         self.ui.redraw(cx);
     }
@@ -4380,14 +4448,22 @@ impl App {
             self.ui.view(vid).set_visible(cx, p == target);
         }
 
-        let bright = vec4(0.957, 0.957, 0.969, 1.0);
-        let muted = vec4(0.635, 0.647, 0.706, 1.0);
-        let icon_muted = vec4(0.533, 0.545, 0.600, 1.0);
+        let pal = self.adaptive_palette();
+        let bright = rgba_to_vec4(pal.text_primary);
+        let muted = rgba_to_vec4(pal.text_secondary);
+        let icon_muted = rgba_to_vec4(pal.icon_idle);
+        let icon_hov = rgba_to_vec4(pal.icon_hover);
+        let disabled_col = if pal.is_light {
+            vec4(0.06, 0.08, 0.12, 0.34)
+        } else {
+            vec4(0.32, 0.34, 0.40, 1.0)
+        };
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
         } else {
             0.0_f32
         };
+        let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
         let nav_map = [
             (MainPage::Home, id!(nav_home)),
             (MainPage::Search, id!(nav_search)),
@@ -4403,9 +4479,9 @@ impl App {
             self.ui.button(btn_id).apply_over(
                 cx,
                 live! {
-                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr) }
-                    draw_icon: { color: (if active { bright } else { icon_muted }) }
-                    draw_text: { color: (if active { bright } else { muted }) }
+                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), light_mode: (lm) }
+                    draw_icon: { color: (if active { bright } else { icon_muted }), color_hover: (icon_hov), color_focus: (icon_hov), color_down: (icon_hov) }
+                    draw_text: { color: (if active { bright } else { muted }), color_hover: (icon_hov), color_focus: (icon_hov), color_down: (icon_hov) }
                 },
             );
         }
@@ -4417,11 +4493,11 @@ impl App {
             .is_some_and(NavHistory::can_forward);
         self.ui.button(id!(nav_back_btn)).apply_over(
             cx,
-            live! { draw_icon: { color: (if can_b { bright } else { vec4(0.32, 0.34, 0.40, 1.0) }) } },
+            live! { draw_icon: { color: (if can_b { bright } else { disabled_col }) } },
         );
         self.ui.button(id!(nav_fwd_btn)).apply_over(
             cx,
-            live! { draw_icon: { color: (if can_f { bright } else { vec4(0.32, 0.34, 0.40, 1.0) }) } },
+            live! { draw_icon: { color: (if can_f { bright } else { disabled_col }) } },
         );
 
         match target {
@@ -4514,13 +4590,15 @@ impl App {
         self.style_chip_btn(cx, id!(rs_tab_queue), !lyrics_tab);
         self.style_chip_btn(cx, id!(rs_tab_lyrics), lyrics_tab);
 
-        let accent = self.current_accent();
-        let muted = vec4(0.604, 0.612, 0.659, 1.0);
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
+        let muted = rgba_to_vec4(pal.icon_idle);
+        let bright = rgba_to_vec4(pal.text_primary);
         self.ui.button(id!(toggle_right_btn)).apply_over(
             cx,
             live! {
                 draw_bg: { active: (if open { 1.0 } else { 0.0 }) }
-                draw_icon: { color: (if open { vec4(0.96, 0.96, 0.97, 1.0) } else { muted }) }
+                draw_icon: { color: (if open { bright } else { muted }) }
             },
         );
         self.ui.button(id!(bar_lyrics_btn)).apply_over(
@@ -4707,8 +4785,11 @@ impl App {
     }
 
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
-        let accent = self.current_accent();
-        let brand_accent = rgba_vec4(&self.theme.accent_hex);
+        let raw_accent = self.current_accent();
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
+        let brand_accent = rgba_to_vec4(pal.brand_accent);
+        let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
         let acrylic_tint = rgba_vec4(&self.theme.acrylic_tint_hex);
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
@@ -4740,15 +4821,17 @@ impl App {
                     acrylic_on: (acr),
                     acrylic_opacity: (op),
                     acrylic_tint: (acrylic_tint),
+                    light_mode: (lm),
                     glow_amt: (if self.queue.current().is_some() { 0.36 } else { 0.14 })
                 }
             },
         );
+        // Fullscreen overlay always sits over its own dark velvet aurora backdrop -> keep vivid raw cover accent
         self.ui.ferric_ambient_stage(id!(fs_backdrop)).set_state(
             cx,
             self.fullscreen_open,
             is_playing,
-            accent,
+            raw_accent,
             acr,
         );
         self.ui
@@ -4756,16 +4839,16 @@ impl App {
             .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
         self.ui
             .ferric_bar_slider(id!(fs_seek_slider))
-            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+            .apply_over(cx, live! { draw_bg: { fill_col: (raw_accent) } });
         self.ui
             .ferric_bar_slider(id!(vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
         self.ui
             .ferric_bar_slider(id!(fs_vol_slider))
-            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+            .apply_over(cx, live! { draw_bg: { fill_col: (raw_accent) } });
         self.ui.view(id!(top_search_box)).apply_over(
             cx,
-            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent) } },
+            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
         );
         for nid in [
             id!(nav_home),
@@ -4777,9 +4860,10 @@ impl App {
             id!(nav_playlists),
             id!(nav_settings),
         ] {
-            self.ui
-                .button(nid)
-                .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+            self.ui.button(nid).apply_over(
+                cx,
+                live! { draw_bg: { accent_col: (accent), light_mode: (lm) } },
+            );
         }
         for qid in [
             id!(qp_0),
@@ -4791,57 +4875,82 @@ impl App {
             id!(qp_6),
             id!(qp_7),
         ] {
-            self.ui
-                .view(qid)
-                .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+            self.ui.view(qid).apply_over(
+                cx,
+                live! { draw_bg: { accent_col: (accent), light_mode: (lm) } },
+            );
         }
-        let muted = vec4(0.604, 0.612, 0.659, 1.0);
+        let muted = rgba_to_vec4(pal.icon_idle);
+        let icon_muted = rgba_to_vec4(pal.icon_muted);
+        let fs_muted = vec4(0.604, 0.612, 0.659, 1.0);
         let is_liked = self.queue.current().is_some_and(|cur| {
             self.all_tracks
                 .iter()
                 .find(|t| t.id == cur.id)
                 .map_or(cur.liked, |t| t.liked)
         });
-        let like_col = if is_liked {
-            accent
+        let like_col = if is_liked { accent } else { icon_muted };
+        let fs_like_col = if is_liked {
+            raw_accent
         } else {
             vec4(0.439, 0.451, 0.510, 1.0)
         };
-        for lbtn in [id!(np_like_btn), id!(fs_like_btn)] {
-            self.ui
-                .button(lbtn)
-                .apply_over(cx, live! { draw_icon: { color: (like_col) } });
-        }
-        for sbtn in [id!(shuffle_btn), id!(fs_shuffle_btn)] {
-            self.ui.button(sbtn).apply_over(
-                cx,
-                live! { draw_icon: { color: (if self.queue.shuffle { accent } else { muted }) } },
-            );
-        }
+        self.ui
+            .button(id!(np_like_btn))
+            .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+        self.ui
+            .button(id!(fs_like_btn))
+            .apply_over(cx, live! { draw_icon: { color: (fs_like_col) } });
+        self.ui.button(id!(shuffle_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if self.queue.shuffle { accent } else { muted }) } },
+        );
+        self.ui.button(id!(fs_shuffle_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if self.queue.shuffle { raw_accent } else { fs_muted }) } },
+        );
         let rep_col = match self.queue.repeat {
             RepeatMode::Off => muted,
             RepeatMode::All => accent,
+            RepeatMode::One => {
+                if pal.is_light {
+                    vec4(0.62, 0.42, 0.04, 1.0)
+                } else {
+                    vec4(0.95, 0.78, 0.36, 1.0)
+                }
+            }
+        };
+        let fs_rep_col = match self.queue.repeat {
+            RepeatMode::Off => fs_muted,
+            RepeatMode::All => raw_accent,
             RepeatMode::One => vec4(0.95, 0.78, 0.36, 1.0),
         };
-        for rbtn in [id!(repeat_btn), id!(fs_repeat_btn)] {
-            self.ui
-                .button(rbtn)
-                .apply_over(cx, live! { draw_icon: { color: (rep_col) } });
-        }
+        self.ui
+            .button(id!(repeat_btn))
+            .apply_over(cx, live! { draw_icon: { color: (rep_col) } });
+        self.ui
+            .button(id!(fs_repeat_btn))
+            .apply_over(cx, live! { draw_icon: { color: (fs_rep_col) } });
         let mute_col = if self.session_state.volume < 0.01 {
             accent
         } else {
             muted
         };
-        for mbtn in [id!(vol_mute_btn), id!(fs_vol_mute_btn)] {
-            self.ui
-                .button(mbtn)
-                .apply_over(cx, live! { draw_icon: { color: (mute_col) } });
-        }
+        let fs_mute_col = if self.session_state.volume < 0.01 {
+            raw_accent
+        } else {
+            fs_muted
+        };
+        self.ui
+            .button(id!(vol_mute_btn))
+            .apply_over(cx, live! { draw_icon: { color: (mute_col) } });
+        self.ui
+            .button(id!(fs_vol_mute_btn))
+            .apply_over(cx, live! { draw_icon: { color: (fs_mute_col) } });
         self.ui.button(id!(rs_radio_btn)).apply_over(
             cx,
             live! {
-                draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { vec4(0.55, 0.56, 0.62, 1.0) }) }
+                draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { icon_muted }) }
             },
         );
         self.ui.button(id!(bar_lyrics_btn)).apply_over(
@@ -4856,11 +4965,10 @@ impl App {
                 draw_icon: { color: (if self.right_sidebar_open && !self.right_lyrics_tab { accent } else { muted }) }
             },
         );
-        if self.video_open {
-            self.ui
-                .button(id!(bar_video_btn))
-                .apply_over(cx, live! { draw_icon: { color: (accent) } });
-        }
+        self.ui.button(id!(bar_video_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if self.video_open { accent } else { muted }) } },
+        );
         let surface = rgba_vec4(&self.theme.surface_hex);
         let border = rgba_vec4(&self.theme.border_hex);
         self.ui.view(id!(toast_pill)).apply_over(
@@ -4872,7 +4980,8 @@ impl App {
                     acrylic_tint: (acrylic_tint),
                     surface_col: (surface),
                     border_col: (border),
-                    accent_col: (accent)
+                    accent_col: (accent),
+                    light_mode: (lm)
                 }
             },
         );
@@ -4930,24 +5039,24 @@ impl App {
         }
         self.ui.view(id!(q_now_row)).apply_over(
             cx,
-            live! { draw_bg: { accent_col: (accent), acrylic_on: (acr) } },
+            live! { draw_bg: { accent_col: (accent), acrylic_on: (acr), light_mode: (lm) } },
         );
         self.ui
             .label(id!(q_now_header))
             .apply_over(cx, live! { draw_text: { color: (accent) } });
         self.ui.view(id!(np_canvas)).apply_over(
             cx,
-            live! { draw_bg: { accent: (accent), acrylic_on: (acr) } },
+            live! { draw_bg: { accent: (raw_accent), acrylic_on: (acr) } },
         );
         self.ui
             .ferric_eq_graph(id!(eq_graph))
             .apply_over(cx, live! { draw_bg: { accent: (brand_accent) } });
         self.ui
             .ferric_lyrics_view(id!(rs_lyrics_scroll))
-            .set_style(cx, accent, z);
+            .set_style(cx, accent, z, pal.is_light);
         self.ui
             .ferric_lyrics_view(id!(fs_lyrics_scroll))
-            .set_style(cx, accent, z);
+            .set_style(cx, raw_accent, z, false);
         self.ui.redraw(cx);
     }
 
@@ -6443,10 +6552,22 @@ impl App {
             self.theme.acrylic_tint_rgb(),
         );
 
+        let pal = self.adaptive_palette();
+        let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
+        let text_primary = rgba_to_vec4(pal.text_primary);
+        let text_secondary = rgba_to_vec4(pal.text_secondary);
+        let text_muted = rgba_to_vec4(pal.text_muted);
+        let icon_idle = rgba_to_vec4(pal.icon_idle);
+        let icon_hover = rgba_to_vec4(pal.icon_hover);
+        let icon_muted = rgba_to_vec4(pal.icon_muted);
+        let divider_col = rgba_to_vec4(pal.divider);
+        let accent = rgba_to_vec4(pal.accent);
+        let brand_accent = rgba_to_vec4(pal.brand_accent);
+        let danger_col = rgba_to_vec4(pal.danger_text);
+
         let canvas = rgba_vec4(&self.theme.canvas_hex);
         let surface = rgba_vec4(&self.theme.surface_hex);
         let border = rgba_vec4(&self.theme.border_hex);
-        let accent = self.current_accent();
         let acrylic_tint = rgba_vec4(&self.theme.acrylic_tint_hex);
 
         let op = self.theme.acrylic_opacity.clamp(0.18, 0.94);
@@ -6484,7 +6605,7 @@ impl App {
             );
         }
 
-        // Propagate clean Native Acrylic / AMOLED surface states to all cards, shelves, grids & queue rows
+        // Propagate clean Native Acrylic / AMOLED / Light surface polarity to all cards
         for card_id in [
             id!(card_acct_yt),
             id!(card_acct_import),
@@ -6500,8 +6621,34 @@ impl App {
             id!(card_st_update),
             id!(card_st_keys),
             id!(card_conn_main),
-            id!(card_cmdk),
-            id!(card_update_popup),
+        ] {
+            self.ui.view(card_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        acrylic_on: (acr),
+                        accent_col: (accent),
+                        light_mode: (lm)
+                    }
+                },
+            );
+        }
+        // Modal cards sit over a dark scrim, so keep them opaque solid matching dark/light polarity
+        for modal_card_id in [id!(card_cmdk), id!(card_update_popup)] {
+            self.ui.view(modal_card_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        acrylic_on: 0.0,
+                        accent_col: (accent),
+                        light_mode: (lm)
+                    }
+                },
+            );
+        }
+
+        // Propagate surface polarity + adaptive title/sub text to all tiles, shelf cards & grid cards
+        for card_id in [
             id!(qp_0),
             id!(qp_1),
             id!(qp_2),
@@ -6615,6 +6762,25 @@ impl App {
             id!(plc_17),
             id!(plc_18),
             id!(plc_19),
+        ] {
+            let v = self.ui.view(card_id);
+            v.apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        acrylic_on: (acr),
+                        accent_col: (accent),
+                        light_mode: (lm)
+                    }
+                },
+            );
+            v.label(id!(title))
+                .apply_over(cx, live! { draw_text: { color: (text_primary) } });
+            v.label(id!(sub))
+                .apply_over(cx, live! { draw_text: { color: (text_secondary) } });
+        }
+
+        for qrow_id in [
             id!(qh_0),
             id!(qh_1),
             id!(qh_2),
@@ -6630,15 +6796,29 @@ impl App {
             id!(qu_8),
             id!(qu_9),
         ] {
-            self.ui.view(card_id).apply_over(
+            let v = self.ui.view(qrow_id);
+            v.apply_over(
                 cx,
                 live! {
                     draw_bg: {
                         acrylic_on: (acr),
-                        accent_col: (accent)
+                        accent_col: (accent),
+                        light_mode: (lm)
                     }
                 },
             );
+            v.label(id!(title))
+                .apply_over(cx, live! { draw_text: { color: (text_primary) } });
+            v.label(id!(sub))
+                .apply_over(cx, live! { draw_text: { color: (text_secondary) } });
+            v.label(id!(dur))
+                .apply_over(cx, live! { draw_text: { color: (text_muted) } });
+            v.button(id!(up_btn)).apply_over(
+                cx,
+                live! { draw_icon: { color: (icon_muted), color_hover: (icon_hover) } },
+            );
+            v.button(id!(rm_btn))
+                .apply_over(cx, live! { draw_icon: { color: (icon_muted) } });
         }
 
         self.ui.view(id!(toast_pill)).apply_over(
@@ -6650,29 +6830,61 @@ impl App {
                     acrylic_tint: (acrylic_tint),
                     surface_col: (surface),
                     border_col: (border),
-                    accent_col: (accent)
+                    accent_col: (accent),
+                    light_mode: (lm)
                 }
             },
         );
-        let toast_txt_col = rgba_vec4(&self.theme.text_primary_hex);
         self.ui
             .label(id!(toast_lbl))
-            .apply_over(cx, live! { draw_text: { color: (toast_txt_col) } });
+            .apply_over(cx, live! { draw_text: { color: (text_primary) } });
+        self.ui.view(id!(discord_preview_box)).apply_over(
+            cx,
+            live! { draw_bg: { acrylic_on: (acr), light_mode: (lm) } },
+        );
         self.ui
-            .view(id!(discord_preview_box))
-            .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
+            .view(id!(acrylic_tint_preview))
+            .apply_over(cx, live! { draw_bg: { light_mode: (lm) } });
         self.ui.view(id!(top_search_box)).apply_over(
             cx,
-            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent) } },
+            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
+        );
+        self.ui
+            .widget(id!(top_search_icon))
+            .apply_over(cx, live! { draw_icon: { color: (icon_muted) } });
+        self.ui.text_input(id!(top_search_input)).apply_over(
+            cx,
+            live! {
+                draw_text: { color: (text_primary), color_empty: (text_muted) }
+                draw_cursor: { color: (brand_accent) }
+            },
         );
 
         let (inp_bg, inp_hov, inp_foc, inp_b, inp_bh) = if self.theme.acrylic_enabled {
+            if pal.is_light {
+                (
+                    vec4(0.05, 0.06, 0.10, 0.085),
+                    vec4(0.05, 0.06, 0.10, 0.13),
+                    vec4(0.05, 0.06, 0.10, 0.16),
+                    vec4(0.05, 0.06, 0.10, 0.20),
+                    vec4(0.05, 0.06, 0.10, 0.34),
+                )
+            } else {
+                (
+                    vec4(1.0, 1.0, 1.0, 0.055),
+                    vec4(1.0, 1.0, 1.0, 0.095),
+                    vec4(1.0, 1.0, 1.0, 0.115),
+                    vec4(1.0, 1.0, 1.0, 0.095),
+                    vec4(1.0, 1.0, 1.0, 0.19),
+                )
+            }
+        } else if pal.is_light {
             (
-                vec4(1.0, 1.0, 1.0, 0.055),
-                vec4(1.0, 1.0, 1.0, 0.095),
-                vec4(1.0, 1.0, 1.0, 0.115),
-                vec4(1.0, 1.0, 1.0, 0.095),
-                vec4(1.0, 1.0, 1.0, 0.19),
+                rgba_vec4("#E6DFD1"),
+                rgba_vec4("#DDD5C5"),
+                rgba_vec4("#D7CEBC"),
+                rgba_vec4("#C5BBA5"),
+                rgba_vec4("#9E9480"),
             )
         } else {
             (
@@ -6715,6 +6927,37 @@ impl App {
                         border_color_1_focus: (accent),
                         border_color_2_focus: (accent)
                     }
+                    draw_text: { color: (text_primary), color_empty: (text_muted) }
+                    draw_cursor: { color: (brand_accent) }
+                },
+            );
+        }
+
+        // Primary CTA buttons invert smoothly on light surfaces (#12151E bg + #FFFFFF text)
+        let prim_fg = if pal.is_light {
+            vec4(1.0, 1.0, 1.0, 1.0)
+        } else {
+            vec4(0.035, 0.035, 0.051, 1.0)
+        };
+        for pbtn_id in [
+            id!(update_badge_btn),
+            id!(search_go_btn),
+            id!(recents_play_btn),
+            id!(play_all_btn),
+            id!(pl_create_btn),
+            id!(detail_play_btn),
+            id!(yt_login_btn),
+            id!(discord_save_id_btn),
+            id!(update_now_btn),
+            id!(tm_play_btn),
+            id!(tm_new_pl_btn),
+        ] {
+            self.ui.button(pbtn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { light_mode: (lm) }
+                    draw_text: { color: (prim_fg), color_hover: (prim_fg), color_focus: (prim_fg), color_down: (prim_fg) }
+                    draw_icon: { color: (prim_fg), color_hover: (prim_fg), color_focus: (prim_fg), color_down: (prim_fg) }
                 },
             );
         }
@@ -6729,7 +6972,6 @@ impl App {
             id!(recents_clear_btn),
             id!(hero_shuffle_btn),
             id!(add_folder_btn),
-            id!(songs_clear_demo_btn),
             id!(sort_cycle_btn),
             id!(pl_import_btn),
             id!(detail_shuffle_btn),
@@ -6737,7 +6979,6 @@ impl App {
             id!(detail_pin_btn),
             id!(detail_queue_btn),
             id!(detail_export_btn),
-            id!(detail_delete_btn),
             id!(detail_rename_btn),
             id!(yt_sync_btn),
             id!(yt_logout_btn),
@@ -6794,8 +7035,6 @@ impl App {
             id!(clear_audio_cache_btn),
             id!(clear_art_cache_btn),
             id!(load_demo_btn),
-            id!(remove_demo_btn),
-            id!(clear_local_btn),
             id!(check_updates_btn),
             id!(open_releases_btn),
             id!(connect_gen_pair_btn),
@@ -6806,10 +7045,18 @@ impl App {
             id!(rs_lyr_copy),
             id!(rs_watch_video),
             id!(codec_pill_btn),
-            id!(fs_radio_btn),
-            id!(fs_lyr_minus),
-            id!(fs_lyr_plus),
-            id!(fs_lyr_copy),
+            id!(cmdk_close_btn),
+            id!(cmdk_home_btn),
+            id!(cmdk_search_btn),
+            id!(cmdk_songs_btn),
+            id!(cmdk_albums_btn),
+            id!(cmdk_artists_btn),
+            id!(cmdk_playlists_btn),
+            id!(cmdk_eq_btn),
+            id!(cmdk_fade_btn),
+            id!(cmdk_google_btn),
+            id!(cmdk_fs_btn),
+            id!(cmdk_demo_btn),
             id!(tm_close_btn),
             id!(tm_play_next_btn),
             id!(tm_add_queue_btn),
@@ -6818,24 +7065,65 @@ impl App {
             id!(tm_artist_btn),
             id!(tm_album_btn),
             id!(tm_copy_btn),
-            id!(tm_remove_btn),
         ] {
             self.ui.button(btn_id).apply_over(
                 cx,
-                live! { draw_bg: { acrylic_on: (acr), accent_col: (accent) } },
+                live! {
+                    draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                    draw_text: { color: (text_primary), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
+                },
+            );
+        }
+        self.ui
+            .button(id!(top_account_btn))
+            .apply_over(cx, live! { draw_icon: { color: (brand_accent) } });
+        for danger_btn_id in [
+            id!(songs_clear_demo_btn),
+            id!(detail_delete_btn),
+            id!(remove_demo_btn),
+            id!(clear_local_btn),
+            id!(tm_remove_btn),
+        ] {
+            self.ui.button(danger_btn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                    draw_text: { color: (danger_col), color_hover: (danger_col), color_focus: (danger_col) }
+                },
             );
         }
 
-        for chip_or_nav_id in [
-            id!(nav_home),
-            id!(nav_search),
-            id!(nav_recents),
-            id!(nav_songs),
-            id!(nav_albums),
-            id!(nav_artists),
-            id!(nav_playlists),
-            id!(nav_settings),
-            id!(sidebar_add_folder_btn),
+        // Sidebar navigation items (preserve active highlight + adapt ink)
+        let nav_map = [
+            (MainPage::Home, id!(nav_home)),
+            (MainPage::Search, id!(nav_search)),
+            (MainPage::Recents, id!(nav_recents)),
+            (MainPage::Songs, id!(nav_songs)),
+            (MainPage::Albums, id!(nav_albums)),
+            (MainPage::Artists, id!(nav_artists)),
+            (MainPage::Playlists, id!(nav_playlists)),
+            (MainPage::Settings, id!(nav_settings)),
+        ];
+        for (p, nid) in nav_map {
+            let active = p == self.active_page;
+            self.ui.button(nid).apply_over(
+                cx,
+                live! {
+                    draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                    draw_icon: { color: (if active { text_primary } else { icon_idle }), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
+                    draw_text: { color: (if active { text_primary } else { text_secondary }), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
+                },
+            );
+        }
+        self.ui.button(id!(sidebar_add_folder_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                draw_icon: { color: (icon_idle), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
+                draw_text: { color: (text_secondary), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
+            },
+        );
+        for pin_id in [
             id!(pin_liked_btn),
             id!(pin_local_btn),
             id!(pin_slot_0),
@@ -6843,13 +7131,20 @@ impl App {
             id!(pin_slot_2),
             id!(pin_slot_3),
             id!(pin_slot_4),
+        ] {
+            self.ui.button(pin_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { acrylic_on: (acr), light_mode: (lm) }
+                    draw_text: { color: (text_secondary), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
+                },
+            );
+        }
+
+        // All Chip buttons (moods, filters, tabs, tint presets, quality, queue/lyrics tabs)
+        for chip_id in [
             id!(chip_0),
             id!(chip_1),
-            id!(rsrch_0),
-            id!(rsrch_1),
-            id!(rsrch_2),
-            id!(rsrch_3),
-            id!(rsrch_4),
             id!(chip_2),
             id!(chip_3),
             id!(chip_4),
@@ -6857,6 +7152,11 @@ impl App {
             id!(chip_6),
             id!(chip_7),
             id!(chip_8),
+            id!(rsrch_0),
+            id!(rsrch_1),
+            id!(rsrch_2),
+            id!(rsrch_3),
+            id!(rsrch_4),
             id!(sf_all_btn),
             id!(sf_songs_btn),
             id!(sf_albums_btn),
@@ -6885,22 +7185,33 @@ impl App {
             id!(tint_smoke_btn),
             id!(rs_tab_queue),
             id!(rs_tab_lyrics),
-            id!(fs_mode_art_btn),
-            id!(fs_mode_video_btn),
             id!(aq_low_btn),
             id!(aq_norm_btn),
             id!(aq_high_btn),
             id!(aq_best_btn),
-            id!(vq_auto_btn),
-            id!(vq_360_btn),
-            id!(vq_480_btn),
-            id!(vq_720_btn),
-            id!(vq_1080_btn),
             id!(svq_auto_btn),
             id!(svq_360_btn),
             id!(svq_480_btn),
             id!(svq_720_btn),
             id!(svq_1080_btn),
+            id!(tm_pl_0),
+            id!(tm_pl_1),
+            id!(tm_pl_2),
+            id!(tm_pl_3),
+            id!(tm_pl_4),
+            id!(tm_pl_5),
+        ] {
+            self.ui.button(chip_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { acrylic_on: (acr), light_mode: (lm) }
+                    draw_text: { color: (text_secondary), light_mode: (lm) }
+                },
+            );
+        }
+
+        // All shell Icon buttons (top bar, shelf arrows, pagination, right sidebar, bottom bar)
+        for icon_btn_id in [
             id!(toggle_left_btn),
             id!(nav_back_btn),
             id!(nav_fwd_btn),
@@ -6908,30 +7219,339 @@ impl App {
             id!(top_settings_btn),
             id!(toggle_right_btn),
             id!(top_search_clear_btn),
+            id!(qp_prev_btn),
+            id!(qp_next_btn),
+            id!(sh0_prev_btn),
+            id!(sh0_next_btn),
+            id!(sh1_prev_btn),
+            id!(sh1_next_btn),
+            id!(sh2_prev_btn),
+            id!(sh2_next_btn),
+            id!(sh3_prev_btn),
+            id!(sh3_next_btn),
+            id!(sh4_prev_btn),
+            id!(sh4_next_btn),
+            id!(sh5_prev_btn),
+            id!(sh5_next_btn),
+            id!(sh6_prev_btn),
+            id!(sh6_next_btn),
+            id!(sh7_prev_btn),
+            id!(sh7_next_btn),
+            id!(alb_prev_btn),
+            id!(alb_next_btn),
+            id!(art_prev_btn),
+            id!(art_next_btn),
+            id!(pl_prev_btn),
+            id!(pl_next_btn),
             id!(rs_radio_btn),
             id!(rs_refresh_queue_btn),
             id!(rs_clear_btn),
+            id!(np_like_btn),
+            id!(np_add_pl_btn),
+            id!(shuffle_btn),
+            id!(prev_btn),
+            id!(next_btn),
+            id!(repeat_btn),
             id!(bar_video_btn),
             id!(bar_lyrics_btn),
             id!(bar_queue_btn),
-            id!(np_add_pl_btn),
             id!(vol_mute_btn),
-            id!(tm_pl_0),
-            id!(tm_pl_1),
-            id!(tm_pl_2),
-            id!(tm_pl_3),
-            id!(tm_pl_4),
-            id!(tm_pl_5),
             id!(bar_fullscreen_btn),
-            id!(fs_like_btn),
-            id!(fs_shuffle_btn),
-            id!(fs_prev_btn),
-            id!(fs_next_btn),
-            id!(fs_repeat_btn),
-            id!(fs_vol_mute_btn),
+        ] {
+            self.ui.button(icon_btn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { acrylic_on: (acr), light_mode: (lm) }
+                    draw_icon: { color: (icon_idle), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (accent) }
+                },
+            );
+        }
+        let can_b = self.nav_history.as_ref().is_some_and(NavHistory::can_back);
+        let can_f = self
+            .nav_history
+            .as_ref()
+            .is_some_and(NavHistory::can_forward);
+        let disabled_nav = if pal.is_light {
+            vec4(0.06, 0.08, 0.12, 0.34)
+        } else {
+            vec4(0.32, 0.34, 0.40, 1.0)
+        };
+        self.ui.button(id!(nav_back_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if can_b { text_primary } else { disabled_nav }) } },
+        );
+        self.ui.button(id!(nav_fwd_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if can_f { text_primary } else { disabled_nav }) } },
+        );
+        self.ui.button(id!(toggle_right_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if self.right_sidebar_open { text_primary } else { icon_idle }) } },
+        );
+
+        // Window chrome controls (min / max / close) & Play/Pause button
+        for win_btn_id in [id!(win_min_btn), id!(win_max_btn), id!(win_close_btn)] {
+            self.ui.ferric_win_btn(win_btn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        fg_col: (icon_idle),
+                        fg_hover: (icon_hover),
+                        light_mode: (lm)
+                    }
+                },
+            );
+        }
+        let (play_bg, play_hov, play_glyph) = if pal.is_light {
+            (
+                vec4(0.071, 0.082, 0.118, 1.0),
+                vec4(0.137, 0.157, 0.220, 1.0),
+                vec4(1.0, 1.0, 1.0, 1.0),
+            )
+        } else {
+            (
+                vec4(1.0, 1.0, 1.0, 1.0),
+                vec4(1.0, 1.0, 1.0, 1.0),
+                vec4(0.035, 0.035, 0.051, 1.0),
+            )
+        };
+        self.ui.ferric_play_btn(id!(play_pause_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    accent_col: (play_bg),
+                    accent_hover: (play_hov),
+                    glyph_col: (play_glyph)
+                }
+            },
+        );
+
+        // Sliders, Toggles & EQ graph surfaces adapt to light/dark background
+        let slider_track = if pal.is_light {
+            vec4(0.06, 0.07, 0.11, 0.24)
+        } else {
+            rgba_vec4("#3E404C")
+        };
+        for sid in [
+            id!(seek_slider),
+            id!(vol_slider),
+            id!(xfade_slider),
+            id!(fadein_slider),
+            id!(eq_preamp_slider),
+            id!(acrylic_opacity_slider),
         ] {
             self.ui
-                .button(chip_or_nav_id)
+                .ferric_bar_slider(sid)
+                .apply_over(cx, live! { draw_bg: { track_col: (slider_track) } });
+        }
+        let vert_track = if pal.is_light {
+            vec4(0.06, 0.07, 0.11, 0.22)
+        } else {
+            rgba_vec4("#262834")
+        };
+        for (slider_id, _) in eq_band_ids() {
+            self.ui
+                .ferric_vert_slider(slider_id)
+                .apply_over(cx, live! { draw_bg: { track_col: (vert_track) } });
+        }
+        let (tog_off, tog_border) = if pal.is_light {
+            (vec4(0.06, 0.07, 0.11, 0.22), vec4(0.06, 0.07, 0.11, 0.34))
+        } else {
+            (rgba_vec4("#222430"), rgba_vec4("#323544"))
+        };
+        for tid in [
+            id!(close_to_tray_toggle),
+            id!(radio_toggle),
+            id!(gapless_lock_toggle),
+            id!(trim_silence_toggle),
+            id!(replay_gain_toggle),
+            id!(mono_toggle),
+            id!(eq_enable_toggle),
+            id!(acrylic_toggle),
+            id!(adaptive_art_toggle),
+            id!(discord_enable_toggle),
+            id!(discord_paused_toggle),
+            id!(discord_cover_toggle),
+            id!(discord_hide_details_toggle),
+            id!(auto_update_toggle),
+        ] {
+            self.ui.ferric_toggle(tid).apply_over(
+                cx,
+                live! { draw_bg: { off_col: (tog_off), border_col: (tog_border) } },
+            );
+        }
+        let (eq_bg, eq_border) = if pal.is_light {
+            (rgba_vec4("#E6DFD1"), rgba_vec4("#C5BBA5"))
+        } else {
+            (rgba_vec4("#12131A"), rgba_vec4("#232530"))
+        };
+        self.ui.ferric_eq_graph(id!(eq_graph)).apply_over(
+            cx,
+            live! { draw_bg: { bg_col: (eq_bg), border_col: (eq_border) } },
+        );
+
+        // Dividers adapt cleanly to light/dark background
+        for div_id in [
+            id!(div_top_l),
+            id!(div_top_r),
+            id!(div_h_top),
+            id!(div_h_side),
+            id!(left_divider),
+            id!(right_divider),
+            id!(div_h_recents),
+            id!(div_h_songs),
+            id!(div_h_detail),
+            id!(div_h_app),
+            id!(div_h_disc),
+            id!(div_h_rs),
+        ] {
+            self.ui
+                .widget(div_id)
+                .apply_over(cx, live! { draw_bg: { color: (divider_col) } });
+        }
+
+        // All primary shell labels -> WCAG-verified primary ink
+        for lid in [
+            id!(brand_title_lbl),
+            id!(lbl_t_quick_picks),
+            id!(sh0_title_lbl),
+            id!(sh1_title_lbl),
+            id!(sh2_title_lbl),
+            id!(sh3_title_lbl),
+            id!(sh4_title_lbl),
+            id!(sh5_title_lbl),
+            id!(sh6_title_lbl),
+            id!(sh7_title_lbl),
+            id!(lbl_t_top_results),
+            id!(lbl_t_recents),
+            id!(songs_title_lbl),
+            id!(lbl_t_albums),
+            id!(lbl_t_artists),
+            id!(lbl_t_playlists),
+            id!(detail_title_lbl),
+            id!(lbl_t_settings),
+            id!(lbl_t_acct_yt),
+            id!(lbl_t_acct_import),
+            id!(lbl_t_acct_sub),
+            id!(lbl_t_pb_xfade),
+            id!(lbl_t_pb_fadein),
+            id!(lbl_t_pb_qual),
+            id!(lbl_t_pb_aq),
+            id!(lbl_t_pb_vq),
+            id!(lbl_t_pb_beh),
+            id!(lbl_t_pb_tray),
+            id!(lbl_t_pb_radio),
+            id!(lbl_t_pb_gapless),
+            id!(lbl_t_pb_trim),
+            id!(lbl_t_pb_rg),
+            id!(lbl_t_pb_mono),
+            id!(lbl_t_pb_speed),
+            id!(sleep_status_lbl),
+            id!(lbl_t_eq_title),
+            id!(lbl_t_eq_preamp),
+            id!(eq_v0),
+            id!(eq_v1),
+            id!(eq_v2),
+            id!(eq_v3),
+            id!(eq_v4),
+            id!(eq_v5),
+            id!(eq_v6),
+            id!(eq_v7),
+            id!(eq_v8),
+            id!(eq_v9),
+            id!(lbl_t_app_title),
+            id!(lbl_t_app_zoom),
+            id!(lbl_t_app_acr),
+            id!(lbl_t_app_tint),
+            id!(lbl_t_app_adaptive),
+            id!(lbl_t_disc_title),
+            id!(discord_prev_title),
+            id!(lbl_t_disc_en),
+            id!(lbl_t_disc_fmt),
+            id!(lbl_t_disc_paused),
+            id!(lbl_t_disc_cover),
+            id!(lbl_t_disc_hide),
+            id!(lbl_t_disc_id),
+            id!(lbl_t_st_cache),
+            id!(lbl_t_st_update),
+            id!(lbl_t_st_keys),
+            id!(lbl_t_conn_title),
+            id!(np_title_lbl),
+            id!(lbl_t_powerbar),
+            id!(update_popup_title),
+        ] {
+            self.ui
+                .label(lid)
+                .apply_over(cx, live! { draw_text: { color: (text_primary) } });
+        }
+
+        // All secondary/muted shell labels -> WCAG-verified secondary/muted ink
+        for lid in [
+            id!(lbl_m_library),
+            id!(lbl_m_pinned),
+            id!(home_status_lbl),
+            id!(search_status_lbl),
+            id!(lbl_m_recent),
+            id!(recents_sub_lbl),
+            id!(songs_sub_lbl),
+            id!(albums_sub_lbl),
+            id!(artists_sub_lbl),
+            id!(detail_sub_lbl),
+            id!(lbl_m_acct_desc),
+            id!(oauth_status_lbl),
+            id!(lbl_m_pb_curve),
+            id!(eq_status_lbl),
+            id!(eq_f0),
+            id!(eq_f1),
+            id!(eq_f2),
+            id!(eq_f3),
+            id!(eq_f4),
+            id!(eq_f5),
+            id!(eq_f6),
+            id!(eq_f7),
+            id!(eq_f8),
+            id!(eq_f9),
+            id!(lbl_m_app_opacity),
+            id!(lbl_m_app_profiles),
+            id!(discord_prev_header),
+            id!(discord_prev_artist),
+            id!(discord_prev_album),
+            id!(lbl_m_disc_hint),
+            id!(cache_stats_lbl),
+            id!(update_status_lbl),
+            id!(lbl_m_st_keys),
+            id!(connect_peers_lbl),
+            id!(lbl_m_history),
+            id!(q_upnext_header),
+            id!(q_radio_status),
+            id!(rs_lyr_source),
+            id!(np_artist_lbl),
+            id!(pos_lbl),
+            id!(update_popup_notes),
+        ] {
+            self.ui
+                .label(lid)
+                .apply_over(cx, live! { draw_text: { color: (text_secondary) } });
+        }
+        self.ui.button(id!(dur_btn)).apply_over(
+            cx,
+            live! {
+                draw_text: { color: (text_secondary), color_hover: (text_primary), color_focus: (text_primary) }
+            },
+        );
+
+        // Fullscreen overlay chips keep acrylic_on sync without light_mode inversion (dark aurora stage)
+        for fs_chip_id in [
+            id!(fs_mode_art_btn),
+            id!(fs_mode_video_btn),
+            id!(vq_auto_btn),
+            id!(vq_360_btn),
+            id!(vq_480_btn),
+            id!(vq_720_btn),
+            id!(vq_1080_btn),
+        ] {
+            self.ui
+                .button(fs_chip_id)
                 .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
         }
 
@@ -7847,17 +8467,22 @@ impl App {
     }
 
     fn set_lyrics_center_message(&self, cx: &mut Cx, msg: &str) {
-        let accent = self.current_accent();
+        let raw_accent = self.current_accent();
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
         let z = self.theme.ui_zoom.clamp(0.65, 1.40);
-        for vid in [id!(rs_lyrics_scroll), id!(fs_lyrics_scroll)] {
-            let lv = self.ui.ferric_lyrics_view(vid);
-            lv.set_style(cx, accent, z);
-            lv.set_empty_message(cx, msg);
-        }
+        let rs = self.ui.ferric_lyrics_view(id!(rs_lyrics_scroll));
+        rs.set_style(cx, accent, z, pal.is_light);
+        rs.set_empty_message(cx, msg);
+        let fs = self.ui.ferric_lyrics_view(id!(fs_lyrics_scroll));
+        fs.set_style(cx, raw_accent, z, false);
+        fs.set_empty_message(cx, msg);
     }
 
     fn push_lyrics_to_views(&self, cx: &mut Cx) {
-        let accent = self.current_accent();
+        let raw_accent = self.current_accent();
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
         let z = self.theme.ui_zoom.clamp(0.65, 1.40);
         let items: Vec<(u64, String)> = self
             .synced_lyrics
@@ -7865,11 +8490,12 @@ impl App {
             .iter()
             .map(|l| (l.timestamp_ms, l.text.clone()))
             .collect();
-        for vid in [id!(rs_lyrics_scroll), id!(fs_lyrics_scroll)] {
-            let lv = self.ui.ferric_lyrics_view(vid);
-            lv.set_style(cx, accent, z);
-            lv.set_lyrics(cx, items.clone());
-        }
+        let rs = self.ui.ferric_lyrics_view(id!(rs_lyrics_scroll));
+        rs.set_style(cx, accent, z, pal.is_light);
+        rs.set_lyrics(cx, items.clone());
+        let fs = self.ui.ferric_lyrics_view(id!(fs_lyrics_scroll));
+        fs.set_style(cx, raw_accent, z, false);
+        fs.set_lyrics(cx, items);
     }
 
     fn update_lyrics_display(&self, cx: &mut Cx, raw_pos_ms: u64) {
@@ -12117,13 +12743,19 @@ impl AppMain for App {
             ((s.spectrum_bins[0] + s.spectrum_bins[1]) as f32 / 2_000.0).clamp(0.1, 1.0)
         });
         self.missing_art_queue.borrow_mut().clear();
+        let pal = self.adaptive_palette();
         let props = TrackListScope {
             tracks: self.active_track_list(),
             active_track_id: self.queue.current().map(|t| t.id.clone()),
             is_playing: snap_opt.is_some_and(|s| s.is_playing),
             audio_level: avg_lvl,
-            accent: self.current_accent(),
+            accent: rgba_to_vec4(pal.accent),
             acrylic_on: if self.theme.acrylic_enabled { 1.0 } else { 0.0 },
+            light_mode: if pal.is_light { 1.0 } else { 0.0 },
+            text_primary: rgba_to_vec4(pal.text_primary),
+            text_secondary: rgba_to_vec4(pal.text_secondary),
+            icon_idle: rgba_to_vec4(pal.icon_idle),
+            icon_hover: rgba_to_vec4(pal.icon_hover),
             ui_zoom: self.theme.ui_zoom.clamp(0.65, 1.40),
             artworks: Rc::clone(&self.artwork_snapshot),
             missing_art_tracks: Rc::clone(&self.missing_art_queue),
@@ -12203,6 +12835,10 @@ fn eq_band_ids() -> [(&'static [LiveId], &'static [LiveId]); 10] {
 fn rgba_vec4(hex: &str) -> Vec4 {
     let [r, g, b, a] = hex_to_rgba_f32(hex, 1.0);
     vec4(r, g, b, a)
+}
+
+fn rgba_to_vec4(c: [f32; 4]) -> Vec4 {
+    vec4(c[0], c[1], c[2], c[3])
 }
 
 app_main!(App);

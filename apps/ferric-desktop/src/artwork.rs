@@ -406,6 +406,8 @@ fn downscale_bilinear(src: &ImageBuffer, max_dim: usize) -> ImageBuffer {
 }
 
 /// Extract a refined, WCAG-legible vibrant accent RGB from decoded `VecBGRAu8_32` album artwork.
+/// Supports vivid, deep underwater/dark (e.g. navy/emerald), and subtle pastel/sage covers;
+/// only falls back to Ferric Burnt Orange on truly neutral grayscale/monochrome artwork.
 pub fn extract_vibrant_accent_rgb(buffer: &ImageBuffer) -> [f32; 3] {
     const FALLBACK: [f32; 3] = [0.910, 0.416, 0.173]; // Ferric Burnt Orange (#E86A2C)
 
@@ -414,70 +416,128 @@ pub fn extract_vibrant_accent_rgb(buffer: &ImageBuffer) -> [f32; 3] {
         return FALLBACK;
     }
 
-    let mut bucket_score = [0.0_f32; 12];
-    let mut bucket_r = [0.0_f32; 12];
-    let mut bucket_g = [0.0_f32; 12];
-    let mut bucket_b = [0.0_f32; 12];
+    let extract_pass =
+        |min_delta: f32, min_sat: f32, min_lum: f32, max_lum: f32| -> Option<[f32; 3]> {
+            let mut bucket_score = [0.0_f32; 12];
+            let mut bucket_r = [0.0_f32; 12];
+            let mut bucket_g = [0.0_f32; 12];
+            let mut bucket_b = [0.0_f32; 12];
 
-    let step = (len / 256).max(1);
-    for &px in buffer.data.iter().step_by(step) {
-        let r = ((px >> 16) & 0xFF) as f32 / 255.0;
-        let g = ((px >> 8) & 0xFF) as f32 / 255.0;
-        let b = (px & 0xFF) as f32 / 255.0;
-        let max_c = r.max(g).max(b);
-        let min_c = r.min(g).min(b);
-        let delta = max_c - min_c;
-        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        if delta < 0.14 || !(0.12..=0.90).contains(&lum) {
-            continue;
-        }
-        let sat = delta / max_c.max(1e-4);
-        if sat < 0.22 {
-            continue;
-        }
-        let hue = if (max_c - r).abs() < 1e-4 {
-            ((g - b) / delta).rem_euclid(6.0)
-        } else if (max_c - g).abs() < 1e-4 {
-            (b - r) / delta + 2.0
-        } else {
-            (r - g) / delta + 4.0
+            let step = (len / 320).max(1);
+            for &px in buffer.data.iter().step_by(step) {
+                let r = ((px >> 16) & 0xFF) as f32 / 255.0;
+                let g = ((px >> 8) & 0xFF) as f32 / 255.0;
+                let b = (px & 0xFF) as f32 / 255.0;
+                let max_c = r.max(g).max(b);
+                let min_c = r.min(g).min(b);
+                let delta = max_c - min_c;
+                let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                if delta < min_delta || lum < min_lum || lum > max_lum {
+                    continue;
+                }
+                let sat = delta / max_c.max(1e-4);
+                if sat < min_sat {
+                    continue;
+                }
+                let hue = if (max_c - r).abs() < 1e-4 {
+                    ((g - b) / delta).rem_euclid(6.0)
+                } else if (max_c - g).abs() < 1e-4 {
+                    (b - r) / delta + 2.0
+                } else {
+                    (r - g) / delta + 4.0
+                };
+                let bi = ((hue * 2.0).floor() as usize).min(11);
+                let lum_weight = 0.30 + (1.0 - (lum - 0.48).abs() * 1.15).max(0.10);
+                let w = sat.powf(1.55) * lum_weight;
+                bucket_score[bi] += w;
+                bucket_r[bi] += r * w;
+                bucket_g[bi] += g * w;
+                bucket_b[bi] += b * w;
+            }
+
+            let (best_i, &best_w) = bucket_score
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))?;
+            if best_w < 0.06 {
+                return None;
+            }
+            Some([
+                (bucket_r[best_i] / best_w).clamp(0.0, 1.0),
+                (bucket_g[best_i] / best_w).clamp(0.0, 1.0),
+                (bucket_b[best_i] / best_w).clamp(0.0, 1.0),
+            ])
         };
-        let bi = ((hue * 2.0).floor() as usize).min(11);
-        let w = sat * sat * (1.0 - (lum - 0.52).abs() * 1.4).max(0.15);
-        bucket_score[bi] += w;
-        bucket_r[bi] += r * w;
-        bucket_g[bi] += g * w;
-        bucket_b[bi] += b * w;
+
+    // Pass 1: Vivid & moody-saturated covers (handles deep ocean blue, neon, warm amber, etc.)
+    // Pass 2: Subtle/pastel tinted covers (handles sage green, dusty rose, muted slate-blue)
+    let (mut r, mut g, mut b, boost_sat) =
+        if let Some([r, g, b]) = extract_pass(0.075, 0.13, 0.05, 0.95) {
+            (r, g, b, false)
+        } else if let Some([r, g, b]) = extract_pass(0.035, 0.065, 0.04, 0.96) {
+            (r, g, b, true)
+        } else {
+            return FALLBACK;
+        };
+
+    // Preserve hue vibrancy while lifting deep covers so accent reads crisply on dark surfaces
+    let max_c = r.max(g).max(b);
+    let min_c = r.min(g).min(b);
+    let avg = (r + g + b) / 3.0;
+    if boost_sat || (max_c - min_c) / max_c.max(1e-4) < 0.38 {
+        let sat_boost = if boost_sat { 1.65 } else { 1.28 };
+        r = (avg + (r - avg) * sat_boost).clamp(0.0, 1.0);
+        g = (avg + (g - avg) * sat_boost).clamp(0.0, 1.0);
+        b = (avg + (b - avg) * sat_boost).clamp(0.0, 1.0);
     }
 
-    let Some((best_i, &best_w)) = bucket_score
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(b.1))
-    else {
-        return FALLBACK;
-    };
-    if best_w < 0.15 {
-        return FALLBACK;
-    }
-
-    let mut r = (bucket_r[best_i] / best_w).clamp(0.0, 1.0);
-    let mut g = (bucket_g[best_i] / best_w).clamp(0.0, 1.0);
-    let mut b = (bucket_b[best_i] / best_w).clamp(0.0, 1.0);
-
-    // Ensure WCAG AA+ legibility (>= 5:1 contrast) on pure AMOLED #000000 canvas.
     let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     if lum < 0.44 {
-        let lift = ((0.48 - lum) / (1.0 - lum).max(0.1)).clamp(0.0, 0.68);
+        let lift = ((0.50 - lum) / (1.0 - lum).max(0.1)).clamp(0.0, 0.72);
         r += (1.0 - r) * lift;
         g += (1.0 - g) * lift;
         b += (1.0 - b) * lift;
     }
-    let avg = (r + g + b) / 3.0;
-    let desat = 0.14;
-    r = (r * (1.0 - desat) + avg * desat).clamp(0.20, 0.96);
-    g = (g * (1.0 - desat) + avg * desat).clamp(0.20, 0.96);
-    b = (b * (1.0 - desat) + avg * desat).clamp(0.20, 0.96);
 
-    [r, g, b]
+    [
+        r.clamp(0.14, 0.98),
+        g.clamp(0.14, 0.98),
+        b.clamp(0.14, 0.98),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid_buffer(r: u8, g: u8, b: u8) -> ImageBuffer {
+        let px = (0xFF_u32 << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+        ImageBuffer {
+            width: 32,
+            height: 32,
+            data: vec![px; 32 * 32],
+            animation: None,
+        }
+    }
+
+    #[test]
+    fn adaptive_accent_extracts_deep_ocean_blue_and_muted_sage_green() {
+        let ocean = extract_vibrant_accent_rgb(&solid_buffer(14, 38, 58));
+        assert!(
+            ocean[2] > ocean[0] + 0.12 && ocean[2] > 0.55,
+            "deep ocean cover should extract blue accent, got {ocean:?}"
+        );
+
+        let sage = extract_vibrant_accent_rgb(&solid_buffer(108, 128, 100));
+        assert!(
+            sage[1] > sage[0] + 0.05 && sage[1] > sage[2] + 0.05,
+            "muted sage cover should extract green accent, got {sage:?}"
+        );
+
+        let mono = extract_vibrant_accent_rgb(&solid_buffer(120, 120, 120));
+        assert!(
+            (mono[0] - 0.910).abs() < 0.01,
+            "pure grayscale cover should fall back to Ferric Burnt Orange, got {mono:?}"
+        );
+    }
 }

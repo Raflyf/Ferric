@@ -7,6 +7,7 @@ const ALLOWED_HTTPS_PREFIXES: &[&str] = &[
     "https://developer.spotify.com/",
     "https://accounts.google.com/",
     "https://console.cloud.google.com/",
+    "https://discord.com/developers/applications",
 ];
 
 /// Events emitted by the Win32 window subclass & System Tray icon back to Ferric's UI loop.
@@ -162,6 +163,7 @@ mod win_impl {
         static TASKBAR_STATE: RefCell<Option<TaskbarThumbState>> = const { RefCell::new(None) };
     }
     static ACRYLIC_ENABLED: AtomicBool = AtomicBool::new(false);
+    static ACRYLIC_TINT_RGB: AtomicU32 = AtomicU32::new(0x000B_0D14);
     static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
     static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
@@ -358,10 +360,15 @@ mod win_impl {
                 type SetWcaFn =
                     unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
                 let set_wca: SetWcaFn = std::mem::transmute(proc_fn);
+                let rgb = ACRYLIC_TINT_RGB.load(Ordering::Acquire);
+                let r = (rgb >> 16) & 0xFF;
+                let g = (rgb >> 8) & 0xFF;
+                let b = rgb & 0xFF;
+                let abgr = 0x0100_0000 | (b << 16) | (g << 8) | r;
                 let mut policy = AccentPolicy {
                     accent_state: if enabled { 4 } else { 0 },
                     accent_flags: if enabled { 2 } else { 0 },
-                    gradient_color: if enabled { 0x0110_0E16 } else { 0 },
+                    gradient_color: if enabled { abgr } else { 0 },
                     animation_id: 0,
                 };
                 let mut data = WindowCompositionAttribData {
@@ -374,8 +381,10 @@ mod win_impl {
         }
     }
 
-    pub fn set_native_acrylic(enabled: bool, _opacity: f32) {
+    pub fn set_native_acrylic(enabled: bool, _opacity: f32, tint_rgb: (u8, u8, u8)) {
         ACRYLIC_ENABLED.store(enabled, Ordering::Release);
+        let packed = ((tint_rgb.0 as u32) << 16) | ((tint_rgb.1 as u32) << 8) | (tint_rgb.2 as u32);
+        ACRYLIC_TINT_RGB.store(packed, Ordering::Release);
         let Some(hwnd) = active_process_hwnd() else {
             return;
         };
@@ -555,7 +564,13 @@ mod win_impl {
             apply_window_icon(hwnd);
             init_taskbar_thumbbar(hwnd);
             let acr_on = ACRYLIC_ENABLED.load(Ordering::Acquire);
-            set_native_acrylic(acr_on, 0.72);
+            let packed = ACRYLIC_TINT_RGB.load(Ordering::Acquire);
+            let tint = (
+                ((packed >> 16) & 0xFF) as u8,
+                ((packed >> 8) & 0xFF) as u8,
+                (packed & 0xFF) as u8,
+            );
+            set_native_acrylic(acr_on, 0.72, tint);
         }
     }
 
@@ -1384,12 +1399,12 @@ pub fn win32_install_window_hooks() {
     win_impl::install_window_hooks();
 }
 
-pub fn win32_set_native_acrylic(enabled: bool, opacity: f32) {
+pub fn win32_set_native_acrylic(enabled: bool, opacity: f32, tint_rgb: (u8, u8, u8)) {
     #[cfg(target_os = "windows")]
-    win_impl::set_native_acrylic(enabled, opacity);
+    win_impl::set_native_acrylic(enabled, opacity, tint_rgb);
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (enabled, opacity);
+        let _ = (enabled, opacity, tint_rgb);
     }
 }
 

@@ -30,8 +30,8 @@ live_design! {
             instance down: 0.0
             uniform base_col: #00000000
             uniform hover_col: #161822
-            uniform active_col: #1B192C
-            uniform accent_col: #A882FF
+            uniform active_col: #261810
+            uniform accent_col: #E86A2C
             uniform acrylic_on: 0.0
 
             fn pixel(self) -> vec4 {
@@ -150,12 +150,15 @@ live_design! {
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 13, height: 13 }
+            icon_walk: { width: 14, height: 14 }
             draw_icon: {
+                curve: 1.15,
+                linearize: 0.08,
+                brightness: 1.05,
                 svg_path: "M14 10H2V12H14V10ZM14 6H2V8H14V6ZM18 14V10H16V14H12V16H16V20H18V16H22V14H18ZM2 16H10V14H2V16Z"
                 color: #6E7180
                 color_hover: #F4F4F7
-                color_down: #A882FF
+                color_down: #E86A2C
             }
             draw_bg: {
                 instance hover: 0.0
@@ -183,12 +186,15 @@ live_design! {
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 13, height: 13 }
+            icon_walk: { width: 14, height: 14 }
             draw_icon: {
+                curve: 1.15,
+                linearize: 0.08,
+                brightness: 1.05,
                 svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
                 color: #5C5F6E
                 color_hover: #F4F4F7
-                color_down: #A882FF
+                color_down: #E86A2C
             }
             draw_bg: {
                 instance hover: 0.0
@@ -216,12 +222,15 @@ live_design! {
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 13, height: 13 }
+            icon_walk: { width: 14, height: 14 }
             draw_icon: {
+                curve: 1.15,
+                linearize: 0.08,
+                brightness: 1.05,
                 svg_path: "M19 13H13V19H11V13H5V11H11V5H13V11H19V13Z"
                 color: #6E7180
                 color_hover: #F4F4F7
-                color_down: #A882FF
+                color_down: #E86A2C
             }
             draw_bg: {
                 instance hover: 0.0
@@ -249,8 +258,11 @@ live_design! {
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 12, height: 12 }
+            icon_walk: { width: 14, height: 14 }
             draw_icon: {
+                curve: 1.15,
+                linearize: 0.08,
+                brightness: 1.05,
                 svg_path: "M6 19C6 20.1 6.9 21 8 21H16C17.1 21 18 20.1 18 19V7H6V19ZM19 4H15.5L14.5 3H9.5L8.5 4H5V6H19V4Z"
                 color: #646778
                 color_hover: #FF6B7A
@@ -376,7 +388,7 @@ live_design! {
                 icon_walk: { width: 12, height: Fit }
                 draw_icon: {
                     svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z"
-                    color: #A882FF
+                    color: #E86A2C
                     color_hover: #F4F4F7
                     color_focus: #F4F4F7
                     color_down: #F4F4F7
@@ -415,7 +427,7 @@ live_design! {
                 icon_walk: { width: 12, height: Fit }
                 draw_icon: {
                     svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z"
-                    color: #A882FF
+                    color: #E86A2C
                     color_hover: #F4F4F7
                     color_focus: #F4F4F7
                     color_down: #F4F4F7
@@ -454,13 +466,13 @@ live_design! {
                 icon_walk: { width: 11, height: Fit }
                 draw_icon: {
                     svg_path: "M8 5V19L19 12L8 5Z"
-                    color: #A882FF
+                    color: #E86A2C
                     color_hover: #F4F4F7
                     color_focus: #F4F4F7
                     color_down: #F4F4F7
                 }
                 draw_text: {
-                    color: #C5B2FF,
+                    color: #F5A473,
                     color_hover: #FFFFFF,
                     color_focus: #FFFFFF,
                     color_down: #FFFFFF,
@@ -473,8 +485,8 @@ live_design! {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                         let inset = 0.5 + self.down * 0.6;
                         sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
-                        sdf.fill_keep(mix(mix(#1C1A29, #2A2542, self.hover), #342D52, self.down));
-                        sdf.stroke(mix(#443B66, #7463B0, self.hover), 1.0);
+                        sdf.fill_keep(mix(mix(#241710, #382216, self.hover), #472A1B, self.down));
+                        sdf.stroke(mix(#6E3920, #B85A2C, self.hover), 1.0);
                         return sdf.result;
                     }
                 }
@@ -679,7 +691,7 @@ impl Widget for TrackList {
                         None,
                         false,
                         0.5,
-                        vec4(0.659, 0.510, 1.0, 1.0),
+                        vec4(0.910, 0.416, 0.173, 1.0),
                         0.0,
                         1.0,
                         Rc::new(HashMap::new()),

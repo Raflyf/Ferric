@@ -20,7 +20,7 @@ live_design! {
         height: Fill,
         draw_bg: {
             texture image: texture2d
-            accent: #A882FF
+            accent: #E86A2C
             has_image: 0.0
             phase: 0.0
             mouse_x: 0.5
@@ -101,7 +101,7 @@ live_design! {
         height: Fill,
         compact: false,
         draw_pill: {
-            accent: #A882FF
+            accent: #E86A2C
             alpha: 0.0
             hover_mode: 0.0
             mouse_x: 0.5
@@ -234,7 +234,7 @@ live_design! {
         height: 48,
         draw_bg: {
             texture image: texture2d
-            accent: #A882FF
+            accent: #E86A2C
             uniform fallback_col: #1C1D24
             uniform border_col: #2A2C38
 
@@ -370,7 +370,7 @@ live_design! {
         height: 20,
         draw_bg: {
             uniform track_col: #2A2C38
-            uniform fill_col: #A882FF
+            uniform fill_col: #E86A2C
             uniform thumb_col: #F4F4F7
 
             fn pixel(self) -> vec4 {
@@ -415,7 +415,7 @@ live_design! {
         value: 0.0,
         draw_bg: {
             uniform track_col: #262834
-            uniform fill_col: #A882FF
+            uniform fill_col: #E86A2C
             uniform thumb_col: #F4F4F7
 
             fn pixel(self) -> vec4 {
@@ -457,7 +457,7 @@ live_design! {
         width: 42,
         height: 23,
         draw_bg: {
-            uniform on_col: #A882FF
+            uniform on_col: #E86A2C
             uniform off_col: #222430
             uniform border_col: #323544
             uniform knob_col: #F4F4F7
@@ -530,7 +530,7 @@ live_design! {
                     sdf.box(c.x - 6.0, c.y - 4.5, 12.0, 9.0, 1.5);
                     sdf.stroke(stroke_col, 1.15);
                     sdf.rect(c.x + 0.2, c.y - 0.2, 4.8, 3.8);
-                    sdf.fill(#A882FF);
+                    sdf.fill(#E86A2C);
                 }
                 return sdf.result;
             }
@@ -616,7 +616,7 @@ live_design! {
         width: Fill,
         height: 176,
         draw_bg: {
-            uniform accent: #A882FF
+            uniform accent: #E86A2C
             uniform bg_col: #12131A
             uniform border_col: #232530
 
@@ -734,7 +734,7 @@ live_design! {
             instance s5: 0.50
             instance s6: 0.30
             instance s7: 0.24
-            uniform accent: #A882FF
+            uniform accent: #E86A2C
             uniform acrylic_on: 0.0
 
             fn bin_val(self, i: float) -> float {
@@ -2172,7 +2172,7 @@ impl Widget for FerricLyricsView {
         let accent = if self.accent.w > 0.5 {
             self.accent
         } else {
-            vec4(0.659, 0.510, 1.0, 1.0)
+            vec4(0.910, 0.416, 0.173, 1.0)
         };
 
         if self.lines.is_empty() {

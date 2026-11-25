@@ -1,8 +1,9 @@
 use crate::artwork::{ArtworkCache, CachedArtwork};
+use crate::discord_rpc::{DiscordRpcBridge, DiscordTrackSnapshot, is_valid_client_id};
 use crate::google_login::{GoogleLoginOutcome, launch_google_ytm_login_window};
 use crate::shell::{
-    TrayEvent, copy_text_to_clipboard, launch_verified_installer, open_github_url,
-    win32_client_rect_screen, win32_close_active_window, win32_force_quit,
+    TrayEvent, copy_text_to_clipboard, launch_verified_installer, open_allowed_url,
+    open_github_url, win32_client_rect_screen, win32_close_active_window, win32_force_quit,
     win32_install_window_hooks, win32_is_active_window_maximized,
     win32_is_window_hidden_or_minimized, win32_main_hwnd_raw, win32_minimize_active_window,
     win32_poll_tray_events, win32_set_close_to_tray, win32_set_native_acrylic,
@@ -25,12 +26,12 @@ use ferric_core::app_data_dir;
 use ferric_core::db::LibraryDb;
 use ferric_core::eq::EqConfig;
 use ferric_core::models::{
-    AccountSettings, AudioQuality, FadeCurve, PlaybackDspSettings, Playlist, RepeatMode,
-    SessionResumeState, Track, TrackSource, UpdateSettings, VideoQuality, format_duration_ms,
-    parse_playlist_import_text,
+    AccountSettings, AudioQuality, DiscordRpcSettings, DiscordStatusFormat, FadeCurve,
+    PlaybackDspSettings, Playlist, RepeatMode, SessionResumeState, Track, TrackSource,
+    UpdateSettings, VideoQuality, format_duration_ms, parse_playlist_import_text,
 };
 use ferric_core::queue::PlayQueue;
-use ferric_core::theme::{ThemeConfig, hex_to_rgba_f32};
+use ferric_core::theme::{ThemeConfig, hex_to_rgba_f32, parse_hex_rgb};
 use ferric_providers::autoeq::search_autoeq_profiles;
 use ferric_providers::local_scanner::scan_local_folder;
 use ferric_providers::lyrics::{SyncedLyrics, fetch_best_free_lyrics};
@@ -91,6 +92,7 @@ live_design! {
             uniform border_col: #1C1D25
             uniform acrylic_on: 0.0
             uniform acrylic_opacity: 0.72
+            uniform acrylic_tint: #0B0D14
             uniform is_canvas: 0.0
 
             fn pixel(self) -> vec4 {
@@ -100,8 +102,8 @@ live_design! {
                 if (self.is_canvas > 0.5) {
                     return vec4(0.0, 0.0, 0.0, 0.0);
                 }
-                let a = clamp(self.acrylic_opacity * 0.36, 0.06, 0.44);
-                let tint = vec3(0.055, 0.058, 0.088);
+                let a = clamp(self.acrylic_opacity * 0.38, 0.07, 0.48);
+                let tint = clamp(self.acrylic_tint.xyz * 1.18 + vec3(0.014, 0.014, 0.018), 0.0, 1.0);
                 return vec4(tint * a, a);
             }
         }
@@ -118,10 +120,11 @@ live_design! {
         show_bg: true,
         draw_bg: {
             uniform base_col: #08080C
-            uniform accent_col: #A882FF
+            uniform accent_col: #E86A2C
             uniform glow_amt: 0.20
             uniform acrylic_on: 0.0
             uniform acrylic_opacity: 0.72
+            uniform acrylic_tint: #0B0D14
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 if (p.y < 1.0) {
@@ -134,8 +137,8 @@ live_design! {
                 let d_mid = length((self.pos - vec2(0.48, 0.85)) * vec2(0.9, 2.4));
                 let wash = (exp(-d_left * d_left * 2.4) * 0.55 + exp(-d_mid * d_mid * 1.8) * 0.35) * self.glow_amt;
                 if (self.acrylic_on > 0.5) {
-                    let a = clamp(self.acrylic_opacity * 0.60, 0.18, 0.78);
-                    let rgb = clamp(vec3(0.044, 0.048, 0.072) + self.accent_col.xyz * wash, 0.0, 1.0);
+                    let a = clamp(self.acrylic_opacity * 0.62, 0.20, 0.80);
+                    let rgb = clamp(self.acrylic_tint.xyz * 1.12 + self.accent_col.xyz * wash, 0.0, 1.0);
                     return vec4(rgb * a, a);
                 }
                 let rgb = self.base_col.xyz + self.accent_col.xyz * wash;
@@ -163,7 +166,7 @@ live_design! {
         show_bg: true,
         draw_bg: {
             uniform acrylic_on: 0.0
-            uniform accent_col: #A882FF
+            uniform accent_col: #E86A2C
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
@@ -184,8 +187,11 @@ live_design! {
         padding: { left: 9, right: 8 }
         spacing: 9,
         align: { x: 0.0, y: 0.5 }
-        icon_walk: { width: Fit, height: 13 }
+        icon_walk: { width: Fit, height: 14 }
         draw_icon: {
+            curve: 1.15,
+            linearize: 0.08,
+            brightness: 1.05,
             color: #888B99,
             color_hover: #F4F4F7,
             color_focus: #F4F4F7,
@@ -299,8 +305,11 @@ live_design! {
         padding: { left: 12, right: 13 }
         spacing: 6,
         align: { x: 0.5, y: 0.5 }
-        icon_walk: { width: Fit, height: 12 }
+        icon_walk: { width: Fit, height: 13 }
         draw_icon: {
+            curve: 1.15,
+            linearize: 0.08,
+            brightness: 1.05,
             color: #09090D,
             color_hover: #09090D,
             color_focus: #09090D,
@@ -351,12 +360,15 @@ live_design! {
         padding: { left: 10, right: 11 }
         spacing: 6,
         align: { x: 0.5, y: 0.5 }
-        icon_walk: { width: Fit, height: 12 }
+        icon_walk: { width: Fit, height: 13 }
         draw_icon: {
+            curve: 1.15,
+            linearize: 0.08,
+            brightness: 1.05,
             color: #9A9CA8,
             color_hover: #F4F4F7,
             color_focus: #F4F4F7,
-            color_down: #A882FF
+            color_down: #E86A2C
         }
         draw_text: {
             color: #DCDCE6,
@@ -370,13 +382,13 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             uniform acrylic_on: 0.0
-            uniform accent_col: #A882FF
+            uniform accent_col: #E86A2C
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 0.65;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
                 let solid_idle = mix(#14151D, #232737, self.hover);
-                let solid_act = mix(#231E3A, vec4(self.accent_col.xyz, 0.28), 0.36);
+                let solid_act = mix(#2E1B11, vec4(self.accent_col.xyz, 0.28), 0.36);
                 let acrylic_idle = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.16), self.hover);
                 let acrylic_act = vec4(self.accent_col.xyz, 0.30);
                 let bg = mix(mix(solid_idle, solid_act, self.active), mix(acrylic_idle, acrylic_act, self.active), self.acrylic_on);
@@ -465,19 +477,22 @@ live_design! {
     }
 
     FerricIconBtn = <Button> {
-        width: 26,
-        height: 26,
+        width: 28,
+        height: 28,
         padding: 0,
         spacing: 0,
         align: { x: 0.5, y: 0.5 }
         text: ""
         label_walk: { width: 0, height: 0 }
-        icon_walk: { width: Fit, height: 12 }
+        icon_walk: { width: Fit, height: 14 }
         draw_icon: {
+            curve: 1.15,
+            linearize: 0.08,
+            brightness: 1.05,
             color: #9A9CA8,
             color_hover: #F4F4F7,
             color_focus: #F4F4F7,
-            color_down: #A882FF
+            color_down: #E86A2C
         }
         draw_bg: {
             instance active: 0.0
@@ -489,7 +504,7 @@ live_design! {
                 let inset = 1.0 + self.down * 0.85;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
                 let hov = mix(#212432, vec4(1.0, 1.0, 1.0, 0.13), self.acrylic_on);
-                let act = mix(#262040, vec4(1.0, 1.0, 1.0, 0.19), self.acrylic_on);
+                let act = mix(#321E14, vec4(1.0, 1.0, 1.0, 0.19), self.acrylic_on);
                 let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
                 sdf.fill_keep(mix(bg, vec4(1.0, 1.0, 1.0, 0.16), self.down * 0.25));
                 let rim = vec4(1.0, 1.0, 1.0, (0.11 * self.hover + 0.14 * self.active));
@@ -537,15 +552,15 @@ live_design! {
             border_color_2_empty: #232634,
             border_color_1_hover: #3B3F56,
             border_color_2_hover: #3B3F56,
-            border_color_1_focus: #A882FF,
-            border_color_2_focus: #A882FF
+            border_color_1_focus: #E86A2C,
+            border_color_2_focus: #E86A2C
         }
         draw_text: {
             color: #F4F4F7,
             color_empty: #6D7080,
             text_style: <THEME_FONT_REGULAR> { font_size: 9.2, line_spacing: 1.0 }
         }
-        draw_cursor: { color: #A882FF }
+        draw_cursor: { color: #E86A2C }
     }
 
     // Compact 2x4 Home Quick Picks Song Tile (48px, crisp Inter scale, tactile hover/press)
@@ -563,7 +578,7 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             uniform acrylic_on: 0.0
-            uniform accent_col: #A882FF
+            uniform accent_col: #E86A2C
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let inset = 0.5 + self.down * 1.1;
@@ -637,7 +652,7 @@ live_design! {
             instance down: 0.0
             uniform ghost: 0.0
             uniform acrylic_on: 0.0
-            uniform accent_col: #A882FF
+            uniform accent_col: #E86A2C
             fn pixel(self) -> vec4 {
                 if self.ghost > 0.5 {
                     return vec4(0.0, 0.0, 0.0, 0.0);
@@ -718,7 +733,7 @@ live_design! {
             instance down: 0.0
             uniform ghost: 0.0
             uniform acrylic_on: 0.0
-            uniform accent_col: #A882FF
+            uniform accent_col: #E86A2C
             fn pixel(self) -> vec4 {
                 if self.ghost > 0.5 {
                     return vec4(0.0, 0.0, 0.0, 0.0);
@@ -799,7 +814,7 @@ live_design! {
             instance active: 0.0
             instance hover: 0.0
             instance down: 0.0
-            uniform accent_col: #A882FF
+            uniform accent_col: #E86A2C
             uniform acrylic_on: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -866,12 +881,15 @@ live_design! {
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 10, height: 10 }
+            icon_walk: { width: 11, height: 11 }
             draw_icon: {
+                curve: 1.15,
+                linearize: 0.08,
+                brightness: 1.05,
                 svg_path: "M7.41 15.41L12 10.83L16.59 15.41L18 14L12 8L6 14L7.41 15.41Z"
                 color: #6B6F82
                 color_hover: #F4F4F7
-                color_down: #A882FF
+                color_down: #E86A2C
             }
             draw_bg: {
                 instance hover: 0.0
@@ -896,8 +914,11 @@ live_design! {
             align: { x: 0.5, y: 0.5 }
             text: ""
             label_walk: { width: 0, height: 0 }
-            icon_walk: { width: 10, height: 10 }
+            icon_walk: { width: 11, height: 11 }
             draw_icon: {
+                curve: 1.15,
+                linearize: 0.08,
+                brightness: 1.05,
                 svg_path: "M19 6.41L17.59 5L12 10.59L6.41 5L5 6.41L10.59 12L5 17.59L6.41 19L12 13.41L17.59 19L19 17.59L13.41 12L19 6.41Z"
                 color: #6B6F82
                 color_hover: #FF6B7A
@@ -942,15 +963,16 @@ live_design! {
                         uniform canvas_col: #000000
                         uniform acrylic_on: 0.0
                         uniform acrylic_opacity: 0.72
-                        uniform accent_col: #A882FF
+                        uniform acrylic_tint: #0B0D14
+                        uniform accent_col: #E86A2C
                         fn pixel(self) -> vec4 {
                             if (self.acrylic_on < 0.5) {
                                 return self.canvas_col;
                             }
                             let d1 = length((self.pos - vec2(0.14, 0.14)) * vec2(0.95, 1.15));
-                            let subtle = exp(-d1 * d1 * 3.2) * self.accent_col.xyz * 0.07;
+                            let subtle = exp(-d1 * d1 * 3.2) * self.accent_col.xyz * 0.065;
                             let a = clamp(self.acrylic_opacity * 0.78, 0.14, 0.90);
-                            let rgb = clamp(vec3(0.036, 0.040, 0.060) + subtle, 0.0, 1.0);
+                            let rgb = clamp(self.acrylic_tint.xyz + subtle, 0.0, 1.0);
                             return vec4(rgb * a, a);
                         }
                     }
@@ -994,19 +1016,19 @@ live_design! {
                                 }
                                 <SolidView> { width: 1, height: 13, margin: { left: 1, right: 4 }, draw_bg: { color: #242634 } }
                                 toggle_left_btn = <FerricIconBtn> {
-                                    width: 26, height: 24,
+                                    width: 26, height: 26,
                                     draw_icon: { svg_path: "M3 5H21V19H3V5ZM5 7V17H9V7H5ZM11 7V17H19V7H11Z" }
                                 }
                                 nav_back_btn = <FerricIconBtn> {
-                                    width: 24, height: 24,
+                                    width: 26, height: 26,
                                     draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" }
                                 }
                                 nav_fwd_btn = <FerricIconBtn> {
-                                    width: 24, height: 24,
+                                    width: 26, height: 26,
                                     draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" }
                                 }
                                 refresh_btn = <FerricIconBtn> {
-                                    width: 24, height: 24,
+                                    width: 26, height: 26,
                                     draw_icon: { svg_path: "M17.65 6.35C16.2 4.9 14.21 4 12 4C7.58 4 4.01 7.58 4.01 12C4.01 16.42 7.58 20 12 20C15.73 20 18.84 17.45 19.73 14H17.65C16.83 16.33 14.61 18 12 18C8.69 18 6 15.31 6 12C6 8.69 8.69 6 12 6C13.66 6 15.14 6.69 16.22 7.78L13 11H20V4L17.65 6.35Z" }
                                 }
                             }
@@ -1027,7 +1049,7 @@ live_design! {
                                     draw_bg: {
                                         instance hover: 0.0
                                         uniform acrylic_on: 0.0
-                                        uniform accent_col: #A882FF
+                                        uniform accent_col: #E86A2C
                                         fn pixel(self) -> vec4 {
                                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                                             let r = (self.rect_size.y - 1.0) * 0.30;
@@ -1048,8 +1070,11 @@ live_design! {
                                         }
                                     }
                                     <Icon> {
-                                        icon_walk: { width: 12, height: 12 }
+                                        icon_walk: { width: 13, height: 13 }
                                         draw_icon: {
+                                            curve: 1.15,
+                                            linearize: 0.08,
+                                            brightness: 1.05,
                                             svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
                                             color: #7D8090
                                         }
@@ -1103,16 +1128,16 @@ live_design! {
                                     text: "Sign in"
                                     draw_icon: {
                                         svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z"
-                                        color: #A882FF
+                                        color: #E86A2C
                                     }
                                     draw_text: { text_style: { font_size: 8.4 } }
                                 }
                                 top_settings_btn = <FerricIconBtn> {
-                                    width: 24, height: 24,
+                                    width: 26, height: 26,
                                     draw_icon: { svg_path: "M19.14 12.94C19.18 12.64 19.2 12.33 19.2 12C19.2 11.68 19.18 11.36 19.13 11.06L21.16 9.48C21.34 9.34 21.39 9.07 21.28 8.87L19.36 5.55C19.24 5.33 18.99 5.26 18.77 5.33L16.38 6.29C15.88 5.91 15.35 5.59 14.76 5.35L14.4 2.81C14.36 2.57 14.16 2.4 13.92 2.4H10.08C9.84 2.4 9.65 2.57 9.61 2.81L9.25 5.35C8.66 5.59 8.12 5.92 7.63 6.29L5.24 5.33C5.02 5.25 4.77 5.33 4.65 5.55L2.74 8.87C2.62 9.08 2.66 9.34 2.86 9.48L4.89 11.06C4.84 11.36 4.8 11.69 4.8 12C4.8 12.31 4.82 12.64 4.87 12.94L2.84 14.52C2.66 14.66 2.61 14.93 2.72 15.13L4.64 18.45C4.76 18.67 5.01 18.74 5.23 18.67L7.62 17.71C8.12 18.09 8.65 18.41 9.24 18.65L9.6 21.19C9.65 21.43 9.84 21.6 10.08 21.6H13.92C14.16 21.6 14.36 21.43 14.39 21.19L14.75 18.65C15.34 18.41 15.88 18.09 16.37 17.71L18.76 18.67C18.98 18.75 19.23 18.67 19.35 18.45L21.27 15.13C21.39 14.91 21.34 14.66 21.15 14.52L19.14 12.94ZM12 15.6C10.02 15.6 8.4 13.98 8.4 12C8.4 10.02 10.02 8.4 12 8.4C13.98 8.4 15.6 10.02 15.6 12C15.6 13.98 13.98 15.6 12 15.6Z" }
                                 }
                                 toggle_right_btn = <FerricIconBtn> {
-                                    width: 24, height: 24,
+                                    width: 26, height: 26,
                                     draw_bg: { active: 1.0 }
                                     draw_icon: {
                                         svg_path: "M3 5H21V19H3V5ZM5 7V17H13V7H5ZM15 7V17H19V7H15Z"
@@ -1724,7 +1749,7 @@ live_design! {
                                         }
                                         <View> {
                                             width: Fill, height: Fit, flow: Down, spacing: 4,
-                                            detail_kind_lbl = <Label> { draw_text: { color: #A882FF, text_style: <THEME_FONT_BOLD> { font_size: 8.2 } }, text: "PLAYLIST" }
+                                            detail_kind_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 8.2 } }, text: "PLAYLIST" }
                                             detail_title_lbl = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 16.0 } }, text: "Collection" }
                                             detail_sub_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "" }
                                             <View> {
@@ -1778,6 +1803,7 @@ live_design! {
                                         st_playback_btn = <FerricChipBtn> { text: "Playback" }
                                         st_eq_btn = <FerricChipBtn> { text: "Equalizer" }
                                         st_appearance_btn = <FerricChipBtn> { text: "Appearance" }
+                                        st_integrations_btn = <FerricChipBtn> { text: "Integrations" }
                                         st_storage_btn = <FerricChipBtn> { text: "Storage" }
                                         st_connect_btn = <FerricChipBtn> { text: "Connect" }
                                     }
@@ -1792,7 +1818,7 @@ live_design! {
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
                                                 <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "YouTube Music & Google Account" }
-                                                yt_state_lbl = <Label> { draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Guest Mode (Optional)" }
+                                                yt_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Guest Mode (Optional)" }
                                             }
                                             <Label> {
                                                 width: Fill,
@@ -1808,7 +1834,7 @@ live_design! {
                                             }
                                             oauth_status_lbl = <Label> {
                                                 width: Fill,
-                                                draw_text: { color: #C5B2FF, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }
+                                                draw_text: { color: #F5A473, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }
                                                 text: "Guest Mode active — YouTube Music streaming ready."
                                             }
                                         }
@@ -1851,7 +1877,7 @@ live_design! {
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
                                                 <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Seamless Dual-Deck Fade-In & Crossfade" }
-                                                xfade_val_lbl = <Label> { draw_text: { color: #A882FF, text_style: <THEME_FONT_BOLD> { font_size: 9.2 } }, text: "6.0 s" }
+                                                xfade_val_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.2 } }, text: "6.0 s" }
                                             }
                                             xfade_slider = <FerricBarSlider> { min: 0.0, max: 12.0, value: 6.0 }
                                             <View> {
@@ -1871,7 +1897,7 @@ live_design! {
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
                                                 <Label> { width: Fill, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Soft Play / Resume Fade-In (ms)" }
-                                                fadein_val_lbl = <Label> { draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "240 ms" }
+                                                fadein_val_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "240 ms" }
                                             }
                                             fadein_slider = <FerricBarSlider> { min: 0.0, max: 1000.0, value: 240.0 }
                                         }
@@ -1974,7 +2000,7 @@ live_design! {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                                 <Label> { width: 68, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Preamp" }
                                                 eq_preamp_slider = <FerricBarSlider> { min: -12.0, max: 12.0, value: 0.0 }
-                                                eq_preamp_lbl = <Label> { width: 48, draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "+0.0 dB" }
+                                                eq_preamp_lbl = <Label> { width: 48, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "+0.0 dB" }
                                             }
 
                                             // 13 EQ Presets
@@ -2042,7 +2068,7 @@ live_design! {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                                 <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Interface Zoom (Ctrl - / Ctrl + / Ctrl 0)" }
                                                 zoom_out_btn = <FerricBtn> { height: 24, padding: { left: 9, right: 9 }, text: "-" }
-                                                zoom_val_lbl = <Label> { width: 42, align: { x: 0.5, y: 0.5 }, draw_text: { color: #A882FF, text_style: <THEME_FONT_BOLD> { font_size: 9.0 } }, text: "100%" }
+                                                zoom_val_lbl = <Label> { width: 42, align: { x: 0.5, y: 0.5 }, draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.0 } }, text: "100%" }
                                                 zoom_in_btn = <FerricBtn> { height: 24, padding: { left: 9, right: 9 }, text: "+" }
                                                 zoom_reset_btn = <FerricBtn> { height: 24, text: "Reset" }
                                             }
@@ -2055,7 +2081,45 @@ live_design! {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                                 <Label> { width: 140, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Opacity" }
                                                 acrylic_opacity_slider = <FerricBarSlider> { min: 0.18, max: 0.94, value: 0.72, wheel_adjust: true, wheel_step: 0.04 }
-                                                acrylic_opacity_lbl = <Label> { width: 42, draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "72%" }
+                                                acrylic_opacity_lbl = <Label> { width: 42, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "72%" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 6,
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                    <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Glass Tint Color (Custom RGB)" }
+                                                    acrylic_tint_preview = <View> {
+                                                        width: 18, height: 18,
+                                                        show_bg: true,
+                                                        draw_bg: {
+                                                            uniform tint_col: #0B0D14
+                                                            fn pixel(self) -> vec4 {
+                                                                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                                                sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.5 - 1.0);
+                                                                sdf.fill_keep(self.tint_col);
+                                                                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.35), 1.0);
+                                                                return sdf.result;
+                                                            }
+                                                        }
+                                                    }
+                                                    acrylic_tint_lbl = <Label> { width: 64, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.6 } }, text: "#0B0D14" }
+                                                }
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Right, spacing: 5,
+                                                    tint_obsidian_btn = <FerricChipBtn> { text: "Obsidian" }
+                                                    tint_ember_btn = <FerricChipBtn> { text: "Ember" }
+                                                    tint_copper_btn = <FerricChipBtn> { text: "Copper" }
+                                                    tint_midnight_btn = <FerricChipBtn> { text: "Midnight" }
+                                                    tint_emerald_btn = <FerricChipBtn> { text: "Emerald" }
+                                                    tint_crimson_btn = <FerricChipBtn> { text: "Crimson" }
+                                                    tint_slate_btn = <FerricChipBtn> { text: "Slate" }
+                                                    tint_smoke_btn = <FerricChipBtn> { text: "Smoke" }
+                                                }
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                    acrylic_tint_input = <FerricInput> { width: 160, height: 28, empty_text: "#RRGGBB (e.g. #2B140A)" }
+                                                    acrylic_tint_apply_btn = <FerricBtn> { height: 28, text: "Apply Tint" }
+                                                }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
@@ -2068,6 +2132,110 @@ live_design! {
                                                 <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Custom Theme Profiles" }
                                                 theme_import_btn = <FerricBtn> { height: 24, text: "Import Theme JSON" }
                                                 theme_export_btn = <FerricBtn> { height: 24, text: "Export Theme JSON" }
+                                            }
+                                        }
+                                    }
+
+                                    // TAB D2: INTEGRATIONS (DISCORD RICH PRESENCE)
+                                    tab_integrations = <View> {
+                                        visible: false,
+                                        width: Fill, height: Fit, flow: Down, spacing: 10,
+
+                                        card_discord_rpc = <FerricCard> {
+                                            flow: Down, spacing: 10,
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Discord Rich Presence" }
+                                                discord_status_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.6 } }, text: "Disabled" }
+                                            }
+
+                                            // Live Discord Listening Activity Preview Card
+                                            discord_preview_box = <View> {
+                                                width: Fill, height: Fit,
+                                                padding: { left: 14, right: 14, top: 12, bottom: 12 }
+                                                flow: Down, spacing: 8,
+                                                show_bg: true,
+                                                draw_bg: {
+                                                    uniform acrylic_on: 0.0
+                                                    fn pixel(self) -> vec4 {
+                                                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 9.0);
+                                                        let solid_bg = vec4(0.085, 0.088, 0.112, 1.0);
+                                                        let acr_bg = vec4(1.0, 1.0, 1.0, 0.052);
+                                                        sdf.fill_keep(mix(solid_bg, acr_bg, self.acrylic_on));
+                                                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.095), 1.0);
+                                                        return sdf.result;
+                                                    }
+                                                }
+                                                discord_prev_header = <Label> {
+                                                    width: Fill,
+                                                    draw_text: { color: #B4B7C6, text_style: <THEME_FONT_MEDIUM> { font_size: 8.4 } }
+                                                    text: "Listening to Artist - Title"
+                                                }
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 12,
+                                                    discord_prev_art = <FerricCoverArt> { width: 60, height: 60, draw_bg: { radius: 8.0 } }
+                                                    <View> {
+                                                        width: Fill, height: Fit, flow: Down, spacing: 3,
+                                                        discord_prev_title = <Label> {
+                                                            width: Fill,
+                                                            draw_text: { color: #FFFFFF, text_style: <THEME_FONT_BOLD> { font_size: 9.8 } }
+                                                            text: "Play a song to preview Discord status"
+                                                        }
+                                                        discord_prev_artist = <Label> {
+                                                            width: Fill,
+                                                            draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
+                                                            text: "Ferric Hi-Fi Player"
+                                                        }
+                                                        discord_prev_album = <Label> {
+                                                            width: Fill,
+                                                            draw_text: { color: #8E92A4, text_style: <THEME_FONT_REGULAR> { font_size: 8.3 } }
+                                                            text: "Native Rust IPC"
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                                <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_MEDIUM> { font_size: 9.2 } }, text: "Show on Discord (Listening activity via local IPC)" }
+                                                discord_enable_toggle = <FerricToggle> { is_on: false }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Status name display" }
+                                                discord_format_btn = <FerricBtn> { height: 26, text: "Artist - Title" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Show when paused" }
+                                                discord_paused_toggle = <FerricToggle> { is_on: false }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Show album cover art" }
+                                                discord_cover_toggle = <FerricToggle> { is_on: true }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Hide track details (Privacy mode)" }
+                                                discord_hide_details_toggle = <FerricToggle> { is_on: false }
+                                            }
+                                            <FerricDividerH> {}
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 6,
+                                                <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Discord Application ID" }
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                    discord_client_id_input = <FerricInput> { width: Fill, height: 28, empty_text: "Paste 18-19 digit Discord Application ID (e.g. from Discord Developer Portal)..." }
+                                                    discord_save_id_btn = <FerricPrimaryBtn> { height: 28, text: "Save ID" }
+                                                    discord_portal_btn = <FerricBtn> { height: 28, text: "Create App ID" }
+                                                }
+                                                <Label> {
+                                                    width: Fill,
+                                                    draw_text: { color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
+                                                    text: "Click 'Create App ID' -> New Application (name it 'Ferric') -> copy Application ID -> paste here & click Save ID."
+                                                }
                                             }
                                         }
                                     }
@@ -2129,7 +2297,7 @@ live_design! {
                                             <View> {
                                                 width: Fill, height: Fit, flow: Down, spacing: 6,
                                                 <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Ferric Connect (Local LAN Pairing)" }
-                                                connect_lan_ip_lbl = <Label> { draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "LAN: Ready" }
+                                                connect_lan_ip_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "LAN: Ready" }
                                                 connect_peers_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Listening for Ferric devices on local Wi-Fi..." }
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, spacing: 6,
@@ -2167,7 +2335,7 @@ live_design! {
                                         draw_bg: { active: 1.0 }
                                         draw_icon: {
                                             svg_path: "M3.24 6.15C2.51 6.43 2 7.17 2 8V20C2 21.1 2.89 22 4 22H20C21.11 22 22 21.1 22 20V8C22 6.89 21.11 6 20 6H8.3L16.56 2.66L15.88 1L3.24 6.15ZM7 20C5.34 20 4 18.66 4 17C4 15.34 5.34 14 7 14C8.66 14 10 15.34 10 17C10 18.66 8.66 20 7 20ZM20 12H18V10H16V12H4V8H20V12Z"
-                                            color: #A882FF
+                                            color: #E86A2C
                                         }
                                     }
                                     rs_refresh_queue_btn = <FerricIconBtn> {
@@ -2209,7 +2377,7 @@ live_design! {
                                     q_now_header = <Label> {
                                         margin: { left: 4, top: 4, bottom: 1 }
                                         padding: 0,
-                                        draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
+                                        draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
                                         text: "NOW PLAYING"
                                     }
                                     q_now_row = <QueueMiniRow> {
@@ -2346,11 +2514,13 @@ live_design! {
                                     spacing: 14,
 
                                     shuffle_btn = <FerricIconBtn> {
-                                        width: 26, height: 26,
+                                        width: 28, height: 28,
+                                        icon_walk: { width: Fit, height: 15 }
                                         draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z" }
                                     }
                                     prev_btn = <FerricIconBtn> {
-                                        width: 26, height: 26,
+                                        width: 28, height: 28,
+                                        icon_walk: { width: Fit, height: 15 }
                                         draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z" }
                                     }
                                     play_pause_btn = <FerricPlayBtn> {
@@ -2358,11 +2528,13 @@ live_design! {
                                         draw_bg: { accent_col: #FFFFFF, accent_hover: #FFFFFF, glyph_col: #09090D }
                                     }
                                     next_btn = <FerricIconBtn> {
-                                        width: 26, height: 26,
+                                        width: 28, height: 28,
+                                        icon_walk: { width: Fit, height: 15 }
                                         draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z" }
                                     }
                                     repeat_btn = <FerricIconBtn> {
-                                        width: 26, height: 26,
+                                        width: 28, height: 28,
+                                        icon_walk: { width: Fit, height: 15 }
                                         draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z" }
                                     }
                                 }
@@ -2413,19 +2585,23 @@ live_design! {
                                     draw_text: { color: #B4B6C4, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
                                 }
                                 bar_video_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
+                                    width: 28, height: 28,
+                                    icon_walk: { width: Fit, height: 15 }
                                     draw_icon: { svg_path: "M18 4L20 8H17L15 4H13L15 8H12L10 4H8L10 8H7L5 4H4C2.9 4 2.01 4.9 2.01 6L2 18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V4H18Z" }
                                 }
                                 bar_lyrics_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
+                                    width: 28, height: 28,
+                                    icon_walk: { width: Fit, height: 15 }
                                     draw_icon: { svg_path: "M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2C10.34 2 9 3.34 9 5V11C9 12.66 10.34 14 12 14ZM17 11C17 13.76 14.76 16 12 16C9.24 16 7 13.76 7 11H5C5 14.53 7.61 17.43 11 17.92V21H13V17.92C16.39 17.43 19 14.53 19 11H17Z" }
                                 }
                                 bar_queue_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
+                                    width: 28, height: 28,
+                                    icon_walk: { width: Fit, height: 15 }
                                     draw_icon: { svg_path: "M3 10H14V12H3V10ZM3 6H14V8H3V6ZM3 14H10V16H3V14ZM16 13V21L22 17L16 13Z" }
                                 }
                                 vol_mute_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
+                                    width: 28, height: 28,
+                                    icon_walk: { width: Fit, height: 15 }
                                     draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" }
                                 }
                                 vol_slider = <FerricBarSlider> {
@@ -2436,7 +2612,8 @@ live_design! {
                                     wheel_step: 0.05
                                 }
                                 bar_fullscreen_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
+                                    width: 28, height: 28,
+                                    icon_walk: { width: Fit, height: 15 }
                                     draw_icon: { svg_path: "M7 14H5V19H10V17H7V14ZM5 10H7V7H10V5H5V10ZM17 17H14V19H19V14H17V17ZM14 5V7H17V10H19V5H14Z" }
                                 }
                             }
@@ -2825,7 +3002,7 @@ live_design! {
                             flow: Down,
                             spacing: 10,
                             update_popup_title = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 13.5 } }, text: "Ferric Update Available" }
-                            update_popup_sub = <Label> { draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "" }
+                            update_popup_sub = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "" }
                             update_popup_notes = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "" }
                             <View> {
                                 width: Fill, height: Fit, margin: { top: 6 }, flow: Right, spacing: 6,
@@ -3117,6 +3294,12 @@ pub struct App {
     last_codec_txt: String,
     #[rust]
     sleep_timer: SleepTimerMode,
+    #[rust]
+    discord_settings: DiscordRpcSettings,
+    #[rust]
+    discord_rpc: Option<DiscordRpcBridge>,
+    #[rust]
+    last_discord_status: String,
     #[rust]
     tick_timer: Timer,
     #[rust]
@@ -3905,6 +4088,17 @@ impl App {
                 self.theme = ThemeConfig::default();
                 let _ = store.save_theme(&self.theme);
             }
+            // Migrate legacy violet default accent to Ferric signature Burnt Orange (#E86A2C)
+            if self.theme.accent_hex.eq_ignore_ascii_case("#A882FF")
+                || parse_hex_rgb(&self.theme.accent_hex).is_err()
+            {
+                self.theme.accent_hex = "#E86A2C".to_string();
+                let _ = store.save_theme(&self.theme);
+            }
+            if parse_hex_rgb(&self.theme.acrylic_tint_hex).is_err() {
+                self.theme.acrylic_tint_hex = "#0B0D14".to_string();
+                let _ = store.save_theme(&self.theme);
+            }
             if !(0.65..=1.40).contains(&self.theme.ui_zoom) {
                 self.theme.ui_zoom = 1.0;
             }
@@ -3912,6 +4106,7 @@ impl App {
             self.eq = store.load_eq().unwrap_or_default();
             self.dsp = store.load_playback_dsp().unwrap_or_default();
             self.accounts = store.load_accounts().unwrap_or_default();
+            self.discord_settings = store.load_discord_rpc().unwrap_or_default();
             // When signed out (Guest Mode), remove stale synced Google/YouTube account playlists
             // while keeping manually created and manually imported playlists intact.
             let yt_signed_in = self.accounts.youtube_connected
@@ -3944,6 +4139,7 @@ impl App {
         self.audio = Some(audio);
 
         self.smtc = Some(SmtcBridge::try_init());
+        self.discord_rpc = Some(DiscordRpcBridge::start(self.discord_settings.clone()));
         let dev_id = format!("ferric-pc-{:08x}", fastrand::u32(..));
         self.lease = Some(ActiveSpeakerLease::new(dev_id.clone(), "Desktop-PC"));
         self.lan_ip = detect_local_lan_ip();
@@ -4024,6 +4220,10 @@ impl App {
             "appearance" => {
                 self.navigate_to(cx, MainPage::Settings, false);
                 self.switch_settings_tab(cx, SettingsTab::Appearance);
+            }
+            "integrations" | "discord" => {
+                self.navigate_to(cx, MainPage::Settings, false);
+                self.switch_settings_tab(cx, SettingsTab::Integrations);
             }
             "storage" => {
                 self.navigate_to(cx, MainPage::Settings, false);
@@ -4193,6 +4393,11 @@ impl App {
                 id!(tab_appearance),
                 id!(st_appearance_btn),
             ),
+            (
+                SettingsTab::Integrations,
+                id!(tab_integrations),
+                id!(st_integrations_btn),
+            ),
             (SettingsTab::Storage, id!(tab_storage), id!(st_storage_btn)),
             (SettingsTab::Connect, id!(tab_connect), id!(st_connect_btn)),
         ];
@@ -4203,6 +4408,8 @@ impl App {
         }
         if tab == SettingsTab::Storage {
             self.refresh_storage_stats(cx);
+        } else if tab == SettingsTab::Integrations {
+            self.refresh_discord_preview(cx);
         }
         self.page_reveal_t = 0.0;
         self.start_motion(cx);
@@ -4422,6 +4629,8 @@ impl App {
 
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
         let accent = self.current_accent();
+        let brand_accent = rgba_vec4(&self.theme.accent_hex);
+        let acrylic_tint = rgba_vec4(&self.theme.acrylic_tint_hex);
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
         } else {
@@ -4435,7 +4644,14 @@ impl App {
             .is_some_and(|a| a.telemetry().is_playing);
         self.ui.view(id!(body)).apply_over(
             cx,
-            live! { draw_bg: { accent_col: (accent), acrylic_on: (acr), acrylic_opacity: (op) } },
+            live! {
+                draw_bg: {
+                    accent_col: (accent),
+                    acrylic_on: (acr),
+                    acrylic_opacity: (op),
+                    acrylic_tint: (acrylic_tint)
+                }
+            },
         );
         self.ui.view(id!(bottom_bar)).apply_over(
             cx,
@@ -4444,6 +4660,7 @@ impl App {
                     accent_col: (accent),
                     acrylic_on: (acr),
                     acrylic_opacity: (op),
+                    acrylic_tint: (acrylic_tint),
                     glow_amt: (if self.queue.current().is_some() { 0.28 } else { 0.14 })
                 }
             },
@@ -4458,6 +4675,61 @@ impl App {
         self.ui
             .ferric_bar_slider(id!(vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui
+            .ferric_bar_slider(id!(fs_vol_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        for sid in [
+            id!(xfade_slider),
+            id!(fadein_slider),
+            id!(eq_preamp_slider),
+            id!(acrylic_opacity_slider),
+        ] {
+            self.ui
+                .ferric_bar_slider(sid)
+                .apply_over(cx, live! { draw_bg: { fill_col: (brand_accent) } });
+        }
+        for (slider_id, _) in eq_band_ids() {
+            self.ui
+                .ferric_vert_slider(slider_id)
+                .apply_over(cx, live! { draw_bg: { fill_col: (brand_accent) } });
+        }
+        for tid in [
+            id!(close_to_tray_toggle),
+            id!(radio_toggle),
+            id!(gapless_lock_toggle),
+            id!(trim_silence_toggle),
+            id!(replay_gain_toggle),
+            id!(mono_toggle),
+            id!(eq_enable_toggle),
+            id!(acrylic_toggle),
+            id!(adaptive_art_toggle),
+            id!(discord_enable_toggle),
+            id!(discord_paused_toggle),
+            id!(discord_cover_toggle),
+            id!(discord_hide_details_toggle),
+            id!(auto_update_toggle),
+        ] {
+            self.ui
+                .ferric_toggle(tid)
+                .apply_over(cx, live! { draw_bg: { on_col: (brand_accent) } });
+        }
+        for lid in [
+            id!(zoom_val_lbl),
+            id!(acrylic_opacity_lbl),
+            id!(acrylic_tint_lbl),
+            id!(eq_preamp_lbl),
+            id!(connect_lan_ip_lbl),
+            id!(xfade_val_lbl),
+            id!(fadein_val_lbl),
+            id!(yt_state_lbl),
+            id!(discord_status_lbl),
+            id!(detail_kind_lbl),
+            id!(update_popup_sub),
+        ] {
+            self.ui
+                .label(lid)
+                .apply_over(cx, live! { draw_text: { color: (brand_accent) } });
+        }
         self.ui.view(id!(q_now_row)).apply_over(
             cx,
             live! { draw_bg: { accent_col: (accent), acrylic_on: (acr) } },
@@ -4471,7 +4743,7 @@ impl App {
         );
         self.ui
             .ferric_eq_graph(id!(eq_graph))
-            .apply_over(cx, live! { draw_bg: { accent: (accent) } });
+            .apply_over(cx, live! { draw_bg: { accent: (brand_accent) } });
         self.ui
             .ferric_lyrics_view(id!(rs_lyrics_scroll))
             .set_style(cx, accent, z);
@@ -5803,6 +6075,27 @@ impl App {
         self.ui
             .label(id!(eq_status_lbl))
             .set_text(cx, &format!("Preset: {}", self.eq.preset_name));
+        for (btn, preset) in [
+            (id!(eq_pre_flat), "Flat"),
+            (id!(eq_pre_bass), "Bass Boost"),
+            (id!(eq_pre_bassred), "Bass Reducer"),
+            (id!(eq_pre_treble), "Treble Boost"),
+            (id!(eq_pre_vocal), "Vocal Clarity"),
+            (id!(eq_pre_rock), "Rock"),
+            (id!(eq_pre_pop), "Pop"),
+            (id!(eq_pre_jazz), "Jazz"),
+            (id!(eq_pre_classical), "Classical"),
+            (id!(eq_pre_elec), "Electronic"),
+            (id!(eq_pre_acoustic), "Acoustic"),
+            (id!(eq_pre_loudness), "Loudness"),
+            (id!(eq_pre_copper), "Warm Copper"),
+        ] {
+            let active = self.eq.preset_name.eq_ignore_ascii_case(preset);
+            self.ui.button(btn).apply_over(
+                cx,
+                live! { draw_bg: { active: (if active { 1.0 } else { 0.0 }) } },
+            );
+        }
 
         // Theme buttons active indicator
         for (btn, active) in [
@@ -5841,6 +6134,48 @@ impl App {
         self.ui
             .label(id!(acrylic_opacity_lbl))
             .set_text(cx, &format!("{:.0}%", self.theme.acrylic_opacity * 100.0));
+        let tint_hex = self.theme.acrylic_tint_hex.to_ascii_uppercase();
+        let tint_v4 = rgba_vec4(&tint_hex);
+        self.ui.label(id!(acrylic_tint_lbl)).set_text(cx, &tint_hex);
+        self.ui
+            .view(id!(acrylic_tint_preview))
+            .apply_over(cx, live! { draw_bg: { tint_col: (tint_v4) } });
+        self.ui
+            .text_input(id!(acrylic_tint_input))
+            .set_text(cx, &tint_hex);
+        for (btn, hex) in [
+            (id!(tint_obsidian_btn), "#0B0D14"),
+            (id!(tint_ember_btn), "#2B140A"),
+            (id!(tint_copper_btn), "#2E1A10"),
+            (id!(tint_midnight_btn), "#0C182E"),
+            (id!(tint_emerald_btn), "#0B2118"),
+            (id!(tint_crimson_btn), "#290E16"),
+            (id!(tint_slate_btn), "#1D222E"),
+            (id!(tint_smoke_btn), "#181818"),
+        ] {
+            self.style_chip_btn(cx, btn, tint_hex.eq_ignore_ascii_case(hex));
+        }
+
+        // Discord Rich Presence controls
+        self.ui
+            .ferric_toggle(id!(discord_enable_toggle))
+            .set_active(cx, self.discord_settings.enabled);
+        self.ui
+            .button(id!(discord_format_btn))
+            .set_text(cx, self.discord_settings.status_format.label());
+        self.ui
+            .ferric_toggle(id!(discord_paused_toggle))
+            .set_active(cx, self.discord_settings.show_when_paused);
+        self.ui
+            .ferric_toggle(id!(discord_cover_toggle))
+            .set_active(cx, self.discord_settings.show_cover_art);
+        self.ui
+            .ferric_toggle(id!(discord_hide_details_toggle))
+            .set_active(cx, self.discord_settings.hide_details);
+        self.ui
+            .text_input(id!(discord_client_id_input))
+            .set_text(cx, &self.discord_settings.client_id);
+        self.refresh_discord_preview(cx);
 
         self.ui
             .ferric_bar_slider(id!(vol_slider))
@@ -5900,12 +6235,17 @@ impl App {
         } else {
             0.0_f32
         };
-        win32_set_native_acrylic(self.theme.acrylic_enabled, self.theme.acrylic_opacity);
+        win32_set_native_acrylic(
+            self.theme.acrylic_enabled,
+            self.theme.acrylic_opacity,
+            self.theme.acrylic_tint_rgb(),
+        );
 
         let canvas = rgba_vec4(&self.theme.canvas_hex);
         let surface = rgba_vec4(&self.theme.surface_hex);
         let border = rgba_vec4(&self.theme.border_hex);
         let accent = self.current_accent();
+        let acrylic_tint = rgba_vec4(&self.theme.acrylic_tint_hex);
 
         let op = self.theme.acrylic_opacity.clamp(0.18, 0.94);
         self.ui.view(id!(body)).apply_over(
@@ -5915,6 +6255,7 @@ impl App {
                     canvas_col: (canvas),
                     acrylic_on: (acr),
                     acrylic_opacity: (op),
+                    acrylic_tint: (acrylic_tint),
                     accent_col: (accent)
                 }
             },
@@ -5934,6 +6275,7 @@ impl App {
                         border_col: (border),
                         acrylic_on: (acr),
                         acrylic_opacity: (op),
+                        acrylic_tint: (acrylic_tint),
                         is_canvas: (is_canv)
                     }
                 },
@@ -5951,6 +6293,7 @@ impl App {
             id!(card_pb_speed),
             id!(card_eq_main),
             id!(card_app_theme),
+            id!(card_discord_rpc),
             id!(card_st_cache),
             id!(card_st_update),
             id!(card_st_keys),
@@ -6099,6 +6442,9 @@ impl App {
         self.ui
             .view(id!(toast_pill))
             .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
+        self.ui
+            .view(id!(discord_preview_box))
+            .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
         self.ui.view(id!(top_search_box)).apply_over(
             cx,
             live! { draw_bg: { acrylic_on: (acr), accent_col: (accent) } },
@@ -6131,6 +6477,8 @@ impl App {
             id!(sub_user_input),
             id!(sub_pass_input),
             id!(autoeq_input),
+            id!(acrylic_tint_input),
+            id!(discord_client_id_input),
             id!(cmdk_input),
             id!(tm_new_pl_input),
         ] {
@@ -6199,10 +6547,29 @@ impl App {
             id!(slp_30_btn),
             id!(slp_60_btn),
             id!(slp_eot_btn),
+            id!(eq_pre_flat),
+            id!(eq_pre_bass),
+            id!(eq_pre_bassred),
+            id!(eq_pre_treble),
+            id!(eq_pre_vocal),
+            id!(eq_pre_rock),
+            id!(eq_pre_pop),
+            id!(eq_pre_jazz),
+            id!(eq_pre_classical),
+            id!(eq_pre_elec),
+            id!(eq_pre_acoustic),
+            id!(eq_pre_loudness),
+            id!(eq_pre_copper),
+            id!(autoeq_apply_btn),
+            id!(eq_import_btn),
+            id!(eq_export_btn),
             id!(pal_amoled_btn),
             id!(pal_acrylic_btn),
             id!(pal_obsidian_btn),
             id!(pal_cream_btn),
+            id!(acrylic_tint_apply_btn),
+            id!(discord_format_btn),
+            id!(discord_portal_btn),
             id!(theme_import_btn),
             id!(theme_export_btn),
             id!(zoom_out_btn),
@@ -6289,8 +6656,17 @@ impl App {
             id!(st_playback_btn),
             id!(st_eq_btn),
             id!(st_appearance_btn),
+            id!(st_integrations_btn),
             id!(st_storage_btn),
             id!(st_connect_btn),
+            id!(tint_obsidian_btn),
+            id!(tint_ember_btn),
+            id!(tint_copper_btn),
+            id!(tint_midnight_btn),
+            id!(tint_emerald_btn),
+            id!(tint_crimson_btn),
+            id!(tint_slate_btn),
+            id!(tint_smoke_btn),
             id!(rs_tab_queue),
             id!(rs_tab_lyrics),
             id!(fs_mode_art_btn),
@@ -6378,6 +6754,109 @@ impl App {
             let _ = db.save_eq(&self.eq);
         }
         self.ui.redraw(cx);
+    }
+
+    fn apply_discord_settings(&mut self, cx: &mut Cx) {
+        if let Some(db) = &self.db {
+            let _ = db.save_discord_rpc(&self.discord_settings);
+        }
+        if let Some(rpc) = &mut self.discord_rpc {
+            rpc.configure(self.discord_settings.clone());
+            if let Some(cur) = self.queue.current() {
+                let snap = self.audio.as_ref().map(|a| a.telemetry());
+                rpc.update_playback(Some(DiscordTrackSnapshot {
+                    title: cur.title.clone(),
+                    artist: cur.artist.clone(),
+                    album: cur.album.clone(),
+                    cover_url: cur.thumbnail_url.clone(),
+                    position_ms: snap.as_ref().map_or(0, |s| s.position_ms),
+                    duration_ms: snap
+                        .as_ref()
+                        .map_or(cur.duration_ms, |s| s.duration_ms.max(cur.duration_ms)),
+                    is_playing: snap.as_ref().is_some_and(|s| s.is_playing),
+                }));
+            }
+        }
+        self.sync_controls_from_state(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn refresh_discord_preview(&self, cx: &mut Cx) {
+        if let Some(rpc) = &self.discord_rpc {
+            self.ui
+                .label(id!(discord_status_lbl))
+                .set_text(cx, &rpc.status_text());
+        }
+        let Some(track) = self.queue.current() else {
+            self.ui
+                .label(id!(discord_prev_header))
+                .set_text(cx, "Listening to Ferric");
+            self.ui
+                .label(id!(discord_prev_title))
+                .set_text(cx, "Play a song to preview Discord activity");
+            self.ui
+                .label(id!(discord_prev_artist))
+                .set_text(cx, "Ferric Hi-Fi Player");
+            self.ui
+                .label(id!(discord_prev_album))
+                .set_text(cx, "Native Windows IPC");
+            return;
+        };
+
+        if self.discord_settings.hide_details {
+            self.ui
+                .label(id!(discord_prev_header))
+                .set_text(cx, "Listening to Ferric");
+            self.ui
+                .label(id!(discord_prev_title))
+                .set_text(cx, "Listening to music");
+            self.ui
+                .label(id!(discord_prev_artist))
+                .set_text(cx, "Ferric Hi-Fi Player");
+            self.ui
+                .label(id!(discord_prev_album))
+                .set_text(cx, "Track details hidden");
+        } else {
+            let header = match self.discord_settings.status_format {
+                DiscordStatusFormat::ArtistTitle => {
+                    format!("Listening to {} - {}", track.artist, track.title)
+                }
+                DiscordStatusFormat::TrackTitle => format!("Listening to {}", track.title),
+                DiscordStatusFormat::Artist => format!("Listening to {}", track.artist),
+                DiscordStatusFormat::AppName => "Listening to Ferric".to_string(),
+            };
+            self.ui
+                .label(id!(discord_prev_header))
+                .set_text(cx, &clip_text(&clean_display_text(&header), 56));
+            self.ui
+                .label(id!(discord_prev_title))
+                .set_text(cx, &clip_text(&clean_display_text(&track.title), 44));
+            self.ui
+                .label(id!(discord_prev_artist))
+                .set_text(cx, &clip_text(&clean_display_text(&track.artist), 44));
+            let alb = if track.album.trim().is_empty() {
+                "Ferric".to_string()
+            } else {
+                track.album.clone()
+            };
+            self.ui
+                .label(id!(discord_prev_album))
+                .set_text(cx, &clip_text(&clean_display_text(&alb), 44));
+        }
+
+        self.bind_cover_art_url(
+            cx,
+            self.ui.ferric_cover_art(id!(discord_prev_art)),
+            if self.discord_settings.show_cover_art && !self.discord_settings.hide_details {
+                track.thumbnail_url.as_deref()
+            } else {
+                None
+            },
+            Some(track),
+            false,
+            0.55,
+            false,
+        );
     }
 
     fn current_ytm_session(&self) -> YtmSession {
@@ -6506,6 +6985,8 @@ impl App {
             id!(sub_user_input),
             id!(sub_pass_input),
             id!(autoeq_input),
+            id!(acrylic_tint_input),
+            id!(discord_client_id_input),
             id!(cmdk_input),
             id!(tm_new_pl_input),
         ] {
@@ -7055,6 +7536,18 @@ impl App {
             smtc.set_metadata(&track.title, &track.artist, &track.album, track.duration_ms);
             smtc.set_playing(true);
         }
+        if let Some(rpc) = &mut self.discord_rpc {
+            rpc.update_playback(Some(DiscordTrackSnapshot {
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                cover_url: track.thumbnail_url.clone(),
+                position_ms: 0,
+                duration_ms: track.duration_ms,
+                is_playing: true,
+            }));
+        }
+        self.refresh_discord_preview(cx);
 
         self.lyrics_offset_ms = 0;
         self.load_lyrics_for_track(cx, track);
@@ -8565,8 +9058,29 @@ impl App {
             }
             if let Some(cur) = self.queue.current() {
                 win32_update_taskbar_playback(&cur.title, &cur.artist, snap.is_playing);
+                if let Some(rpc) = &mut self.discord_rpc {
+                    rpc.update_playback(Some(DiscordTrackSnapshot {
+                        title: cur.title.clone(),
+                        artist: cur.artist.clone(),
+                        album: cur.album.clone(),
+                        cover_url: cur.thumbnail_url.clone(),
+                        position_ms: snap.position_ms,
+                        duration_ms: snap.duration_ms.max(cur.duration_ms),
+                        is_playing: snap.is_playing,
+                    }));
+                }
             } else {
                 win32_update_taskbar_playback("", "", false);
+                if let Some(rpc) = &mut self.discord_rpc {
+                    rpc.update_playback(None);
+                }
+            }
+            if let Some(rpc) = &self.discord_rpc {
+                let st = rpc.status_text();
+                if st != self.last_discord_status {
+                    self.last_discord_status = st.clone();
+                    self.ui.label(id!(discord_status_lbl)).set_text(cx, &st);
+                }
             }
 
             // Skip GPU UI telemetry redraws when hidden in tray / minimized -> near-0% idle GPU/CPU
@@ -10085,6 +10599,7 @@ impl App {
             (id!(st_playback_btn), SettingsTab::Playback),
             (id!(st_eq_btn), SettingsTab::Equalizer),
             (id!(st_appearance_btn), SettingsTab::Appearance),
+            (id!(st_integrations_btn), SettingsTab::Integrations),
             (id!(st_storage_btn), SettingsTab::Storage),
             (id!(st_connect_btn), SettingsTab::Connect),
         ] {
@@ -10496,6 +11011,130 @@ impl App {
                 .label(id!(acrylic_opacity_lbl))
                 .set_text(cx, &format!("{:.0}%", self.theme.acrylic_opacity * 100.0));
             self.apply_theme_live(cx);
+        }
+        for (btn, name, hex) in [
+            (id!(tint_obsidian_btn), "Obsidian", "#0B0D14"),
+            (id!(tint_ember_btn), "Ember", "#2B140A"),
+            (id!(tint_copper_btn), "Copper", "#2E1A10"),
+            (id!(tint_midnight_btn), "Midnight", "#0C182E"),
+            (id!(tint_emerald_btn), "Emerald", "#0B2118"),
+            (id!(tint_crimson_btn), "Crimson", "#290E16"),
+            (id!(tint_slate_btn), "Slate", "#1D222E"),
+            (id!(tint_smoke_btn), "Smoke", "#181818"),
+        ] {
+            if self.ui.button(btn).clicked(actions) {
+                self.theme.acrylic_tint_hex = hex.to_string();
+                if !self.theme.acrylic_enabled {
+                    self.theme.acrylic_enabled = true;
+                    self.theme.name = "Native Acrylic".to_string();
+                }
+                self.sync_controls_from_state(cx);
+                self.apply_theme_live(cx);
+                self.show_toast(cx, &format!("Acrylic tint: {name} ({hex})"));
+            }
+        }
+        let apply_custom_tint = self.ui.button(id!(acrylic_tint_apply_btn)).clicked(actions)
+            || self
+                .ui
+                .text_input(id!(acrylic_tint_input))
+                .returned(actions)
+                .is_some();
+        if apply_custom_tint {
+            let raw = self.ui.text_input(id!(acrylic_tint_input)).text();
+            let clean = raw.trim().trim_start_matches('#');
+            let formatted = format!("#{}", clean.to_ascii_uppercase());
+            if parse_hex_rgb(&formatted).is_ok() {
+                self.theme.acrylic_tint_hex = formatted.clone();
+                if !self.theme.acrylic_enabled {
+                    self.theme.acrylic_enabled = true;
+                    self.theme.name = "Native Acrylic".to_string();
+                }
+                self.sync_controls_from_state(cx);
+                self.apply_theme_live(cx);
+                self.show_toast(cx, &format!("Custom Acrylic tint applied: {formatted}"));
+            } else {
+                self.show_toast(cx, "Invalid hex color — use #RRGGBB (e.g. #2B140A)");
+            }
+        }
+
+        // Integrations Tab (Discord Rich Presence)
+        if let Some(on) = self
+            .ui
+            .ferric_toggle(id!(discord_enable_toggle))
+            .toggled(actions)
+        {
+            self.discord_settings.enabled = on;
+            self.apply_discord_settings(cx);
+            self.show_toast(
+                cx,
+                if on {
+                    if is_valid_client_id(&self.discord_settings.client_id) {
+                        "Discord Rich Presence enabled"
+                    } else {
+                        "Discord RPC enabled — paste your Discord Application ID"
+                    }
+                } else {
+                    "Discord Rich Presence disabled"
+                },
+            );
+        }
+        if self.ui.button(id!(discord_format_btn)).clicked(actions) {
+            self.discord_settings.status_format = self.discord_settings.status_format.next();
+            self.apply_discord_settings(cx);
+        }
+        if let Some(on) = self
+            .ui
+            .ferric_toggle(id!(discord_paused_toggle))
+            .toggled(actions)
+        {
+            self.discord_settings.show_when_paused = on;
+            self.apply_discord_settings(cx);
+        }
+        if let Some(on) = self
+            .ui
+            .ferric_toggle(id!(discord_cover_toggle))
+            .toggled(actions)
+        {
+            self.discord_settings.show_cover_art = on;
+            self.apply_discord_settings(cx);
+        }
+        if let Some(on) = self
+            .ui
+            .ferric_toggle(id!(discord_hide_details_toggle))
+            .toggled(actions)
+        {
+            self.discord_settings.hide_details = on;
+            self.apply_discord_settings(cx);
+        }
+        let save_discord_id = self.ui.button(id!(discord_save_id_btn)).clicked(actions)
+            || self
+                .ui
+                .text_input(id!(discord_client_id_input))
+                .returned(actions)
+                .is_some();
+        if save_discord_id {
+            let raw = self.ui.text_input(id!(discord_client_id_input)).text();
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() || is_valid_client_id(&trimmed) {
+                self.discord_settings.client_id = trimmed.clone();
+                if !trimmed.is_empty() {
+                    self.discord_settings.enabled = true;
+                }
+                self.apply_discord_settings(cx);
+                self.show_toast(
+                    cx,
+                    if trimmed.is_empty() {
+                        "Discord Application ID cleared"
+                    } else {
+                        "Discord Application ID saved — connecting..."
+                    },
+                );
+            } else {
+                self.show_toast(cx, "Invalid Discord Application ID (must be 17-22 digits)");
+            }
+        }
+        if self.ui.button(id!(discord_portal_btn)).clicked(actions) {
+            let _ = open_allowed_url("https://discord.com/developers/applications");
         }
         if self.ui.button(id!(theme_export_btn)).clicked(actions)
             && let Some(file) = rfd::FileDialog::new()

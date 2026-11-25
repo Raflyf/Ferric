@@ -1,8 +1,8 @@
 use crate::CoreResult;
 use crate::eq::EqConfig;
 use crate::models::{
-    AccountSettings, PlaybackDspSettings, Playlist, SessionResumeState, Track, TrackSource,
-    UpdateSettings,
+    AccountSettings, DiscordRpcSettings, PlaybackDspSettings, Playlist, SessionResumeState, Track,
+    TrackSource, UpdateSettings,
 };
 use crate::theme::ThemeConfig;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -668,6 +668,14 @@ impl LibraryDb {
 
     pub fn load_session_state(&self) -> CoreResult<SessionResumeState> {
         Ok(self.get_setting("session_resume")?.unwrap_or_default())
+    }
+
+    pub fn save_discord_rpc(&self, cfg: &DiscordRpcSettings) -> CoreResult<()> {
+        self.set_setting("discord_rpc", cfg)
+    }
+
+    pub fn load_discord_rpc(&self) -> CoreResult<DiscordRpcSettings> {
+        Ok(self.get_setting("discord_rpc")?.unwrap_or_default())
     }
 
     pub fn get_cached_lyrics(&self, track_key: &str) -> CoreResult<Option<String>> {

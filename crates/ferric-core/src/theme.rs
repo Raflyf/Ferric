@@ -18,6 +18,10 @@ fn default_acrylic_opacity() -> f32 {
     0.72
 }
 
+fn default_acrylic_tint_hex() -> String {
+    "#0B0D14".to_string()
+}
+
 /// Complete theme contract matching `.ferric-theme.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,13 +44,16 @@ pub struct ThemeConfig {
     pub ui_zoom: f32,
     /// Native Windows 11 DWM Acrylic window transparency (OFF by default for pure AMOLED Black).
     pub acrylic_enabled: bool,
-    /// Native Acrylic window opacity (`0.65 ..= 0.96`).
+    /// Native Acrylic window opacity (`0.18 ..= 0.94`).
     #[serde(default = "default_acrylic_opacity")]
     pub acrylic_opacity: f32,
+    /// Customizable Native Acrylic glass tint color (`#RRGGBB`).
+    #[serde(default = "default_acrylic_tint_hex")]
+    pub acrylic_tint_hex: String,
 }
 
 impl Default for ThemeConfig {
-    /// Pure AMOLED Black canvas (#000000) with crisp obsidian surfaces and adaptive accent (WCAG AAA > 19:1).
+    /// Pure AMOLED Black canvas (#000000) with crisp obsidian surfaces and Ferric Burnt Orange accent.
     fn default() -> Self {
         Self {
             name: "AMOLED Black".to_string(),
@@ -55,7 +62,7 @@ impl Default for ThemeConfig {
             border_hex: "#1C1D25".to_string(),
             text_primary_hex: "#F4F4F7".to_string(),
             text_secondary_hex: "#9A9CA8".to_string(),
-            accent_hex: "#A882FF".to_string(),
+            accent_hex: "#E86A2C".to_string(),
             background_mode: BackgroundMode::AmoledSolid,
             corner_radius_px: 8.0,
             track_row_height_px: 46.0,
@@ -66,6 +73,7 @@ impl Default for ThemeConfig {
             ui_zoom: 1.0,
             acrylic_enabled: false,
             acrylic_opacity: 0.72,
+            acrylic_tint_hex: default_acrylic_tint_hex(),
         }
     }
 }
@@ -123,9 +131,13 @@ impl ThemeConfig {
     }
 
     pub fn accent_contrast_ratio(&self) -> f64 {
-        let fg = parse_hex_rgb(&self.accent_hex).unwrap_or((168, 130, 255));
+        let fg = parse_hex_rgb(&self.accent_hex).unwrap_or((232, 106, 44));
         let bg = parse_hex_rgb(&self.canvas_hex).unwrap_or((0, 0, 0));
         wcag_contrast_ratio(fg, bg)
+    }
+
+    pub fn acrylic_tint_rgb(&self) -> (u8, u8, u8) {
+        parse_hex_rgb(&self.acrylic_tint_hex).unwrap_or((11, 13, 20))
     }
 
     pub fn export_to_file(&self, path: &Path) -> CoreResult<()> {
@@ -194,10 +206,13 @@ mod tests {
 
     #[test]
     fn native_acrylic_theme_roundtrips_json() {
-        let theme = ThemeConfig::native_acrylic();
+        let mut theme = ThemeConfig::native_acrylic();
+        theme.acrylic_tint_hex = "#2B140A".to_string();
         let json = serde_json::to_string(&theme).expect("serialize theme");
         let parsed: ThemeConfig = serde_json::from_str(&json).expect("deserialize theme");
         assert!(parsed.acrylic_enabled);
         assert!((parsed.acrylic_opacity - 0.72).abs() < 1e-4);
+        assert_eq!(parsed.acrylic_tint_hex, "#2B140A");
+        assert_eq!(parsed.acrylic_tint_rgb(), (43, 20, 10));
     }
 }

@@ -280,6 +280,60 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiscordStatusFormat {
+    #[default]
+    ArtistTitle,
+    TrackTitle,
+    Artist,
+    AppName,
+}
+
+impl DiscordStatusFormat {
+    pub fn next(self) -> Self {
+        match self {
+            Self::ArtistTitle => Self::TrackTitle,
+            Self::TrackTitle => Self::Artist,
+            Self::Artist => Self::AppName,
+            Self::AppName => Self::ArtistTitle,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ArtistTitle => "Artist - Title",
+            Self::TrackTitle => "Song Title",
+            Self::Artist => "Artist Only",
+            Self::AppName => "Ferric",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscordRpcSettings {
+    pub enabled: bool,
+    pub client_id: String,
+    pub status_format: DiscordStatusFormat,
+    pub show_when_paused: bool,
+    #[serde(default = "default_true")]
+    pub show_cover_art: bool,
+    pub hide_details: bool,
+}
+
+impl Default for DiscordRpcSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            client_id: String::new(),
+            status_format: DiscordStatusFormat::ArtistTitle,
+            show_when_paused: false,
+            show_cover_art: true,
+            hide_details: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AccountSettings {

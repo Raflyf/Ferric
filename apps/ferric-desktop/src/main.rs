@@ -2,6 +2,7 @@
 
 mod app;
 mod artwork;
+mod discord_rpc;
 mod google_login;
 mod icons;
 mod shell;

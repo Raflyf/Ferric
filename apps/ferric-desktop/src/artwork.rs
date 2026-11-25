@@ -407,7 +407,7 @@ fn downscale_bilinear(src: &ImageBuffer, max_dim: usize) -> ImageBuffer {
 
 /// Extract a refined, WCAG-legible vibrant accent RGB from decoded `VecBGRAu8_32` album artwork.
 pub fn extract_vibrant_accent_rgb(buffer: &ImageBuffer) -> [f32; 3] {
-    const FALLBACK: [f32; 3] = [0.659, 0.510, 1.0]; // Soft violet (#A882FF)
+    const FALLBACK: [f32; 3] = [0.910, 0.416, 0.173]; // Ferric Burnt Orange (#E86A2C)
 
     let len = buffer.data.len();
     if len == 0 {

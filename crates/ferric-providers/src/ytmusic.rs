@@ -587,7 +587,7 @@ pub fn fetch_rich_home(
 
     let root = post_ytm_json("browse", &body, &effective_session)?;
     let visitor_data = extract_visitor_data(&root, &effective_session.visitor_data);
-    let mut next_sess = effective_session.clone();
+    let mut next_sess = effective_session;
     next_sess.visitor_data = visitor_data.clone();
 
     let mut chips = Vec::new();

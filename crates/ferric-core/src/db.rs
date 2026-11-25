@@ -666,9 +666,11 @@ mod tests {
             Some("https://example.com/ram.jpg")
         );
 
-        let mut theme = ThemeConfig::default();
-        theme.acrylic_enabled = true;
-        theme.acrylic_opacity = 0.80;
+        let theme = ThemeConfig {
+            acrylic_enabled: true,
+            acrylic_opacity: 0.80,
+            ..ThemeConfig::default()
+        };
         db.save_theme(&theme).expect("save theme");
         let loaded = db.load_theme().expect("load theme");
         assert!(loaded.acrylic_enabled);

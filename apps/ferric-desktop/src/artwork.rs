@@ -11,9 +11,10 @@ use std::thread;
 
 /// Two lightweight worker threads decode visible cover art fast while minimizing peak decode RAM.
 const WORKER_THREADS: usize = 2;
-/// Hard LRU cap: 48 covers x 112x112 BGRA (~49 KB) = ~2.4 MB CPU + ~2.4 MB VRAM max.
-/// Holds active Quick Picks, visible Shelf cards, Queue, and Hero artwork smoothly under 100 MB RAM.
-const MAX_CACHED_TEXTURES: usize = 48;
+/// Hard LRU cap: 128 covers x 112x112 BGRA (~49 KB) = ~6.2 MB max CPU/VRAM.
+/// Exceeds total simultaneous visible Home (48) + Queue/History (14) + Search/Library slots
+/// so LRU eviction NEVER thrashes visible cards during playback.
+const MAX_CACHED_TEXTURES: usize = 128;
 /// Crisp card thumbnail size (sharp for 32..120 px slots, 65x smaller than 1280x720).
 const THUMB_MAX_DIM: usize = 112;
 /// Higher detail size reserved solely for the currently playing hero/fullscreen artwork (~225 KB).

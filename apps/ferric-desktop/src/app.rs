@@ -82,29 +82,35 @@ live_design! {
         }
     }
 
-    // Ferric Pure AMOLED Black surface that transitions cleanly into Native Windows 11 Acrylic
+    // Ferric Pure AMOLED Black surface that transitions cleanly into true per-pixel Windows 11 Acrylic
     FerricSurface = <View> {
         show_bg: true,
         draw_bg: {
             uniform base_col: #09090D
             uniform border_col: #1C1D25
             uniform acrylic_on: 0.0
+            uniform acrylic_opacity: 0.72
+            uniform is_canvas: 0.0
 
             fn pixel(self) -> vec4 {
                 if (self.acrylic_on < 0.5) {
                     return self.base_col;
                 }
-                let tint = mix(self.base_col.xyz, vec3(0.068, 0.072, 0.102), 0.52);
-                return vec4(tint, 1.0);
+                if (self.is_canvas > 0.5) {
+                    return vec4(0.0, 0.0, 0.0, 0.0);
+                }
+                let a = clamp(self.acrylic_opacity * 0.36, 0.06, 0.44);
+                let tint = vec3(0.055, 0.058, 0.088);
+                return vec4(tint * a, a);
             }
         }
     }
 
-    // Compact Adaptive Ambient Bottom Player Bar (60px, Inter typography, zero clipping)
+    // Centered 2-Row Ambient Bottom Player Bar (74px, crisp symmetry, per-pixel Acrylic ready)
     AmbientBottomBar = <View> {
         width: Fill,
-        height: 60,
-        padding: { left: 12, right: 12, top: 4, bottom: 4 }
+        height: 74,
+        padding: { left: 14, right: 14, top: 6, bottom: 6 }
         flow: Right,
         align: { y: 0.5 }
         spacing: 10,
@@ -114,16 +120,24 @@ live_design! {
             uniform accent_col: #A882FF
             uniform glow_amt: 0.20
             uniform acrylic_on: 0.0
+            uniform acrylic_opacity: 0.72
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 if (p.y < 1.0) {
-                    return mix(#181A22, vec4(1.0, 1.0, 1.0, 0.10), self.acrylic_on);
+                    if (self.acrylic_on > 0.5) {
+                        return vec4(0.14, 0.14, 0.16, 0.16);
+                    }
+                    return #181A22;
                 }
                 let d_left = length((self.pos - vec2(0.08, 0.55)) * vec2(1.4, 2.2));
-                let d_mid = length((self.pos - vec2(0.46, 0.85)) * vec2(0.9, 2.4));
+                let d_mid = length((self.pos - vec2(0.48, 0.85)) * vec2(0.9, 2.4));
                 let wash = (exp(-d_left * d_left * 2.4) * 0.55 + exp(-d_mid * d_mid * 1.8) * 0.35) * self.glow_amt;
-                let base_rgb = mix(self.base_col.xyz, vec3(0.064, 0.068, 0.098), self.acrylic_on);
-                let rgb = base_rgb + self.accent_col.xyz * wash;
+                if (self.acrylic_on > 0.5) {
+                    let a = clamp(self.acrylic_opacity * 0.60, 0.18, 0.78);
+                    let rgb = clamp(vec3(0.044, 0.048, 0.072) + self.accent_col.xyz * wash, 0.0, 1.0);
+                    return vec4(rgb * a, a);
+                }
+                let rgb = self.base_col.xyz + self.accent_col.xyz * wash;
                 return vec4(clamp(rgb, 0.0, 1.0), 1.0);
             }
         }
@@ -153,10 +167,10 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
                 let solid_fill = vec4(0.052, 0.056, 0.076, 1.0);
-                let acrylic_fill = vec4(0.084, 0.090, 0.128, 1.0);
+                let acrylic_fill = vec4(0.078, 0.084, 0.118, 0.62);
                 sdf.fill_keep(mix(solid_fill, acrylic_fill, self.acrylic_on));
                 let solid_border = vec4(0.114, 0.122, 0.161, 1.0);
-                let acrylic_border = vec4(1.0, 1.0, 1.0, 0.095);
+                let acrylic_border = vec4(1.0, 1.0, 1.0, 0.12);
                 sdf.stroke(mix(solid_border, acrylic_border, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -555,8 +569,8 @@ live_design! {
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 7.0);
                 let solid_idle = mix(vec4(0.050, 0.054, 0.074, 1.0), vec4(0.112, 0.120, 0.168, 1.0), self.hover);
                 let solid_act = mix(vec4(0.105, 0.098, 0.175, 1.0), vec4(self.accent_col.xyz, 0.24), 0.36);
-                let acr_idle = mix(vec4(0.092, 0.098, 0.138, 1.0), vec4(0.155, 0.164, 0.228, 1.0), self.hover);
-                let acr_act = vec4(mix(vec3(0.12, 0.12, 0.18), self.accent_col.xyz, 0.30), 1.0);
+                let acr_idle = mix(vec4(0.076, 0.082, 0.116, 0.58), vec4(0.145, 0.156, 0.220, 0.78), self.hover);
+                let acr_act = vec4(mix(vec3(0.12, 0.12, 0.18), self.accent_col.xyz, 0.30), 0.80);
                 let col = mix(mix(solid_idle, solid_act, self.active), mix(acr_idle, acr_act, self.active), self.acrylic_on);
                 let sheen = smoothstep(0.55, 0.0, self.pos.y) * self.hover * 0.075;
                 let lifted = vec4(clamp(col.xyz + vec3(sheen), 0.0, 1.0), col.w);
@@ -631,7 +645,7 @@ live_design! {
                 let inset = 0.5 + self.down * 1.4;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
                 let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover);
-                let acr_fill = mix(vec4(0.090, 0.096, 0.136, 1.0), vec4(0.160, 0.170, 0.236, 1.0), self.hover);
+                let acr_fill = mix(vec4(0.076, 0.082, 0.116, 0.58), vec4(0.148, 0.158, 0.222, 0.78), self.hover);
                 let fill = mix(solid_fill, acr_fill, self.acrylic_on);
                 let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.085;
                 let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
@@ -708,7 +722,7 @@ live_design! {
                 let inset = 0.5 + self.down * 1.4;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
                 let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover);
-                let acr_fill = mix(vec4(0.090, 0.096, 0.136, 1.0), vec4(0.160, 0.170, 0.236, 1.0), self.hover);
+                let acr_fill = mix(vec4(0.076, 0.082, 0.116, 0.58), vec4(0.148, 0.158, 0.222, 0.78), self.hover);
                 let fill = mix(solid_fill, acr_fill, self.acrylic_on);
                 let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.085;
                 let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
@@ -764,10 +778,10 @@ live_design! {
     QueueMiniRow = <View> {
         width: Fill,
         height: 44,
-        padding: { left: 7, right: 7, top: 4, bottom: 4 }
+        padding: { left: 7, right: 8, top: 4, bottom: 4 }
         flow: Right,
         align: { y: 0.5 }
-        spacing: 8,
+        spacing: 6,
         show_bg: true,
         cursor: Hand,
         draw_bg: {
@@ -780,13 +794,13 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
                 let solid_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(0.095, 0.102, 0.140, 1.0), self.hover);
-                let acr_idle = mix(vec4(1.0, 1.0, 1.0, 0.025), vec4(1.0, 1.0, 1.0, 0.095), self.hover);
+                let acr_idle = mix(vec4(1.0, 1.0, 1.0, 0.03), vec4(1.0, 1.0, 1.0, 0.11), self.hover);
                 let idle = mix(solid_idle, acr_idle, self.acrylic_on);
                 let act_solid = mix(#1A1928, vec4(self.accent_col.xyz, 0.24), 0.34);
-                let act_acr = vec4(mix(vec3(0.13, 0.13, 0.20), self.accent_col.xyz, 0.28), 1.0);
+                let act_acr = vec4(mix(vec3(0.12, 0.12, 0.18), self.accent_col.xyz, 0.30), 0.72);
                 sdf.fill_keep(mix(idle, mix(act_solid, act_acr, self.acrylic_on), self.active));
                 let i_rim = vec4(1.0, 1.0, 1.0, (0.06 + 0.08 * self.hover) * self.acrylic_on);
-                let a_rim = vec4(self.accent_col.xyz, 0.58);
+                let a_rim = vec4(self.accent_col.xyz, 0.62);
                 sdf.stroke(mix(i_rim, a_rim, self.active), 1.0);
                 return sdf.result;
             }
@@ -901,7 +915,7 @@ live_design! {
         ui: <Root> {
             main_window = <Window> {
                 window: { title: "Ferric", inner_size: vec2(1280, 780) }
-                pass: { clear_color: #000000 }
+                pass: { clear_color: #00000000 }
                 caption_bar = {
                     visible: false,
                     height: 0,
@@ -916,14 +930,17 @@ live_design! {
                     draw_bg: {
                         uniform canvas_col: #000000
                         uniform acrylic_on: 0.0
+                        uniform acrylic_opacity: 0.72
                         uniform accent_col: #A882FF
                         fn pixel(self) -> vec4 {
                             if (self.acrylic_on < 0.5) {
                                 return self.canvas_col;
                             }
                             let d1 = length((self.pos - vec2(0.14, 0.14)) * vec2(0.95, 1.15));
-                            let subtle = exp(-d1 * d1 * 3.2) * self.accent_col.xyz * 0.08;
-                            return vec4(clamp(vec3(0.044, 0.048, 0.068) + subtle, 0.0, 1.0), 1.0);
+                            let subtle = exp(-d1 * d1 * 3.2) * self.accent_col.xyz * 0.07;
+                            let a = clamp(self.acrylic_opacity * 0.78, 0.14, 0.90);
+                            let rgb = clamp(vec3(0.036, 0.040, 0.060) + subtle, 0.0, 1.0);
+                            return vec4(rgb * a, a);
                         }
                     }
 
@@ -1194,7 +1211,7 @@ live_design! {
                                 width: Fill,
                                 height: Fill,
                                 flow: Overlay,
-                                draw_bg: { base_col: #000000 }
+                                draw_bg: { base_col: #000000, is_canvas: 1.0 }
 
                                 // --------------------------------------------------------
                                 // PAGE 1: HOME (Mood Chips + Quick Picks + 8 Dynamic Shelves + Load More)
@@ -1972,7 +1989,7 @@ live_design! {
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                                 <Label> { width: 140, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Opacity" }
-                                                acrylic_opacity_slider = <FerricBarSlider> { min: 0.48, max: 0.94, value: 0.72, wheel_adjust: true, wheel_step: 0.04 }
+                                                acrylic_opacity_slider = <FerricBarSlider> { min: 0.18, max: 0.94, value: 0.72, wheel_adjust: true, wheel_step: 0.04 }
                                                 acrylic_opacity_lbl = <Label> { width: 42, draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "72%" }
                                             }
                                             <View> {
@@ -2063,20 +2080,20 @@ live_design! {
                             right_divider = <FerricDividerV> {}
 
                             // ============================================================
-                            // DOCKED RIGHT SIDEBAR (248px — Queue & Spring Synced Lyrics)
+                            // DOCKED RIGHT SIDEBAR (260px — Queue & Spring Synced Lyrics)
                             // ============================================================
                             right_sidebar = <FerricSurface> {
                                 visible: true,
-                                width: 248,
+                                width: 260,
                                 height: Fill,
-                                padding: { left: 8, right: 8, top: 8, bottom: 8 }
+                                padding: { left: 8, right: 10, top: 8, bottom: 8 }
                                 flow: Down,
                                 spacing: 6,
                                 draw_bg: { base_col: #09090D }
 
-                                // Right Sidebar Header Tabs: [Queue] [Lyrics] + [Radio] [Clear]
+                                // Right Sidebar Header Tabs: [Queue] [Lyrics] + [Radio] [Refresh] [Clear]
                                 <View> {
-                                    width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 5,
+                                    width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 4,
                                     rs_tab_queue = <FerricChipBtn> { height: 24, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
                                     rs_tab_lyrics = <FerricChipBtn> { height: 24, text: "Lyrics" }
                                     <View> { width: Fill, height: 1 }
@@ -2105,7 +2122,7 @@ live_design! {
                                     visible: true,
                                     width: Fill,
                                     height: Fill,
-                                    padding: { top: 2, bottom: 10 }
+                                    padding: { top: 2, right: 8, bottom: 10 }
                                     flow: Down,
                                     spacing: 4,
 
@@ -2194,20 +2211,20 @@ live_design! {
                         }
 
                         // ============================================================
-                        // 3. SINGLE-ROW AMBIENT BOTTOM PLAYER BAR (60px, ZERO CLIPPING!)
+                        // 3. CENTERED 2-ROW AMBIENT BOTTOM PLAYER BAR (74px, GEOMETRIC SYMMETRY)
                         // ============================================================
                         bottom_bar = <AmbientBottomBar> {
-                            // Left: 38x38 Cover Art + Title/Artist + Heart
+                            // Left (272px): 44x44 Cover Art + Title/Artist + Heart + Add Playlist
                             bottom_left_grp = <View> {
-                                width: 236,
+                                width: 272,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
-                                spacing: 9,
+                                spacing: 10,
 
                                 np_art = <FerricCoverArt> {
-                                    width: 38,
-                                    height: 38,
+                                    width: 44,
+                                    height: 44,
                                     draw_bg: { radius: 6.0 }
                                 }
                                 <View> {
@@ -2219,14 +2236,14 @@ live_design! {
                                         width: Fill,
                                         flow: Right,
                                         padding: 0,
-                                        draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 9.4, line_spacing: 1.0 } }
+                                        draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 9.6, line_spacing: 1.0 } }
                                         text: "Ready to play"
                                     }
                                     np_artist_lbl = <Label> {
                                         width: Fill,
                                         flow: Right,
                                         padding: 0,
-                                        draw_text: { color: #A2A6B8, text_style: <THEME_FONT_REGULAR> { font_size: 8.2, line_spacing: 1.0 } }
+                                        draw_text: { color: #A2A6B8, text_style: <THEME_FONT_REGULAR> { font_size: 8.3, line_spacing: 1.0 } }
                                         text: "Pick a song to play"
                                     }
                                 }
@@ -2246,70 +2263,89 @@ live_design! {
                                 }
                             }
 
-                            // Center: Single-Row Transport + Inline Seekbar
+                            // Center (Stacked 2-Row Transport + Wide Scrubber — Dead-Center Symmetry)
                             <View> {
                                 width: Fill,
                                 height: Fill,
-                                flow: Right,
+                                flow: Down,
                                 align: { x: 0.5, y: 0.5 }
-                                spacing: 6,
+                                spacing: 4,
+                                padding: { left: 16, right: 16 }
 
-                                shuffle_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
-                                    draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z" }
-                                }
-                                prev_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
-                                    draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z" }
-                                }
-                                play_pause_btn = <FerricPlayBtn> {
-                                    width: 32, height: 32,
-                                }
-                                next_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
-                                    draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z" }
-                                }
-                                repeat_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
-                                    draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z" }
-                                }
-
-                                <View> { width: 4, height: 1 }
-
-                                pos_lbl = <Label> {
-                                    width: 40,
-                                    padding: 0,
+                                // Row 1: Centered Transport Controls
+                                <View> {
+                                    width: Fit,
+                                    height: Fit,
+                                    flow: Right,
                                     align: { x: 0.5, y: 0.5 }
-                                    draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }
-                                    text: "00:00"
+                                    spacing: 14,
+
+                                    shuffle_btn = <FerricIconBtn> {
+                                        width: 26, height: 26,
+                                        draw_icon: { svg_path: "M10.59 9.17L5.41 4L4 5.41L9.17 10.58L10.59 9.17ZM14.5 4L16.54 6.04L4 18.59L5.41 20L17.96 7.46L20 9.5V4H14.5ZM14.83 13.41L13.42 14.82L16.55 17.95L14.5 20H20V14.5L17.96 16.54L14.83 13.41Z" }
+                                    }
+                                    prev_btn = <FerricIconBtn> {
+                                        width: 26, height: 26,
+                                        draw_icon: { svg_path: "M6 6H8V18H6V6ZM9.5 12L18 18V6L9.5 12Z" }
+                                    }
+                                    play_pause_btn = <FerricPlayBtn> {
+                                        width: 34, height: 34,
+                                        draw_bg: { accent_col: #FFFFFF, accent_hover: #FFFFFF, glyph_col: #09090D }
+                                    }
+                                    next_btn = <FerricIconBtn> {
+                                        width: 26, height: 26,
+                                        draw_icon: { svg_path: "M6 18L14.5 12L6 6V18ZM16 6V18H18V6H16Z" }
+                                    }
+                                    repeat_btn = <FerricIconBtn> {
+                                        width: 26, height: 26,
+                                        draw_icon: { svg_path: "M7 7H17V10L21 6L17 2V5H5V11H7V7ZM17 17H7V14L3 18L7 22V19H19V13H17V17Z" }
+                                    }
                                 }
-                                seek_slider = <FerricBarSlider> {
+
+                                // Row 2: Wide Scrubber Track with Left Elapsed & Right Total/Remaining
+                                <View> {
                                     width: Fill,
                                     height: 18,
-                                    min: 0.0, max: 1.0, value: 0.0
-                                }
-                                dur_btn = <Button> {
-                                    width: 42, height: 22, padding: 0,
+                                    flow: Right,
                                     align: { x: 0.5, y: 0.5 }
-                                    text: "00:00"
-                                    draw_bg: { fn pixel(self) -> vec4 { return vec4(0.0, 0.0, 0.0, 0.0); } }
-                                    draw_text: { color: #9A9CA8, color_hover: #F4F4F7, color_focus: #F4F4F7, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }
+                                    spacing: 10,
+
+                                    pos_lbl = <Label> {
+                                        width: 38,
+                                        padding: 0,
+                                        align: { x: 1.0, y: 0.5 }
+                                        draw_text: { color: #B4B7C5, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }
+                                        text: "0:00"
+                                    }
+                                    seek_slider = <FerricBarSlider> {
+                                        width: Fill,
+                                        height: 16,
+                                        min: 0.0, max: 1.0, value: 0.0,
+                                        draw_bg: { track_col: #3E404C, fill_col: #F4F4F7, thumb_col: #FFFFFF }
+                                    }
+                                    dur_btn = <Button> {
+                                        width: 40, height: 18, padding: 0,
+                                        align: { x: 0.0, y: 0.5 }
+                                        text: "0:00"
+                                        draw_bg: { fn pixel(self) -> vec4 { return vec4(0.0, 0.0, 0.0, 0.0); } }
+                                        draw_text: { color: #B4B7C5, color_hover: #FFFFFF, color_focus: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }
+                                    }
                                 }
                             }
 
-                            // Right: width: Fit prevents bar_fullscreen_btn from EVER clipping on wide codec badges!
-                            <View> {
-                                width: Fit,
+                            // Right (272px matching Left width for exact geometric centering of Play/Pause!)
+                            bottom_right_grp = <View> {
+                                width: 272,
                                 height: Fill,
                                 flow: Right,
                                 align: { x: 1.0, y: 0.5 }
-                                spacing: 4,
+                                spacing: 3,
 
                                 codec_pill_btn = <FerricBtn> {
                                     height: 22,
                                     padding: { left: 7, right: 7 }
                                     text: "READY"
-                                    draw_text: { color: #B4B6C4, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 7.9 } }
+                                    draw_text: { color: #B4B6C4, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
                                 }
                                 bar_video_btn = <FerricIconBtn> {
                                     width: 26, height: 26,
@@ -2328,7 +2364,7 @@ live_design! {
                                     draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" }
                                 }
                                 vol_slider = <FerricBarSlider> {
-                                    width: 64,
+                                    width: 62,
                                     height: 18,
                                     min: 0.0, max: 1.0, value: 0.85,
                                     wheel_adjust: true,
@@ -3002,6 +3038,12 @@ pub struct App {
     #[rust]
     right_w_target: f64,
     #[rust]
+    last_pos_txt: String,
+    #[rust]
+    last_dur_txt: String,
+    #[rust]
+    last_codec_txt: String,
+    #[rust]
     sleep_timer: SleepTimerMode,
     #[rust]
     tick_timer: Timer,
@@ -3241,7 +3283,7 @@ impl App {
         };
         self.left_w_cur = self.left_w_target;
         self.right_w_target = if self.right_sidebar_open {
-            248.0 * z
+            260.0 * z
         } else {
             0.0
         };
@@ -3258,20 +3300,23 @@ impl App {
         if self.right_sidebar_open {
             self.ui
                 .view(id!(right_sidebar))
-                .apply_over(cx, live! { width: (248.0 * z) });
+                .apply_over(cx, live! { width: (260.0 * z) });
         }
         self.ui
             .view(id!(bottom_bar))
-            .apply_over(cx, live! { height: (60.0 * z) });
+            .apply_over(cx, live! { height: (74.0 * z) });
         self.ui
             .view(id!(bottom_left_grp))
-            .apply_over(cx, live! { width: (236.0 * z) });
+            .apply_over(cx, live! { width: (272.0 * z) });
+        self.ui
+            .view(id!(bottom_right_grp))
+            .apply_over(cx, live! { width: (272.0 * z) });
         self.ui
             .ferric_cover_art(id!(np_art))
-            .apply_over(cx, live! { width: (38.0 * z), height: (38.0 * z) });
+            .apply_over(cx, live! { width: (44.0 * z), height: (44.0 * z) });
         self.ui
             .ferric_play_btn(id!(play_pause_btn))
-            .apply_over(cx, live! { width: (32.0 * z), height: (32.0 * z) });
+            .apply_over(cx, live! { width: (34.0 * z), height: (34.0 * z) });
         self.ui.label(id!(np_title_lbl)).apply_over(
             cx,
             live! { draw_text: { text_style: { font_size: (9.4 * z) } } },
@@ -3748,7 +3793,7 @@ impl App {
             if !(0.65..=1.40).contains(&self.theme.ui_zoom) {
                 self.theme.ui_zoom = 1.0;
             }
-            self.theme.acrylic_opacity = self.theme.acrylic_opacity.clamp(0.48, 0.94);
+            self.theme.acrylic_opacity = self.theme.acrylic_opacity.clamp(0.18, 0.94);
             self.eq = store.load_eq().unwrap_or_default();
             self.dsp = store.load_playback_dsp().unwrap_or_default();
             self.accounts = store.load_accounts().unwrap_or_default();
@@ -3768,8 +3813,8 @@ impl App {
         let init_z = self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
         self.left_w_cur = 168.0 * init_z;
         self.left_w_target = 168.0 * init_z;
-        self.right_w_cur = 248.0 * init_z;
-        self.right_w_target = 248.0 * init_z;
+        self.right_w_cur = 260.0 * init_z;
+        self.right_w_target = 260.0 * init_z;
         self.displayed_accent = rgba_vec4(&self.theme.accent_hex);
         win32_set_close_to_tray(self.dsp.close_to_tray);
         self.queue.shuffle = self.session_state.shuffle;
@@ -4052,7 +4097,7 @@ impl App {
         let z = self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
         self.right_sidebar_open = open;
         self.right_lyrics_tab = lyrics_tab;
-        self.right_w_target = if open { 248.0 * z } else { 0.0 };
+        self.right_w_target = if open { 260.0 * z } else { 0.0 };
         if open {
             self.ui.view(id!(right_sidebar)).set_visible(cx, true);
             self.ui.view(id!(right_divider)).set_visible(cx, true);
@@ -4096,6 +4141,8 @@ impl App {
             self.close_native_video_stage(cx);
         }
         self.fullscreen_open = open;
+        self.last_pos_txt.clear();
+        self.last_dur_txt.clear();
         self.ui.view(id!(shell_col)).set_visible(cx, !open);
         self.ui.view(id!(fullscreen_overlay)).set_visible(cx, open);
         let accent = self.current_accent();
@@ -4264,6 +4311,7 @@ impl App {
         } else {
             0.0_f32
         };
+        let op = self.theme.acrylic_opacity.clamp(0.18, 0.94);
         let z = self.theme.ui_zoom.clamp(0.65, 1.40);
         let is_playing = self
             .audio
@@ -4271,7 +4319,7 @@ impl App {
             .is_some_and(|a| a.telemetry().is_playing);
         self.ui.view(id!(body)).apply_over(
             cx,
-            live! { draw_bg: { accent_col: (accent), acrylic_on: (acr) } },
+            live! { draw_bg: { accent_col: (accent), acrylic_on: (acr), acrylic_opacity: (op) } },
         );
         self.ui.view(id!(bottom_bar)).apply_over(
             cx,
@@ -4279,6 +4327,7 @@ impl App {
                 draw_bg: {
                     accent_col: (accent),
                     acrylic_on: (acr),
+                    acrylic_opacity: (op),
                     glow_amt: (if self.queue.current().is_some() { 0.28 } else { 0.14 })
                 }
             },
@@ -4290,11 +4339,9 @@ impl App {
             accent,
             acr,
         );
-        for slider_id in [id!(seek_slider), id!(vol_slider)] {
-            self.ui
-                .ferric_bar_slider(slider_id)
-                .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
-        }
+        self.ui
+            .ferric_bar_slider(id!(vol_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
         self.ui.view(id!(q_now_row)).apply_over(
             cx,
             live! { draw_bg: { accent_col: (accent), acrylic_on: (acr) } },
@@ -5591,22 +5638,24 @@ impl App {
         let border = rgba_vec4(&self.theme.border_hex);
         let accent = self.current_accent();
 
+        let op = self.theme.acrylic_opacity.clamp(0.18, 0.94);
         self.ui.view(id!(body)).apply_over(
             cx,
             live! {
                 draw_bg: {
                     canvas_col: (canvas),
                     acrylic_on: (acr),
+                    acrylic_opacity: (op),
                     accent_col: (accent)
                 }
             },
         );
 
-        for (pid, flat_col) in [
-            (id!(top_bar), surface),
-            (id!(left_sidebar), surface),
-            (id!(center_stage), canvas),
-            (id!(right_sidebar), surface),
+        for (pid, flat_col, is_canv) in [
+            (id!(top_bar), surface, 0.0_f32),
+            (id!(left_sidebar), surface, 0.0_f32),
+            (id!(center_stage), canvas, 1.0_f32),
+            (id!(right_sidebar), surface, 0.0_f32),
         ] {
             self.ui.view(pid).apply_over(
                 cx,
@@ -5614,7 +5663,9 @@ impl App {
                     draw_bg: {
                         base_col: (flat_col),
                         border_col: (border),
-                        acrylic_on: (acr)
+                        acrylic_on: (acr),
+                        acrylic_opacity: (op),
+                        is_canvas: (is_canv)
                     }
                 },
             );
@@ -6435,6 +6486,9 @@ impl App {
     }
 
     fn play_track(&mut self, cx: &mut Cx, track: Track) {
+        self.last_pos_txt.clear();
+        self.last_dur_txt.clear();
+        self.last_codec_txt.clear();
         if let Some(cache) = &mut self.artwork {
             cache.pin_active_track(Some(&track));
         }
@@ -8003,26 +8057,36 @@ impl App {
 
             if snap.duration_ms > 0 {
                 let ratio = (snap.position_ms as f64 / snap.duration_ms as f64).clamp(0.0, 1.0);
-                let pos_txt = format_duration_ms(snap.position_ms);
+                let pos_txt = format_compact_time_ms(snap.position_ms);
                 self.ui
                     .ferric_bar_slider(id!(seek_slider))
                     .set_value(cx, ratio);
-                self.ui.label(id!(pos_lbl)).set_text(cx, &pos_txt);
                 let dur_txt = if self.show_remaining_time {
                     format!(
                         "-{}",
-                        format_duration_ms(snap.duration_ms.saturating_sub(snap.position_ms))
+                        format_compact_time_ms(snap.duration_ms.saturating_sub(snap.position_ms))
                     )
                 } else {
-                    format_duration_ms(snap.duration_ms)
+                    format_compact_time_ms(snap.duration_ms)
                 };
-                self.ui.button(id!(dur_btn)).set_text(cx, &dur_txt);
+                if pos_txt != self.last_pos_txt {
+                    self.last_pos_txt = pos_txt.clone();
+                    self.ui.label(id!(pos_lbl)).set_text(cx, &pos_txt);
+                    if self.fullscreen_open {
+                        self.ui.label(id!(fs_pos_lbl)).set_text(cx, &pos_txt);
+                    }
+                }
+                if dur_txt != self.last_dur_txt {
+                    self.last_dur_txt = dur_txt.clone();
+                    self.ui.button(id!(dur_btn)).set_text(cx, &dur_txt);
+                    if self.fullscreen_open {
+                        self.ui.label(id!(fs_dur_lbl)).set_text(cx, &dur_txt);
+                    }
+                }
                 if self.fullscreen_open {
                     self.ui
                         .ferric_bar_slider(id!(fs_seek_slider))
                         .set_value(cx, ratio);
-                    self.ui.label(id!(fs_pos_lbl)).set_text(cx, &pos_txt);
-                    self.ui.label(id!(fs_dur_lbl)).set_text(cx, &dur_txt);
                 }
                 self.update_lyrics_display(cx, snap.position_ms);
             }
@@ -8036,14 +8100,20 @@ impl App {
                     .set_playing(cx, snap.is_playing);
             }
 
-            if snap.is_crossfading {
-                self.ui.button(id!(codec_pill_btn)).set_text(cx, "XFADE");
+            let next_codec = if snap.is_crossfading {
+                Some("XFADE".to_string())
             } else if let Some(cur) = self.queue.current()
                 && self.pending_stream_track_id.is_none()
             {
-                self.ui
-                    .button(id!(codec_pill_btn))
-                    .set_text(cx, &cur.quality_badge());
+                Some(cur.quality_badge())
+            } else {
+                None
+            };
+            if let Some(badge) = next_codec
+                && badge != self.last_codec_txt
+            {
+                self.last_codec_txt = badge.clone();
+                self.ui.button(id!(codec_pill_btn)).set_text(cx, &badge);
             }
 
             let accent = self.current_accent();
@@ -9223,6 +9293,7 @@ impl App {
         }
         if self.ui.button(id!(dur_btn)).clicked(actions) {
             self.show_remaining_time = !self.show_remaining_time;
+            self.last_dur_txt.clear();
         }
         if (self.ui.button(id!(np_like_btn)).clicked(actions)
             || self.ui.button(id!(fs_like_btn)).clicked(actions))
@@ -9871,7 +9942,7 @@ impl App {
             .ferric_bar_slider(id!(acrylic_opacity_slider))
             .changed(actions)
         {
-            self.theme.acrylic_opacity = (v as f32).clamp(0.48, 0.94);
+            self.theme.acrylic_opacity = (v as f32).clamp(0.18, 0.94);
             self.ui
                 .label(id!(acrylic_opacity_lbl))
                 .set_text(cx, &format!("{:.0}%", self.theme.acrylic_opacity * 100.0));
@@ -10471,6 +10542,13 @@ impl AppMain for App {
             self.handle_actions(cx, actions);
         }
     }
+}
+
+fn format_compact_time_ms(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{mins}:{secs:02}")
 }
 
 fn is_desktop_click(fe: &FingerUpEvent) -> bool {

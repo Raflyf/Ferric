@@ -44,6 +44,9 @@ pub fn startup_play_first() -> bool {
 }
 
 fn main() {
+    if !shell::win32_acquire_single_instance_or_activate() {
+        return;
+    }
     let _ = startup_page_override();
     let _ = startup_load_demo();
     let _ = startup_play_first();

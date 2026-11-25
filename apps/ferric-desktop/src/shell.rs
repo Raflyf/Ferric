@@ -69,12 +69,11 @@ mod win_impl {
     use super::{TrayEvent, WindowClientScreenRect};
     use std::ffi::c_void;
     use std::ptr;
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
-        ClientToScreen, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-        MonitorFromWindow,
+        ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
     };
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
@@ -84,22 +83,21 @@ mod win_impl {
         Shell_NotifyIconW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-        GetClientRect, GetCursorPos, IDI_APPLICATION, LoadIconW, MF_SEPARATOR, MF_STRING,
-        MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, RegisterClassW, SW_HIDE, SW_RESTORE, SW_SHOW,
-        SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
+        AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetCursorPos, IDI_APPLICATION,
+        LoadIconW, MF_SEPARATOR, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, SW_HIDE,
+        SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
         TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE,
-        WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE,
-        WM_NCCALCSIZE, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED,
-        WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE, WM_NCCALCSIZE,
+        WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED, WS_CAPTION,
+        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
     use windows::core::{PCWSTR, s, w};
 
     const SUBCLASS_ID: usize = 0xFE11_C001;
     const TRAY_ICON_ID: u32 = 1;
     const WM_TRAYICON: u32 = WM_APP + 42;
+    const ERROR_ALREADY_EXISTS: u32 = 183;
 
     const CMD_SHOW: u32 = 1001;
     const CMD_PLAY_PAUSE: u32 = 1002;
@@ -113,16 +111,14 @@ mod win_impl {
     const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
     const DWMWCP_DONOTROUND: i32 = 1;
     const DWMWCP_ROUND: i32 = 2;
+    const DWMSBT_NONE: i32 = 1;
     const DWMSBT_TRANSIENTWINDOW: i32 = 3; // Native Windows 11 Acrylic
     const GWL_STYLE: i32 = -16;
-    const GWL_EXSTYLE: i32 = -20;
-    const LWA_ALPHA: u32 = 0x0000_0002;
 
+    static SINGLE_INSTANCE_MUTEX: AtomicIsize = AtomicIsize::new(0);
+    static ACTIVATE_MSG: AtomicU32 = AtomicU32::new(0);
     static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
-    static BACKDROP_HWND: AtomicIsize = AtomicIsize::new(0);
-    static BACKDROP_CLASS_REG: AtomicBool = AtomicBool::new(false);
     static ACRYLIC_ENABLED: AtomicBool = AtomicBool::new(false);
-    static ACRYLIC_ALPHA: AtomicU8 = AtomicU8::new(184);
     static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
     static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
@@ -197,62 +193,99 @@ mod win_impl {
         fn GetClassNameW(hwnd: *mut c_void, lp_class_name: *mut u16, n_max_count: i32) -> i32;
         fn GetWindowLongW(hwnd: HWND, n_index: i32) -> i32;
         fn SetWindowLongW(hwnd: HWND, n_index: i32, dw_new_long: i32) -> i32;
-        fn SetLayeredWindowAttributes(hwnd: HWND, cr_key: u32, b_alpha: u8, dw_flags: u32) -> i32;
+        fn RegisterWindowMessageW(lp_string: *const u16) -> u32;
+        fn FindWindowW(lp_class_name: *const u16, lp_window_name: *const u16) -> *mut c_void;
+        fn AllowSetForegroundWindow(dw_process_id: u32) -> i32;
     }
 
-    unsafe extern "system" fn backdrop_wnd_proc(
-        hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        if msg == WM_ERASEBKGND {
-            // Never paint an opaque brush over the DWM Acrylic surface so blurred silhouettes shine through.
-            return LRESULT(1);
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateMutexW(
+            lp_mutex_attributes: *mut c_void,
+            b_initial_owner: i32,
+            lp_name: *const u16,
+        ) -> *mut c_void;
+        fn GetLastError() -> u32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+    }
+
+    fn activate_message_id() -> u32 {
+        let cached = ACTIVATE_MSG.load(Ordering::Acquire);
+        if cached != 0 {
+            return cached;
         }
-        // SAFETY: Standard stateless Win32 window proc for passive DWM Acrylic backdrop host.
-        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        let name: Vec<u16> = "Ferric.MusicPlayer.ActivateSingleInstance.v1\0"
+            .encode_utf16()
+            .collect();
+        // SAFETY: Null-terminated UTF-16 message name passed to RegisterWindowMessageW.
+        let id = unsafe { RegisterWindowMessageW(name.as_ptr()) };
+        if id != 0 {
+            ACTIVATE_MSG.store(id, Ordering::Release);
+        }
+        id
     }
 
-    unsafe fn apply_backdrop_acrylic_policy(bh: HWND, layer_alpha: u8) {
-        // Map user opacity slider (0.48..0.94) to a light-to-medium dark DWM frosted tint
-        // so blurred silhouettes of background windows remain visibly frosted without washing out text.
-        let t = ((f32::from(layer_alpha) / 255.0 - 0.48) / 0.46).clamp(0.0, 1.0);
-        let tint_alpha = (50.0 + t * 66.0).round() as u32; // 0x32..0x74 dark frosted veil
-        let gradient_color = (tint_alpha << 24) | 0x0013_0F0E;
-        // SAFETY: Dynamically resolves SetWindowCompositionAttribute from user32.dll on Windows 10/11.
+    unsafe extern "system" fn enum_proc_find_other_ferric_hwnd(
+        hwnd: *mut c_void,
+        l_param: isize,
+    ) -> i32 {
+        // SAFETY: `l_param` points to stack-owned `*mut c_void`.
         unsafe {
-            let mut applied_wca = false;
-            if let Ok(user32) = GetModuleHandleW(w!("user32.dll"))
-                && let Some(proc_fn) = GetProcAddress(user32, s!("SetWindowCompositionAttribute"))
-            {
-                type SetWcaFn =
-                    unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
-                let set_wca: SetWcaFn = std::mem::transmute(proc_fn);
-                let mut policy = AccentPolicy {
-                    accent_state: 4, // ACCENT_ENABLE_ACRYLICBLURBEHIND (real frosted silhouette blur)
-                    accent_flags: 2,
-                    gradient_color,
-                    animation_id: 0,
-                };
-                let mut data = WindowCompositionAttribData {
-                    attrib: 19,
-                    pv_data: (&raw mut policy).cast(),
-                    cb_data: std::mem::size_of::<AccentPolicy>(),
-                };
-                if set_wca(bh, &raw mut data) != 0 {
-                    applied_wca = true;
+            let mut pid = 0u32;
+            let _ = GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid != 0 && pid != std::process::id() && is_makepad_window(hwnd) {
+                let out_slot = l_param as *mut *mut c_void;
+                *out_slot = hwnd;
+                return 0;
+            }
+            1
+        }
+    }
+
+    /// Ensure only one Ferric desktop instance runs per user session.
+    /// If Ferric is already running (even minimized or hidden in System Tray),
+    /// signal the existing instance to restore and focus itself, then return `false`.
+    pub fn acquire_single_instance_or_activate() -> bool {
+        let msg_id = activate_message_id();
+        let mutex_name: Vec<u16> = "Local\\FerricMusicPlayerSingleInstance_v1\0"
+            .encode_utf16()
+            .collect();
+        // SAFETY: Null-terminated UTF-16 named mutex scoped to current desktop session.
+        unsafe {
+            let handle = CreateMutexW(ptr::null_mut(), 0, mutex_name.as_ptr());
+            let last_err = GetLastError();
+            if handle.is_null() {
+                return true;
+            }
+            if last_err == ERROR_ALREADY_EXISTS {
+                let _ = CloseHandle(handle);
+                let cls: Vec<u16> = "MakepadWindow\0".encode_utf16().collect();
+                let title: Vec<u16> = "Ferric\0".encode_utf16().collect();
+                let mut target = FindWindowW(cls.as_ptr(), title.as_ptr());
+                if target.is_null() {
+                    let slot_ptr = (&raw mut target) as isize;
+                    let _ = EnumWindows(enum_proc_find_other_ferric_hwnd, slot_ptr);
                 }
+                if !target.is_null() {
+                    let mut existing_pid = 0u32;
+                    let _ = GetWindowThreadProcessId(target, &mut existing_pid);
+                    if existing_pid != 0 {
+                        let _ = AllowSetForegroundWindow(existing_pid);
+                    }
+                    if msg_id != 0 {
+                        let _ = PostMessageW(Some(HWND(target)), msg_id, WPARAM(0), LPARAM(0));
+                    } else {
+                        let _ = ShowWindow(HWND(target), SW_SHOW);
+                        if IsIconic(target) != 0 {
+                            let _ = ShowWindow(HWND(target), SW_RESTORE);
+                        }
+                        let _ = SetForegroundWindow(HWND(target));
+                    }
+                }
+                return false;
             }
-            if !applied_wca {
-                let backdrop: i32 = DWMSBT_TRANSIENTWINDOW;
-                let _ = DwmSetWindowAttribute(
-                    bh,
-                    DWMWA_SYSTEMBACKDROP_TYPE,
-                    (&raw const backdrop).cast(),
-                    std::mem::size_of::<i32>() as u32,
-                );
-            }
+            SINGLE_INSTANCE_MUTEX.store(handle as isize, Ordering::Release);
+            true
         }
     }
 
@@ -273,110 +306,38 @@ mod win_impl {
         }
     }
 
-    unsafe fn ensure_acrylic_backdrop_hwnd() -> Option<HWND> {
-        let existing = BACKDROP_HWND.load(Ordering::Acquire);
-        if existing != 0 {
-            return Some(HWND(existing as *mut c_void));
-        }
-        // SAFETY: Register passive non-interactive Win32 backdrop class and create borderless HWND.
+    unsafe fn apply_wca_acrylic_fallback(hwnd: HWND, enabled: bool) {
+        // SAFETY: Dynamically resolves SetWindowCompositionAttribute from user32.dll for Windows 10 fallback.
         unsafe {
-            let hinst = GetModuleHandleW(None).ok()?;
-            let class_name = w!("FerricAcrylicBackdrop");
-            if !BACKDROP_CLASS_REG.swap(true, Ordering::AcqRel) {
-                let wc = WNDCLASSW {
-                    lpfnWndProc: Some(backdrop_wnd_proc),
-                    hInstance: hinst.into(),
-                    lpszClassName: class_name,
-                    hbrBackground: HBRUSH::default(),
-                    ..Default::default()
+            if let Ok(user32) = GetModuleHandleW(w!("user32.dll"))
+                && let Some(proc_fn) = GetProcAddress(user32, s!("SetWindowCompositionAttribute"))
+            {
+                type SetWcaFn =
+                    unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
+                let set_wca: SetWcaFn = std::mem::transmute(proc_fn);
+                let mut policy = AccentPolicy {
+                    accent_state: if enabled { 4 } else { 0 },
+                    accent_flags: if enabled { 2 } else { 0 },
+                    gradient_color: if enabled { 0x0110_0E16 } else { 0 },
+                    animation_id: 0,
                 };
-                let _ = RegisterClassW(&wc);
-            }
-            let Ok(bh) = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-                class_name,
-                w!(""),
-                WS_POPUP,
-                0,
-                0,
-                1,
-                1,
-                None,
-                None,
-                Some(hinst.into()),
-                None,
-            ) else {
-                return None;
-            };
-            let dark: i32 = 1;
-            let _ = DwmSetWindowAttribute(
-                bh,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                (&raw const dark).cast(),
-                std::mem::size_of::<i32>() as u32,
-            );
-            let margins = DwmMargins {
-                cx_left_width: -1,
-                cx_right_width: -1,
-                cy_top_height: -1,
-                cy_bottom_height: -1,
-            };
-            let _ = DwmExtendFrameIntoClientArea(bh, &raw const margins);
-            let alpha = ACRYLIC_ALPHA.load(Ordering::Acquire);
-            apply_backdrop_acrylic_policy(bh, alpha);
-            BACKDROP_HWND.store(bh.0 as isize, Ordering::Release);
-            Some(bh)
-        }
-    }
-
-    unsafe fn sync_acrylic_backdrop_geometry(main_hwnd: HWND) {
-        let bh_raw = BACKDROP_HWND.load(Ordering::Acquire);
-        if bh_raw == 0 {
-            return;
-        }
-        let bh = HWND(bh_raw as *mut c_void);
-        // SAFETY: Synchronizes passive backdrop bounds and Z-order directly behind `main_hwnd`.
-        unsafe {
-            let enabled = ACRYLIC_ENABLED.load(Ordering::Acquire);
-            let hidden = IsWindowVisible(main_hwnd.0) == 0 || IsIconic(main_hwnd.0) != 0;
-            if !enabled || hidden {
-                let _ = ShowWindow(bh, SW_HIDE);
-                return;
-            }
-            let is_max = IsZoomed(main_hwnd.0) != 0;
-            apply_dwm_corner_pref(main_hwnd, is_max);
-            apply_dwm_corner_pref(bh, is_max);
-            let mut crc = RECT::default();
-            if GetClientRect(main_hwnd, &mut crc).is_ok() {
-                let mut tl = POINT {
-                    x: crc.left,
-                    y: crc.top,
+                let mut data = WindowCompositionAttribData {
+                    attrib: 19,
+                    pv_data: (&raw mut policy).cast(),
+                    cb_data: std::mem::size_of::<AccentPolicy>(),
                 };
-                let _ = ClientToScreen(main_hwnd, &mut tl);
-                let w = (crc.right - crc.left).max(1);
-                let h = (crc.bottom - crc.top).max(1);
-                let _ = ShowWindow(bh, SW_SHOWNOACTIVATE);
-                let _ = SetWindowPos(
-                    bh,
-                    Some(main_hwnd),
-                    tl.x,
-                    tl.y,
-                    w,
-                    h,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
+                let _ = set_wca(hwnd, &raw mut data);
             }
         }
     }
 
-    pub fn set_native_acrylic(enabled: bool, opacity: f32) {
-        let alpha = (opacity.clamp(0.48, 0.94) * 255.0).round() as u8;
+    pub fn set_native_acrylic(enabled: bool, _opacity: f32) {
         ACRYLIC_ENABLED.store(enabled, Ordering::Release);
-        ACRYLIC_ALPHA.store(alpha, Ordering::Release);
         let Some(hwnd) = active_process_hwnd() else {
             return;
         };
-        // SAFETY: Updates WS_EX_LAYERED translucency and native Windows 11 DWM Acrylic backdrop on own HWND.
+        // SAFETY: Enables true per-pixel Windows 11 DWM Acrylic directly behind Ferric's
+        // premultiplied DirectComposition swapchain — zero WS_EX_LAYERED text dimming.
         unsafe {
             let dark: i32 = 1;
             let _ = DwmSetWindowAttribute(
@@ -387,32 +348,28 @@ mod win_impl {
             );
             apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);
 
-            let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-            let layered_bit = WS_EX_LAYERED.0 as i32;
-            if enabled {
-                if let Some(bh) = ensure_acrylic_backdrop_hwnd() {
-                    apply_backdrop_acrylic_policy(bh, alpha);
-                }
-                if (ex & layered_bit) == 0 {
-                    let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, ex | layered_bit);
-                }
-                let _ = SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
-                sync_acrylic_backdrop_geometry(hwnd);
+            let margins = DwmMargins {
+                cx_left_width: -1,
+                cx_right_width: -1,
+                cy_top_height: -1,
+                cy_bottom_height: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+
+            let backdrop: i32 = if enabled {
+                DWMSBT_TRANSIENTWINDOW
             } else {
-                if (ex & layered_bit) != 0 {
-                    let _ = SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
-                    let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, ex & !layered_bit);
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                    );
-                }
-                sync_acrylic_backdrop_geometry(hwnd);
+                DWMSBT_NONE
+            };
+            let hr = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                (&raw const backdrop).cast(),
+                std::mem::size_of::<i32>() as u32,
+            );
+            if hr != 0 {
+                // Windows 10 / older builds fallback
+                apply_wca_acrylic_fallback(hwnd, enabled);
             }
         }
     }
@@ -552,8 +509,7 @@ mod win_impl {
                 ensure_tray_icon(hwnd, "Ferric — Music Player");
             }
             let acr_on = ACRYLIC_ENABLED.load(Ordering::Acquire);
-            let acr_op = f32::from(ACRYLIC_ALPHA.load(Ordering::Acquire)) / 255.0;
-            set_native_acrylic(acr_on, acr_op);
+            set_native_acrylic(acr_on, 0.72);
         }
     }
 
@@ -737,6 +693,18 @@ mod win_impl {
     ) -> LRESULT {
         // SAFETY: Valid Win32 subclass callback executing on Ferric's UI thread.
         unsafe {
+            let act_msg = ACTIVATE_MSG.load(Ordering::Acquire);
+            if act_msg != 0 && msg == act_msg {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                if IsIconic(hwnd.0) != 0 {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(hwnd);
+                WINDOW_HIDDEN_OR_MIN.store(false, Ordering::Release);
+                apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);
+                push_event(TrayEvent::ShowWindow);
+                return LRESULT(0);
+            }
             match msg {
                 WM_GETMINMAXINFO => {
                     let _ = DefSubclassProc(hwnd, msg, wparam, lparam);
@@ -792,7 +760,7 @@ mod win_impl {
                     }
                 }
                 WM_SIZE => {
-                    sync_acrylic_backdrop_geometry(hwnd);
+                    apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);
                     if wparam.0 == 1 {
                         // SIZE_MINIMIZED -> release GPU/UI artwork buffers & trim working set
                         if !WINDOW_HIDDEN_OR_MIN.swap(true, Ordering::AcqRel) {
@@ -806,7 +774,6 @@ mod win_impl {
                     }
                 }
                 WM_MOVE | WM_WINDOWPOSCHANGED | WM_SHOWWINDOW => {
-                    sync_acrylic_backdrop_geometry(hwnd);
                     push_event(TrayEvent::WindowMovedOrResized);
                 }
                 WM_CLOSE => {
@@ -815,7 +782,6 @@ mod win_impl {
                         ensure_tray_icon(hwnd, "Ferric — Playing in background");
                         let _ = ShowWindow(hwnd, SW_HIDE);
                         WINDOW_HIDDEN_OR_MIN.store(true, Ordering::Release);
-                        sync_acrylic_backdrop_geometry(hwnd);
                         trim_working_set();
                         push_event(TrayEvent::HiddenToTray);
                         return LRESULT(0);
@@ -829,7 +795,7 @@ mod win_impl {
                         let _ = ShowWindow(hwnd, SW_RESTORE);
                         let _ = SetForegroundWindow(hwnd);
                         WINDOW_HIDDEN_OR_MIN.store(false, Ordering::Release);
-                        sync_acrylic_backdrop_geometry(hwnd);
+                        apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);
                         push_event(TrayEvent::ShowWindow);
                         return LRESULT(0);
                     }
@@ -839,9 +805,9 @@ mod win_impl {
                     }
                 }
                 WM_DESTROY => {
-                    let bh_raw = BACKDROP_HWND.swap(0, Ordering::AcqRel);
-                    if bh_raw != 0 {
-                        let _ = DestroyWindow(HWND(bh_raw as *mut c_void));
+                    let mh = SINGLE_INSTANCE_MUTEX.swap(0, Ordering::AcqRel);
+                    if mh != 0 {
+                        let _ = CloseHandle(mh as *mut c_void);
                     }
                     remove_tray_icon(hwnd);
                     let _ = RemoveWindowSubclass(hwnd, ferric_subclass_proc, uid);
@@ -970,6 +936,17 @@ mod win_impl {
             let _ = CloseClipboard();
         }
         Ok(())
+    }
+}
+
+pub fn win32_acquire_single_instance_or_activate() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        win_impl::acquire_single_instance_or_activate()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
     }
 }
 

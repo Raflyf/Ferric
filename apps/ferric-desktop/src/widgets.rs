@@ -922,8 +922,11 @@ impl FerricBarSliderRef {
         if let Some(mut inner) = self.borrow_mut()
             && !inner.dragging
         {
-            inner.value = val.clamp(inner.min, inner.max);
-            inner.draw_bg.redraw(cx);
+            let clamped = val.clamp(inner.min, inner.max);
+            if (inner.value - clamped).abs() > 1e-4 {
+                inner.value = clamped;
+                inner.draw_bg.redraw(cx);
+            }
         }
     }
 
@@ -1024,8 +1027,11 @@ impl FerricVertSliderRef {
         if let Some(mut inner) = self.borrow_mut()
             && !inner.dragging
         {
-            inner.value = val.clamp(inner.min, inner.max);
-            inner.draw_bg.redraw(cx);
+            let clamped = val.clamp(inner.min, inner.max);
+            if (inner.value - clamped).abs() > 1e-4 {
+                inner.value = clamped;
+                inner.draw_bg.redraw(cx);
+            }
         }
     }
 
@@ -1253,8 +1259,11 @@ impl FerricWinBtnRef {
 
     pub fn set_maximized(&self, cx: &mut Cx, maximized: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.draw_bg.is_maximized = if maximized { 1.0 } else { 0.0 };
-            inner.draw_bg.redraw(cx);
+            let next = if maximized { 1.0 } else { 0.0 };
+            if (inner.draw_bg.is_maximized - next).abs() > 0.1 {
+                inner.draw_bg.is_maximized = next;
+                inner.draw_bg.redraw(cx);
+            }
         }
     }
 }
@@ -1609,18 +1618,35 @@ impl FerricCoverArtRef {
 
     pub fn set_texture(&self, cx: &mut Cx, texture: Option<Texture>, aspect: f32) {
         if let Some(mut inner) = self.borrow_mut() {
+            let clamped = aspect.clamp(0.25, 4.0);
+            let same_tex = inner.texture.as_ref().map(|t| t.texture_id())
+                == texture.as_ref().map(|t| t.texture_id());
+            if same_tex && (inner.draw_bg.img_aspect - clamped).abs() < 0.001 {
+                return;
+            }
             inner.texture = texture;
-            inner.draw_bg.img_aspect = aspect.clamp(0.25, 4.0);
+            inner.draw_bg.img_aspect = clamped;
             inner.draw_bg.redraw(cx);
         }
     }
 
     pub fn set_state(&self, cx: &mut Cx, playing: bool, level: f32, accent: Vec4, circle: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.draw_bg.playing = if playing { 1.0 } else { 0.0 };
+            let next_play = if playing { 1.0 } else { 0.0 };
+            let next_circ = if circle { 1.0 } else { 0.0 };
+            if (inner.draw_bg.playing - next_play).abs() < 0.001
+                && (inner.draw_bg.level - level).abs() < 0.015
+                && (inner.draw_bg.circle - next_circ).abs() < 0.001
+                && (inner.draw_bg.accent.x - accent.x).abs() < 0.004
+                && (inner.draw_bg.accent.y - accent.y).abs() < 0.004
+                && (inner.draw_bg.accent.z - accent.z).abs() < 0.004
+            {
+                return;
+            }
+            inner.draw_bg.playing = next_play;
             inner.draw_bg.level = level;
             inner.draw_bg.accent = accent;
-            inner.draw_bg.circle = if circle { 1.0 } else { 0.0 };
+            inner.draw_bg.circle = next_circ;
             inner.draw_bg.redraw(cx);
         }
     }

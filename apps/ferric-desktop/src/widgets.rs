@@ -1506,14 +1506,17 @@ impl Widget for FerricLyricsView {
                 }
             }
             Hit::FingerUp(fe) if fe.is_over && (fe.abs - fe.abs_start).length() < 16.0 => {
-                if let Some((idx, _)) = self.line_rects.iter().find(|(_, r)| r.contains(fe.abs))
-                    && let Some((ts_ms, _)) = self.lines.get(*idx)
-                {
-                    self.active_idx = *idx;
+                let clicked = self
+                    .line_rects
+                    .iter()
+                    .find(|(_, r)| r.contains(fe.abs))
+                    .and_then(|(idx, _)| self.lines.get(*idx).map(|(ts_ms, _)| (*idx, *ts_ms)));
+                if let Some((idx, ts_ms)) = clicked {
+                    self.active_idx = idx;
                     self.manual_scroll_until = 0.0;
                     self.recompute_target_scroll();
                     self.wake_anim(cx);
-                    cx.widget_action(uid, &scope.path, FerricLyricsAction::SeekMs(*ts_ms));
+                    cx.widget_action(uid, &scope.path, FerricLyricsAction::SeekMs(ts_ms));
                 }
             }
             _ => {}
@@ -1529,7 +1532,7 @@ impl Widget for FerricLyricsView {
                 ..Default::default()
             },
         );
-        let rect = cx.turtle().inner_rect();
+        let rect = cx.turtle().rect();
         self.last_viewport_h = rect.size.y.max(120.0);
         self.line_rects.clear();
 

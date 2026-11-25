@@ -391,7 +391,7 @@ pub struct TrackList {
     #[rust]
     smooth_abs: DVec2,
     #[rust]
-    smooth_window_id: WindowId,
+    smooth_window_id: Option<WindowId>,
     #[rust]
     smooth_frame: NextFrame,
     #[rust]
@@ -411,7 +411,7 @@ impl Widget for TrackList {
             se.handled_y.set(true);
             self.smooth_rem_y += se.scroll.y * 1.15;
             self.smooth_abs = se.abs;
-            self.smooth_window_id = se.window_id;
+            self.smooth_window_id = Some(se.window_id);
             self.smooth_frame = cx.new_next_frame();
             return;
         }
@@ -422,12 +422,14 @@ impl Widget for TrackList {
                 0.016
             };
             self.smooth_last_t = nf.time;
-            if self.smooth_rem_y.abs() > 0.45 {
+            if self.smooth_rem_y.abs() > 0.45
+                && let Some(win_id) = self.smooth_window_id
+            {
                 let k = 1.0 - (-16.0 * dt).exp();
                 let step = self.smooth_rem_y * k;
                 self.smooth_rem_y -= step;
-                let synth = Event::Scroll(ScrollEvent {
-                    window_id: self.smooth_window_id,
+                let synth = Event::Scroll(makepad_widgets::makepad_platform::event::ScrollEvent {
+                    window_id: win_id,
                     scroll: dvec2(0.0, step),
                     abs: self.smooth_abs,
                     modifiers: KeyModifiers::default(),

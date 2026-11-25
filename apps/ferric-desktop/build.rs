@@ -5,7 +5,7 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("resources/ferric.ico");
         res.set("ProductName", "Ferric");
-        res.set("FileDescription", "Ferric Native Rust Hi-Fi Music Player");
+        res.set("FileDescription", "Ferric");
         res.set("CompanyName", "LivelyDesk");
         res.set("LegalCopyright", "Copyright (c) 2026 Rafly");
         res.set_manifest(

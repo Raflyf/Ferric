@@ -14,6 +14,7 @@ live_design! {
     pub DrawLyricsPill = {{DrawLyricsPill}} {}
     pub DrawLyricsText = {{DrawLyricsText}} {}
     pub DrawAmbientStage = {{DrawAmbientStage}} {}
+    pub DrawColorPicker = {{DrawColorPicker}} {}
 
     pub FerricAmbientStage = {{FerricAmbientStage}} {
         width: Fill,
@@ -187,6 +188,7 @@ live_design! {
             sweep_y_max: 0.0,
             dim_col: #FFFFFF6E,
             glow_amt: 1.0,
+            accent_col: #E86A2C,
             text_style: <THEME_FONT_DISPLAY> {
                 font_size: 20.5,
                 line_spacing: 1.20
@@ -210,7 +212,13 @@ live_design! {
                         c = mix(self.dim_col, c, lit);
                         if self.glow_amt > 0.01 && lit > 0.05 {
                             let halo = clamp(((sample2d(self.grayscale_texture, self.t.xy).x - (1.0 - self.cutoff)) * self.radius / (base_scale * 4.0) + 0.5), 0.0, 1.0);
-                            s = max(s, halo * 0.38 * lit * self.glow_amt);
+                            let halo_a = halo * 0.40 * lit * self.glow_amt;
+                            if halo_a > s {
+                                let aura_rgb = mix(vec3(1.0, 1.0, 1.0), self.accent_col.xyz, 0.58);
+                                let mix_t = clamp((halo_a - s) / max(halo_a, 0.001), 0.0, 1.0);
+                                c = vec4(mix(c.rgb, aura_rgb, mix_t), c.a);
+                                s = halo_a;
+                            }
                         }
                     }
                     return s * vec4(c.rgb * c.a, c.a);
@@ -789,6 +797,81 @@ live_design! {
                 }
 
                 return vec4(0.0, 0.0, 0.0, 0.0);
+            }
+        }
+    }
+
+    pub FerricColorPicker = {{FerricColorPicker}} {
+        width: Fill,
+        height: 138,
+        draw_bg: {
+            hue: 0.62
+            sat: 0.45
+            val: 0.08
+
+            fn hsv_to_rgb(self, h: float, s: float, v: float) -> vec3 {
+                let c = v * s;
+                let hp = (h - floor(h)) * 6.0;
+                let hp2 = hp - floor(hp * 0.5) * 2.0;
+                let x = c * (1.0 - abs(hp2 - 1.0));
+                let mut rgb = vec3(0.0, 0.0, 0.0);
+                if (hp < 1.0) { rgb = vec3(c, x, 0.0); }
+                else if (hp < 2.0) { rgb = vec3(x, c, 0.0); }
+                else if (hp < 3.0) { rgb = vec3(0.0, c, x); }
+                else if (hp < 4.0) { rgb = vec3(0.0, x, c); }
+                else if (hp < 5.0) { rgb = vec3(x, 0.0, c); }
+                else { rgb = vec3(c, 0.0, x); }
+                let m = v - c;
+                return rgb + vec3(m, m, m);
+            }
+
+            fn pixel(self) -> vec4 {
+                let p = self.pos * self.rect_size;
+                let sdf = Sdf2d::viewport(p);
+                let w = max(self.rect_size.x, 40.0);
+                let h = max(self.rect_size.y, 60.0);
+                let hue_h = 16.0;
+                let gap = 10.0;
+                let sv_h = max(h - hue_h - gap, 24.0);
+                let sv_y0 = 0.0;
+                let hue_y0 = sv_h + gap;
+
+                // 1. 2D Saturation-Value color square
+                sdf.box(0.5, sv_y0 + 0.5, w - 1.0, sv_h - 1.0, 7.0);
+                let u_sv = clamp(p.x / w, 0.0, 1.0);
+                let v_sv = clamp(1.0 - (p.y - sv_y0) / sv_h, 0.0, 1.0);
+                let sv_rgb = self.hsv_to_rgb(self.hue, u_sv, v_sv);
+                sdf.fill_keep(vec4(sv_rgb, 1.0));
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.16), 1.0);
+
+                // Crisp circular crosshair on SV pad
+                let cx = clamp(self.sat, 0.0, 1.0) * (w - 14.0) + 7.0;
+                let cy = sv_y0 + (1.0 - clamp(self.val, 0.0, 1.0)) * (sv_h - 14.0) + 7.0;
+                let picked_rgb = self.hsv_to_rgb(self.hue, self.sat, self.val);
+                sdf.circle(cx, cy, 7.0);
+                sdf.fill_keep(vec4(picked_rgb, 1.0));
+                sdf.stroke(#000000CC, 2.2);
+                sdf.circle(cx, cy, 5.8);
+                sdf.stroke(#FFFFFF, 1.6);
+
+                // 2. Full 360-degree Rainbow Hue Spectrum bar
+                sdf.box(0.5, hue_y0 + 0.5, w - 1.0, hue_h - 1.0, hue_h * 0.5);
+                let u_h = clamp(p.x / w, 0.0, 1.0);
+                let hue_rgb = self.hsv_to_rgb(u_h, 1.0, 1.0);
+                sdf.fill_keep(vec4(hue_rgb, 1.0));
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.16), 1.0);
+
+                // Hue circular thumb
+                let hx = clamp(self.hue, 0.0, 1.0) * (w - 16.0) + 8.0;
+                let hy = hue_y0 + hue_h * 0.5;
+                let pure_hue = self.hsv_to_rgb(self.hue, 1.0, 1.0);
+                sdf.circle(hx, hy, 7.2);
+                sdf.fill_keep(vec4(pure_hue, 1.0));
+                sdf.stroke(#000000CC, 2.0);
+                sdf.circle(hx, hy, 6.0);
+                sdf.stroke(#FFFFFF, 1.6);
+
+                return sdf.result;
             }
         }
     }
@@ -1828,6 +1911,8 @@ pub struct DrawLyricsText {
     dim_col: Vec4,
     #[live(0.0_f32)]
     glow_amt: f32,
+    #[live]
+    accent_col: Vec4,
 }
 
 /// 60 FPS GPU interactive synced lyrics stage:
@@ -2408,6 +2493,7 @@ impl Widget for FerricLyricsView {
                 self.draw_active.sweep_y_max = sweep_y_max;
                 self.draw_active.dim_col = dim_active_col;
                 self.draw_active.glow_amt = focus * edge_fade;
+                self.draw_active.accent_col = accent;
                 self.draw_active.color = bright_col;
                 self.draw_active.draw_walk_laidout(
                     cx,
@@ -2569,6 +2655,260 @@ impl FerricLyricsViewRef {
                 inner.recompute_target_scroll();
                 inner.area.redraw(cx);
             }
+        }
+    }
+}
+
+#[derive(Clone, Debug, DefaultNone)]
+pub enum FerricColorPickerAction {
+    None,
+    Changed(String),
+    Committed(String),
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawColorPicker {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live(0.62_f32)]
+    hue: f32,
+    #[live(0.45_f32)]
+    sat: f32,
+    #[live(0.08_f32)]
+    val: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickerDragZone {
+    None,
+    SvPad,
+    HueBar,
+}
+
+/// Interactive 2D HSV Saturation-Value pad + 360-degree Hue rainbow bar for custom Acrylic glass tinting.
+#[derive(Live, LiveHook, Widget)]
+pub struct FerricColorPicker {
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawColorPicker,
+    #[rust(PickerDragZone::None)]
+    drag_zone: PickerDragZone,
+}
+
+fn hsv_to_rgb_u8(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h = h.rem_euclid(1.0);
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let c = v * s;
+    let hp = h * 6.0;
+    let x = c * (1.0 - ((hp % 2.0) - 1.0).abs());
+    let (r1, g1, b1) = if hp < 1.0 {
+        (c, x, 0.0)
+    } else if hp < 2.0 {
+        (x, c, 0.0)
+    } else if hp < 3.0 {
+        (0.0, c, x)
+    } else if hp < 4.0 {
+        (0.0, x, c)
+    } else if hp < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = v - c;
+    (
+        ((r1 + m).clamp(0.0, 1.0) * 255.0).round() as u8,
+        ((g1 + m).clamp(0.0, 1.0) * 255.0).round() as u8,
+        ((b1 + m).clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
+}
+
+fn rgb_u8_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+    let max_c = rf.max(gf).max(bf);
+    let min_c = rf.min(gf).min(bf);
+    let delta = max_c - min_c;
+    let h = if delta < 1e-5 {
+        0.0
+    } else if (max_c - rf).abs() < 1e-5 {
+        (((gf - bf) / delta).rem_euclid(6.0)) / 6.0
+    } else if (max_c - gf).abs() < 1e-5 {
+        (((bf - rf) / delta) + 2.0) / 6.0
+    } else {
+        (((rf - gf) / delta) + 4.0) / 6.0
+    };
+    let s = if max_c < 1e-5 { 0.0 } else { delta / max_c };
+    (h.clamp(0.0, 1.0), s.clamp(0.0, 1.0), max_c.clamp(0.0, 1.0))
+}
+
+impl FerricColorPicker {
+    fn current_hex(&self) -> String {
+        let (r, g, b) = hsv_to_rgb_u8(self.draw_bg.hue, self.draw_bg.sat, self.draw_bg.val);
+        format!("#{r:02X}{g:02X}{b:02X}")
+    }
+
+    fn update_from_abs(&mut self, cx: &mut Cx, abs: DVec2, zone: PickerDragZone) -> bool {
+        let rect = self.draw_bg.area().rect(cx);
+        if rect.size.x < 10.0 || rect.size.y < 30.0 {
+            return false;
+        }
+        let hue_h = 16.0;
+        let gap = 10.0;
+        let sv_h = (rect.size.y - hue_h - gap).max(24.0);
+        match zone {
+            PickerDragZone::SvPad => {
+                let s = ((abs.x - rect.pos.x) / rect.size.x).clamp(0.0, 1.0) as f32;
+                let v = (1.0 - (abs.y - rect.pos.y) / sv_h).clamp(0.0, 1.0) as f32;
+                self.draw_bg.sat = s;
+                self.draw_bg.val = v;
+                self.draw_bg.redraw(cx);
+                true
+            }
+            PickerDragZone::HueBar => {
+                let h = ((abs.x - rect.pos.x) / rect.size.x).clamp(0.0, 0.999) as f32;
+                self.draw_bg.hue = h;
+                self.draw_bg.redraw(cx);
+                true
+            }
+            PickerDragZone::None => false,
+        }
+    }
+
+    fn hit_zone(&self, cx: &Cx, abs: DVec2) -> PickerDragZone {
+        let rect = self.draw_bg.area().rect(cx);
+        let hue_h = 16.0;
+        let gap = 10.0;
+        let sv_h = (rect.size.y - hue_h - gap).max(24.0);
+        let local_y = abs.y - rect.pos.y;
+        if local_y >= sv_h + gap * 0.5 {
+            PickerDragZone::HueBar
+        } else {
+            PickerDragZone::SvPad
+        }
+    }
+}
+
+impl Widget for FerricColorPicker {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+            }
+            Hit::FingerDown(fe) => {
+                cx.set_cursor(MouseCursor::Hand);
+                let z = self.hit_zone(cx, fe.abs);
+                self.drag_zone = z;
+                if self.update_from_abs(cx, fe.abs, z) {
+                    cx.widget_action(
+                        uid,
+                        &scope.path,
+                        FerricColorPickerAction::Changed(self.current_hex()),
+                    );
+                }
+            }
+            Hit::FingerMove(fe) if self.drag_zone != PickerDragZone::None => {
+                let z = self.drag_zone;
+                if self.update_from_abs(cx, fe.abs, z) {
+                    cx.widget_action(
+                        uid,
+                        &scope.path,
+                        FerricColorPickerAction::Changed(self.current_hex()),
+                    );
+                }
+            }
+            Hit::FingerUp(fe) if self.drag_zone != PickerDragZone::None => {
+                let z = self.drag_zone;
+                let _ = self.update_from_abs(cx, fe.abs, z);
+                self.drag_zone = PickerDragZone::None;
+                cx.widget_action(
+                    uid,
+                    &scope.path,
+                    FerricColorPickerAction::Committed(self.current_hex()),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let _ = self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+}
+
+impl FerricColorPickerRef {
+    pub fn set_hex(&self, cx: &mut Cx, hex: &str) {
+        let clean = hex.trim().trim_start_matches('#');
+        if clean.len() != 6 {
+            return;
+        }
+        let Ok(r) = u8::from_str_radix(&clean[0..2], 16) else {
+            return;
+        };
+        let Ok(g) = u8::from_str_radix(&clean[2..4], 16) else {
+            return;
+        };
+        let Ok(b) = u8::from_str_radix(&clean[4..6], 16) else {
+            return;
+        };
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.drag_zone != PickerDragZone::None {
+                return;
+            }
+            let (h, s, v) = rgb_u8_to_hsv(r, g, b);
+            // Preserve previous hue when color is achromatic (e.g. pure black/smoke gray)
+            if s > 0.02 {
+                inner.draw_bg.hue = h;
+            }
+            inner.draw_bg.sat = s;
+            inner.draw_bg.val = v;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn changed(&self, actions: &Actions) -> Option<String> {
+        if let FerricColorPickerAction::Changed(hex) =
+            actions.find_widget_action(self.widget_uid()).cast()
+        {
+            return Some(hex);
+        }
+        None
+    }
+
+    pub fn committed(&self, actions: &Actions) -> Option<String> {
+        if let FerricColorPickerAction::Committed(hex) =
+            actions.find_widget_action(self.widget_uid()).cast()
+        {
+            return Some(hex);
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod color_picker_tests {
+    use super::*;
+
+    #[test]
+    fn hsv_rgb_roundtrip_matches_known_colors() {
+        for (r, g, b) in [
+            (232, 106, 44),
+            (11, 13, 20),
+            (43, 20, 10),
+            (12, 24, 46),
+            (11, 33, 24),
+        ] {
+            let (h, s, v) = rgb_u8_to_hsv(r, g, b);
+            let (r2, g2, b2) = hsv_to_rgb_u8(h, s, v);
+            assert!((r as i32 - r2 as i32).abs() <= 1);
+            assert!((g as i32 - g2 as i32).abs() <= 1);
+            assert!((b as i32 - b2 as i32).abs() <= 1);
         }
     }
 }

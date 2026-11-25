@@ -82,10 +82,10 @@ use {
                         GWL_EXSTYLE,
                         HWND_TOPMOST,
                         HWND_NOTOPMOST,
+                        WS_CAPTION,
                         WS_SIZEBOX,
                         WS_MAXIMIZEBOX,
                         WS_MINIMIZEBOX,
-                        WS_POPUP,
                         WS_CLIPSIBLINGS,
                         WS_CLIPCHILDREN,
                         WS_SYSMENU,
@@ -318,10 +318,10 @@ impl Win32Window {
 
         let title = encode_wide(title);
         
-        let style = WS_SIZEBOX
+        let style = WS_CAPTION
+            | WS_SIZEBOX
             | WS_MAXIMIZEBOX
             | WS_MINIMIZEBOX
-            | WS_POPUP
             | WS_CLIPSIBLINGS
             | WS_CLIPCHILDREN
             | WS_SYSMENU;

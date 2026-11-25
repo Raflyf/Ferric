@@ -20,6 +20,22 @@ const OP_CLOSE: u32 = 2;
 const OP_PING: u32 = 3;
 const OP_PONG: u32 = 4;
 
+/// Optional built-in Ferric Discord Application ID.
+/// Once registered on Discord Developer Portal, embedding the public numeric Application ID here
+/// enables zero-config 1-toggle Rich Presence for every user without manual setup.
+pub const BUILTIN_DISCORD_APP_ID: &str = "";
+
+pub fn effective_client_id(cfg: &DiscordRpcSettings) -> &str {
+    let custom = cfg.client_id.trim();
+    if is_valid_client_id(custom) {
+        custom
+    } else if is_valid_client_id(BUILTIN_DISCORD_APP_ID) {
+        BUILTIN_DISCORD_APP_ID
+    } else {
+        ""
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscordTrackSnapshot {
     pub title: String,
@@ -98,7 +114,7 @@ impl Drop for DiscordRpcBridge {
 fn initial_status_label(cfg: &DiscordRpcSettings) -> &'static str {
     if !cfg.enabled {
         "Disabled"
-    } else if !is_valid_client_id(&cfg.client_id) {
+    } else if effective_client_id(cfg).is_empty() {
         "Enter your Discord Application ID below"
     } else {
         "Connecting to Discord desktop..."
@@ -416,7 +432,8 @@ fn worker_loop(rx: Receiver<RpcCommand>, mut cfg: DiscordRpcSettings, status: Ar
             set_status(status, "Disabled");
             return;
         }
-        if !is_valid_client_id(&cfg.client_id) {
+        let cid = effective_client_id(cfg);
+        if cid.is_empty() {
             if let Some(mut p) = pipe_opt.take() {
                 p.close_gracefully();
             }
@@ -424,7 +441,7 @@ fn worker_loop(rx: Receiver<RpcCommand>, mut cfg: DiscordRpcSettings, status: Ar
             return;
         }
         if pipe_opt.is_none() {
-            match DiscordPipe::connect(&cfg.client_id) {
+            match DiscordPipe::connect(cid) {
                 Ok(p) => {
                     *pipe_opt = Some(p);
                     set_status(status, "Connected to Discord");
@@ -480,13 +497,13 @@ fn worker_loop(rx: Receiver<RpcCommand>, mut cfg: DiscordRpcSettings, status: Ar
         }
     };
 
-    if cfg.enabled && is_valid_client_id(&cfg.client_id) {
+    if cfg.enabled && !effective_client_id(&cfg).is_empty() {
         send_now(&mut pipe, &cfg, current_snap.as_ref(), &mut nonce, &status);
     }
 
     loop {
         // Sleep completely (0% CPU) when disabled or already connected; retry every 8s when waiting for Discord.
-        let wait = if cfg.enabled && is_valid_client_id(&cfg.client_id) && pipe.is_none() {
+        let wait = if cfg.enabled && !effective_client_id(&cfg).is_empty() && pipe.is_none() {
             Some(Duration::from_secs(8))
         } else {
             None

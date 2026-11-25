@@ -96,7 +96,7 @@
             Id="ApplicationStartMenuShortcut"
             Directory="ProgramMenuFolder"
             Name="Ferric"
-            Description="Native Rust Hi-Fi Music Player"
+            Description="Ferric Music Player"
             Target="[#FerricExe]"
             WorkingDirectory="INSTALLFOLDER"
             Icon="FerricIcon.ico"

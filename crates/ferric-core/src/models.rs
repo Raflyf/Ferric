@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,6 +447,10 @@ pub struct SessionResumeState {
     pub pinned_ids: Vec<String>,
     #[serde(default = "default_true")]
     pub autoplay_radio: bool,
+    #[serde(default)]
+    pub track_play_counts: HashMap<String, u32>,
+    #[serde(default)]
+    pub artist_play_counts: HashMap<String, u32>,
 }
 
 impl Default for SessionResumeState {
@@ -461,12 +466,18 @@ impl Default for SessionResumeState {
             recent_searches: Vec::new(),
             pinned_ids: Vec::new(),
             autoplay_radio: true,
+            track_play_counts: HashMap::new(),
+            artist_play_counts: HashMap::new(),
         }
     }
 }
 
 impl SessionResumeState {
     pub fn record_play(&mut self, track_id: &str, duration_ms: u64) {
+        self.record_play_with_artist(track_id, "", duration_ms);
+    }
+
+    pub fn record_play_with_artist(&mut self, track_id: &str, artist: &str, duration_ms: u64) {
         self.last_track_id = Some(track_id.to_string());
         self.total_tracks_played = self.total_tracks_played.saturating_add(1);
         self.total_listened_secs = self
@@ -476,6 +487,39 @@ impl SessionResumeState {
         self.recent_track_ids.insert(0, track_id.to_string());
         if self.recent_track_ids.len() > 50 {
             self.recent_track_ids.truncate(50);
+        }
+        let tc = self
+            .track_play_counts
+            .entry(track_id.to_string())
+            .or_insert(0);
+        *tc = tc.saturating_add(1);
+        if self.track_play_counts.len() > 200
+            && let Some(min_k) = self
+                .track_play_counts
+                .iter()
+                .filter(|(k, _)| k.as_str() != track_id)
+                .min_by_key(|(_, v)| **v)
+                .map(|(k, _)| k.clone())
+        {
+            self.track_play_counts.remove(&min_k);
+        }
+        let primary_artist = primary_artist_key(artist);
+        if !primary_artist.is_empty() {
+            let ac = self
+                .artist_play_counts
+                .entry(primary_artist.clone())
+                .or_insert(0);
+            *ac = ac.saturating_add(1);
+            if self.artist_play_counts.len() > 100
+                && let Some(min_a) = self
+                    .artist_play_counts
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != primary_artist.as_str())
+                    .min_by_key(|(_, v)| **v)
+                    .map(|(k, _)| k.clone())
+            {
+                self.artist_play_counts.remove(&min_a);
+            }
         }
     }
 
@@ -503,6 +547,31 @@ impl SessionResumeState {
             true
         }
     }
+}
+
+pub fn primary_artist_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("unknown artist")
+        || trimmed.eq_ignore_ascii_case("youtube music")
+    {
+        return String::new();
+    }
+    let first = trimmed
+        .split(['&', ',', '•', '·'])
+        .next()
+        .unwrap_or(trimmed)
+        .split(" feat.")
+        .next()
+        .unwrap_or(trimmed)
+        .split(" ft.")
+        .next()
+        .unwrap_or(trimmed)
+        .split(" x ")
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    first.to_string()
 }
 
 /// Parse an `.m3u` / `.m3u8` or Exportify `.csv` playlist file into a `Playlist` and `Vec<Track>`.

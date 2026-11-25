@@ -5,7 +5,7 @@ use crate::yt_cleaner::clean_youtube_metadata;
 use crate::{ProviderError, ProviderResult};
 use ferric_core::models::{AudioQuality, Playlist, Track, TrackSource, VideoQuality};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -754,17 +754,195 @@ fn tracks_to_song_cards(tracks: &[Track]) -> Vec<YtmShelfCard> {
         .collect()
 }
 
-/// Fetch rich YouTube Music Home feed: Mood Chips, dynamic Quick Picks,
-/// continuations, `FEmusic_explore` (New Releases), `FEmusic_charts` (Charts),
-/// and Guest-mode listening-seed mixes so recommendations stay rich and fresh.
+/// Listening-history & affinity profile passed into `fetch_rich_home` so Home recommendations
+/// reflect what the user actually plays most plus globally popular songs co-listened by fans of the same taste.
+#[derive(Debug, Clone, Default)]
+pub struct YtmHomeTasteProfile {
+    /// User's most-played, liked, and recently listened tracks (highest affinity first).
+    pub top_tracks: Vec<Track>,
+    /// User's most-played primary artists (highest affinity first).
+    pub top_artists: Vec<String>,
+    /// Recent user search queries (secondary taste signal).
+    pub recent_searches: Vec<String>,
+}
+
+fn dominant_taste_locale(tracks: &[Track]) -> MusicLocale {
+    if tracks.is_empty() {
+        return MusicLocale::GlobalEn;
+    }
+    let mut en_w = 0usize;
+    let mut id_w = 0usize;
+    let mut jp_w = 0usize;
+    let mut kr_w = 0usize;
+    for (idx, t) in tracks.iter().take(16).enumerate() {
+        let w = 16usize.saturating_sub(idx).max(1);
+        match detect_track_locale(&t.title, &t.artist, &t.album) {
+            MusicLocale::GlobalEn => en_w += w,
+            MusicLocale::Indonesian => id_w += w,
+            MusicLocale::Japanese => jp_w += w,
+            MusicLocale::Korean => kr_w += w,
+        }
+    }
+    [
+        (MusicLocale::GlobalEn, en_w),
+        (MusicLocale::Indonesian, id_w),
+        (MusicLocale::Japanese, jp_w),
+        (MusicLocale::Korean, kr_w),
+    ]
+    .into_iter()
+    .max_by_key(|(_, w)| *w)
+    .map_or(MusicLocale::GlobalEn, |(l, _)| l)
+}
+
+fn primary_artist_norm(raw: &str) -> String {
+    raw.split(['&', ',', '•', '·'])
+        .next()
+        .unwrap_or(raw)
+        .split(" feat.")
+        .next()
+        .unwrap_or(raw)
+        .split(" ft.")
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn is_regional_geoip_chart_shelf(
+    title: &str,
+    cards: &[YtmShelfCard],
+    taste_locale: MusicLocale,
+) -> bool {
+    let tl = title.to_ascii_lowercase();
+    if taste_locale == MusicLocale::GlobalEn {
+        if tl.contains("indonesia") || tl.contains("indo ") || tl.contains("dangdut") {
+            return true;
+        }
+        let id_cards = cards
+            .iter()
+            .filter(|c| {
+                let ct = format!("{} {}", c.title, c.subtitle).to_ascii_lowercase();
+                ct.contains("indonesia")
+                    || ct.contains("indo")
+                    || detect_track_locale(&c.title, &c.subtitle, "") == MusicLocale::Indonesian
+            })
+            .count();
+        if !cards.is_empty() && id_cards * 2 >= cards.len() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Rank collaborative co-listening candidates across multiple seed radio pools so tracks
+/// loved by millions of listeners who share the user's exact listening taste rise to the top,
+/// while enforcing artist diversity and locale coherence.
+pub fn rank_personalized_home_candidates(
+    radio_pools: &[Vec<Track>],
+    artist_popular: &[Track],
+    taste: &YtmHomeTasteProfile,
+    taste_locale: MusicLocale,
+    max_per_artist: usize,
+) -> Vec<Track> {
+    let top_artist_norms: HashSet<String> = taste
+        .top_artists
+        .iter()
+        .map(|a| primary_artist_norm(a))
+        .filter(|a| !a.is_empty())
+        .collect();
+    let recent_ids: HashSet<String> = taste.top_tracks.iter().map(|t| t.id.clone()).collect();
+
+    struct ScoredTrack {
+        track: Track,
+        score: i32,
+        pool_hits: usize,
+    }
+    let mut by_key: HashMap<String, ScoredTrack> = HashMap::new();
+
+    for pool in radio_pools {
+        let mut seen_in_pool = HashSet::new();
+        for (rank, t) in pool.iter().enumerate() {
+            if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms) {
+                continue;
+            }
+            if taste_locale == MusicLocale::GlobalEn
+                && detect_track_locale(&t.title, &t.artist, &t.album) == MusicLocale::Indonesian
+            {
+                continue;
+            }
+            let key = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+            if !seen_in_pool.insert(key.clone()) {
+                continue;
+            }
+            let pos_score = 32_i32.saturating_sub((rank as i32) * 2).max(4);
+            let artist_n = primary_artist_norm(&t.artist);
+            let affinity_bonus = if top_artist_norms.contains(&artist_n) {
+                14
+            } else {
+                0
+            };
+            let freshness_bonus = if recent_ids.contains(&t.id) { 0 } else { 10 };
+            let entry = by_key.entry(key).or_insert_with(|| ScoredTrack {
+                track: t.clone(),
+                score: 0,
+                pool_hits: 0,
+            });
+            entry.pool_hits += 1;
+            // Multi-seed collaborative consensus boost: tracks appearing across 2+ seed radios
+            // are strongly preferred by listeners who share this user's exact combined taste.
+            let consensus_bonus = if entry.pool_hits >= 2 { 44 } else { 0 };
+            entry.score += pos_score + affinity_bonus + freshness_bonus + consensus_bonus;
+        }
+    }
+
+    for (rank, t) in artist_popular.iter().enumerate() {
+        if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms) {
+            continue;
+        }
+        let key = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+        let pos_score = 22_i32.saturating_sub((rank as i32) * 2).max(4);
+        let entry = by_key.entry(key).or_insert_with(|| ScoredTrack {
+            track: t.clone(),
+            score: 0,
+            pool_hits: 0,
+        });
+        entry.score += pos_score;
+    }
+
+    let mut ranked: Vec<ScoredTrack> = by_key.into_values().collect();
+    ranked.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.pool_hits.cmp(&a.pool_hits))
+    });
+
+    let mut out = Vec::new();
+    let mut artist_counts: HashMap<String, usize> = HashMap::new();
+    for item in ranked {
+        let an = primary_artist_norm(&item.track.artist);
+        let cap = max_per_artist.max(1);
+        let cnt = artist_counts.entry(an).or_insert(0);
+        if *cnt >= cap {
+            continue;
+        }
+        *cnt += 1;
+        out.push(item.track);
+    }
+    out
+}
+
+/// Fetch rich YouTube Music Home feed:
+/// - When user has listening history, runs a multi-seed collaborative co-listening & artist popularity
+///   recommendation fan-out in parallel (~1 RTT) so Home mirrors the user's real listening taste
+///   and globally popular songs enjoyed by similar listeners (never drowned in regional GeoIP charts).
+/// - On cold start (empty history) or when browsing a specific Mood Chip, queries locale-matched
+///   `FEmusic_home` + `FEmusic_explore` + `FEmusic_charts`.
 pub fn fetch_rich_home(
     session: &YtmSession,
     mood_params: Option<&str>,
     fresh_seed: bool,
-    recent_seed_vids: &[String],
+    taste: &YtmHomeTasteProfile,
 ) -> ProviderResult<YtmRichHome> {
-    // In Guest Mode, requesting a fresh seed drops stale visitorData so YouTube Music
-    // rotates recommendations dynamically instead of freezing on one static snapshot.
     let effective_session = if !session.is_signed_in() && fresh_seed {
         YtmSession::guest(String::new())
     } else {
@@ -772,67 +950,213 @@ pub fn fetch_rich_home(
     };
 
     let is_default_home = mood_params.map(str::trim).is_none_or(str::is_empty);
+    let has_taste = !taste.top_tracks.is_empty();
+    let taste_locale = dominant_taste_locale(&taste.top_tracks);
+
     let mut body = json!({
         "browseId": "FEmusic_home",
-        "context": web_remix_context(&effective_session),
+        "context": web_remix_context_for_locale(&effective_session, taste_locale),
     });
     if let Some(params) = mood_params.map(str::trim).filter(|p| !p.is_empty()) {
         body["params"] = json!(params);
     }
 
-    // Fan out Home, Explore, Charts, and Recent-Listening Radio in parallel on default Home
-    // so Home loads in ~1 RTT and survives individual YouTube edge timeouts seamlessly.
-    let (home_res, explore_res, charts_res, radio_res) = if is_default_home {
-        let seed_vid_opt = if !recent_seed_vids.is_empty() {
-            Some(recent_seed_vids[fastrand::usize(..recent_seed_vids.len())].clone())
+    // Pick up to 3 distinct-artist seed tracks from user's top-played / liked / recent tracks
+    let mut seed_tracks: Vec<Track> = Vec::new();
+    if is_default_home && has_taste {
+        let mut used_artists: HashSet<String> = HashSet::new();
+        let candidates: Vec<Track> = taste
+            .top_tracks
+            .iter()
+            .filter(|t| t.youtube_video_id.as_deref().is_some_and(is_valid_video_id))
+            .cloned()
+            .collect();
+        let start_offset = if fresh_seed && candidates.len() > 3 {
+            fastrand::usize(..candidates.len().min(6))
         } else {
-            None
+            0
         };
-        std::thread::scope(|s| {
-            let h_home = s.spawn(|| post_ytm_json("browse", &body, &effective_session));
-            let h_explore = s.spawn(|| {
-                let sup_body = json!({
-                    "browseId": "FEmusic_explore",
-                    "context": web_remix_context(&effective_session),
+        for pass in 0..2 {
+            for i in 0..candidates.len() {
+                if seed_tracks.len() >= 3 {
+                    break;
+                }
+                let t = &candidates[(i + start_offset) % candidates.len()];
+                let an = primary_artist_norm(&t.artist);
+                if pass == 0 && !an.is_empty() && !used_artists.insert(an) {
+                    continue;
+                }
+                if !seed_tracks.iter().any(|s| s.id == t.id) {
+                    seed_tracks.push(t.clone());
+                }
+            }
+        }
+    }
+
+    let mut top_artists: Vec<String> = taste
+        .top_artists
+        .iter()
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .collect();
+    for t in &taste.top_tracks {
+        let a = t
+            .artist
+            .split(['&', ',', '•', '·'])
+            .next()
+            .unwrap_or(&t.artist)
+            .trim()
+            .to_string();
+        if !a.is_empty()
+            && !a.eq_ignore_ascii_case("unknown artist")
+            && !top_artists.iter().any(|x| x.eq_ignore_ascii_case(&a))
+        {
+            top_artists.push(a);
+        }
+        if top_artists.len() >= 4 {
+            break;
+        }
+    }
+    let artist_1 = top_artists.first().cloned();
+    let artist_2 = top_artists.get(1).cloned();
+
+    // Parallel fan-out:
+    // - Personalized Home (has listening history): FEmusic_home (for Mood Chips) + 3 collaborative
+    //   seed radios + 2 top-artist popular playlists/albums searches (~1 RTT total).
+    // - Cold start (no history): FEmusic_home + FEmusic_explore + FEmusic_charts.
+    let (home_res, explore_res, charts_res, radio_pools, artist_search_1, artist_search_2) =
+        if is_default_home && !seed_tracks.is_empty() {
+            let s0 = seed_tracks.first().cloned();
+            let s1 = seed_tracks.get(1).cloned();
+            let s2 = seed_tracks.get(2).cloned();
+            let a1_q = artist_1.as_ref().map(|a| format!("{a} popular hits"));
+            let a2_q = artist_2.as_ref().map(|a| format!("{a} mix playlist"));
+            std::thread::scope(|s| {
+                let h_home = s.spawn(|| post_ytm_json_fast("browse", &body, &effective_session));
+                let h_r0 = s.spawn(|| {
+                    s0.as_ref().and_then(|t| {
+                        let vid = t.youtube_video_id.as_deref()?;
+                        fetch_radio_up_next_for_track(
+                            &effective_session,
+                            vid,
+                            &t.title,
+                            &t.artist,
+                            &t.album,
+                            18,
+                            fresh_seed,
+                        )
+                        .ok()
+                    })
                 });
-                post_ytm_json_fast("browse", &sup_body, &effective_session)
-            });
-            let h_charts = s.spawn(|| {
-                let sup_body = json!({
-                    "browseId": "FEmusic_charts",
-                    "context": web_remix_context(&effective_session),
+                let h_r1 = s.spawn(|| {
+                    s1.as_ref().and_then(|t| {
+                        let vid = t.youtube_video_id.as_deref()?;
+                        fetch_radio_up_next_for_track(
+                            &effective_session,
+                            vid,
+                            &t.title,
+                            &t.artist,
+                            &t.album,
+                            18,
+                            fresh_seed,
+                        )
+                        .ok()
+                    })
                 });
-                post_ytm_json_fast("browse", &sup_body, &effective_session)
-            });
-            let h_radio = s.spawn(|| {
-                seed_vid_opt
-                    .as_deref()
-                    .and_then(|vid| fetch_radio_up_next(&effective_session, vid, 15).ok())
-            });
+                let h_r2 = s.spawn(|| {
+                    s2.as_ref().and_then(|t| {
+                        let vid = t.youtube_video_id.as_deref()?;
+                        fetch_radio_up_next_for_track(
+                            &effective_session,
+                            vid,
+                            &t.title,
+                            &t.artist,
+                            &t.album,
+                            16,
+                            fresh_seed,
+                        )
+                        .ok()
+                    })
+                });
+                let h_a1 = s.spawn(|| {
+                    a1_q.as_deref()
+                        .and_then(|q| fetch_rich_search(&effective_session, q, 14).ok())
+                });
+                let h_a2 = s.spawn(|| {
+                    a2_q.as_deref()
+                        .and_then(|q| fetch_rich_search(&effective_session, q, 12).ok())
+                });
+                let mut pools = Vec::new();
+                for res in [
+                    h_r0.join().ok().flatten(),
+                    h_r1.join().ok().flatten(),
+                    h_r2.join().ok().flatten(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !res.is_empty() {
+                        pools.push(res);
+                    }
+                }
+                (
+                    h_home.join().unwrap_or_else(|_| {
+                        Err(ProviderError::Http(
+                            "YouTube Music Home thread failed".to_string(),
+                        ))
+                    }),
+                    None,
+                    None,
+                    pools,
+                    h_a1.join().ok().flatten(),
+                    h_a2.join().ok().flatten(),
+                )
+            })
+        } else if is_default_home {
+            std::thread::scope(|s| {
+                let h_home = s.spawn(|| post_ytm_json("browse", &body, &effective_session));
+                let h_explore = s.spawn(|| {
+                    let sup_body = json!({
+                        "browseId": "FEmusic_explore",
+                        "context": web_remix_context_for_locale(&effective_session, taste_locale),
+                    });
+                    post_ytm_json_fast("browse", &sup_body, &effective_session)
+                });
+                let h_charts = s.spawn(|| {
+                    let sup_body = json!({
+                        "browseId": "FEmusic_charts",
+                        "context": web_remix_context_for_locale(&effective_session, taste_locale),
+                    });
+                    post_ytm_json_fast("browse", &sup_body, &effective_session)
+                });
+                (
+                    h_home.join().unwrap_or_else(|_| {
+                        Err(ProviderError::Http(
+                            "YouTube Music Home thread failed".to_string(),
+                        ))
+                    }),
+                    h_explore.join().ok().and_then(Result::ok),
+                    h_charts.join().ok().and_then(Result::ok),
+                    Vec::new(),
+                    None,
+                    None,
+                )
+            })
+        } else {
             (
-                h_home.join().unwrap_or_else(|_| {
-                    Err(ProviderError::Http(
-                        "YouTube Music Home thread failed".to_string(),
-                    ))
-                }),
-                h_explore.join().ok().and_then(Result::ok),
-                h_charts.join().ok().and_then(Result::ok),
-                h_radio.join().ok().flatten(),
+                post_ytm_json("browse", &body, &effective_session),
+                None,
+                None,
+                Vec::new(),
+                None,
+                None,
             )
-        })
-    } else {
-        (
-            post_ytm_json("browse", &body, &effective_session),
-            None,
-            None,
-            None,
-        )
-    };
+        };
 
     let home_root = match home_res {
         Ok(root) => Some(root),
         Err(err) => {
-            if explore_res.is_none() && charts_res.is_none() {
+            if explore_res.is_none() && charts_res.is_none() && radio_pools.is_empty() {
                 return Err(err);
             }
             None
@@ -841,23 +1165,20 @@ pub fn fetch_rich_home(
 
     let mut visitor_data = effective_session.visitor_data.clone();
     let mut chips = Vec::new();
-    let mut quick_picks = Vec::new();
+    let mut raw_home_picks = Vec::new();
     let mut seen_tracks = HashSet::new();
-    let mut shelves = Vec::new();
+    let mut raw_home_shelves = Vec::new();
     let mut all_tracks = Vec::new();
     let mut continuation_token = None;
 
     if let Some(root) = home_root {
         visitor_data = extract_visitor_data(&root, &visitor_data);
         collect_mood_chips(&root, &mut chips);
-        collect_home_shelves(&root, &mut quick_picks, &mut seen_tracks, &mut shelves);
-        all_tracks.extend(quick_picks.iter().cloned());
-        collect_music_items(
+        collect_home_shelves(
             &root,
-            "YouTube Music",
-            64,
+            &mut raw_home_picks,
             &mut seen_tracks,
-            &mut all_tracks,
+            &mut raw_home_shelves,
         );
         continuation_token = extract_continuation_token(&root);
     }
@@ -865,137 +1186,251 @@ pub fn fetch_rich_home(
     let mut next_sess = effective_session;
     next_sess.visitor_data = visitor_data.clone();
 
-    // Follow up to 2 fast continuation pages from FEmusic_home so Home immediately opens rich & deep
-    for _ in 0..2 {
-        let Some(tok) = continuation_token.clone() else {
-            break;
-        };
-        let cont_body = json!({
-            "continuation": tok,
-            "context": web_remix_context(&next_sess),
-        });
-        let Ok(cont_root) = post_ytm_json_fast("browse", &cont_body, &next_sess) else {
-            break;
-        };
-        let mut c_picks = Vec::new();
-        let mut c_shelves = Vec::new();
-        collect_home_shelves(&cont_root, &mut c_picks, &mut seen_tracks, &mut c_shelves);
-        for t in c_picks {
-            if quick_picks.len() < 40 && !quick_picks.iter().any(|q| q.id == t.id) {
-                quick_picks.push(t.clone());
+    // Cold-start or Mood-chip browse: follow up to 2 fast continuations + Explore/Charts
+    if !has_taste || !is_default_home {
+        for _ in 0..2 {
+            let Some(tok) = continuation_token.clone() else {
+                break;
+            };
+            let cont_body = json!({
+                "continuation": tok,
+                "context": web_remix_context_for_locale(&next_sess, taste_locale),
+            });
+            let Ok(cont_root) = post_ytm_json_fast("browse", &cont_body, &next_sess) else {
+                break;
+            };
+            let mut c_picks = Vec::new();
+            let mut c_shelves = Vec::new();
+            collect_home_shelves(&cont_root, &mut c_picks, &mut seen_tracks, &mut c_shelves);
+            for t in c_picks {
+                if raw_home_picks.len() < 40 && !raw_home_picks.iter().any(|q| q.id == t.id) {
+                    raw_home_picks.push(t);
+                }
             }
-            if !all_tracks.iter().any(|a| a.id == t.id) {
-                all_tracks.push(t);
+            for shelf in c_shelves {
+                if !raw_home_shelves
+                    .iter()
+                    .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
+                {
+                    raw_home_shelves.push(shelf);
+                }
             }
+            continuation_token = extract_continuation_token(&cont_root);
         }
-        for shelf in c_shelves {
-            if !shelves
-                .iter()
-                .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
-            {
-                shelves.push(shelf);
-            }
-        }
-        collect_music_items(
-            &cont_root,
-            "YouTube Music",
-            96,
-            &mut seen_tracks,
-            &mut all_tracks,
-        );
-        continuation_token = extract_continuation_token(&cont_root);
-    }
 
-    // Merge parallel Explore (New Albums & Singles) + Charts (Top Songs & Artists)
-    for sup_root in [explore_res, charts_res].into_iter().flatten() {
-        if visitor_data.is_empty() {
-            visitor_data = extract_visitor_data(&sup_root, &visitor_data);
-        }
-        if chips.is_empty() {
-            collect_mood_chips(&sup_root, &mut chips);
-        }
-        let mut sup_picks = Vec::new();
-        let mut sup_shelves = Vec::new();
-        collect_home_shelves(
-            &sup_root,
-            &mut sup_picks,
-            &mut seen_tracks,
-            &mut sup_shelves,
-        );
-        for t in sup_picks {
-            if quick_picks.len() < 48 && !quick_picks.iter().any(|q| q.id == t.id) {
-                quick_picks.push(t.clone());
+        for sup_root in [explore_res, charts_res].into_iter().flatten() {
+            if visitor_data.is_empty() {
+                visitor_data = extract_visitor_data(&sup_root, &visitor_data);
             }
-            if !all_tracks.iter().any(|a| a.id == t.id) {
-                all_tracks.push(t);
+            if chips.is_empty() {
+                collect_mood_chips(&sup_root, &mut chips);
             }
-        }
-        for shelf in sup_shelves {
-            if !shelves
-                .iter()
-                .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
-            {
-                shelves.push(shelf);
-            }
-        }
-        collect_music_items(
-            &sup_root,
-            "YouTube Music Explore",
-            120,
-            &mut seen_tracks,
-            &mut all_tracks,
-        );
-    }
-
-    // Merge dynamic guest personalization seeded from user's recent plays
-    if let Some(radio_tracks) = radio_res
-        && radio_tracks.len() >= 4
-    {
-        let cards = tracks_to_song_cards(&radio_tracks);
-        if cards.len() >= 4 {
-            shelves.insert(
-                0,
-                YtmHomeShelf {
-                    title: "Picked from your recent listening".to_string(),
-                    cards,
-                },
+            let mut sup_picks = Vec::new();
+            let mut sup_shelves = Vec::new();
+            collect_home_shelves(
+                &sup_root,
+                &mut sup_picks,
+                &mut seen_tracks,
+                &mut sup_shelves,
             );
-        }
-        for t in radio_tracks {
-            if !quick_picks.iter().any(|q| q.id == t.id) {
-                quick_picks.push(t.clone());
+            for t in sup_picks {
+                if raw_home_picks.len() < 48 && !raw_home_picks.iter().any(|q| q.id == t.id) {
+                    raw_home_picks.push(t);
+                }
             }
-            if !all_tracks.iter().any(|a| a.id == t.id) {
-                all_tracks.push(t);
+            for shelf in sup_shelves {
+                if !raw_home_shelves
+                    .iter()
+                    .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
+                {
+                    raw_home_shelves.push(shelf);
+                }
             }
         }
     }
 
-    if quick_picks.len() < 16 {
+    let mut quick_picks: Vec<Track> = Vec::new();
+    let mut shelves: Vec<YtmHomeShelf> = Vec::new();
+
+    if is_default_home && has_taste && !radio_pools.is_empty() {
+        let mut artist_popular_tracks: Vec<Track> = Vec::new();
+        let mut taste_cards: Vec<YtmShelfCard> = Vec::new();
+        let mut seen_card_ids: HashSet<String> = HashSet::new();
+
+        for search_opt in [artist_search_1.as_ref(), artist_search_2.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            for t in search_opt.tracks.iter().take(10) {
+                if !artist_popular_tracks.iter().any(|x| x.id == t.id) {
+                    artist_popular_tracks.push(t.clone());
+                }
+            }
+            for c in &search_opt.cards {
+                if matches!(
+                    c.kind,
+                    YtmCardKind::Playlist | YtmCardKind::Album | YtmCardKind::Artist
+                ) && seen_card_ids.insert(c.id.clone())
+                {
+                    taste_cards.push(c.clone());
+                }
+            }
+        }
+
+        let ranked_discovery = rank_personalized_home_candidates(
+            &radio_pools,
+            &artist_popular_tracks,
+            taste,
+            taste_locale,
+            2,
+        );
+
+        // Quick Picks: blend 30% user's top-played favorites + 70% top collaborative crowd-favorites
+        // matching the user's exact listening taste (zero regional GeoIP spam).
+        let mut qp_seen: HashSet<String> = HashSet::new();
+        let mut fav_iter = taste
+            .top_tracks
+            .iter()
+            .filter(|t| t.youtube_video_id.is_some())
+            .take(8)
+            .cloned()
+            .peekable();
+        let mut disc_iter = ranked_discovery.iter().cloned().peekable();
+        let mut slot = 0usize;
+        while quick_picks.len() < 32 && (fav_iter.peek().is_some() || disc_iter.peek().is_some()) {
+            let pick = if slot % 3 == 0 {
+                fav_iter.next().or_else(|| disc_iter.next())
+            } else {
+                disc_iter.next().or_else(|| fav_iter.next())
+            };
+            slot += 1;
+            if let Some(t) = pick {
+                let k = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+                if qp_seen.insert(k) {
+                    quick_picks.push(t);
+                }
+            }
+        }
+
+        // Shelf 1: Listen again (user's most frequently played & liked songs)
+        let listen_again_cards = tracks_to_song_cards(
+            &taste
+                .top_tracks
+                .iter()
+                .take(15)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        if listen_again_cards.len() >= 3 {
+            shelves.push(YtmHomeShelf {
+                title: "Listen again".to_string(),
+                cards: listen_again_cards,
+            });
+        }
+
+        // Shelf 2: Popular with listeners like you (unseen/fresh collaborative hits)
+        let top_ids: HashSet<&str> = taste.top_tracks.iter().map(|t| t.id.as_str()).collect();
+        let popular_discovery: Vec<Track> = ranked_discovery
+            .iter()
+            .filter(|t| !top_ids.contains(t.id.as_str()))
+            .take(15)
+            .cloned()
+            .collect();
+        let pop_cards = tracks_to_song_cards(&popular_discovery);
+        if pop_cards.len() >= 4 {
+            shelves.push(YtmHomeShelf {
+                title: "Popular with listeners like you".to_string(),
+                cards: pop_cards,
+            });
+        }
+
+        // Shelf 3: Because you listen to <Top Artist 1>
+        if let Some(a1) = &artist_1 {
+            let mut artist_mix: Vec<Track> = Vec::new();
+            if let Some(first_pool) = radio_pools.first() {
+                for t in first_pool {
+                    if !artist_mix.iter().any(|x| x.id == t.id) {
+                        artist_mix.push(t.clone());
+                    }
+                }
+            }
+            for t in &artist_popular_tracks {
+                if !artist_mix.iter().any(|x| x.id == t.id) {
+                    artist_mix.push(t.clone());
+                }
+            }
+            let a1_cards =
+                tracks_to_song_cards(&artist_mix.into_iter().take(15).collect::<Vec<_>>());
+            if a1_cards.len() >= 4 {
+                shelves.push(YtmHomeShelf {
+                    title: format!("Because you listen to {a1}"),
+                    cards: a1_cards,
+                });
+            }
+        }
+
+        // Shelf 4: Albums, Artists & Playlists matching user's taste (replaces generic regional charts!)
+        if taste_cards.len() >= 3 {
+            shelves.push(YtmHomeShelf {
+                title: "Recommended albums & playlists for you".to_string(),
+                cards: taste_cards.into_iter().take(15).collect(),
+            });
+        }
+
+        // Shelf 5+: Second seed's vibe mix (if distinct)
+        if let Some(a2) = &artist_2
+            && let Some(second_pool) = radio_pools.get(1)
+        {
+            let a2_cards = tracks_to_song_cards(second_pool);
+            if a2_cards.len() >= 4 {
+                shelves.push(YtmHomeShelf {
+                    title: format!("More like {a2}"),
+                    cards: a2_cards,
+                });
+            }
+        }
+
+        // Append ONLY locale-compatible non-regional-spam shelves from FEmusic_home below
+        for shelf in raw_home_shelves {
+            if is_regional_geoip_chart_shelf(&shelf.title, &shelf.cards, taste_locale) {
+                continue;
+            }
+            if !shelves
+                .iter()
+                .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
+            {
+                shelves.push(shelf);
+            }
+        }
+
+        // Aggregate all_tracks cleanly
+        for t in quick_picks.iter().chain(ranked_discovery.iter()) {
+            if !all_tracks.iter().any(|a| a.id == t.id) {
+                all_tracks.push(t.clone());
+            }
+        }
+    } else {
+        // Cold-start or Mood-chip view
+        quick_picks = raw_home_picks;
+        shelves = raw_home_shelves;
+        if taste_locale == MusicLocale::GlobalEn && has_taste {
+            shelves.retain(|s| !is_regional_geoip_chart_shelf(&s.title, &s.cards, taste_locale));
+        }
+        all_tracks.extend(quick_picks.iter().cloned());
+        if !session.is_signed_in() && quick_picks.len() > 8 {
+            fastrand::shuffle(&mut quick_picks);
+        }
+    }
+
+    if quick_picks.len() < 12 {
         for t in &all_tracks {
-            if quick_picks.len() >= 32 {
+            if quick_picks.len() >= 24 {
                 break;
             }
             if !quick_picks.iter().any(|q| q.id == t.id) {
                 quick_picks.push(t.clone());
             }
         }
-    }
-
-    // Dynamic freshness rotation in Guest Mode so Quick Picks & shelves stay lively on every open/refresh
-    if !session.is_signed_in() && quick_picks.len() > 8 {
-        fastrand::shuffle(&mut quick_picks);
-    }
-    if !session.is_signed_in() && fresh_seed && shelves.len() > 3 {
-        let keep_first = if shelves
-            .first()
-            .is_some_and(|s| s.title.starts_with("Picked from"))
-        {
-            1
-        } else {
-            0
-        };
-        fastrand::shuffle(&mut shelves[keep_first..]);
     }
 
     Ok(YtmRichHome {
@@ -2993,6 +3428,51 @@ mod tests {
         let auth = build_sapisidhash_header("abc123", YTM_ORIGIN, 1_700_000_000);
         assert!(auth.starts_with("SAPISIDHASH 1700000000_"));
         assert_eq!(auth.len(), "SAPISIDHASH 1700000000_".len() + 40);
+    }
+
+    #[test]
+    fn personalized_home_ranks_consensus_popular_tracks_and_filters_mismatched_locale() {
+        let mk = |vid: &str, title: &str, artist: &str| Track {
+            id: format!("yt:video:{vid}"),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: "Album".to_string(),
+            duration_ms: 210_000,
+            path: None,
+            source: TrackSource::YouTubeMusic,
+            codec: "OPUS".to_string(),
+            sample_rate: 48_000,
+            bit_depth: 16,
+            bitrate_kbps: 140,
+            isrc: None,
+            spotify_id: None,
+            youtube_video_id: Some(vid.to_string()),
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked: false,
+        };
+        let taste = YtmHomeTasteProfile {
+            top_tracks: vec![
+                mk("seed1aaaaaa", "WILDFLOWER", "Billie Eilish"),
+                mk("seed2bbbbbb", "Runaway", "AURORA"),
+            ],
+            top_artists: vec!["Billie Eilish".to_string(), "AURORA".to_string()],
+            recent_searches: Vec::new(),
+        };
+        let locale = dominant_taste_locale(&taste.top_tracks);
+        assert_eq!(locale, MusicLocale::GlobalEn);
+        let pool1 = vec![
+            mk("shared11111", "Sweater Weather", "The Neighbourhood"),
+            mk("idspam22222", "Aku Dirimu Dirinya", "Della Monica"),
+            mk("solo3333333", "Cinnamon Girl", "Lana Del Rey"),
+        ];
+        let pool2 = vec![
+            mk("solo4444444", "happier", "Olivia Rodrigo"),
+            mk("shared11111", "Sweater Weather", "The Neighbourhood"),
+        ];
+        let ranked = rank_personalized_home_candidates(&[pool1, pool2], &[], &taste, locale, 2);
+        assert_eq!(ranked[0].title, "Sweater Weather");
+        assert!(!ranked.iter().any(|t| t.title.contains("Aku Dirimu")));
     }
 
     #[test]

@@ -98,9 +98,9 @@ mod win_impl {
         SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN,
         TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE,
         WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE,
-        WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND,
-        WM_WINDOWPOSCHANGED, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
-        WS_THICKFRAME,
+        WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_RBUTTONUP, WM_SHOWWINDOW,
+        WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+        WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
     use windows::core::{PCWSTR, s, w};
 
@@ -526,14 +526,16 @@ mod win_impl {
         let ok = unsafe { SetWindowSubclass(hwnd, ferric_subclass_proc, SUBCLASS_ID, 0) };
         if ok != 0 {
             HOOK_INSTALLED.store(true, Ordering::Release);
-            // Keep WS_POPUP (strip WS_CAPTION explicitly!) with WS_THICKFRAME | WS_MINIMIZEBOX |
-            // WS_MAXIMIZEBOX | WS_SYSMENU so Windows 11 DWM provides rounded corners, Aero Snap,
-            // and smooth maximize/restore animations WITHOUT ever painting native ghost caption
-            // buttons (`—`, `❐`, `×`) over Ferric's custom Acrylic top bar.
+            // Use overlapped top-level style (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+            // WS_MAXIMIZEBOX | WS_SYSMENU, clearing WS_POPUP) so Windows 11 DWM delivers full
+            // native minimize / maximize / restore animations, rounded corners, and Aero Snap.
+            // Zero OS caption buttons appear because WM_NCCALCSIZE removes the entire NC frame,
+            // WM_NCACTIVATE/WM_NCPAINT suppress classic non-client drawing, WM_NCHITTEST keeps
+            // caption hitboxes as HTCLIENT, and WS_EX_NOREDIRECTIONBITMAP removes GDI surface.
             unsafe {
                 let cur_style = GetWindowLongW(hwnd, GWL_STYLE);
-                let next_style = (cur_style & !(WS_CAPTION.0 as i32))
-                    | (WS_POPUP.0
+                let next_style = (cur_style & !(WS_POPUP.0 as i32))
+                    | (WS_CAPTION.0
                         | WS_THICKFRAME.0
                         | WS_MINIMIZEBOX.0
                         | WS_MAXIMIZEBOX.0
@@ -1162,6 +1164,15 @@ mod win_impl {
                         }
                         return LRESULT(0);
                     }
+                }
+                WM_NCACTIVATE => {
+                    // Never allow DefWindowProcW to paint classic titlebar/caption frames on focus/blur.
+                    if IsIconic(hwnd.0) == 0 {
+                        return LRESULT(1);
+                    }
+                }
+                WM_NCPAINT => {
+                    return LRESULT(0);
                 }
                 WM_NCCALCSIZE => {
                     // Keep the entire window 100% client area (zero OS non-client titlebar/caption

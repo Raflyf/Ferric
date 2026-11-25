@@ -1,5 +1,7 @@
 use crate::artwork::{ArtworkCache, CachedArtwork};
-use crate::discord_rpc::{DiscordRpcBridge, DiscordTrackSnapshot, is_valid_client_id};
+use crate::discord_rpc::{
+    DiscordRpcBridge, DiscordTrackSnapshot, effective_client_id, is_valid_client_id,
+};
 use crate::google_login::{GoogleLoginOutcome, launch_google_ytm_login_window};
 use crate::shell::{
     TrayEvent, copy_text_to_clipboard, launch_verified_installer, open_allowed_url,
@@ -29,6 +31,7 @@ use ferric_core::models::{
     AccountSettings, AudioQuality, DiscordRpcSettings, DiscordStatusFormat, FadeCurve,
     PlaybackDspSettings, Playlist, RepeatMode, SessionResumeState, Track, TrackSource,
     UpdateSettings, VideoQuality, format_duration_ms, parse_playlist_import_text,
+    primary_artist_key,
 };
 use ferric_core::queue::PlayQueue;
 use ferric_core::theme::{ThemeConfig, hex_to_rgba_f32, parse_hex_rgb};
@@ -45,8 +48,8 @@ use ferric_providers::updater::{
     format_check_status, release_page_url,
 };
 use ferric_providers::ytmusic::{
-    VideoStreamOption, YtmCardKind, YtmRichHome, YtmRichSearch, YtmSession, YtmShelfCard,
-    fetch_account_library, fetch_browse_detail, fetch_home_continuation,
+    VideoStreamOption, YtmCardKind, YtmHomeTasteProfile, YtmRichHome, YtmRichSearch, YtmSession,
+    YtmShelfCard, fetch_account_library, fetch_browse_detail, fetch_home_continuation,
     fetch_radio_up_next_for_track, fetch_rich_home, fetch_rich_search, fetch_video_streams,
     normalize_ytm_thumbnail_url, resolve_and_cache_audio_stream_with_quality,
     resolve_best_video_id_for_track,
@@ -209,15 +212,23 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             uniform acrylic_on: 0.0
+            uniform accent_col: #E86A2C
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 6.0);
                 let hov = mix(#161822, vec4(1.0, 1.0, 1.0, 0.075), self.acrylic_on);
-                let act = mix(#1E202F, vec4(1.0, 1.0, 1.0, 0.135), self.acrylic_on);
+                let act_solid = mix(#1A1C28, vec4(self.accent_col.xyz, 0.24), 0.28);
+                let act_acr = vec4(mix(vec3(1.0, 1.0, 1.0), self.accent_col.xyz, 0.30), 0.16);
+                let act = mix(act_solid, act_acr, self.acrylic_on);
                 let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
                 sdf.fill_keep(col);
-                let rim = vec4(1.0, 1.0, 1.0, (0.09 * self.active + 0.05 * self.hover) * self.acrylic_on);
-                sdf.stroke(rim, 1.0);
+                let idle_rim = vec4(1.0, 1.0, 1.0, 0.05 * self.hover * self.acrylic_on);
+                let act_rim = vec4(self.accent_col.xyz, 0.34);
+                sdf.stroke(mix(idle_rim, act_rim, self.active), 1.0);
+                if self.active > 0.5 {
+                    sdf.box(2.5, 6.0, 2.5, max(self.rect_size.y - 12.0, 6.0), 1.25);
+                    sdf.fill(vec4(self.accent_col.xyz, self.active));
+                }
                 return sdf.result;
             }
         }
@@ -1082,7 +1093,7 @@ live_design! {
                                     top_search_input = <FerricInput> {
                                         width: Fill,
                                         height: Fill,
-                                        padding: { left: 2, right: 6, top: 0, bottom: 0 }
+                                        padding: { left: 2, right: 2, top: 0, bottom: 0 }
                                         empty_text: "Search music... (Ctrl+K)"
                                         draw_bg: {
                                             color: #00000000,
@@ -1103,6 +1114,17 @@ live_design! {
                                             color: #F4F4F7,
                                             color_empty: #7D8090,
                                             text_style: <THEME_FONT_REGULAR> { font_size: 8.6, line_spacing: 1.0 }
+                                        }
+                                    }
+                                    top_search_clear_btn = <FerricIconBtn> {
+                                        visible: false,
+                                        width: 20,
+                                        height: 20,
+                                        icon_walk: { width: Fit, height: 11 }
+                                        draw_icon: {
+                                            svg_path: "M19 6.41L17.59 5L12 10.59L6.41 5L5 6.41L10.59 12L5 17.59L6.41 19L12 13.41L17.59 19L19 17.59L13.41 12L19 6.41Z"
+                                            color: #8A8E9E,
+                                            color_hover: #FFFFFF
                                         }
                                     }
                                 }
@@ -2115,6 +2137,10 @@ live_design! {
                                                     tint_slate_btn = <FerricChipBtn> { text: "Slate" }
                                                     tint_smoke_btn = <FerricChipBtn> { text: "Smoke" }
                                                 }
+                                                acrylic_color_picker = <FerricColorPicker> {
+                                                    width: Fill,
+                                                    height: 138,
+                                                }
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                                     acrylic_tint_input = <FerricInput> { width: 160, height: 28, empty_text: "#RRGGBB (e.g. #2B140A)" }
@@ -2447,9 +2473,9 @@ live_design! {
                         // 3. CENTERED 2-ROW AMBIENT BOTTOM PLAYER BAR (74px, GEOMETRIC SYMMETRY)
                         // ============================================================
                         bottom_bar = <AmbientBottomBar> {
-                            // Left (272px): 44x44 Cover Art + Title/Artist + Heart + Add Playlist
+                            // Left (304px): 44x44 Cover Art + Title/Artist + Heart + Add Playlist
                             bottom_left_grp = <View> {
-                                width: 272,
+                                width: 304,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
@@ -2570,9 +2596,9 @@ live_design! {
                                 }
                             }
 
-                            // Right (272px matching Left width for exact geometric centering of Play/Pause!)
+                            // Right (304px matching Left width for exact geometric centering & zero icon clip at 65%-140% zoom!)
                             bottom_right_grp = <View> {
-                                width: 272,
+                                width: 304,
                                 height: Fill,
                                 flow: Right,
                                 align: { x: 1.0, y: 0.5 }
@@ -2652,7 +2678,6 @@ live_design! {
                                 }
                                 fs_close_btn = <Button> {
                                     width: Fit, height: 28, padding: { left: 14, right: 14 },
-                                    cursor: Hand,
                                     text: "Close (Esc)"
                                     draw_text: { color: #FFFFFFCC, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.6 } }
                                     draw_bg: {
@@ -2968,13 +2993,24 @@ live_design! {
                             show_bg: true,
                             draw_bg: {
                                 uniform acrylic_on: 0.0
+                                uniform acrylic_opacity: 0.72
+                                uniform acrylic_tint: #0B0D14
+                                uniform surface_col: #0F1016
+                                uniform border_col: #252734
+                                uniform accent_col: #E86A2C
                                 fn pixel(self) -> vec4 {
                                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 7.0);
-                                    let fill_c = mix(vec4(0.08, 0.09, 0.13, 0.96), vec4(0.12, 0.13, 0.18, 0.96), self.acrylic_on);
-                                    let stroke_c = mix(#2C2E40, vec4(1.0, 1.0, 1.0, 0.16), self.acrylic_on);
-                                    sdf.fill_keep(fill_c);
-                                    sdf.stroke(stroke_c, 1.0);
+                                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
+                                    if self.acrylic_on > 0.5 {
+                                        let a = clamp(self.acrylic_opacity * 0.70 + 0.18, 0.44, 0.88);
+                                        let glass = clamp(self.acrylic_tint.xyz * 1.15 + vec3(0.055, 0.058, 0.068), 0.0, 1.0);
+                                        sdf.fill_keep(vec4(glass * a, a));
+                                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.16), 1.0);
+                                    } else {
+                                        let solid_fill = vec4(clamp(self.surface_col.xyz * 1.15 + vec3(0.02, 0.02, 0.024), 0.0, 1.0), 0.96);
+                                        sdf.fill_keep(solid_fill);
+                                        sdf.stroke(mix(self.border_col, vec4(self.accent_col.xyz, 0.45), 0.25), 1.0);
+                                    }
                                     return sdf.result;
                                 }
                             }
@@ -3534,53 +3570,94 @@ impl App {
             .set_text(cx, &format!("{:.0}%", z * 100.0));
 
         self.left_w_target = if self.left_sidebar_open {
-            168.0 * z
+            (168.0 * z).max(132.0)
         } else {
             0.0
         };
         self.left_w_cur = self.left_w_target;
         self.right_w_target = if self.right_sidebar_open {
-            260.0 * z
+            (260.0 * z).max(210.0)
         } else {
             0.0
         };
         self.right_w_cur = self.right_w_target;
 
+        let bar_h = (74.0 * z).max(64.0);
+        let side_grp_w = (304.0 * z).max(248.0);
+        let btn_sz = (28.0 * z).max(22.0);
+        let icon_h = (15.0 * z).max(12.0);
         self.ui
             .view(id!(top_bar))
-            .apply_over(cx, live! { height: (36.0 * z) });
+            .apply_over(cx, live! { height: ((36.0 * z).max(30.0)) });
         if self.left_sidebar_open {
             self.ui
                 .view(id!(left_sidebar))
-                .apply_over(cx, live! { width: (168.0 * z) });
+                .apply_over(cx, live! { width: ((168.0 * z).max(132.0)) });
         }
         if self.right_sidebar_open {
             self.ui
                 .view(id!(right_sidebar))
-                .apply_over(cx, live! { width: (260.0 * z) });
+                .apply_over(cx, live! { width: ((260.0 * z).max(210.0)) });
         }
         self.ui
             .view(id!(bottom_bar))
-            .apply_over(cx, live! { height: (74.0 * z) });
+            .apply_over(cx, live! { height: (bar_h) });
+        self.ui.view(id!(toast_wrap)).apply_over(
+            cx,
+            live! { padding: { right: 16.0, bottom: (bar_h + 12.0) } },
+        );
         self.ui
             .view(id!(bottom_left_grp))
-            .apply_over(cx, live! { width: (272.0 * z) });
+            .apply_over(cx, live! { width: (side_grp_w) });
         self.ui
             .view(id!(bottom_right_grp))
-            .apply_over(cx, live! { width: (272.0 * z) });
+            .apply_over(cx, live! { width: (side_grp_w) });
+        self.ui.button(id!(codec_pill_btn)).apply_over(
+            cx,
+            live! {
+                height: ((22.0 * z).max(18.0)),
+                padding: { left: ((7.0 * z).max(5.0)), right: ((7.0 * z).max(5.0)) },
+                draw_text: { text_style: { font_size: ((7.8 * z).max(6.8)) } }
+            },
+        );
+        for b_id in [
+            id!(shuffle_btn),
+            id!(prev_btn),
+            id!(next_btn),
+            id!(repeat_btn),
+            id!(bar_video_btn),
+            id!(bar_lyrics_btn),
+            id!(bar_queue_btn),
+            id!(vol_mute_btn),
+            id!(bar_fullscreen_btn),
+        ] {
+            self.ui.button(b_id).apply_over(
+                cx,
+                live! {
+                    width: (btn_sz),
+                    height: (btn_sz),
+                    icon_walk: { width: Fit, height: (icon_h) }
+                },
+            );
+        }
+        self.ui
+            .ferric_bar_slider(id!(vol_slider))
+            .apply_over(cx, live! { width: ((62.0 * z).max(44.0)) });
+        let art_sz = (44.0 * z).max(34.0);
+        let play_sz = (34.0 * z).max(28.0);
         self.ui
             .ferric_cover_art(id!(np_art))
-            .apply_over(cx, live! { width: (44.0 * z), height: (44.0 * z) });
+            .apply_over(cx, live! { width: (art_sz), height: (art_sz) });
         self.ui
             .ferric_play_btn(id!(play_pause_btn))
-            .apply_over(cx, live! { width: (34.0 * z), height: (34.0 * z) });
+            .apply_over(cx, live! { width: (play_sz), height: (play_sz) });
         self.ui.label(id!(np_title_lbl)).apply_over(
             cx,
-            live! { draw_text: { text_style: { font_size: (9.4 * z) } } },
+            live! { draw_text: { text_style: { font_size: ((9.4 * z).max(7.6)) } } },
         );
         self.ui.label(id!(np_artist_lbl)).apply_over(
             cx,
-            live! { draw_text: { text_style: { font_size: (8.2 * z) } } },
+            live! { draw_text: { text_style: { font_size: ((8.2 * z).max(6.8)) } } },
         );
         self.ui
             .view(id!(fs_left_card))
@@ -4663,7 +4740,7 @@ impl App {
                     acrylic_on: (acr),
                     acrylic_opacity: (op),
                     acrylic_tint: (acrylic_tint),
-                    glow_amt: (if self.queue.current().is_some() { 0.28 } else { 0.14 })
+                    glow_amt: (if self.queue.current().is_some() { 0.36 } else { 0.14 })
                 }
             },
         );
@@ -4675,11 +4752,130 @@ impl App {
             acr,
         );
         self.ui
+            .ferric_bar_slider(id!(seek_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui
+            .ferric_bar_slider(id!(fs_seek_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui
             .ferric_bar_slider(id!(vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
         self.ui
             .ferric_bar_slider(id!(fs_vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui.view(id!(top_search_box)).apply_over(
+            cx,
+            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent) } },
+        );
+        for nid in [
+            id!(nav_home),
+            id!(nav_search),
+            id!(nav_recents),
+            id!(nav_songs),
+            id!(nav_albums),
+            id!(nav_artists),
+            id!(nav_playlists),
+            id!(nav_settings),
+        ] {
+            self.ui
+                .button(nid)
+                .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+        }
+        for qid in [
+            id!(qp_0),
+            id!(qp_1),
+            id!(qp_2),
+            id!(qp_3),
+            id!(qp_4),
+            id!(qp_5),
+            id!(qp_6),
+            id!(qp_7),
+        ] {
+            self.ui
+                .view(qid)
+                .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+        }
+        let muted = vec4(0.604, 0.612, 0.659, 1.0);
+        let is_liked = self.queue.current().is_some_and(|cur| {
+            self.all_tracks
+                .iter()
+                .find(|t| t.id == cur.id)
+                .map_or(cur.liked, |t| t.liked)
+        });
+        let like_col = if is_liked {
+            accent
+        } else {
+            vec4(0.439, 0.451, 0.510, 1.0)
+        };
+        for lbtn in [id!(np_like_btn), id!(fs_like_btn)] {
+            self.ui
+                .button(lbtn)
+                .apply_over(cx, live! { draw_icon: { color: (like_col) } });
+        }
+        for sbtn in [id!(shuffle_btn), id!(fs_shuffle_btn)] {
+            self.ui.button(sbtn).apply_over(
+                cx,
+                live! { draw_icon: { color: (if self.queue.shuffle { accent } else { muted }) } },
+            );
+        }
+        let rep_col = match self.queue.repeat {
+            RepeatMode::Off => muted,
+            RepeatMode::All => accent,
+            RepeatMode::One => vec4(0.95, 0.78, 0.36, 1.0),
+        };
+        for rbtn in [id!(repeat_btn), id!(fs_repeat_btn)] {
+            self.ui
+                .button(rbtn)
+                .apply_over(cx, live! { draw_icon: { color: (rep_col) } });
+        }
+        let mute_col = if self.session_state.volume < 0.01 {
+            accent
+        } else {
+            muted
+        };
+        for mbtn in [id!(vol_mute_btn), id!(fs_vol_mute_btn)] {
+            self.ui
+                .button(mbtn)
+                .apply_over(cx, live! { draw_icon: { color: (mute_col) } });
+        }
+        self.ui.button(id!(rs_radio_btn)).apply_over(
+            cx,
+            live! {
+                draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { vec4(0.55, 0.56, 0.62, 1.0) }) }
+            },
+        );
+        self.ui.button(id!(bar_lyrics_btn)).apply_over(
+            cx,
+            live! {
+                draw_icon: { color: (if self.right_sidebar_open && self.right_lyrics_tab { accent } else { muted }) }
+            },
+        );
+        self.ui.button(id!(bar_queue_btn)).apply_over(
+            cx,
+            live! {
+                draw_icon: { color: (if self.right_sidebar_open && !self.right_lyrics_tab { accent } else { muted }) }
+            },
+        );
+        if self.video_open {
+            self.ui
+                .button(id!(bar_video_btn))
+                .apply_over(cx, live! { draw_icon: { color: (accent) } });
+        }
+        let surface = rgba_vec4(&self.theme.surface_hex);
+        let border = rgba_vec4(&self.theme.border_hex);
+        self.ui.view(id!(toast_pill)).apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    acrylic_on: (acr),
+                    acrylic_opacity: (op),
+                    acrylic_tint: (acrylic_tint),
+                    surface_col: (surface),
+                    border_col: (border),
+                    accent_col: (accent)
+                }
+            },
+        );
         for sid in [
             id!(xfade_slider),
             id!(fadein_slider),
@@ -4752,6 +4948,7 @@ impl App {
         self.ui
             .ferric_lyrics_view(id!(fs_lyrics_scroll))
             .set_style(cx, accent, z);
+        self.ui.redraw(cx);
     }
 
     fn rebuild_library_views(&mut self, cx: &mut Cx) {
@@ -6145,6 +6342,9 @@ impl App {
         self.ui
             .text_input(id!(acrylic_tint_input))
             .set_text(cx, &tint_hex);
+        self.ui
+            .ferric_color_picker(id!(acrylic_color_picker))
+            .set_hex(cx, &tint_hex);
         for (btn, hex) in [
             (id!(tint_obsidian_btn), "#0B0D14"),
             (id!(tint_ember_btn), "#2B140A"),
@@ -6441,9 +6641,23 @@ impl App {
             );
         }
 
+        self.ui.view(id!(toast_pill)).apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    acrylic_on: (acr),
+                    acrylic_opacity: (op),
+                    acrylic_tint: (acrylic_tint),
+                    surface_col: (surface),
+                    border_col: (border),
+                    accent_col: (accent)
+                }
+            },
+        );
+        let toast_txt_col = rgba_vec4(&self.theme.text_primary_hex);
         self.ui
-            .view(id!(toast_pill))
-            .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
+            .label(id!(toast_lbl))
+            .apply_over(cx, live! { draw_text: { color: (toast_txt_col) } });
         self.ui
             .view(id!(discord_preview_box))
             .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
@@ -6693,6 +6907,7 @@ impl App {
             id!(refresh_btn),
             id!(top_settings_btn),
             id!(toggle_right_btn),
+            id!(top_search_clear_btn),
             id!(rs_radio_btn),
             id!(rs_refresh_queue_btn),
             id!(rs_clear_btn),
@@ -7361,6 +7576,13 @@ impl App {
                 &clip_text(&format!("{} · Buffering...", track.artist), 24),
             );
             self.ui
+                .label(id!(fs_title_lbl))
+                .set_text(cx, &clip_text(&clean_display_text(&track.title), 36));
+            self.ui.label(id!(fs_artist_lbl)).set_text(
+                cx,
+                &clip_text(&format!("{} · Buffering...", track.artist), 44),
+            );
+            self.ui
                 .button(id!(codec_pill_btn))
                 .set_text(cx, "BUFFERING");
             self.bind_cover_art_url(
@@ -7372,6 +7594,16 @@ impl App {
                 0.5,
                 false,
             );
+            self.bind_cover_art_url(
+                cx,
+                self.ui.ferric_cover_art(id!(fs_art)),
+                track.thumbnail_url.as_deref(),
+                Some(&track),
+                false,
+                0.5,
+                false,
+            );
+            self.sync_fullscreen_backdrop_artwork(cx);
             self.refresh_right_sidebar(cx);
             self.ui.redraw(cx);
             self.spawn_stream_resolve(track.clone(), true);
@@ -7444,7 +7676,8 @@ impl App {
 
     fn update_now_playing_metadata(&mut self, cx: &mut Cx, track: &Track) {
         self.persist_track_to_library(track);
-        self.session_state.record_play(&track.id, track.duration_ms);
+        self.session_state
+            .record_play_with_artist(&track.id, &track.artist, track.duration_ms);
         if let Some(db) = &self.db {
             let _ = db.save_session_state(&self.session_state);
         }
@@ -7706,6 +7939,74 @@ impl App {
         });
     }
 
+    fn build_home_taste_profile(&self) -> YtmHomeTasteProfile {
+        let mut by_id: HashMap<&str, &Track> = HashMap::new();
+        for t in &self.all_tracks {
+            by_id.insert(t.id.as_str(), t);
+        }
+        let mut scored_tracks: Vec<(i32, Track)> = Vec::new();
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (pos, id) in self.session_state.recent_track_ids.iter().enumerate() {
+            if let Some(t) = by_id.get(id.as_str())
+                && seen_ids.insert(t.id.clone())
+            {
+                let plays = self
+                    .session_state
+                    .track_play_counts
+                    .get(&t.id)
+                    .copied()
+                    .unwrap_or(1) as i32;
+                let recency = 28_i32.saturating_sub(pos as i32).max(1);
+                let liked_bonus = if t.liked { 16 } else { 0 };
+                scored_tracks.push((plays * 12 + recency + liked_bonus, (*t).clone()));
+            }
+        }
+        for (id, &plays) in &self.session_state.track_play_counts {
+            if let Some(t) = by_id.get(id.as_str())
+                && seen_ids.insert(t.id.clone())
+            {
+                let liked_bonus = if t.liked { 16 } else { 0 };
+                scored_tracks.push(((plays as i32) * 12 + liked_bonus, (*t).clone()));
+            }
+        }
+        for t in &self.all_tracks {
+            if t.liked && seen_ids.insert(t.id.clone()) {
+                scored_tracks.push((20, t.clone()));
+            }
+        }
+        scored_tracks.sort_by(|a, b| b.0.cmp(&a.0));
+        let top_tracks: Vec<Track> = scored_tracks.into_iter().take(20).map(|(_, t)| t).collect();
+
+        let mut artist_scores: HashMap<String, (String, i32)> = HashMap::new();
+        for (artist, &cnt) in &self.session_state.artist_play_counts {
+            let key = primary_artist_key(artist);
+            if !key.is_empty() {
+                let norm = key.to_ascii_lowercase();
+                let entry = artist_scores.entry(norm).or_insert((key, 0));
+                entry.1 += (cnt as i32) * 10;
+            }
+        }
+        for (idx, t) in top_tracks.iter().enumerate() {
+            let key = primary_artist_key(&t.artist);
+            if !key.is_empty() {
+                let norm = key.to_ascii_lowercase();
+                let w = 20_i32.saturating_sub(idx as i32).max(2) + if t.liked { 8 } else { 0 };
+                let entry = artist_scores.entry(norm).or_insert((key, 0));
+                entry.1 += w;
+            }
+        }
+        let mut artist_list: Vec<(String, i32)> = artist_scores.into_values().collect();
+        artist_list.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_artists: Vec<String> = artist_list.into_iter().take(8).map(|(a, _)| a).collect();
+
+        YtmHomeTasteProfile {
+            top_tracks,
+            top_artists,
+            recent_searches: self.session_state.recent_searches.clone(),
+        }
+    }
+
     fn spawn_ytm_rich_home(
         &mut self,
         cx: &mut Cx,
@@ -7721,18 +8022,7 @@ impl App {
         self.shelf_pages = [0; 8];
         self.home_loading_more = false;
         let session = self.current_ytm_session();
-        let recent_vids: Vec<String> = self
-            .session_state
-            .recent_track_ids
-            .iter()
-            .filter_map(|id| {
-                self.all_tracks
-                    .iter()
-                    .find(|t| &t.id == id)
-                    .and_then(|t| t.youtube_video_id.clone())
-            })
-            .take(8)
-            .collect();
+        let taste = self.build_home_taste_profile();
         self.ui.button(id!(home_retry_btn)).set_visible(cx, false);
         self.ui
             .label(id!(home_status_lbl))
@@ -7740,7 +8030,7 @@ impl App {
         self.refresh_home_ui(cx);
 
         thread::spawn(move || {
-            match fetch_rich_home(&session, mood_params.as_deref(), fresh_seed, &recent_vids) {
+            match fetch_rich_home(&session, mood_params.as_deref(), fresh_seed, &taste) {
                 Ok(home) => {
                     let _ = tx.send(BgMessage::YtmRichHomeLoaded {
                         mood_index,
@@ -7790,6 +8080,27 @@ impl App {
         self.dispatch_rich_search(cx, raw_query, true);
     }
 
+    fn clear_search_state(&mut self, cx: &mut Cx, focus_top_bar: bool) {
+        self.pending_live_search = None;
+        self.last_dispatched_search.clear();
+        self.search_request_seq = self.search_request_seq.wrapping_add(1);
+        self.ui.text_input(id!(search_page_input)).set_text(cx, "");
+        self.ui.text_input(id!(top_search_input)).set_text(cx, "");
+        self.ui
+            .button(id!(top_search_clear_btn))
+            .set_visible(cx, false);
+        self.search_result = YtmRichSearch::default();
+        self.search_tracks = Rc::new(Vec::new());
+        self.ui
+            .label(id!(search_status_lbl))
+            .set_text(cx, "Instant YouTube Music + Local Search");
+        self.refresh_search_ui(cx);
+        if focus_top_bar {
+            self.ui.widget(id!(top_search_input)).set_key_focus(cx);
+        }
+        self.ui.redraw(cx);
+    }
+
     fn schedule_live_search(&mut self, cx: &mut Cx, raw: String, from_top_bar: bool) {
         if from_top_bar {
             if self.ui.text_input(id!(search_page_input)).text() != raw {
@@ -7800,6 +8111,9 @@ impl App {
         } else if self.ui.text_input(id!(top_search_input)).text() != raw {
             self.ui.text_input(id!(top_search_input)).set_text(cx, &raw);
         }
+        self.ui
+            .button(id!(top_search_clear_btn))
+            .set_visible(cx, !raw.is_empty());
 
         let q = raw.trim().to_string();
         if q.is_empty() {
@@ -7890,6 +8204,9 @@ impl App {
                 .text_input(id!(top_search_input))
                 .set_text(cx, &query);
         }
+        self.ui
+            .button(id!(top_search_clear_btn))
+            .set_visible(cx, !query.is_empty());
         if self.active_page != MainPage::Search {
             self.navigate_to(cx, MainPage::Search, true);
         }
@@ -8320,6 +8637,7 @@ impl App {
         {
             self.artwork_uploads_since_trim = self.artwork_uploads_since_trim.saturating_add(1);
             self.refresh_all_artwork_slots(cx);
+            self.apply_adaptive_accent_live(cx);
         }
 
         // 0d. Smooth exponential accent color lerp when switching tracks
@@ -9256,6 +9574,9 @@ impl App {
             self.spawn_ytm_rich_home(cx, self.active_mood_idx, params, true);
             self.show_toast(cx, "Refreshing YouTube Music feed...");
         }
+        if self.ui.button(id!(top_search_clear_btn)).clicked(actions) {
+            self.clear_search_state(cx, true);
+        }
         if let Some(typed) = self.ui.text_input(id!(top_search_input)).changed(actions) {
             self.schedule_live_search(cx, typed, true);
         }
@@ -9568,17 +9889,7 @@ impl App {
             self.spawn_rich_search(cx, submitted);
         }
         if self.ui.button(id!(search_clear_btn)).clicked(actions) {
-            self.pending_live_search = None;
-            self.last_dispatched_search.clear();
-            self.search_request_seq = self.search_request_seq.wrapping_add(1);
-            self.ui.text_input(id!(search_page_input)).set_text(cx, "");
-            self.ui.text_input(id!(top_search_input)).set_text(cx, "");
-            self.search_result = YtmRichSearch::default();
-            self.search_tracks = Rc::new(Vec::new());
-            self.ui
-                .label(id!(search_status_lbl))
-                .set_text(cx, "Instant YouTube Music + Local Search");
-            self.refresh_search_ui(cx);
+            self.clear_search_state(cx, false);
         }
         for (btn, flt) in [
             (id!(sf_all_btn), SearchFilter::All),
@@ -10991,7 +11302,18 @@ impl App {
             .toggled(actions)
         {
             self.theme.adaptive_album_art = on;
+            self.displayed_accent = self.target_accent();
             self.apply_theme_live(cx);
+            self.sync_controls_from_state(cx);
+            self.refresh_home_ui(cx);
+            self.show_toast(
+                cx,
+                if on {
+                    "Adaptive Artwork Accent enabled"
+                } else {
+                    "Adaptive Artwork Accent disabled (Burnt Orange)"
+                },
+            );
         }
         if let Some(enabled) = self.ui.ferric_toggle(id!(acrylic_toggle)).toggled(actions) {
             self.theme.acrylic_enabled = enabled;
@@ -11035,6 +11357,42 @@ impl App {
                 self.show_toast(cx, &format!("Acrylic tint: {name} ({hex})"));
             }
         }
+        if let Some(picked_hex) = self
+            .ui
+            .ferric_color_picker(id!(acrylic_color_picker))
+            .changed(actions)
+        {
+            self.theme.acrylic_tint_hex = picked_hex.clone();
+            if !self.theme.acrylic_enabled {
+                self.theme.acrylic_enabled = true;
+                self.theme.name = "Native Acrylic".to_string();
+            }
+            let tint_v4 = rgba_vec4(&picked_hex);
+            self.ui
+                .label(id!(acrylic_tint_lbl))
+                .set_text(cx, &picked_hex);
+            self.ui
+                .view(id!(acrylic_tint_preview))
+                .apply_over(cx, live! { draw_bg: { tint_col: (tint_v4) } });
+            self.ui
+                .text_input(id!(acrylic_tint_input))
+                .set_text(cx, &picked_hex);
+            self.apply_theme_live(cx);
+        }
+        if let Some(picked_hex) = self
+            .ui
+            .ferric_color_picker(id!(acrylic_color_picker))
+            .committed(actions)
+        {
+            self.theme.acrylic_tint_hex = picked_hex.clone();
+            if !self.theme.acrylic_enabled {
+                self.theme.acrylic_enabled = true;
+                self.theme.name = "Native Acrylic".to_string();
+            }
+            self.sync_controls_from_state(cx);
+            self.apply_theme_live(cx);
+            self.show_toast(cx, &format!("Acrylic tint: {picked_hex}"));
+        }
         let apply_custom_tint = self.ui.button(id!(acrylic_tint_apply_btn)).clicked(actions)
             || self
                 .ui
@@ -11070,7 +11428,7 @@ impl App {
             self.show_toast(
                 cx,
                 if on {
-                    if is_valid_client_id(&self.discord_settings.client_id) {
+                    if !effective_client_id(&self.discord_settings).is_empty() {
                         "Discord Rich Presence enabled"
                     } else {
                         "Discord RPC enabled — paste your Discord Application ID"

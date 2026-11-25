@@ -286,17 +286,11 @@ pub fn build_set_activity_payload(
     assets.insert("large_image".to_string(), json!(cover_img));
     if !album.is_empty() && album.len() >= 2 && !album.eq_ignore_ascii_case(track.title.trim()) {
         assets.insert("large_text".to_string(), json!(album));
-    } else {
-        assets.insert("large_text".to_string(), json!("Ferric Hi-Fi"));
     }
     assets.insert("small_image".to_string(), json!(FERRIC_BRAND_ICON_URL));
     assets.insert(
         "small_text".to_string(),
-        json!(if track.is_playing {
-            "Ferric Hi-Fi"
-        } else {
-            "Paused · Ferric"
-        }),
+        json!(if track.is_playing { "Ferric" } else { "Paused" }),
     );
     activity.insert("assets".to_string(), Value::Object(assets));
 
@@ -609,8 +603,25 @@ mod tests {
             "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj"
         );
         assert_eq!(
+            payload["args"]["activity"]["assets"]["large_text"],
+            "Songs for Dads"
+        );
+        assert_eq!(
             payload["args"]["activity"]["assets"]["small_image"],
             FERRIC_BRAND_ICON_URL
+        );
+
+        let single_snap = DiscordTrackSnapshot {
+            album: "I Love You So".to_string(),
+            ..snap
+        };
+        let single_payload =
+            build_set_activity_payload(&cfg, Some(&single_snap), 999, 2, 1_750_000_000);
+        assert!(
+            single_payload["args"]["activity"]["assets"]
+                .get("large_text")
+                .is_none(),
+            "single tracks whose album equals title must omit large_text so no extra 3rd line appears"
         );
     }
 

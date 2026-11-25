@@ -665,9 +665,15 @@ pub fn fetch_rich_home(
         )
     };
 
-    if home_res.is_err() && explore_res.is_none() && charts_res.is_none() {
-        return Err(home_res.unwrap_err());
-    }
+    let home_root = match home_res {
+        Ok(root) => Some(root),
+        Err(err) => {
+            if explore_res.is_none() && charts_res.is_none() {
+                return Err(err);
+            }
+            None
+        }
+    };
 
     let mut visitor_data = effective_session.visitor_data.clone();
     let mut chips = Vec::new();
@@ -677,7 +683,7 @@ pub fn fetch_rich_home(
     let mut all_tracks = Vec::new();
     let mut continuation_token = None;
 
-    if let Ok(root) = home_res {
+    if let Some(root) = home_root {
         visitor_data = extract_visitor_data(&root, &visitor_data);
         collect_mood_chips(&root, &mut chips);
         collect_home_shelves(&root, &mut quick_picks, &mut seen_tracks, &mut shelves);

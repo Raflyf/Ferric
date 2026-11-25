@@ -327,14 +327,34 @@ pub fn build_artist_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
     out
 }
 
-/// Truncate text cleanly at UTF-8 char boundaries so cards & sidebar rows stay single-line crisp.
+/// Truncate text cleanly at UTF-8 char boundaries and strip glyphs absent from IBM Plex Sans
+/// (such as emoji/CJK/private-use blocks) so cards & sidebar rows stay single-line with zero tofu boxes.
 pub fn clip_text(raw: &str, max_chars: usize) -> String {
-    let cleaned = raw.trim().replace('\n', " ");
-    if cleaned.chars().count() <= max_chars {
-        return cleaned;
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .filter(|&c| {
+            let cp = c as u32;
+            cp <= 0x25FF && !matches!(cp, 0x0370..=0x1EFF)
+        })
+        .collect();
+    let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let final_str = if trimmed.is_empty() {
+        raw.trim().to_string()
+    } else {
+        trimmed
+    };
+    if final_str.chars().count() <= max_chars {
+        return final_str;
     }
     let take = max_chars.saturating_sub(1);
-    let mut out: String = cleaned.chars().take(take).collect();
+    let mut out: String = final_str.chars().take(take).collect();
     out.push('…');
     out
 }

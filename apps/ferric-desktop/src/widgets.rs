@@ -27,7 +27,7 @@ live_design! {
                 let c = self.rect_size * 0.5;
                 let min_dim = min(self.rect_size.x, self.rect_size.y);
 
-                if self.circle > 0.5 {
+                if (self.circle > 0.5) {
                     sdf.circle(c.x, c.y, min_dim * 0.5 - 0.5);
                 } else {
                     let r = min(self.radius * 0.5, min_dim * 0.22);
@@ -35,10 +35,10 @@ live_design! {
                 }
 
                 let mut rgb = self.fallback_col.xyz;
-                if self.has_image > 0.5 {
+                if (self.has_image > 0.5) {
                     let box_aspect = self.rect_size.x / max(self.rect_size.y, 1.0);
                     let mut uv = self.pos;
-                    if self.img_aspect > box_aspect {
+                    if (self.img_aspect > box_aspect) {
                         let scale = box_aspect / max(self.img_aspect, 0.01);
                         uv.x = (uv.x - 0.5) * scale + 0.5;
                     } else {
@@ -53,18 +53,18 @@ live_design! {
                     rgb = self.fallback_col.xyz + self.accent.xyz * (0.06 + 0.07 * sheen);
                 }
 
-                if self.hover > 0.01 {
+                if (self.hover > 0.01) {
                     rgb = mix(rgb, vec3(1.0, 1.0, 1.0), 0.06 * self.hover);
                 }
 
-                if self.playing > 0.5 {
+                if (self.playing > 0.5) {
                     rgb = mix(rgb, vec3(0.04, 0.04, 0.06), 0.44);
                 }
 
                 sdf.fill_keep(vec4(clamp(rgb, 0.0, 1.0), 1.0));
                 sdf.stroke(mix(self.border_col, vec4(self.accent.xyz, 0.75), self.playing), 1.0);
 
-                if self.playing > 0.5 {
+                if (self.playing > 0.5) {
                     let bw = max(min_dim * 0.095, 2.5);
                     let gap = max(min_dim * 0.055, 2.0);
                     let base_y = self.rect_size.y * 0.76;

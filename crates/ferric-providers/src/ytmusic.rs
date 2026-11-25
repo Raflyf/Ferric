@@ -1441,6 +1441,7 @@ fn collect_home_shelves(
                     for entry in contents {
                         if let Some(resp) = entry.get("musicResponsiveListItemRenderer")
                             && let Some(track) = parse_responsive_item(resp, &shelf_title)
+                            && !track.album.to_ascii_lowercase().contains("watching")
                             && seen_tracks
                                 .insert(track.youtube_video_id.clone().unwrap_or_default())
                         {
@@ -1448,6 +1449,7 @@ fn collect_home_shelves(
                         }
                         if let Some(two_row) = entry.get("musicTwoRowItemRenderer") {
                             if let Some(track) = parse_two_row_song(two_row, &shelf_title)
+                                && !track.album.to_ascii_lowercase().contains("watching")
                                 && seen_tracks
                                     .insert(track.youtube_video_id.clone().unwrap_or_default())
                             {

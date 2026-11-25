@@ -425,7 +425,7 @@ live_design! {
     // Sonora Horizontal Album / Playlist Shelf Card (Real Square Cover Art!)
     ShelfCard = <View> {
         width: Fill,
-        height: Fit,
+        height: 184,
         padding: 8,
         flow: Down,
         spacing: 7,
@@ -460,7 +460,7 @@ live_design! {
     // Visual Grid Card for Albums / Artists / Playlists pages
     GridCard = <View> {
         width: Fill,
-        height: Fit,
+        height: 214,
         padding: 10,
         flow: Down,
         spacing: 8,
@@ -477,7 +477,7 @@ live_design! {
         }
         art = <FerricCoverArt> {
             width: Fill,
-            height: 144,
+            height: 146,
             draw_bg: { radius: 10.0 }
         }
         title = <Label> {
@@ -495,8 +495,8 @@ live_design! {
     // Compact Right Sidebar Queue / History Row with 34x34 real cover art
     QueueMiniRow = <View> {
         width: Fill,
-        height: 46,
-        padding: { left: 7, right: 8, top: 4, bottom: 4 }
+        height: 52,
+        padding: { left: 7, right: 8, top: 6, bottom: 6 }
         flow: Right,
         align: { y: 0.5 }
         spacing: 9,
@@ -515,15 +515,15 @@ live_design! {
             }
         }
         art = <FerricCoverArt> {
-            width: 34,
-            height: 34,
+            width: 36,
+            height: 36,
             draw_bg: { radius: 6.0 }
         }
         <View> {
             width: Fill,
             height: Fit,
             flow: Down,
-            spacing: 1,
+            spacing: 2,
             title = <Label> {
                 width: Fill,
                 draw_text: { color: #ECEEF5, text_style: { font_size: 11.5 } }
@@ -636,12 +636,12 @@ live_design! {
                                 height: Fill,
                                 align: { x: 0.5, y: 0.5 }
                                 top_search_pill = <Button> {
-                                    width: 270,
+                                    width: 260,
                                     height: 28,
                                     padding: { left: 12, right: 12 }
                                     spacing: 8,
                                     align: { x: 0.0, y: 0.5 }
-                                    text: "Search songs, albums, artists... (Ctrl+K)"
+                                    text: "Search music... (Ctrl+K)"
                                     icon_walk: { width: 13, height: Fit }
                                     draw_icon: {
                                         svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
@@ -1352,8 +1352,11 @@ live_design! {
                                                 xf_3_btn = <SonoraBtn> { text: "3s Crisp" }
                                                 xf_6_btn = <SonoraBtn> { text: "6s Seamless" }
                                                 xf_10_btn = <SonoraBtn> { text: "10s Club Mix" }
-                                                <View> { width: 12, height: 1 }
-                                                curve_bass_btn = <SonoraBtn> { text: "Bass-Swap" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                <Label> { draw_text: { color: #9A9CA8, text_style: { font_size: 12.0 } }, text: "Transition Curve:" }
+                                                curve_bass_btn = <SonoraBtn> { text: "Bass-Swap Automix" }
                                                 curve_eqp_btn = <SonoraBtn> { text: "Equal-Power" }
                                                 curve_velvet_btn = <SonoraBtn> { text: "S-Curve Velvet" }
                                             }
@@ -1640,14 +1643,19 @@ live_design! {
                                     visible: true,
                                     width: Fill,
                                     height: Fill,
+                                    padding: { top: 4, bottom: 8 }
                                     flow: Down,
-                                    spacing: 4,
+                                    spacing: 5,
 
-                                    qh_header = <Label> {
+                                    qh_header = <View> {
                                         visible: false,
+                                        width: Fill,
+                                        height: Fit,
                                         margin: { left: 6, top: 2, bottom: 2 }
-                                        draw_text: { color: #757888, text_style: { font_size: 10.5 } }
-                                        text: "History"
+                                        <Label> {
+                                            draw_text: { color: #757888, text_style: { font_size: 10.5 } }
+                                            text: "History"
+                                        }
                                     }
                                     qh_0 = <QueueMiniRow> { visible: false }
                                     qh_1 = <QueueMiniRow> { visible: false }
@@ -1797,7 +1805,7 @@ live_design! {
                                 <View> { width: 6, height: 1 }
 
                                 pos_lbl = <Label> {
-                                    width: 40,
+                                    width: 48,
                                     align: { x: 1.0, y: 0.5 }
                                     draw_text: { color: #9A9CA8, text_style: { font_size: 11.0 } }
                                     text: "00:00"
@@ -1808,7 +1816,7 @@ live_design! {
                                     min: 0.0, max: 1.0, value: 0.0
                                 }
                                 dur_btn = <Button> {
-                                    width: 44, height: 24, padding: 0,
+                                    width: 48, height: 24, padding: 0,
                                     align: { x: 0.0, y: 0.5 }
                                     text: "00:00"
                                     draw_bg: { fn pixel(self) -> vec4 { return vec4(0.0, 0.0, 0.0, 0.0); } }
@@ -2251,8 +2259,11 @@ impl App {
 
         if let Some(store) = &db {
             self.theme = store.load_theme().unwrap_or_default();
-            // Upgrade legacy default orange AMOLED configs cleanly only if untouched pure default
-            if self.theme.name == "Pure AMOLED 3-Color" && self.theme.accent_hex == "#D9541E" {
+            // Upgrade pre-Sonora legacy orange/glass configs cleanly to Sonora Midnight
+            if self.theme.name != "Sonora Midnight"
+                && self.theme.name != "Pure AMOLED"
+                && self.theme.name != "Warm Cream Light"
+            {
                 self.theme = ThemeConfig::default();
             }
             self.eq = store.load_eq().unwrap_or_default();
@@ -2304,12 +2315,21 @@ impl App {
             self.load_and_play_demo_suite(cx);
         } else {
             self.spawn_ytm_rich_home(cx, 0, None);
-            if startup_play_first() && !self.all_tracks.is_empty() {
+            if startup_play_first()
+                && !self.all_tracks.is_empty()
+                && let Some((idx, first)) = self
+                    .all_tracks
+                    .iter()
+                    .enumerate()
+                    .find(|(_, t)| {
+                        t.path.as_ref().is_some_and(|p| p.is_file())
+                            || (t.duration_ms > 30_000 && t.youtube_video_id.is_some())
+                    })
+                    .map(|(i, t)| (i, t.clone()))
+            {
                 self.startup_auto_played = true;
-                if let Some(first) = self.all_tracks.first().cloned() {
-                    self.queue.set_tracks(self.all_tracks.clone(), Some(0));
-                    self.play_track(cx, first);
-                }
+                self.queue.set_tracks(self.all_tracks.clone(), Some(idx));
+                self.play_track(cx, first);
             }
         }
 
@@ -2441,7 +2461,12 @@ impl App {
             MainPage::Albums => self.refresh_albums_grid(cx),
             MainPage::Artists => self.refresh_artists_grid(cx),
             MainPage::Playlists => self.refresh_playlists_grid(cx),
-            MainPage::Search => self.refresh_search_ui(cx),
+            MainPage::Search => {
+                if self.search_tracks.is_empty() {
+                    self.search_tracks = Rc::new(self.home_quick_picks_pool());
+                }
+                self.refresh_search_ui(cx);
+            }
             MainPage::Settings => self.refresh_storage_stats(cx),
             _ => {}
         }
@@ -3001,10 +3026,10 @@ impl App {
                         card_v.set_visible(cx, true);
                         card_v
                             .label(id!(title))
-                            .set_text(cx, &clip_text(&card.title, 20));
+                            .set_text(cx, &clip_text(&card.title, 16));
                         card_v
                             .label(id!(sub))
-                            .set_text(cx, &clip_text(&card.subtitle, 24));
+                            .set_text(cx, &clip_text(&card.subtitle, 19));
                         self.bind_cover_art_url(
                             cx,
                             card_v.ferric_cover_art(id!(art)),
@@ -3042,14 +3067,14 @@ impl App {
             .take(3)
             .collect();
         self.ui
-            .label(id!(qh_header))
+            .view(id!(qh_header))
             .set_visible(cx, !hist.is_empty());
         for (i, rid) in [id!(qh_0), id!(qh_1), id!(qh_2)].into_iter().enumerate() {
             let rv = self.ui.view(rid);
             if let Some(t) = hist.get(i) {
                 rv.set_visible(cx, true);
-                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 22));
-                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 24));
+                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 17));
+                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 19));
                 rv.label(id!(dur)).set_text(
                     cx,
                     &if t.duration_ms > 0 {
@@ -3075,20 +3100,20 @@ impl App {
         // Now playing
         self.ui.label(id!(q_now_header)).set_text(
             cx,
-            &format!("Now playing · {}", clip_text(&self.queue_context, 24)),
+            &format!("Now playing · {}", clip_text(&self.queue_context, 20)),
         );
         let now_v = self.ui.view(id!(q_now_row));
         if let Some(cur) = self.queue.current() {
             now_v.set_visible(cx, true);
             now_v
                 .label(id!(title))
-                .set_text(cx, &clip_text(&cur.title, 22));
+                .set_text(cx, &clip_text(&cur.title, 17));
             now_v
                 .label(id!(title))
                 .apply_over(cx, live! { draw_text: { color: (accent) } });
             now_v
                 .label(id!(sub))
-                .set_text(cx, &clip_text(&cur.artist, 24));
+                .set_text(cx, &clip_text(&cur.artist, 19));
             now_v.label(id!(dur)).set_text(
                 cx,
                 &if cur.duration_ms > 0 {
@@ -3153,8 +3178,8 @@ impl App {
             let rv = self.ui.view(rid);
             if let Some(t) = upcoming.get(i) {
                 rv.set_visible(cx, true);
-                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 22));
-                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 24));
+                rv.label(id!(title)).set_text(cx, &clip_text(&t.title, 17));
+                rv.label(id!(sub)).set_text(cx, &clip_text(&t.artist, 19));
                 rv.label(id!(dur)).set_text(
                     cx,
                     &if t.duration_ms > 0 {
@@ -3956,10 +3981,10 @@ impl App {
             self.pending_stream_track_id = Some(track.id.clone());
             self.ui
                 .label(id!(np_title_lbl))
-                .set_text(cx, &clip_text(&track.title, 26));
+                .set_text(cx, &clip_text(&track.title, 19));
             self.ui.label(id!(np_artist_lbl)).set_text(
                 cx,
-                &clip_text(&format!("{} · Buffering...", track.artist), 28),
+                &clip_text(&format!("{} · Buffering...", track.artist), 22),
             );
             self.ui
                 .button(id!(codec_pill_btn))
@@ -4001,10 +4026,10 @@ impl App {
             .map_or(48_000, |a| a.telemetry().output_rate);
         self.ui
             .label(id!(np_title_lbl))
-            .set_text(cx, &clip_text(&track.title, 26));
+            .set_text(cx, &clip_text(&track.title, 19));
         self.ui
             .label(id!(np_artist_lbl))
-            .set_text(cx, &clip_text(&track.artist, 28));
+            .set_text(cx, &clip_text(&track.artist, 22));
         self.ui.label(id!(fs_title_lbl)).set_text(cx, &track.title);
         self.ui
             .label(id!(fs_artist_lbl))
@@ -4894,11 +4919,18 @@ impl App {
                         && self.pending_stream_track_id.as_deref() == Some(track_id.as_str())
                     {
                         self.pending_stream_track_id = None;
-                        self.ui
-                            .label(id!(np_artist_lbl))
-                            .set_text(cx, "Stream unavailable");
-                        self.ui.button(id!(codec_pill_btn)).set_text(cx, "OFFLINE");
-                        self.show_toast(cx, &format!("Stream failed: {error}"));
+                        if let Some(next_candidate) = self.queue.next_track().cloned()
+                            && next_candidate.id != track_id
+                        {
+                            self.show_toast(cx, "Skipping unavailable stream...");
+                            self.play_track(cx, next_candidate);
+                        } else {
+                            self.ui
+                                .label(id!(np_artist_lbl))
+                                .set_text(cx, "Stream unavailable");
+                            self.ui.button(id!(codec_pill_btn)).set_text(cx, "OFFLINE");
+                            self.show_toast(cx, &format!("Stream failed: {error}"));
+                        }
                     }
                 }
                 BgMessage::PublicSyncCompleted { provider, payload } => {

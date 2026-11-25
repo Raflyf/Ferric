@@ -326,8 +326,9 @@ impl StereoEqProcessor {
 
     /// Process interleaved stereo `[L, R, L, R, ...]` samples in place.
     pub fn process_interleaved_stereo(&mut self, samples: &mut [f32], volume: f32) {
-        let mut cur = volume.clamp(0.0, 1.5);
-        self.process_interleaved_stereo_ramped(samples, &mut cur, cur);
+        let target = volume.clamp(0.0, 1.5);
+        let mut cur = target;
+        self.process_interleaved_stereo_ramped(samples, &mut cur, target);
     }
 }
 

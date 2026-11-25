@@ -286,6 +286,23 @@ impl LibraryDb {
         Ok(())
     }
 
+    /// Remove synced Google / YouTube Music account playlists (`ytm:pl:*`) and auto-generated
+    /// `ytm:home:discover` rows when signed out, strictly preserving manually created (`local:pl:*`)
+    /// and manually imported (`spotify:*`, `yt:playlist:*`) playlists.
+    pub fn delete_account_synced_playlists(&mut self) -> CoreResult<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id LIKE 'ytm:pl:%' OR playlist_id = 'ytm:home:discover'",
+            [],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM playlists WHERE id LIKE 'ytm:pl:%' OR id = 'ytm:home:discover'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn list_playlists(&self) -> CoreResult<Vec<Playlist>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -619,7 +636,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sqlite_wal_persists_tracks_and_liquid_glass_theme() {
+    fn sqlite_wal_persists_tracks_and_native_acrylic_theme() {
         let mut db = LibraryDb::open_in_memory().expect("open memory db");
         let track = Track {
             id: "local:1".to_string(),
@@ -650,10 +667,40 @@ mod tests {
         );
 
         let mut theme = ThemeConfig::default();
-        theme.material.liquid_glass = true;
+        theme.acrylic_enabled = true;
+        theme.acrylic_opacity = 0.80;
         db.save_theme(&theme).expect("save theme");
         let loaded = db.load_theme().expect("load theme");
-        assert!(loaded.material.liquid_glass);
+        assert!(loaded.acrylic_enabled);
+        assert!((loaded.acrylic_opacity - 0.80).abs() < 1e-4);
+
+        // Verify signed-out cleanup removes account playlists while keeping manual playlists intact
+        let manual_pl = Playlist {
+            id: "local:pl:manual1".to_string(),
+            name: "Manual Mix".to_string(),
+            source: TrackSource::Local,
+            etag: None,
+            track_count: 0,
+            description: "User created".to_string(),
+            thumbnail_url: None,
+        };
+        let acct_pl = Playlist {
+            id: "ytm:pl:VL12345".to_string(),
+            name: "Account Playlist".to_string(),
+            source: TrackSource::YouTubeMusic,
+            etag: None,
+            track_count: 0,
+            description: "Synced".to_string(),
+            thumbnail_url: None,
+        };
+        db.upsert_playlist(&manual_pl, &[]).expect("manual pl");
+        db.upsert_playlist(&acct_pl, &[]).expect("acct pl");
+        assert_eq!(db.list_playlists().expect("list").len(), 2);
+        let removed = db.delete_account_synced_playlists().expect("cleanup");
+        assert_eq!(removed, 1);
+        let after = db.list_playlists().expect("list after");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, "local:pl:manual1");
 
         assert!(
             db.load_update_settings()

@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-/// Two worker threads balance fast artwork loading with minimal thread-stack/TLS RAM overhead.
-const WORKER_THREADS: usize = 2;
-/// Hard LRU cap: 48 covers x 128x128 BGRA (64 KB) = ~3.0 MB CPU + ~3.0 MB VRAM max!
-/// Holds all 8 Quick Picks + 15 Shelf cards + 10 Queue rows simultaneously with zero eviction.
-const MAX_CACHED_TEXTURES: usize = 48;
+/// Three lightweight worker threads decode visible cover art fast with minimal RAM overhead.
+const WORKER_THREADS: usize = 3;
+/// Hard LRU cap: 96 covers x 128x128 BGRA (64 KB) = ~6.0 MB CPU + ~6.0 MB VRAM max.
+/// Holds Home's 8 Quick Picks + 40 Shelf cards + Search cards + visible TrackList + Queue simultaneously.
+const MAX_CACHED_TEXTURES: usize = 96;
 /// Standard cover art thumbnail size (crisp for 40..160 px cards, 56x smaller than 1280x720).
 const THUMB_MAX_DIM: usize = 128;
 /// Higher detail size reserved solely for the currently playing hero/fullscreen artwork (256 KB).
@@ -228,7 +228,7 @@ impl ArtworkCache {
 
     pub fn poll(&mut self, cx: &mut Cx) -> bool {
         let mut changed = false;
-        for _ in 0..12 {
+        for _ in 0..24 {
             let Ok(msg) = self.done_rx.try_recv() else {
                 break;
             };

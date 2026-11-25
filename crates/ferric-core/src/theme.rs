@@ -5,96 +5,17 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackgroundMode {
     AmoledSolid,
-    CustomWallpaper,
-    Gradient,
-    MicaBlur,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LiquidGlassPreset {
-    CrystalPure,
-    PrismaticLiquid,
-    SmokedCopper,
-    UltraFrosted,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LiquidGlassConfig {
-    /// Default OFF to preserve 0% GPU Pure AMOLED identity.
-    pub liquid_glass: bool,
-    /// Snell optical refraction strength (1.00 ..= 2.00).
-    pub ior: f32,
-    /// Chromatic RGB edge dispersion intensity (0.0 ..= 1.0).
-    pub dispersion: f32,
-    /// Interior frost blur radius in px (0.0 ..= 32.0).
-    pub frost_blur_px: f32,
-    /// Curved glass bevel width in px (8.0 ..= 36.0).
-    pub bevel_px: f32,
-    /// Specular rim catchlight intensity (0.0 ..= 1.0).
-    pub specular_rim: f32,
-    /// Dark readability scrim inside glass panels (0.0 ..= 0.65).
-    pub scrim_alpha: f32,
-    /// Automatically suspend optical shader on minimize / lock / low battery.
-    pub auto_fallback_battery: bool,
-}
-
-impl Default for LiquidGlassConfig {
-    fn default() -> Self {
-        Self {
-            liquid_glass: false,
-            ior: 1.48,
-            dispersion: 0.42,
-            frost_blur_px: 10.0,
-            bevel_px: 24.0,
-            specular_rim: 0.78,
-            scrim_alpha: 0.28,
-            auto_fallback_battery: true,
-        }
-    }
-}
-
-impl LiquidGlassConfig {
-    pub fn apply_preset(&mut self, preset: LiquidGlassPreset) {
-        self.liquid_glass = true;
-        match preset {
-            LiquidGlassPreset::CrystalPure => {
-                self.ior = 1.42;
-                self.dispersion = 0.0;
-                self.frost_blur_px = 4.0;
-                self.bevel_px = 20.0;
-                self.specular_rim = 0.85;
-                self.scrim_alpha = 0.24;
-            }
-            LiquidGlassPreset::PrismaticLiquid => {
-                self.ior = 1.48;
-                self.dispersion = 0.42;
-                self.frost_blur_px = 10.0;
-                self.bevel_px = 24.0;
-                self.specular_rim = 0.78;
-                self.scrim_alpha = 0.28;
-            }
-            LiquidGlassPreset::SmokedCopper => {
-                self.ior = 1.52;
-                self.dispersion = 0.22;
-                self.frost_blur_px = 14.0;
-                self.bevel_px = 22.0;
-                self.specular_rim = 0.72;
-                self.scrim_alpha = 0.36;
-            }
-            LiquidGlassPreset::UltraFrosted => {
-                self.ior = 1.32;
-                self.dispersion = 0.14;
-                self.frost_blur_px = 24.0;
-                self.bevel_px = 18.0;
-                self.specular_rim = 0.60;
-                self.scrim_alpha = 0.42;
-            }
-        }
-    }
+    NativeAcrylic,
+    ObsidianSolid,
+    WarmCream,
 }
 
 fn default_ui_zoom() -> f32 {
     1.0
+}
+
+fn default_acrylic_opacity() -> f32 {
+    0.84
 }
 
 /// Complete theme contract matching `.ferric-theme.json`.
@@ -117,7 +38,11 @@ pub struct ThemeConfig {
     pub sync_theme_to_android: bool,
     #[serde(default = "default_ui_zoom")]
     pub ui_zoom: f32,
-    pub material: LiquidGlassConfig,
+    /// Native Windows 11 DWM Acrylic window transparency (OFF by default for pure AMOLED Black).
+    pub acrylic_enabled: bool,
+    /// Native Acrylic window opacity (`0.65 ..= 0.96`).
+    #[serde(default = "default_acrylic_opacity")]
+    pub acrylic_opacity: f32,
 }
 
 impl Default for ThemeConfig {
@@ -132,14 +57,15 @@ impl Default for ThemeConfig {
             text_secondary_hex: "#9A9CA8".to_string(),
             accent_hex: "#A882FF".to_string(),
             background_mode: BackgroundMode::AmoledSolid,
-            corner_radius_px: 10.0,
-            track_row_height_px: 52.0,
+            corner_radius_px: 8.0,
+            track_row_height_px: 46.0,
             panel_opacity: 1.0,
             adaptive_album_art: true,
             zero_gpu_minimize_saver: true,
             sync_theme_to_android: true,
             ui_zoom: 1.0,
-            material: LiquidGlassConfig::default(),
+            acrylic_enabled: false,
+            acrylic_opacity: 0.84,
         }
     }
 }
@@ -149,12 +75,28 @@ impl ThemeConfig {
         Self::default()
     }
 
+    pub fn native_acrylic() -> Self {
+        Self {
+            name: "Native Acrylic".to_string(),
+            canvas_hex: "#0B0C11".to_string(),
+            surface_hex: "#11131B".to_string(),
+            border_hex: "#252836".to_string(),
+            background_mode: BackgroundMode::NativeAcrylic,
+            corner_radius_px: 10.0,
+            panel_opacity: 0.84,
+            acrylic_enabled: true,
+            acrylic_opacity: 0.84,
+            ..Self::default()
+        }
+    }
+
     pub fn obsidian_slate() -> Self {
         Self {
             name: "Obsidian Studio".to_string(),
             canvas_hex: "#0D0E12".to_string(),
             surface_hex: "#14151C".to_string(),
             border_hex: "#232530".to_string(),
+            background_mode: BackgroundMode::ObsidianSolid,
             ..Self::default()
         }
     }
@@ -168,21 +110,8 @@ impl ThemeConfig {
             text_primary_hex: "#111111".to_string(),
             text_secondary_hex: "#524B42".to_string(),
             accent_hex: "#D9541E".to_string(),
+            background_mode: BackgroundMode::WarmCream,
             adaptive_album_art: false,
-            ..Self::default()
-        }
-    }
-
-    pub fn smoked_copper_glass() -> Self {
-        let mut material = LiquidGlassConfig::default();
-        material.apply_preset(LiquidGlassPreset::PrismaticLiquid);
-        Self {
-            name: "Ferric Liquid Glass".to_string(),
-            canvas_hex: "#040508".to_string(),
-            surface_hex: "#0E1018".to_string(),
-            border_hex: "#2B2F42".to_string(),
-            corner_radius_px: 16.0,
-            material,
             ..Self::default()
         }
     }
@@ -194,7 +123,7 @@ impl ThemeConfig {
     }
 
     pub fn accent_contrast_ratio(&self) -> f64 {
-        let fg = parse_hex_rgb(&self.accent_hex).unwrap_or((217, 84, 30));
+        let fg = parse_hex_rgb(&self.accent_hex).unwrap_or((168, 130, 255));
         let bg = parse_hex_rgb(&self.canvas_hex).unwrap_or((0, 0, 0));
         wcag_contrast_ratio(fg, bg)
     }
@@ -258,21 +187,17 @@ mod tests {
     #[test]
     fn default_amoled_theme_passes_wcag_aa_and_aaa() {
         let theme = ThemeConfig::default();
-        assert!(!theme.material.liquid_glass);
+        assert!(!theme.acrylic_enabled);
         assert!(theme.text_contrast_ratio() > 17.0);
         assert!(theme.accent_contrast_ratio() > 5.0);
     }
 
     #[test]
-    fn liquid_glass_theme_roundtrips_json() {
-        let mut theme = ThemeConfig::default();
-        theme
-            .material
-            .apply_preset(LiquidGlassPreset::PrismaticLiquid);
+    fn native_acrylic_theme_roundtrips_json() {
+        let theme = ThemeConfig::native_acrylic();
         let json = serde_json::to_string(&theme).expect("serialize theme");
         let parsed: ThemeConfig = serde_json::from_str(&json).expect("deserialize theme");
-        assert!(parsed.material.liquid_glass);
-        assert!((parsed.material.ior - 1.48).abs() < 1e-4);
-        assert!((parsed.material.dispersion - 0.42).abs() < 1e-4);
+        assert!(parsed.acrylic_enabled);
+        assert!((parsed.acrylic_opacity - 0.84).abs() < 1e-4);
     }
 }

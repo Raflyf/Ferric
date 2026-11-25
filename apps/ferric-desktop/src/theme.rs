@@ -13,8 +13,8 @@ live_design! {
     pub THEME_SPACE_FACTOR = 6.
     pub THEME_CORNER_RADIUS = 2.5
     pub THEME_BEVELING = 0.75
-    pub THEME_FONT_SIZE_BASE = 10.
-    pub THEME_FONT_SIZE_CONTRAST = 2.5
+    pub THEME_FONT_SIZE_BASE = 9.5
+    pub THEME_FONT_SIZE_CONTRAST = 2.0
 
     pub THEME_SPACE_1 = (0.5 * (THEME_SPACE_FACTOR))
     pub THEME_SPACE_2 = (1.0 * (THEME_SPACE_FACTOR))
@@ -313,9 +313,9 @@ live_design! {
     pub THEME_COLOR_WARNING = (THEME_COLOR_MID),
     pub THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
 
-    // TYPOGRAPHY — bundled Plus Jakarta Sans (Regular / Medium / SemiBold / Bold, ~516 KB total)
-    // for modern geometric-humanist clarity and tight vertical rhythm across all cards, rows, and lyrics.
-    pub THEME_FONT_SIZE_CODE = 9.0
+    // TYPOGRAPHY — bundled official Inter v4.1 static TTFs (Regular / Medium / SemiBold / Bold)
+    // Purpose-built neo-grotesque screen typeface with crisp optical legibility at compact desktop sizes.
+    pub THEME_FONT_SIZE_CODE = 8.5
     pub THEME_FONT_WDGT_LINE_SPACING = 1.05
     pub THEME_FONT_HL_LINE_SPACING = 1.02
     pub THEME_FONT_LONGFORM_LINE_SPACING = 1.18
@@ -328,43 +328,43 @@ live_design! {
 
     pub THEME_FONT_LABEL = {
         font_family: {
-            latin = font("crate://self/resources/fonts/PlusJakartaSans-Medium.ttf", 0.0, 0.0),
+            latin = font("crate://self/resources/fonts/Inter-Medium.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_REGULAR = {
         font_family: {
-            latin = font("crate://self/resources/fonts/PlusJakartaSans-Regular.ttf", 0.0, 0.0),
+            latin = font("crate://self/resources/fonts/Inter-Regular.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_MEDIUM = {
         font_family: {
-            latin = font("crate://self/resources/fonts/PlusJakartaSans-Medium.ttf", 0.0, 0.0),
+            latin = font("crate://self/resources/fonts/Inter-Medium.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_BOLD = {
         font_family: {
-            latin = font("crate://self/resources/fonts/PlusJakartaSans-SemiBold.ttf", 0.0, 0.0),
+            latin = font("crate://self/resources/fonts/Inter-SemiBold.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_DISPLAY = {
         font_family: {
-            latin = font("crate://self/resources/fonts/PlusJakartaSans-Bold.ttf", 0.0, 0.0),
+            latin = font("crate://self/resources/fonts/Inter-Bold.ttf", 0.0, 0.0),
         },
         line_spacing: 1.02
     }
     pub THEME_FONT_ITALIC = {
         font_family: {
-            latin = font("crate://self/resources/fonts/PlusJakartaSans-Regular.ttf", 0.0, 0.0),
+            latin = font("crate://self/resources/fonts/Inter-Regular.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_BOLD_ITALIC = {
         font_family: {
-            latin = font("crate://self/resources/fonts/PlusJakartaSans-Bold.ttf", 0.0, 0.0),
+            latin = font("crate://self/resources/fonts/Inter-Bold.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }

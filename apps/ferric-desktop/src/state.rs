@@ -194,6 +194,8 @@ pub enum BgMessage {
         home: Box<YtmRichHome>,
     },
     YtmRichHomeFailed(String),
+    YtmHomeMoreLoaded(Box<YtmRichHome>),
+    YtmHomeMoreFailed(String),
     YtmBrowseDetailLoaded(Box<YtmBrowseDetail>),
     YtmBrowseDetailFailed {
         browse_id: String,

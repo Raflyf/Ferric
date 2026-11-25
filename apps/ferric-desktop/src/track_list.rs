@@ -262,18 +262,45 @@ live_design! {
                 icon_walk: { width: 12, height: Fit }
                 draw_icon: {
                     svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z"
-                    color: #0E0F13
-                    color_hover: #0E0F13
+                    color: #09090D
+                    color_hover: #09090D
+                    color_focus: #09090D
+                    color_down: #09090D
+                    color_disabled: #09090D
+                    fn get_color(self) -> vec4 {
+                        return #09090D;
+                    }
                 }
-                draw_text: { color: #0E0F13, color_hover: #0E0F13, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }
+                draw_text: {
+                    color: #09090D,
+                    color_hover: #09090D,
+                    color_focus: #09090D,
+                    color_down: #09090D,
+                    color_disabled: #09090D,
+                    text_style: <THEME_FONT_BOLD> { font_size: 8.8 }
+                    fn get_color(self) -> vec4 {
+                        return #09090D;
+                    }
+                }
                 draw_bg: {
                     instance hover: 0.0
+                    instance down: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        let r = (self.rect_size.y - 1.0) * 0.25;
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                        sdf.fill(mix(#F4F4F7, #FFFFFF, self.hover));
+                        let inset = 0.5 + self.down * 0.6;
+                        let r = (self.rect_size.y - inset * 2.0) * 0.28;
+                        sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
+                        let col = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D6D9E4, self.down);
+                        sdf.fill(col);
                         return sdf.result;
+                    }
+                }
+                animator: {
+                    hover = {
+                        default: off,
+                        off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0, down: 0.0 } } }
+                        on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0, down: 0.0 } } }
+                        down = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { hover: 1.0, down: 1.0 } } }
                     }
                 }
             }
@@ -285,16 +312,34 @@ live_design! {
                     svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z"
                     color: #A882FF
                     color_hover: #F4F4F7
+                    color_focus: #F4F4F7
+                    color_down: #F4F4F7
                 }
-                draw_text: { color: #F4F4F7, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }
+                draw_text: {
+                    color: #F4F4F7,
+                    color_hover: #FFFFFF,
+                    color_focus: #FFFFFF,
+                    color_down: #FFFFFF,
+                    text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 }
+                }
                 draw_bg: {
                     instance hover: 0.0
+                    instance down: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
-                        sdf.fill_keep(mix(#1C1D24, #252732, self.hover));
-                        sdf.stroke(#2A2C38, 1.0);
+                        let inset = 0.5 + self.down * 0.6;
+                        sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
+                        sdf.fill_keep(mix(mix(#181A22, #252836, self.hover), #2D3042, self.down));
+                        sdf.stroke(mix(#2A2C38, #444861, self.hover), 1.0);
                         return sdf.result;
+                    }
+                }
+                animator: {
+                    hover = {
+                        default: off,
+                        off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0, down: 0.0 }, draw_icon: { hover: 0.0 }, draw_text: { hover: 0.0 } } }
+                        on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0, down: 0.0 }, draw_icon: { hover: 1.0 }, draw_text: { hover: 1.0 } } }
+                        down = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { hover: 1.0, down: 1.0 }, draw_icon: { hover: 1.0 }, draw_text: { hover: 1.0 } } }
                     }
                 }
             }
@@ -306,16 +351,34 @@ live_design! {
                     svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z"
                     color: #A882FF
                     color_hover: #F4F4F7
+                    color_focus: #F4F4F7
+                    color_down: #F4F4F7
                 }
-                draw_text: { color: #F4F4F7, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }
+                draw_text: {
+                    color: #F4F4F7,
+                    color_hover: #FFFFFF,
+                    color_focus: #FFFFFF,
+                    color_down: #FFFFFF,
+                    text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 }
+                }
                 draw_bg: {
                     instance hover: 0.0
+                    instance down: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
-                        sdf.fill_keep(mix(#1C1D24, #252732, self.hover));
-                        sdf.stroke(#2A2C38, 1.0);
+                        let inset = 0.5 + self.down * 0.6;
+                        sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
+                        sdf.fill_keep(mix(mix(#181A22, #252836, self.hover), #2D3042, self.down));
+                        sdf.stroke(mix(#2A2C38, #444861, self.hover), 1.0);
                         return sdf.result;
+                    }
+                }
+                animator: {
+                    hover = {
+                        default: off,
+                        off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0, down: 0.0 }, draw_icon: { hover: 0.0 }, draw_text: { hover: 0.0 } } }
+                        on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0, down: 0.0 }, draw_icon: { hover: 1.0 }, draw_text: { hover: 1.0 } } }
+                        down = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { hover: 1.0, down: 1.0 }, draw_icon: { hover: 1.0 }, draw_text: { hover: 1.0 } } }
                     }
                 }
             }
@@ -327,16 +390,34 @@ live_design! {
                     svg_path: "M8 5V19L19 12L8 5Z"
                     color: #A882FF
                     color_hover: #F4F4F7
+                    color_focus: #F4F4F7
+                    color_down: #F4F4F7
                 }
-                draw_text: { color: #C5B2FF, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }
+                draw_text: {
+                    color: #C5B2FF,
+                    color_hover: #FFFFFF,
+                    color_focus: #FFFFFF,
+                    color_down: #FFFFFF,
+                    text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 }
+                }
                 draw_bg: {
                     instance hover: 0.0
+                    instance down: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
-                        sdf.fill_keep(mix(#1C1A29, #27233B, self.hover));
-                        sdf.stroke(#443B66, 1.0);
+                        let inset = 0.5 + self.down * 0.6;
+                        sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
+                        sdf.fill_keep(mix(mix(#1C1A29, #2A2542, self.hover), #342D52, self.down));
+                        sdf.stroke(mix(#443B66, #7463B0, self.hover), 1.0);
                         return sdf.result;
+                    }
+                }
+                animator: {
+                    hover = {
+                        default: off,
+                        off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0, down: 0.0 }, draw_icon: { hover: 0.0 }, draw_text: { hover: 0.0 } } }
+                        on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0, down: 0.0 }, draw_icon: { hover: 1.0 }, draw_text: { hover: 1.0 } } }
+                        down = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { hover: 1.0, down: 1.0 }, draw_icon: { hover: 1.0 }, draw_text: { hover: 1.0 } } }
                     }
                 }
             }

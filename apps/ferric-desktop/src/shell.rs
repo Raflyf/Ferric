@@ -73,8 +73,8 @@ mod win_impl {
     use std::sync::{Mutex, OnceLock};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
-        BLACK_BRUSH, ClientToScreen, GetMonitorInfoW, GetStockObject, HBRUSH,
-        MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        ClientToScreen, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+        MonitorFromWindow,
     };
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
@@ -87,12 +87,14 @@ mod win_impl {
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
         GetClientRect, GetCursorPos, GetWindowRect, IDI_APPLICATION, LoadIconW, MF_SEPARATOR,
         MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, RegisterClassW, SW_HIDE,
-        SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
-        TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE,
-        WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE, WM_NCCALCSIZE,
-        WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED, WNDCLASSW,
-        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+        SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow,
+        TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+        WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+        WM_MOVE, WM_NCCALCSIZE, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND,
+        WM_WINDOWPOSCHANGED, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME,
     };
     use windows::core::{PCWSTR, s, w};
 
@@ -106,12 +108,14 @@ mod win_impl {
     const CMD_PREV: u32 = 1004;
     const CMD_QUIT: u32 = 1005;
 
+    const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
     const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
     const DWMWCP_DONOTROUND: i32 = 1;
     const DWMWCP_ROUND: i32 = 2;
     const DWMSBT_TRANSIENTWINDOW: i32 = 3; // Native Windows 11 Acrylic
+    const GWL_STYLE: i32 = -16;
     const GWL_EXSTYLE: i32 = -20;
     const LWA_ALPHA: u32 = 0x0000_0002;
 
@@ -119,7 +123,7 @@ mod win_impl {
     static BACKDROP_HWND: AtomicIsize = AtomicIsize::new(0);
     static BACKDROP_CLASS_REG: AtomicBool = AtomicBool::new(false);
     static ACRYLIC_ENABLED: AtomicBool = AtomicBool::new(false);
-    static ACRYLIC_ALPHA: AtomicU8 = AtomicU8::new(214);
+    static ACRYLIC_ALPHA: AtomicU8 = AtomicU8::new(184);
     static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
     static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
@@ -202,8 +206,54 @@ mod win_impl {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if msg == WM_ERASEBKGND {
+            // Never paint an opaque brush over the DWM Acrylic surface so blurred silhouettes shine through.
+            return LRESULT(1);
+        }
         // SAFETY: Standard stateless Win32 window proc for passive DWM Acrylic backdrop host.
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    unsafe fn apply_backdrop_acrylic_policy(bh: HWND, layer_alpha: u8) {
+        // Map user opacity slider (0.48..0.94) to a light-to-medium dark DWM frosted tint
+        // so blurred silhouettes of background windows remain visibly frosted without washing out text.
+        let t = ((f32::from(layer_alpha) / 255.0 - 0.48) / 0.46).clamp(0.0, 1.0);
+        let tint_alpha = (50.0 + t * 66.0).round() as u32; // 0x32..0x74 dark frosted veil
+        let gradient_color = (tint_alpha << 24) | 0x0013_0F0E;
+        // SAFETY: Dynamically resolves SetWindowCompositionAttribute from user32.dll on Windows 10/11.
+        unsafe {
+            let mut applied_wca = false;
+            if let Ok(user32) = GetModuleHandleW(w!("user32.dll"))
+                && let Some(proc_fn) = GetProcAddress(user32, s!("SetWindowCompositionAttribute"))
+            {
+                type SetWcaFn =
+                    unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
+                let set_wca: SetWcaFn = std::mem::transmute(proc_fn);
+                let mut policy = AccentPolicy {
+                    accent_state: 4, // ACCENT_ENABLE_ACRYLICBLURBEHIND (real frosted silhouette blur)
+                    accent_flags: 2,
+                    gradient_color,
+                    animation_id: 0,
+                };
+                let mut data = WindowCompositionAttribData {
+                    attrib: 19,
+                    pv_data: (&raw mut policy).cast(),
+                    cb_data: std::mem::size_of::<AccentPolicy>(),
+                };
+                if set_wca(bh, &raw mut data) != 0 {
+                    applied_wca = true;
+                }
+            }
+            if !applied_wca {
+                let backdrop: i32 = DWMSBT_TRANSIENTWINDOW;
+                let _ = DwmSetWindowAttribute(
+                    bh,
+                    DWMWA_SYSTEMBACKDROP_TYPE,
+                    (&raw const backdrop).cast(),
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
     }
 
     unsafe fn apply_dwm_corner_pref(hwnd: HWND, maximized: bool) {
@@ -233,12 +283,11 @@ mod win_impl {
             let hinst = GetModuleHandleW(None).ok()?;
             let class_name = w!("FerricAcrylicBackdrop");
             if !BACKDROP_CLASS_REG.swap(true, Ordering::AcqRel) {
-                let black_brush = HBRUSH(GetStockObject(BLACK_BRUSH).0);
                 let wc = WNDCLASSW {
                     lpfnWndProc: Some(backdrop_wnd_proc),
                     hInstance: hinst.into(),
                     lpszClassName: class_name,
-                    hbrBackground: black_brush,
+                    hbrBackground: HBRUSH::default(),
                     ..Default::default()
                 };
                 let _ = RegisterClassW(&wc);
@@ -273,36 +322,8 @@ mod win_impl {
                 cy_bottom_height: -1,
             };
             let _ = DwmExtendFrameIntoClientArea(bh, &raw const margins);
-            let backdrop: i32 = DWMSBT_TRANSIENTWINDOW;
-            let hr = DwmSetWindowAttribute(
-                bh,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                (&raw const backdrop).cast(),
-                std::mem::size_of::<i32>() as u32,
-            );
-            if hr != 0 {
-                // Windows 10 fallback: dynamically resolve SetWindowCompositionAttribute from user32.dll
-                if let Ok(user32) = GetModuleHandleW(w!("user32.dll"))
-                    && let Some(proc_fn) =
-                        GetProcAddress(user32, s!("SetWindowCompositionAttribute"))
-                {
-                    type SetWcaFn =
-                        unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
-                    let set_wca: SetWcaFn = std::mem::transmute(proc_fn);
-                    let mut policy = AccentPolicy {
-                        accent_state: 4,
-                        accent_flags: 2,
-                        gradient_color: 0xB810_1116,
-                        animation_id: 0,
-                    };
-                    let mut data = WindowCompositionAttribData {
-                        attrib: 19,
-                        pv_data: (&raw mut policy).cast(),
-                        cb_data: std::mem::size_of::<AccentPolicy>(),
-                    };
-                    let _ = set_wca(bh, &raw mut data);
-                }
-            }
+            let alpha = ACRYLIC_ALPHA.load(Ordering::Acquire);
+            apply_backdrop_acrylic_policy(bh, alpha);
             BACKDROP_HWND.store(bh.0 as isize, Ordering::Release);
             Some(bh)
         }
@@ -344,7 +365,7 @@ mod win_impl {
     }
 
     pub fn set_native_acrylic(enabled: bool, opacity: f32) {
-        let alpha = (opacity.clamp(0.62, 0.97) * 255.0).round() as u8;
+        let alpha = (opacity.clamp(0.48, 0.94) * 255.0).round() as u8;
         ACRYLIC_ENABLED.store(enabled, Ordering::Release);
         ACRYLIC_ALPHA.store(alpha, Ordering::Release);
         let Some(hwnd) = active_process_hwnd() else {
@@ -364,7 +385,9 @@ mod win_impl {
             let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
             let layered_bit = WS_EX_LAYERED.0 as i32;
             if enabled {
-                let _ = ensure_acrylic_backdrop_hwnd();
+                if let Some(bh) = ensure_acrylic_backdrop_hwnd() {
+                    apply_backdrop_acrylic_policy(bh, alpha);
+                }
                 if (ex & layered_bit) == 0 {
                     let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, ex | layered_bit);
                 }
@@ -489,6 +512,37 @@ mod win_impl {
         let ok = unsafe { SetWindowSubclass(hwnd, ferric_subclass_proc, SUBCLASS_ID, 0) };
         if ok != 0 {
             HOOK_INSTALLED.store(true, Ordering::Release);
+            // Upgrade WS_POPUP -> WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU
+            // while WM_NCCALCSIZE keeps the window 100% frameless, unlocking native Windows 11 DWM
+            // maximize / restore / minimize fly-zoom animations and Aero Snap!
+            unsafe {
+                let cur_style = GetWindowLongW(hwnd, GWL_STYLE);
+                let next_style = (cur_style & !(WS_POPUP.0 as i32))
+                    | (WS_CAPTION.0
+                        | WS_THICKFRAME.0
+                        | WS_MINIMIZEBOX.0
+                        | WS_MAXIMIZEBOX.0
+                        | WS_SYSMENU.0) as i32;
+                if next_style != cur_style {
+                    let _ = SetWindowLongW(hwnd, GWL_STYLE, next_style);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                let disable_trans: i32 = 0;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_TRANSITIONS_FORCEDISABLED,
+                    (&raw const disable_trans).cast(),
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
             if CLOSE_TO_TRAY.load(Ordering::Acquire) {
                 ensure_tray_icon(hwnd, "Ferric — Music Player");
             }
@@ -908,6 +962,7 @@ pub fn win32_update_tray_tooltip(tip: &str) {
     let _ = tip;
 }
 
+#[allow(dead_code)]
 pub fn win32_set_mini_mode_flag(mini: bool) {
     #[cfg(target_os = "windows")]
     win_impl::set_mini_mode_flag(mini);

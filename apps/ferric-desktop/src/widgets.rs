@@ -321,18 +321,28 @@ live_design! {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
                 let c = self.rect_size * 0.5;
-                let r = min(c.x, c.y) - 1.0;
-                sdf.circle(c.x, c.y, r);
-                sdf.fill(mix(self.accent_col, self.accent_hover, self.hover));
+                let base_r = min(c.x, c.y) - 2.0;
 
+                // Soft expanding outer aura on hover
+                if (self.hover > 0.01) {
+                    sdf.circle(c.x, c.y, base_r + 1.8 * self.hover);
+                    sdf.fill(vec4(1.0, 1.0, 1.0, 0.14 * self.hover));
+                }
+
+                // Tactile spring scale: gentle lift on hover, crisp press compression on down
+                let r = base_r + 0.9 * self.hover - 1.4 * self.down;
+                sdf.circle(c.x, c.y, r);
+                sdf.fill(mix(mix(self.accent_col, self.accent_hover, self.hover), #D8DAE4, self.down));
+
+                let gs = 1.0 + 0.04 * self.hover - 0.06 * self.down;
                 if (self.playing > 0.5) {
-                    sdf.box(c.x - 4.8, c.y - 5.8, 3.3, 11.6, 0.7);
-                    sdf.box(c.x + 1.5, c.y - 5.8, 3.3, 11.6, 0.7);
+                    sdf.box(c.x - 4.8 * gs, c.y - 5.8 * gs, 3.3 * gs, 11.6 * gs, 0.8);
+                    sdf.box(c.x + 1.5 * gs, c.y - 5.8 * gs, 3.3 * gs, 11.6 * gs, 0.8);
                     sdf.fill(self.glyph_col);
                 } else {
-                    sdf.move_to(c.x - 3.6, c.y - 6.0);
-                    sdf.line_to(c.x + 6.0, c.y);
-                    sdf.line_to(c.x - 3.6, c.y + 6.0);
+                    sdf.move_to(c.x - 3.6 * gs, c.y - 6.0 * gs);
+                    sdf.line_to(c.x + 6.0 * gs, c.y);
+                    sdf.line_to(c.x - 3.6 * gs, c.y + 6.0 * gs);
                     sdf.close_path();
                     sdf.fill(self.glyph_col);
                 }
@@ -357,22 +367,24 @@ live_design! {
                 let cy = self.rect_size.y * 0.5;
                 let t = clamp(self.norm_val, 0.0, 1.0);
                 let tx = pad + usable * t;
+                let active_amt = max(self.hover, self.drag);
+                let track_h = mix(3.0, 4.4, active_amt);
+                let track_r = track_h * 0.5;
 
-                sdf.box(pad, cy - 1.5, usable, 3.0, 0.75);
+                sdf.box(pad, cy - track_h * 0.5, usable, track_h, track_r);
                 sdf.fill(self.track_col);
 
                 if (tx > pad + 0.5) {
-                    sdf.box(pad, cy - 1.5, tx - pad, 3.0, 0.75);
+                    sdf.box(pad, cy - track_h * 0.5, tx - pad, track_h, track_r);
                     sdf.fill(self.fill_col);
                 }
 
-                let active_amt = max(self.hover, self.drag);
                 if (active_amt > 0.01) {
-                    sdf.circle(tx, cy, 8.5);
-                    sdf.fill(vec4(self.fill_col.xyz, 0.24 * active_amt));
+                    sdf.circle(tx, cy, mix(7.2, 9.4, self.drag));
+                    sdf.fill(vec4(self.fill_col.xyz, 0.28 * active_amt));
                 }
 
-                let r = mix(4.2, 5.8, active_amt);
+                let r = mix(4.2, 6.0, active_amt);
                 sdf.circle(tx, cy, r);
                 sdf.fill_keep(self.thumb_col);
                 sdf.stroke(#0E0F13, 0.9);
@@ -468,12 +480,13 @@ live_design! {
                 let sdf = Sdf2d::viewport(p);
                 let c = self.rect_size * 0.5;
 
-                if (self.hover > 0.01) {
-                    sdf.box(2.0, 2.0, self.rect_size.x - 4.0, self.rect_size.y - 4.0, 3.5);
+                if (self.hover > 0.01 || self.down > 0.01) {
+                    let inset = 2.0 + self.down * 0.9;
+                    sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 4.5);
                     if self.kind > 1.5 && self.kind < 2.5 {
-                        sdf.fill(vec4(0.80, 0.22, 0.20, 0.92 * self.hover));
+                        sdf.fill(vec4(0.84, 0.22, 0.20, (0.88 + 0.12 * self.down) * max(self.hover, self.down)));
                     } else {
-                        sdf.fill(vec4(0.18, 0.19, 0.25, 0.90 * self.hover));
+                        sdf.fill(vec4(0.22, 0.24, 0.32, (0.78 + 0.20 * self.down) * max(self.hover, self.down)));
                     }
                 }
 
@@ -800,8 +813,18 @@ pub struct FerricBarSlider {
     max: f64,
     #[live(0.0)]
     value: f64,
+    #[live(false)]
+    wheel_adjust: bool,
+    #[live(0.05)]
+    wheel_step: f64,
     #[rust]
     dragging: bool,
+    #[rust]
+    hover_target: f32,
+    #[rust]
+    drag_target: f32,
+    #[rust]
+    anim_frame: NextFrame,
 }
 
 impl FerricBarSlider {
@@ -819,20 +842,51 @@ impl FerricBarSlider {
 
 impl Widget for FerricBarSlider {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.anim_frame.is_event(event).is_some() {
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
+            self.draw_bg.drag += (self.drag_target - self.draw_bg.drag) * 0.30;
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
+                && (self.drag_target - self.draw_bg.drag).abs() < 0.008;
+            if done {
+                self.draw_bg.hover = self.hover_target;
+                self.draw_bg.drag = self.drag_target;
+            } else {
+                self.anim_frame = cx.new_next_frame();
+            }
+            self.draw_bg.redraw(cx);
+        }
+
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.draw_bg.hover = 1.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
             }
             Hit::FingerHoverOut(_) => {
-                self.draw_bg.hover = 0.0;
-                self.draw_bg.redraw(cx);
+                self.hover_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerScroll(fs) if self.wheel_adjust => {
+                let step = self.wheel_step.abs().max(0.01);
+                let delta = if fs.scroll.y < 0.0 { step } else { -step };
+                let next = (self.value + delta).clamp(self.min, self.max);
+                if (next - self.value).abs() > 1e-6 {
+                    self.value = next;
+                    let span = (self.max - self.min).abs().max(1e-6);
+                    self.draw_bg.norm_val = ((self.value - self.min) / span).clamp(0.0, 1.0) as f32;
+                    self.draw_bg.hover = 1.0;
+                    self.hover_target = 1.0;
+                    self.anim_frame = cx.new_next_frame();
+                    self.draw_bg.redraw(cx);
+                    cx.widget_action(uid, &scope.path, FerricSliderAction::Changed(next));
+                    cx.widget_action(uid, &scope.path, FerricSliderAction::Released(next));
+                }
             }
             Hit::FingerDown(fe) => {
                 self.dragging = true;
-                self.draw_bg.drag = 1.0;
+                self.drag_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
                 let v = self.update_from_abs(cx, fe.abs.x);
                 cx.widget_action(uid, &scope.path, FerricSliderAction::Changed(v));
             }
@@ -842,7 +896,8 @@ impl Widget for FerricBarSlider {
             }
             Hit::FingerUp(fe) if self.dragging => {
                 self.dragging = false;
-                self.draw_bg.drag = 0.0;
+                self.drag_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
                 let v = self.update_from_abs(cx, fe.abs.x);
                 cx.widget_action(uid, &scope.path, FerricSliderAction::Released(v));
             }
@@ -1112,6 +1167,8 @@ pub struct DrawFerricWinBtn {
     is_maximized: f32,
     #[live(0.0_f32)]
     hover: f32,
+    #[live(0.0_f32)]
+    down: f32,
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -1124,15 +1181,21 @@ pub struct FerricWinBtn {
     #[rust]
     hover_target: f32,
     #[rust]
+    down_target: f32,
+    #[rust]
     anim_frame: NextFrame,
 }
 
 impl Widget for FerricWinBtn {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.anim_frame.is_event(event).is_some() {
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.30;
-            if (self.hover_target - self.draw_bg.hover).abs() < 0.01 {
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
+            self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
+                && (self.down_target - self.draw_bg.down).abs() < 0.008;
+            if done {
                 self.draw_bg.hover = self.hover_target;
+                self.draw_bg.down = self.down_target;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
@@ -1147,13 +1210,24 @@ impl Widget for FerricWinBtn {
             }
             Hit::FingerHoverOut(_) => {
                 self.hover_target = 0.0;
+                self.down_target = 0.0;
                 self.anim_frame = cx.new_next_frame();
             }
-            Hit::FingerUp(fe) if fe.is_over => {
-                self.hover_target = 0.0;
-                self.draw_bg.hover = 0.0;
-                self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, FerricWinBtnAction::Clicked);
+            Hit::FingerDown(_) => {
+                self.down_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerUp(fe) => {
+                self.down_target = 0.0;
+                if fe.is_over {
+                    self.hover_target = 0.0;
+                    self.draw_bg.hover = 0.0;
+                    self.draw_bg.down = 0.0;
+                    self.draw_bg.redraw(cx);
+                    cx.widget_action(uid, &scope.path, FerricWinBtnAction::Clicked);
+                } else {
+                    self.anim_frame = cx.new_next_frame();
+                }
             }
             _ => {}
         }
@@ -1196,6 +1270,8 @@ pub struct DrawFerricPlayBtn {
     playing: f32,
     #[live(0.0_f32)]
     hover: f32,
+    #[live(0.0_f32)]
+    down: f32,
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -1208,15 +1284,21 @@ pub struct FerricPlayBtn {
     #[rust]
     hover_target: f32,
     #[rust]
+    down_target: f32,
+    #[rust]
     anim_frame: NextFrame,
 }
 
 impl Widget for FerricPlayBtn {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.anim_frame.is_event(event).is_some() {
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
-            if (self.hover_target - self.draw_bg.hover).abs() < 0.01 {
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.26;
+            self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
+                && (self.down_target - self.draw_bg.down).abs() < 0.008;
+            if done {
                 self.draw_bg.hover = self.hover_target;
+                self.draw_bg.down = self.down_target;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
@@ -1231,10 +1313,19 @@ impl Widget for FerricPlayBtn {
             }
             Hit::FingerHoverOut(_) => {
                 self.hover_target = 0.0;
+                self.down_target = 0.0;
                 self.anim_frame = cx.new_next_frame();
             }
-            Hit::FingerUp(fe) if fe.is_over => {
-                cx.widget_action(uid, &scope.path, FerricPlayBtnAction::Clicked);
+            Hit::FingerDown(_) => {
+                self.down_target = 1.0;
+                self.anim_frame = cx.new_next_frame();
+            }
+            Hit::FingerUp(fe) => {
+                self.down_target = 0.0;
+                self.anim_frame = cx.new_next_frame();
+                if fe.is_over {
+                    cx.widget_action(uid, &scope.path, FerricPlayBtnAction::Clicked);
+                }
             }
             _ => {}
         }

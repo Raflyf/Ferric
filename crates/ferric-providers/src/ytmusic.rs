@@ -261,15 +261,23 @@ pub fn download_artwork_bytes(url: &str, cache_dir: &Path) -> ProviderResult<Vec
     Ok(bytes)
 }
 
+fn build_http_agent_with_family(timeout_secs: u64, ipv4_only: bool) -> ureq::Agent {
+    let body_secs = timeout_secs.max(14);
+    let mut cfg = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_recv_response(Some(Duration::from_secs(body_secs.min(18))))
+        .timeout_per_read(Some(Duration::from_secs(12)))
+        .timeout_recv_body(Some(Duration::from_secs(body_secs)))
+        .timeout_global(Some(Duration::from_secs(body_secs + 10)))
+        .http_status_as_error(false);
+    if ipv4_only {
+        cfg = cfg.ip_family(ureq::config::IpFamily::Ipv4Only);
+    }
+    ureq::Agent::new_with_config(cfg.build())
+}
+
 fn build_http_agent(timeout_secs: u64) -> ureq::Agent {
-    let total = timeout_secs.max(26);
-    let cfg = ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_secs(12)))
-        .timeout_recv_body(Some(Duration::from_secs(total)))
-        .timeout_global(Some(Duration::from_secs(total + 6)))
-        .http_status_as_error(false)
-        .build();
-    ureq::Agent::new_with_config(cfg)
+    build_http_agent_with_family(timeout_secs, false)
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -363,14 +371,25 @@ pub fn extract_sapisid_from_cookie(cookie_header: &str) -> Option<String> {
     fallback
 }
 
-fn post_ytm_json(endpoint: &str, body: &Value, session: &YtmSession) -> ProviderResult<Value> {
+fn post_ytm_json_with_opts(
+    endpoint: &str,
+    body: &Value,
+    session: &YtmSession,
+    attempts: usize,
+    timeout_secs: u64,
+) -> ProviderResult<Value> {
     let url = format!("{YTM_ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false");
     let payload = serde_json::to_string(body)
         .map_err(|e| ProviderError::Metadata(format!("JSON encode failed: {e}")))?;
 
     let mut last_err = None;
-    for attempt in 0..2 {
-        let agent = build_http_agent(28);
+    let total_attempts = attempts.max(1);
+    for attempt in 0..total_attempts {
+        // Attempt 0 uses the system default stack; retries force IPv4 + fresh Connection: close
+        // to immediately escape Windows ISP IPv6 blackholes and stalled chunked keep-alive sockets.
+        let ipv4_only = attempt >= 1;
+        let req_timeout = timeout_secs + (attempt as u64) * 6;
+        let agent = build_http_agent_with_family(req_timeout, ipv4_only);
         let mut req = agent
             .post(&url)
             .header("Content-Type", "application/json")
@@ -380,6 +399,9 @@ fn post_ytm_json(endpoint: &str, body: &Value, session: &YtmSession) -> Provider
             .header("Accept-Language", "en-US,en;q=0.9")
             .header("X-YouTube-Client-Name", "67")
             .header("X-YouTube-Client-Version", WEB_REMIX_VERSION);
+        if attempt >= 1 {
+            req = req.header("Connection", "close");
+        }
 
         if !session.visitor_data.is_empty() {
             req = req.header("X-Goog-Visitor-Id", &session.visitor_data);
@@ -419,8 +441,8 @@ fn post_ytm_json(endpoint: &str, body: &Value, session: &YtmSession) -> Provider
             Ok(val) => return Ok(val),
             Err(err) => {
                 last_err = Some(err);
-                if attempt == 0 {
-                    std::thread::sleep(Duration::from_millis(380));
+                if attempt + 1 < total_attempts {
+                    std::thread::sleep(Duration::from_millis(280 + (attempt as u64) * 320));
                 }
             }
         }
@@ -428,6 +450,14 @@ fn post_ytm_json(endpoint: &str, body: &Value, session: &YtmSession) -> Provider
 
     Err(last_err
         .unwrap_or_else(|| ProviderError::Http(format!("YouTube Music {endpoint} timed out"))))
+}
+
+fn post_ytm_json(endpoint: &str, body: &Value, session: &YtmSession) -> ProviderResult<Value> {
+    post_ytm_json_with_opts(endpoint, body, session, 3, 18)
+}
+
+fn post_ytm_json_fast(endpoint: &str, body: &Value, session: &YtmSession) -> ProviderResult<Value> {
+    post_ytm_json_with_opts(endpoint, body, session, 2, 14)
 }
 
 fn web_remix_context(session: &YtmSession) -> Value {
@@ -577,6 +607,7 @@ pub fn fetch_rich_home(
         session.clone()
     };
 
+    let is_default_home = mood_params.map(str::trim).is_none_or(str::is_empty);
     let mut body = json!({
         "browseId": "FEmusic_home",
         "context": web_remix_context(&effective_session),
@@ -585,30 +616,86 @@ pub fn fetch_rich_home(
         body["params"] = json!(params);
     }
 
-    let root = post_ytm_json("browse", &body, &effective_session)?;
-    let visitor_data = extract_visitor_data(&root, &effective_session.visitor_data);
-    let mut next_sess = effective_session;
-    next_sess.visitor_data = visitor_data.clone();
+    // Fan out Home, Explore, Charts, and Recent-Listening Radio in parallel on default Home
+    // so Home loads in ~1 RTT and survives individual YouTube edge timeouts seamlessly.
+    let (home_res, explore_res, charts_res, radio_res) = if is_default_home {
+        let seed_vid_opt = if !recent_seed_vids.is_empty() {
+            Some(recent_seed_vids[fastrand::usize(..recent_seed_vids.len())].clone())
+        } else {
+            None
+        };
+        std::thread::scope(|s| {
+            let h_home = s.spawn(|| post_ytm_json("browse", &body, &effective_session));
+            let h_explore = s.spawn(|| {
+                let sup_body = json!({
+                    "browseId": "FEmusic_explore",
+                    "context": web_remix_context(&effective_session),
+                });
+                post_ytm_json_fast("browse", &sup_body, &effective_session)
+            });
+            let h_charts = s.spawn(|| {
+                let sup_body = json!({
+                    "browseId": "FEmusic_charts",
+                    "context": web_remix_context(&effective_session),
+                });
+                post_ytm_json_fast("browse", &sup_body, &effective_session)
+            });
+            let h_radio = s.spawn(|| {
+                seed_vid_opt
+                    .as_deref()
+                    .and_then(|vid| fetch_radio_up_next(&effective_session, vid, 15).ok())
+            });
+            (
+                h_home.join().unwrap_or_else(|_| {
+                    Err(ProviderError::Http(
+                        "YouTube Music Home thread failed".to_string(),
+                    ))
+                }),
+                h_explore.join().ok().and_then(Result::ok),
+                h_charts.join().ok().and_then(Result::ok),
+                h_radio.join().ok().flatten(),
+            )
+        })
+    } else {
+        (
+            post_ytm_json("browse", &body, &effective_session),
+            None,
+            None,
+            None,
+        )
+    };
 
+    if home_res.is_err() && explore_res.is_none() && charts_res.is_none() {
+        return Err(home_res.unwrap_err());
+    }
+
+    let mut visitor_data = effective_session.visitor_data.clone();
     let mut chips = Vec::new();
-    collect_mood_chips(&root, &mut chips);
-
     let mut quick_picks = Vec::new();
     let mut seen_tracks = HashSet::new();
     let mut shelves = Vec::new();
-    collect_home_shelves(&root, &mut quick_picks, &mut seen_tracks, &mut shelves);
+    let mut all_tracks = Vec::new();
+    let mut continuation_token = None;
 
-    let mut all_tracks = quick_picks.clone();
-    collect_music_items(
-        &root,
-        "YouTube Music",
-        64,
-        &mut seen_tracks,
-        &mut all_tracks,
-    );
+    if let Ok(root) = home_res {
+        visitor_data = extract_visitor_data(&root, &visitor_data);
+        collect_mood_chips(&root, &mut chips);
+        collect_home_shelves(&root, &mut quick_picks, &mut seen_tracks, &mut shelves);
+        all_tracks.extend(quick_picks.iter().cloned());
+        collect_music_items(
+            &root,
+            "YouTube Music",
+            64,
+            &mut seen_tracks,
+            &mut all_tracks,
+        );
+        continuation_token = extract_continuation_token(&root);
+    }
 
-    // Follow up to 2 continuation pages from FEmusic_home so Home immediately opens rich & deep
-    let mut continuation_token = extract_continuation_token(&root);
+    let mut next_sess = effective_session;
+    next_sess.visitor_data = visitor_data.clone();
+
+    // Follow up to 2 fast continuation pages from FEmusic_home so Home immediately opens rich & deep
     for _ in 0..2 {
         let Some(tok) = continuation_token.clone() else {
             break;
@@ -617,7 +704,7 @@ pub fn fetch_rich_home(
             "continuation": tok,
             "context": web_remix_context(&next_sess),
         });
-        let Ok(cont_root) = post_ytm_json("browse", &cont_body, &next_sess) else {
+        let Ok(cont_root) = post_ytm_json_fast("browse", &cont_body, &next_sess) else {
             break;
         };
         let mut c_picks = Vec::new();
@@ -649,73 +736,67 @@ pub fn fetch_rich_home(
         continuation_token = extract_continuation_token(&cont_root);
     }
 
-    // Supplement default Home with Explore (New Albums & Singles) + Charts (Top Songs & Artists)
-    if mood_params.map(str::trim).is_none_or(str::is_empty) {
-        for browse_id in ["FEmusic_explore", "FEmusic_charts"] {
-            let sup_body = json!({
-                "browseId": browse_id,
-                "context": web_remix_context(&next_sess),
-            });
-            if let Ok(sup_root) = post_ytm_json("browse", &sup_body, &next_sess) {
-                let mut sup_picks = Vec::new();
-                let mut sup_shelves = Vec::new();
-                collect_home_shelves(
-                    &sup_root,
-                    &mut sup_picks,
-                    &mut seen_tracks,
-                    &mut sup_shelves,
-                );
-                for t in sup_picks {
-                    if quick_picks.len() < 48 && !quick_picks.iter().any(|q| q.id == t.id) {
-                        quick_picks.push(t.clone());
-                    }
-                    if !all_tracks.iter().any(|a| a.id == t.id) {
-                        all_tracks.push(t);
-                    }
-                }
-                for shelf in sup_shelves {
-                    if !shelves
-                        .iter()
-                        .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
-                    {
-                        shelves.push(shelf);
-                    }
-                }
-                collect_music_items(
-                    &sup_root,
-                    "YouTube Music Explore",
-                    120,
-                    &mut seen_tracks,
-                    &mut all_tracks,
-                );
+    // Merge parallel Explore (New Albums & Singles) + Charts (Top Songs & Artists)
+    for sup_root in [explore_res, charts_res].into_iter().flatten() {
+        if visitor_data.is_empty() {
+            visitor_data = extract_visitor_data(&sup_root, &visitor_data);
+        }
+        if chips.is_empty() {
+            collect_mood_chips(&sup_root, &mut chips);
+        }
+        let mut sup_picks = Vec::new();
+        let mut sup_shelves = Vec::new();
+        collect_home_shelves(
+            &sup_root,
+            &mut sup_picks,
+            &mut seen_tracks,
+            &mut sup_shelves,
+        );
+        for t in sup_picks {
+            if quick_picks.len() < 48 && !quick_picks.iter().any(|q| q.id == t.id) {
+                quick_picks.push(t.clone());
+            }
+            if !all_tracks.iter().any(|a| a.id == t.id) {
+                all_tracks.push(t);
             }
         }
-
-        // Dynamic guest personalization: seed a fresh Radio mix from user's recent plays
-        if !recent_seed_vids.is_empty() {
-            let pick_i = fastrand::usize(..recent_seed_vids.len());
-            let seed_vid = &recent_seed_vids[pick_i];
-            if let Ok(radio_tracks) = fetch_radio_up_next(&next_sess, seed_vid, 15)
-                && radio_tracks.len() >= 4
+        for shelf in sup_shelves {
+            if !shelves
+                .iter()
+                .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
             {
-                let cards = tracks_to_song_cards(&radio_tracks);
-                if cards.len() >= 4 {
-                    shelves.insert(
-                        0,
-                        YtmHomeShelf {
-                            title: "Picked from your recent listening".to_string(),
-                            cards,
-                        },
-                    );
-                }
-                for t in radio_tracks {
-                    if !quick_picks.iter().any(|q| q.id == t.id) {
-                        quick_picks.push(t.clone());
-                    }
-                    if !all_tracks.iter().any(|a| a.id == t.id) {
-                        all_tracks.push(t);
-                    }
-                }
+                shelves.push(shelf);
+            }
+        }
+        collect_music_items(
+            &sup_root,
+            "YouTube Music Explore",
+            120,
+            &mut seen_tracks,
+            &mut all_tracks,
+        );
+    }
+
+    // Merge dynamic guest personalization seeded from user's recent plays
+    if let Some(radio_tracks) = radio_res
+        && radio_tracks.len() >= 4
+    {
+        let cards = tracks_to_song_cards(&radio_tracks);
+        if cards.len() >= 4 {
+            shelves.insert(
+                0,
+                YtmHomeShelf {
+                    title: "Picked from your recent listening".to_string(),
+                    cards,
+                },
+            );
+        }
+        for t in radio_tracks {
+            if !quick_picks.iter().any(|q| q.id == t.id) {
+                quick_picks.push(t.clone());
+            }
+            if !all_tracks.iter().any(|a| a.id == t.id) {
+                all_tracks.push(t);
             }
         }
     }

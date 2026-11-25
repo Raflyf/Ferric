@@ -5,9 +5,8 @@ use crate::shell::{
     win32_client_rect_screen, win32_close_active_window, win32_force_quit,
     win32_install_window_hooks, win32_is_active_window_maximized,
     win32_is_window_hidden_or_minimized, win32_main_hwnd_raw, win32_minimize_active_window,
-    win32_poll_tray_events, win32_set_close_to_tray, win32_set_mini_mode_flag,
-    win32_set_native_acrylic, win32_toggle_maximize_active_window, win32_trim_working_set,
-    win32_update_tray_tooltip,
+    win32_poll_tray_events, win32_set_close_to_tray, win32_set_native_acrylic,
+    win32_toggle_maximize_active_window, win32_trim_working_set, win32_update_tray_tooltip,
 };
 use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::state::{
@@ -303,9 +302,10 @@ live_design! {
             instance down: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = (self.rect_size.y - 1.0) * 0.28;
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                let c = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D8DAE4, self.down);
+                let inset = 0.5 + self.down * 0.65;
+                let r = (self.rect_size.y - inset * 2.0) * 0.28;
+                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
+                let c = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D6D8E4, self.down);
                 sdf.fill(c);
                 return sdf.result;
             }
@@ -357,16 +357,17 @@ live_design! {
             uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
-                let solid_idle = mix(#14151D, #202330, self.hover);
-                let solid_act = mix(#231E3A, vec4(self.accent_col.xyz, 0.26), 0.35);
-                let acrylic_idle = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.14), self.hover);
-                let acrylic_act = vec4(self.accent_col.xyz, 0.28);
+                let inset = 0.5 + self.down * 0.65;
+                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
+                let solid_idle = mix(#14151D, #232737, self.hover);
+                let solid_act = mix(#231E3A, vec4(self.accent_col.xyz, 0.28), 0.36);
+                let acrylic_idle = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.16), self.hover);
+                let acrylic_act = vec4(self.accent_col.xyz, 0.30);
                 let bg = mix(mix(solid_idle, solid_act, self.active), mix(acrylic_idle, acrylic_act, self.active), self.acrylic_on);
-                let pressed = mix(bg, vec4(1.0, 1.0, 1.0, 0.16), self.down * 0.20);
+                let pressed = mix(bg, vec4(1.0, 1.0, 1.0, 0.18), self.down * 0.24);
                 sdf.fill_keep(pressed);
-                let solid_b = mix(mix(#252734, #3B3F54, self.hover), vec4(self.accent_col.xyz, 0.85), self.active);
-                let acrylic_b = mix(vec4(1.0, 1.0, 1.0, 0.10 + 0.08 * self.hover), vec4(self.accent_col.xyz, 0.88), self.active);
+                let solid_b = mix(mix(#252734, #484E68, self.hover), vec4(self.accent_col.xyz, 0.88), self.active);
+                let acrylic_b = mix(vec4(1.0, 1.0, 1.0, 0.10 + 0.12 * self.hover), vec4(self.accent_col.xyz, 0.90), self.active);
                 sdf.stroke(mix(solid_b, acrylic_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -415,14 +416,15 @@ live_design! {
             uniform acrylic_on: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let r = (self.rect_size.y - 1.0) * 0.28;
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                let solid_idle = mix(#14151D, #222534, self.hover);
-                let acrylic_idle = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.145), self.hover);
+                let inset = 0.5 + self.down * 0.65;
+                let r = (self.rect_size.y - inset * 2.0) * 0.28;
+                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
+                let solid_idle = mix(#14151D, #25293A, self.hover);
+                let acrylic_idle = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.17), self.hover);
                 let idle = mix(solid_idle, acrylic_idle, self.acrylic_on);
-                let bg = mix(idle, #F4F5FA, self.active);
+                let bg = mix(idle, mix(#F4F5FA, #FFFFFF, self.hover), self.active);
                 sdf.fill_keep(bg);
-                let idle_b = mix(mix(#242633, #3A3D52, self.hover), vec4(1.0, 1.0, 1.0, 0.12 + 0.08 * self.hover), self.acrylic_on);
+                let idle_b = mix(mix(#242633, #464B66, self.hover), vec4(1.0, 1.0, 1.0, 0.12 + 0.12 * self.hover), self.acrylic_on);
                 sdf.stroke(mix(idle_b, #FFFFFF, self.active), 1.0);
                 return sdf.result;
             }
@@ -468,12 +470,13 @@ live_design! {
             uniform acrylic_on: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
-                let hov = mix(#1C1E28, vec4(1.0, 1.0, 1.0, 0.10), self.acrylic_on);
-                let act = mix(#231E3A, vec4(1.0, 1.0, 1.0, 0.16), self.acrylic_on);
+                let inset = 1.0 + self.down * 0.85;
+                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
+                let hov = mix(#212432, vec4(1.0, 1.0, 1.0, 0.13), self.acrylic_on);
+                let act = mix(#262040, vec4(1.0, 1.0, 1.0, 0.19), self.acrylic_on);
                 let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
-                sdf.fill_keep(bg);
-                let rim = vec4(1.0, 1.0, 1.0, (0.09 * self.hover + 0.12 * self.active) * self.acrylic_on);
+                sdf.fill_keep(mix(bg, vec4(1.0, 1.0, 1.0, 0.16), self.down * 0.25));
+                let rim = vec4(1.0, 1.0, 1.0, (0.11 * self.hover + 0.14 * self.active));
                 sdf.stroke(rim, 1.0);
                 return sdf.result;
             }
@@ -499,27 +502,32 @@ live_design! {
 
     FerricInput = <TextInput> {
         width: Fill,
-        height: 30,
+        height: 32,
+        margin: 0,
+        padding: { left: 12, right: 12, top: 0, bottom: 0 }
+        flow: Right,
+        align: { x: 0.0, y: 0.5 }
+        label_align: { x: 0.0, y: 0.5 }
         draw_bg: {
             color: #090A0F,
             color_empty: #090A0F,
             color_hover: #10121A,
             color_focus: #12141F,
-            border_radius: 6.0,
+            border_radius: 7.0,
             border_size: 1.0,
             border_color_1: #232634,
             border_color_2: #232634,
             border_color_1_empty: #232634,
             border_color_2_empty: #232634,
-            border_color_1_hover: #35384B,
-            border_color_2_hover: #35384B,
+            border_color_1_hover: #3B3F56,
+            border_color_2_hover: #3B3F56,
             border_color_1_focus: #A882FF,
             border_color_2_focus: #A882FF
         }
         draw_text: {
             color: #F4F4F7,
             color_empty: #6D7080,
-            text_style: <THEME_FONT_REGULAR> { font_size: 9.2 }
+            text_style: <THEME_FONT_REGULAR> { font_size: 9.2, line_spacing: 1.0 }
         }
         draw_cursor: { color: #A882FF }
     }
@@ -542,16 +550,20 @@ live_design! {
             uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 7.0);
-                let solid_idle = mix(vec4(0.050, 0.054, 0.074, 1.0), vec4(0.098, 0.105, 0.145, 1.0), self.hover);
+                let inset = 0.5 + self.down * 1.1;
+                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 7.0);
+                let solid_idle = mix(vec4(0.050, 0.054, 0.074, 1.0), vec4(0.112, 0.120, 0.168, 1.0), self.hover);
                 let solid_act = mix(vec4(0.105, 0.098, 0.175, 1.0), vec4(self.accent_col.xyz, 0.24), 0.36);
-                let acr_idle = mix(vec4(0.092, 0.098, 0.138, 1.0), vec4(0.140, 0.148, 0.205, 1.0), self.hover);
+                let acr_idle = mix(vec4(0.092, 0.098, 0.138, 1.0), vec4(0.155, 0.164, 0.228, 1.0), self.hover);
                 let acr_act = vec4(mix(vec3(0.12, 0.12, 0.18), self.accent_col.xyz, 0.30), 1.0);
                 let col = mix(mix(solid_idle, solid_act, self.active), mix(acr_idle, acr_act, self.active), self.acrylic_on);
-                let pressed = mix(col, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
+                let sheen = smoothstep(0.55, 0.0, self.pos.y) * self.hover * 0.075;
+                let lifted = vec4(clamp(col.xyz + vec3(sheen), 0.0, 1.0), col.w);
+                let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.16), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let solid_b = mix(mix(#1A1C26, #35394F, self.hover), vec4(self.accent_col.xyz, 0.72), self.active);
-                let acr_b = mix(vec4(1.0, 1.0, 1.0, 0.08 + 0.12 * self.hover), vec4(self.accent_col.xyz, 0.80), self.active);
+                let hov_rim = mix(#3D435E, self.accent_col.xyz, 0.24);
+                let solid_b = mix(mix(#1A1C26, hov_rim, self.hover), vec4(self.accent_col.xyz, 0.78), self.active);
+                let acr_b = mix(vec4(1.0, 1.0, 1.0, 0.08 + 0.18 * self.hover), vec4(self.accent_col.xyz, 0.84), self.active);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -559,12 +571,12 @@ live_design! {
         animator: {
             hover = {
                 default: off,
-                off = { from: { all: Forward { duration: 0.16 } } apply: { draw_bg: { hover: 0.0 } } }
-                on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 } } }
+                off = { from: { all: Forward { duration: 0.20 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0 } } }
             }
             down = {
                 default: off,
-                off = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { down: 0.0 } } }
+                off = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { down: 0.0 } } }
                 on = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { down: 1.0 } } }
             }
         }
@@ -615,14 +627,18 @@ live_design! {
                     return vec4(0.0, 0.0, 0.0, 0.0);
                 }
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
-                let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.102, 0.108, 0.148, 1.0), self.hover);
-                let acr_fill = mix(vec4(0.090, 0.096, 0.136, 1.0), vec4(0.142, 0.150, 0.208, 1.0), self.hover);
+                let inset = 0.5 + self.down * 1.4;
+                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
+                let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover);
+                let acr_fill = mix(vec4(0.090, 0.096, 0.136, 1.0), vec4(0.160, 0.170, 0.236, 1.0), self.hover);
                 let fill = mix(solid_fill, acr_fill, self.acrylic_on);
-                let pressed = mix(fill, vec4(1.0, 1.0, 1.0, 0.12), self.down * 0.22);
+                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.085;
+                let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
+                let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let solid_b = mix(#1B1D27, #3A3F57, self.hover);
-                let acr_b = vec4(1.0, 1.0, 1.0, 0.08 + 0.14 * self.hover);
+                let hov_rim = mix(#434966, self.accent_col.xyz, 0.28);
+                let solid_b = mix(#1B1D27, hov_rim, self.hover);
+                let acr_b = vec4(1.0, 1.0, 1.0, 0.08 + 0.20 * self.hover);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -630,12 +646,12 @@ live_design! {
         animator: {
             hover = {
                 default: off,
-                off = { from: { all: Forward { duration: 0.18 } } apply: { draw_bg: { hover: 0.0 } } }
-                on = { from: { all: Forward { duration: 0.13 } } apply: { draw_bg: { hover: 1.0 } } }
+                off = { from: { all: Forward { duration: 0.22 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 } } }
             }
             down = {
                 default: off,
-                off = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { down: 0.0 } } }
+                off = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { down: 0.0 } } }
                 on = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { down: 1.0 } } }
             }
         }
@@ -688,14 +704,18 @@ live_design! {
             uniform accent_col: #A882FF
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
-                let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.102, 0.108, 0.148, 1.0), self.hover);
-                let acr_fill = mix(vec4(0.090, 0.096, 0.136, 1.0), vec4(0.142, 0.150, 0.208, 1.0), self.hover);
+                let inset = 0.5 + self.down * 1.4;
+                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
+                let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover);
+                let acr_fill = mix(vec4(0.090, 0.096, 0.136, 1.0), vec4(0.160, 0.170, 0.236, 1.0), self.hover);
                 let fill = mix(solid_fill, acr_fill, self.acrylic_on);
-                let pressed = mix(fill, vec4(1.0, 1.0, 1.0, 0.12), self.down * 0.22);
+                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.085;
+                let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
+                let pressed = mix(lifted, vec4(1.0, 1.0, 1.0, 0.14), self.down * 0.22);
                 sdf.fill_keep(pressed);
-                let solid_b = mix(#1C1E28, #3A3F57, self.hover);
-                let acr_b = vec4(1.0, 1.0, 1.0, 0.08 + 0.14 * self.hover);
+                let hov_rim = mix(#434966, self.accent_col.xyz, 0.28);
+                let solid_b = mix(#1C1E28, hov_rim, self.hover);
+                let acr_b = vec4(1.0, 1.0, 1.0, 0.08 + 0.20 * self.hover);
                 sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -703,12 +723,12 @@ live_design! {
         animator: {
             hover = {
                 default: off,
-                off = { from: { all: Forward { duration: 0.18 } } apply: { draw_bg: { hover: 0.0 } } }
-                on = { from: { all: Forward { duration: 0.13 } } apply: { draw_bg: { hover: 1.0 } } }
+                off = { from: { all: Forward { duration: 0.22 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 } } }
             }
             down = {
                 default: off,
-                off = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { down: 0.0 } } }
+                off = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { down: 0.0 } } }
                 on = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { down: 1.0 } } }
             }
         }
@@ -871,6 +891,19 @@ live_design! {
                                 align: { y: 0.5 }
                                 spacing: 3,
 
+                                <View> { width: 2, height: 1 }
+                                brand_icon = <Image> {
+                                    width: 17,
+                                    height: 17,
+                                    fit: Smallest
+                                }
+                                <Label> {
+                                    margin: { left: 3, right: 6 }
+                                    padding: 0,
+                                    draw_text: { color: #EEF0F8, text_style: <THEME_FONT_BOLD> { font_size: 9.8 } }
+                                    text: "Ferric"
+                                }
+                                <SolidView> { width: 1, height: 13, margin: { left: 1, right: 4 }, draw_bg: { color: #242634 } }
                                 toggle_left_btn = <FerricIconBtn> {
                                     width: 26, height: 24,
                                     draw_icon: { svg_path: "M3 5H21V19H3V5ZM5 7V17H9V7H5ZM11 7V17H19V7H11Z" }
@@ -887,55 +920,33 @@ live_design! {
                                     width: 24, height: 24,
                                     draw_icon: { svg_path: "M17.65 6.35C16.2 4.9 14.21 4 12 4C7.58 4 4.01 7.58 4.01 12C4.01 16.42 7.58 20 12 20C15.73 20 18.84 17.45 19.73 14H17.65C16.83 16.33 14.61 18 12 18C8.69 18 6 15.31 6 12C6 8.69 8.69 6 12 6C13.66 6 15.14 6.69 16.22 7.78L13 11H20V4L17.65 6.35Z" }
                                 }
-                                <View> { width: 5, height: 1 }
-                                brand_icon = <Image> {
-                                    width: 16,
-                                    height: 16,
-                                    fit: Smallest
-                                }
-                                <Label> {
-                                    margin: { left: 3 }
-                                    draw_text: { color: #E4E6F0, text_style: <THEME_FONT_BOLD> { font_size: 9.8 } }
-                                    text: "Ferric"
-                                }
                             }
 
-                            // Center drag area + compact quick command pill
+                            // Center drag area + inline direct search bar (no modal popup)
                             <View> {
                                 width: Fill,
                                 height: Fill,
                                 align: { x: 0.5, y: 0.5 }
-                                top_search_pill = <Button> {
-                                    width: 230,
-                                    height: 24,
-                                    padding: { left: 10, right: 10 }
-                                    spacing: 6,
-                                    align: { x: 0.0, y: 0.5 }
-                                    text: "Search music... (Ctrl+K)"
-                                    icon_walk: { width: Fit, height: 11 }
-                                    draw_icon: {
-                                        svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
-                                        color: #7D8090
-                                        color_hover: #F4F4F7
-                                        color_focus: #F4F4F7
-                                    }
-                                    draw_text: {
-                                        color: #7D8090,
-                                        color_hover: #D4D6E2,
-                                        color_focus: #D4D6E2,
-                                        text_style: <THEME_FONT_REGULAR> { font_size: 8.6 }
-                                    }
+                                top_search_box = <View> {
+                                    width: 268,
+                                    height: 26,
+                                    padding: { left: 9, right: 6, top: 0, bottom: 0 }
+                                    flow: Right,
+                                    align: { y: 0.5 }
+                                    spacing: 5,
+                                    show_bg: true,
                                     draw_bg: {
                                         instance hover: 0.0
-                                        instance down: 0.0
                                         uniform acrylic_on: 0.0
+                                        uniform accent_col: #A882FF
                                         fn pixel(self) -> vec4 {
                                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
-                                            let solid_c = mix(#06070A, #12141C, self.hover);
-                                            let acr_c = mix(vec4(1.0, 1.0, 1.0, 0.06), vec4(1.0, 1.0, 1.0, 0.12), self.hover);
+                                            let r = (self.rect_size.y - 1.0) * 0.30;
+                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                                            let solid_c = mix(#07080C, #12141F, self.hover);
+                                            let acr_c = mix(vec4(1.0, 1.0, 1.0, 0.065), vec4(1.0, 1.0, 1.0, 0.13), self.hover);
                                             sdf.fill_keep(mix(solid_c, acr_c, self.acrylic_on));
-                                            let b_col = mix(#1F212E, vec4(1.0, 1.0, 1.0, 0.12), self.acrylic_on);
+                                            let b_col = mix(mix(#212433, #3A3F57, self.hover), vec4(1.0, 1.0, 1.0, 0.14 + 0.08 * self.hover), self.acrylic_on);
                                             sdf.stroke(b_col, 1.0);
                                             return sdf.result;
                                         }
@@ -943,18 +954,41 @@ live_design! {
                                     animator: {
                                         hover = {
                                             default: off,
-                                            off = {
-                                                from: { all: Forward { duration: 0.15 } }
-                                                apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_icon: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
-                                            }
-                                            on = {
-                                                from: { all: Forward { duration: 0.12 } }
-                                                apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_icon: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
-                                            }
-                                            down = {
-                                                from: { all: Forward { duration: 0.05 } }
-                                                apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_icon: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
-                                            }
+                                            off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 } } }
+                                            on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0 } } }
+                                        }
+                                    }
+                                    <Icon> {
+                                        icon_walk: { width: 12, height: 12 }
+                                        draw_icon: {
+                                            svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
+                                            color: #7D8090
+                                        }
+                                    }
+                                    top_search_input = <FerricInput> {
+                                        width: Fill,
+                                        height: Fill,
+                                        padding: { left: 2, right: 6, top: 0, bottom: 0 }
+                                        empty_text: "Search music... (Ctrl+K)"
+                                        draw_bg: {
+                                            color: #00000000,
+                                            color_empty: #00000000,
+                                            color_hover: #00000000,
+                                            color_focus: #00000000,
+                                            border_size: 0.0,
+                                            border_color_1: #00000000,
+                                            border_color_2: #00000000,
+                                            border_color_1_empty: #00000000,
+                                            border_color_2_empty: #00000000,
+                                            border_color_1_hover: #00000000,
+                                            border_color_2_hover: #00000000,
+                                            border_color_1_focus: #00000000,
+                                            border_color_2_focus: #00000000
+                                        }
+                                        draw_text: {
+                                            color: #F4F4F7,
+                                            color_empty: #7D8090,
+                                            text_style: <THEME_FONT_REGULAR> { font_size: 8.6, line_spacing: 1.0 }
                                         }
                                     }
                                 }
@@ -997,7 +1031,6 @@ live_design! {
                                     }
                                 }
                                 <SolidView> { width: 1, height: 14, margin: { left: 3, right: 3 }, draw_bg: { color: #242634 } }
-                                win_mini_btn = <FerricWinBtn> { width: 28, height: 24, draw_bg: { kind: 3.0 } }
                                 win_min_btn = <FerricWinBtn> { width: 30, height: 24, draw_bg: { kind: 0.0 } }
                                 win_max_btn = <FerricWinBtn> { width: 30, height: 24, draw_bg: { kind: 1.0 } }
                                 win_close_btn = <FerricWinBtn> { width: 32, height: 24, draw_bg: { kind: 2.0 } }
@@ -1848,8 +1881,8 @@ live_design! {
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                                 <Label> { width: 140, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Opacity" }
-                                                acrylic_opacity_slider = <FerricBarSlider> { min: 0.65, max: 0.96, value: 0.84 }
-                                                acrylic_opacity_lbl = <Label> { width: 42, draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "84%" }
+                                                acrylic_opacity_slider = <FerricBarSlider> { min: 0.48, max: 0.94, value: 0.72, wheel_adjust: true, wheel_step: 0.04 }
+                                                acrylic_opacity_lbl = <Label> { width: 42, draw_text: { color: #A882FF, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "72%" }
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
@@ -1901,7 +1934,7 @@ live_design! {
                                         card_st_keys = <FerricCard> {
                                             flow: Down, spacing: 5,
                                             <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Keyboard Shortcuts" }
-                                            <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Space: Play / Pause  ·  Ctrl+K: Powerbar  ·  Ctrl+F: Search  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down: Volume" }
+                                            <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Space: Play / Pause  ·  Ctrl+K: Focus Search  ·  Ctrl+F: Search Page  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down / Mouse Wheel: Volume" }
                                         }
                                     }
 
@@ -1955,6 +1988,10 @@ live_design! {
                                             svg_path: "M3.24 6.15C2.51 6.43 2 7.17 2 8V20C2 21.1 2.89 22 4 22H20C21.11 22 22 21.1 22 20V8C22 6.89 21.11 6 20 6H8.3L16.56 2.66L15.88 1L3.24 6.15ZM7 20C5.34 20 4 18.66 4 17C4 15.34 5.34 14 7 14C8.66 14 10 15.34 10 17C10 18.66 8.66 20 7 20ZM20 12H18V10H16V12H4V8H20V12Z"
                                             color: #A882FF
                                         }
+                                    }
+                                    rs_refresh_queue_btn = <FerricIconBtn> {
+                                        width: 24, height: 24,
+                                        draw_icon: { svg_path: "M17.65 6.35C16.2 4.9 14.21 4 12 4C7.58 4 4.01 7.58 4.01 12C4.01 16.42 7.58 20 12 20C15.73 20 18.84 17.45 19.73 14H17.65C16.83 16.33 14.61 18 12 18C8.69 18 6 15.31 6 12C6 8.69 8.69 6 12 6C13.66 6 15.14 6.69 16.22 7.78L13 11H20V4L17.65 6.35Z" }
                                     }
                                     rs_clear_btn = <FerricIconBtn> {
                                         width: 24, height: 24,
@@ -2187,7 +2224,9 @@ live_design! {
                                 vol_slider = <FerricBarSlider> {
                                     width: 64,
                                     height: 18,
-                                    min: 0.0, max: 1.0, value: 0.85
+                                    min: 0.0, max: 1.0, value: 0.85,
+                                    wheel_adjust: true,
+                                    wheel_step: 0.05
                                 }
                                 bar_fullscreen_btn = <FerricIconBtn> {
                                     width: 26, height: 26,
@@ -2403,7 +2442,9 @@ live_design! {
                                             draw_icon: { svg_path: "M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.02C15.48 15.29 16.5 13.77 16.5 12ZM14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z", color: #FFFFFF90 }
                                         }
                                         fs_vol_slider = <FerricBarSlider> {
-                                            width: 56, height: 18, min: 0.0, max: 1.0, value: 0.85
+                                            width: 56, height: 18, min: 0.0, max: 1.0, value: 0.85,
+                                            wheel_adjust: true,
+                                            wheel_step: 0.05
                                             draw_bg: {
                                                 track_col: #FFFFFF28
                                                 fill_col: #FFFFFF
@@ -2741,8 +2782,6 @@ pub struct App {
     #[rust]
     pre_mute_volume: f32,
     #[rust]
-    compact_mini_mode: bool,
-    #[rust]
     cmdk_open: bool,
     #[rust]
     toast_until: Option<Instant>,
@@ -2845,7 +2884,7 @@ impl App {
                 }
                 _ => (14.0, 12.0),
             };
-            let top_pad = base_top + 10.0 * (1.0 - f64::from(self.page_reveal_t));
+            let top_pad = base_top + 16.0 * (1.0 - f64::from(self.page_reveal_t));
             self.ui.view(self.active_page_view_id()).apply_over(
                 cx,
                 live! { padding: { left: 18.0, right: 18.0, top: (top_pad), bottom: (base_bottom) } },
@@ -3340,7 +3379,6 @@ impl App {
         let obstructed = !self.fullscreen_open
             || self.cmdk_open
             || self.update_popup_visible
-            || self.compact_mini_mode
             || win32_is_window_hidden_or_minimized();
         if obstructed {
             vp.set_visible(false);
@@ -3515,7 +3553,7 @@ impl App {
             if !(0.65..=1.40).contains(&self.theme.ui_zoom) {
                 self.theme.ui_zoom = 1.0;
             }
-            self.theme.acrylic_opacity = self.theme.acrylic_opacity.clamp(0.65, 0.96);
+            self.theme.acrylic_opacity = self.theme.acrylic_opacity.clamp(0.48, 0.94);
             self.eq = store.load_eq().unwrap_or_default();
             self.dsp = store.load_playback_dsp().unwrap_or_default();
             self.accounts = store.load_accounts().unwrap_or_default();
@@ -3889,21 +3927,6 @@ impl App {
             self.style_chip_btn(cx, id!(fs_mode_video_btn), self.video_open);
             self.start_motion(cx);
         }
-        self.sync_video_bounds(cx);
-        self.ui.redraw(cx);
-    }
-
-    fn toggle_compact_mini_mode(&mut self, cx: &mut Cx) {
-        self.compact_mini_mode = !self.compact_mini_mode;
-        win32_set_mini_mode_flag(self.compact_mini_mode);
-        let show_full = !self.compact_mini_mode;
-        self.ui.view(id!(workspace_row)).set_visible(cx, show_full);
-        let new_size = if self.compact_mini_mode {
-            dvec2(520.0, 128.0)
-        } else {
-            dvec2(1280.0, 780.0)
-        };
-        self.ui.window(id!(main_window)).resize(cx, new_size);
         self.sync_video_bounds(cx);
         self.ui.redraw(cx);
     }
@@ -5476,9 +5499,10 @@ impl App {
         self.ui
             .view(id!(toast_pill))
             .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
-        self.ui
-            .button(id!(top_search_pill))
-            .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
+        self.ui.view(id!(top_search_box)).apply_over(
+            cx,
+            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent) } },
+        );
 
         for btn_id in [
             id!(top_account_btn),
@@ -5621,6 +5645,7 @@ impl App {
             id!(top_settings_btn),
             id!(toggle_right_btn),
             id!(rs_radio_btn),
+            id!(rs_refresh_queue_btn),
             id!(rs_clear_btn),
             id!(bar_video_btn),
             id!(bar_lyrics_btn),
@@ -6727,9 +6752,19 @@ impl App {
                 BgMessage::YtmRichHomeFailed(err) => {
                     self.home_loading_more = false;
                     self.ui.button(id!(home_retry_btn)).set_visible(cx, true);
-                    self.ui
-                        .label(id!(home_status_lbl))
-                        .set_text(cx, "Offline — click Retry");
+                    let has_cached = !self.home_quick_picks_pool().is_empty();
+                    if has_cached {
+                        let pick_n = self.home_quick_picks_pool().len();
+                        let shelf_n = self.rich_home.shelves.len();
+                        self.ui
+                            .label(id!(home_status_lbl))
+                            .set_text(cx, &format!("{pick_n} songs · {shelf_n} shelves"));
+                        self.show_toast(cx, "YouTube Music timed out — showing cached feed");
+                    } else {
+                        self.ui
+                            .label(id!(home_status_lbl))
+                            .set_text(cx, "Connection timed out — click Retry");
+                    }
                     self.ui
                         .label(id!(oauth_status_lbl))
                         .set_text(cx, &format!("Home refresh failed: {err}"));
@@ -7436,10 +7471,6 @@ impl App {
             }
             return;
         }
-        if self.ui.ferric_win_btn(id!(win_mini_btn)).clicked(actions) {
-            self.toggle_compact_mini_mode(cx);
-            return;
-        }
 
         // 2. TOP BAR & SIDEBAR CHROME
         if self.ui.button(id!(toggle_left_btn)).clicked(actions) {
@@ -7483,13 +7514,12 @@ impl App {
             self.spawn_ytm_rich_home(cx, self.active_mood_idx, params, true);
             self.show_toast(cx, "Refreshing YouTube Music feed...");
         }
-        if self.ui.button(id!(top_search_pill)).clicked(actions) {
-            self.cmdk_open = true;
-            self.cmdk_reveal_t = 0.0;
-            self.ui.view(id!(cmdk_modal)).set_visible(cx, true);
-            self.start_motion(cx);
-            self.sync_video_bounds(cx);
-            self.ui.redraw(cx);
+        if let Some((submitted, _)) = self.ui.text_input(id!(top_search_input)).returned(actions) {
+            let q = submitted.trim().to_string();
+            if !q.is_empty() {
+                self.ui.text_input(id!(search_page_input)).set_text(cx, &q);
+                self.spawn_rich_search(cx, q);
+            }
         }
         if self.ui.button(id!(top_account_btn)).clicked(actions) {
             self.navigate_to(cx, MainPage::Settings, true);
@@ -8239,6 +8269,60 @@ impl App {
                     "Autoplay Radio paused"
                 },
             );
+        }
+        if self.ui.button(id!(rs_refresh_queue_btn)).clicked(actions) {
+            let mut seed_state = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0x9E37_79B9_7F4A_7C15_u64, |d| d.as_nanos() as u64)
+                | 1;
+            let mut next_u64 = || {
+                seed_state ^= seed_state << 13;
+                seed_state ^= seed_state >> 7;
+                seed_state ^= seed_state << 17;
+                seed_state
+            };
+
+            if let Some(cur) = self.queue.current().cloned() {
+                self.queue.set_tracks(vec![cur.clone()], Some(0));
+                self.last_radio_seed_id = None;
+                if cur.youtube_video_id.is_some() {
+                    self.maybe_fetch_radio_for_track(&cur, true);
+                    self.sync_next_deck_to_engine();
+                    self.refresh_right_sidebar(cx);
+                    self.show_toast(cx, "Refreshing Up next queue...");
+                } else {
+                    let mut pool: Vec<Track> = self
+                        .home_quick_picks_pool()
+                        .into_iter()
+                        .filter(|t| t.id != cur.id)
+                        .collect();
+                    for i in (1..pool.len()).rev() {
+                        let j = (next_u64() as usize) % (i + 1);
+                        pool.swap(i, j);
+                    }
+                    let mut rebuilt = vec![cur];
+                    rebuilt.extend(pool.into_iter().take(12));
+                    self.queue.set_tracks(rebuilt, Some(0));
+                    self.sync_next_deck_to_engine();
+                    self.refresh_right_sidebar(cx);
+                    self.show_toast(cx, "Up next queue refreshed");
+                }
+            } else {
+                let mut pool = self.home_quick_picks_pool();
+                for i in (1..pool.len()).rev() {
+                    let j = (next_u64() as usize) % (i + 1);
+                    pool.swap(i, j);
+                }
+                if !pool.is_empty() {
+                    self.queue
+                        .set_tracks(pool.into_iter().take(12).collect(), None);
+                    self.sync_next_deck_to_engine();
+                    self.refresh_right_sidebar(cx);
+                    self.show_toast(cx, "Up next queue refreshed");
+                } else {
+                    self.show_toast(cx, "No tracks available to refresh queue");
+                }
+            }
         }
         if self.ui.button(id!(rs_clear_btn)).clicked(actions) {
             if let Some(cur) = self.queue.current().cloned() {
@@ -9035,7 +9119,7 @@ impl App {
             .ferric_bar_slider(id!(acrylic_opacity_slider))
             .changed(actions)
         {
-            self.theme.acrylic_opacity = (v as f32).clamp(0.65, 0.96);
+            self.theme.acrylic_opacity = (v as f32).clamp(0.48, 0.94);
             self.ui
                 .label(id!(acrylic_opacity_lbl))
                 .set_text(cx, &format!("{:.0}%", self.theme.acrylic_opacity * 100.0));
@@ -9138,7 +9222,7 @@ impl AppMain for App {
             && dq.abs.y <= top_bar_h
         {
             let left_r = self.ui.view(id!(top_left_grp)).area().rect(cx);
-            let pill_r = self.ui.button(id!(top_search_pill)).area().rect(cx);
+            let pill_r = self.ui.view(id!(top_search_box)).area().rect(cx);
             let right_r = self.ui.view(id!(top_right_grp)).area().rect(cx);
             let in_left = left_r.size.x > 0.0 && dq.abs.x <= left_r.pos.x + left_r.size.x + 6.0;
             let in_pill = pill_r.size.x > 0.0
@@ -9147,6 +9231,46 @@ impl AppMain for App {
             let in_right = right_r.size.x > 0.0 && dq.abs.x >= right_r.pos.x - 6.0;
             if !in_left && !in_pill && !in_right {
                 dq.response.set(WindowDragQueryResponse::Caption);
+                return;
+            }
+        }
+
+        // Scroll wheel over speaker mute icon also adjusts volume smoothly (+/- 5%)
+        if let Event::Scroll(se) = event
+            && !se.handled_y.get()
+            && se.scroll.y.abs() > 0.01
+        {
+            let on_bottom_vol = self
+                .ui
+                .button(id!(vol_mute_btn))
+                .area()
+                .rect(cx)
+                .contains(se.abs);
+            let on_fs_vol = self.fullscreen_open
+                && self
+                    .ui
+                    .button(id!(fs_vol_mute_btn))
+                    .area()
+                    .rect(cx)
+                    .contains(se.abs);
+            if on_bottom_vol || on_fs_vol {
+                se.handled_y.set(true);
+                let delta = if se.scroll.y < 0.0 {
+                    0.05_f32
+                } else {
+                    -0.05_f32
+                };
+                self.session_state.volume = (self.session_state.volume + delta).clamp(0.0, 1.0);
+                if self.session_state.volume > 0.02 {
+                    self.pre_mute_volume = self.session_state.volume;
+                }
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::SetVolume(self.session_state.volume));
+                }
+                if let Some(db) = &self.db {
+                    let _ = db.save_session_state(&self.session_state);
+                }
+                self.sync_controls_from_state(cx);
                 return;
             }
         }
@@ -9176,15 +9300,11 @@ impl AppMain for App {
                 return;
             }
             if ke.modifiers.control && ke.key_code == KeyCode::KeyK {
-                self.cmdk_open = !self.cmdk_open;
-                self.ui
-                    .view(id!(cmdk_modal))
-                    .set_visible(cx, self.cmdk_open);
-                if self.cmdk_open {
-                    self.cmdk_reveal_t = 0.0;
-                    self.start_motion(cx);
+                if self.active_page == MainPage::Search {
+                    self.ui.widget(id!(search_page_input)).set_key_focus(cx);
+                } else {
+                    self.ui.widget(id!(top_search_input)).set_key_focus(cx);
                 }
-                self.sync_video_bounds(cx);
                 self.ui.redraw(cx);
                 return;
             }
@@ -9207,10 +9327,6 @@ impl AppMain for App {
             if ke.modifiers.control && ke.key_code == KeyCode::KeyE {
                 self.navigate_to(cx, MainPage::Settings, true);
                 self.switch_settings_tab(cx, SettingsTab::Equalizer);
-                return;
-            }
-            if ke.modifiers.control && ke.key_code == KeyCode::KeyM {
-                self.toggle_compact_mini_mode(cx);
                 return;
             }
             if ke.key_code == KeyCode::F11 {

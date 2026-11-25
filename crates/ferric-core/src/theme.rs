@@ -15,7 +15,7 @@ fn default_ui_zoom() -> f32 {
 }
 
 fn default_acrylic_opacity() -> f32 {
-    0.84
+    0.72
 }
 
 /// Complete theme contract matching `.ferric-theme.json`.
@@ -65,7 +65,7 @@ impl Default for ThemeConfig {
             sync_theme_to_android: true,
             ui_zoom: 1.0,
             acrylic_enabled: false,
-            acrylic_opacity: 0.84,
+            acrylic_opacity: 0.72,
         }
     }
 }
@@ -83,9 +83,9 @@ impl ThemeConfig {
             border_hex: "#252836".to_string(),
             background_mode: BackgroundMode::NativeAcrylic,
             corner_radius_px: 10.0,
-            panel_opacity: 0.84,
+            panel_opacity: 0.72,
             acrylic_enabled: true,
-            acrylic_opacity: 0.84,
+            acrylic_opacity: 0.72,
             ..Self::default()
         }
     }

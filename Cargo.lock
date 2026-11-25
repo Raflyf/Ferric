@@ -602,6 +602,7 @@ dependencies = [
  "ferric-sync",
  "makepad-widgets",
  "rfd",
+ "serde_json",
  "souvlaki",
  "webview2-com",
  "windows 0.62.2",

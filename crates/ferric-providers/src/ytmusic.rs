@@ -1168,7 +1168,7 @@ pub fn fetch_rich_home(
     let mut raw_home_picks = Vec::new();
     let mut seen_tracks = HashSet::new();
     let mut raw_home_shelves = Vec::new();
-    let mut all_tracks = Vec::new();
+    let mut all_tracks: Vec<Track> = Vec::new();
     let mut continuation_token = None;
 
     if let Some(root) = home_root {

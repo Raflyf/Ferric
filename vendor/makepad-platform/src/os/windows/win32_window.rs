@@ -471,17 +471,16 @@ impl Win32Window {
             }
             WM_NCPAINT => return LRESULT(0),
             WM_NCACTIVATE => {
-                // With WS_EX_NOREDIRECTIONBITMAP + frameless WM_NCCALCSIZE, forwarding the real
-                // lParam to DefWindowProcW never paints a classic GDI caption frame, while ensuring
-                // Windows 11 DWM activates the Acrylic/SystemBackdrop host immediately on cold start.
-                if INITIAL_ACRYLIC_BACKDROP.load(std::sync::atomic::Ordering::Acquire) {
-                    let margins = MARGINS {
-                        cxLeftWidth: -1,
-                        cxRightWidth: -1,
-                        cyTopHeight: -1,
-                        cyBottomHeight: -1,
-                    };
-                    let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+                // Keep Native Acrylic active across focus changes without flashing opaque fallback
+                // or triggering classic Win32 non-client caption redraws.
+                if IsIconic(hwnd).0 == 0 {
+                    let active_wparam =
+                        if INITIAL_ACRYLIC_BACKDROP.load(std::sync::atomic::Ordering::Acquire) {
+                            WPARAM(1)
+                        } else {
+                            wparam
+                        };
+                    return DefWindowProcW(hwnd, msg, active_wparam, LPARAM(-1));
                 }
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             }

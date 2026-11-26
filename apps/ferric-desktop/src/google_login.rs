@@ -706,10 +706,7 @@ mod imp {
                     unsafe {
                         let js = CoTaskMemPWSTR::from(hook_js);
                         hook_wv
-                            .AddScriptToExecuteOnDocumentCreated(
-                                *js.as_ref().as_pcwstr(),
-                                &handler,
-                            )
+                            .AddScriptToExecuteOnDocumentCreated(*js.as_ref().as_pcwstr(), &handler)
                             .map_err(webview2_com::Error::WindowsError)
                     }
                 }),

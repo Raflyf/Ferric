@@ -62,7 +62,6 @@ use {
                     },
                 },
                 Graphics::Gdi::{
-                    CreateSolidBrush,
                     HMONITOR,
                     GetDC,
                     MonitorFromWindow,
@@ -71,7 +70,6 @@ use {
                     LOGPIXELSX
                 },
                 Foundation::{
-                    COLORREF,
                     S_OK,
                     HWND,
                     BOOL,

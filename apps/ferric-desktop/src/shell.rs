@@ -231,6 +231,9 @@ mod win_impl {
     }
     static ACRYLIC_ENABLED: AtomicBool = AtomicBool::new(false);
     static ACRYLIC_TINT_RGB: AtomicU32 = AtomicU32::new(0x000B_0D14);
+    static APPLIED_ACRYLIC_HWND: AtomicIsize = AtomicIsize::new(0);
+    static APPLIED_ACRYLIC_ON: AtomicBool = AtomicBool::new(false);
+    static APPLIED_WCA_FALLBACK: AtomicBool = AtomicBool::new(false);
     static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
     static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
@@ -612,6 +615,16 @@ mod win_impl {
         let Some(hwnd) = active_process_hwnd() else {
             return;
         };
+        let hwnd_raw = hwnd.0 as isize;
+        if !APPLIED_WCA_FALLBACK.load(Ordering::Acquire)
+            && APPLIED_ACRYLIC_HWND.load(Ordering::Acquire) == hwnd_raw
+            && APPLIED_ACRYLIC_ON.load(Ordering::Acquire) == enabled
+        {
+            // Windows 11 Native Acrylic backdrop is already applied in this state on this HWND;
+            // skip redundant DwmSetWindowAttribute + SWP_FRAMECHANGED calls so adaptive accent
+            // updates or opacity drags never flash the DWM backdrop.
+            return;
+        }
         // SAFETY: Enables true per-pixel Windows 11 DWM Acrylic directly behind Ferric's
         // premultiplied DirectComposition swapchain — zero WS_EX_LAYERED text dimming.
         unsafe {
@@ -645,8 +658,13 @@ mod win_impl {
             );
             if hr != 0 {
                 // Windows 10 / older builds fallback
+                APPLIED_WCA_FALLBACK.store(true, Ordering::Release);
                 apply_wca_acrylic_fallback(hwnd, enabled);
+            } else {
+                APPLIED_WCA_FALLBACK.store(false, Ordering::Release);
             }
+            APPLIED_ACRYLIC_ON.store(enabled, Ordering::Release);
+            APPLIED_ACRYLIC_HWND.store(hwnd_raw, Ordering::Release);
             if IsWindowVisible(hwnd.0) != 0 {
                 let _ = SetWindowPos(
                     hwnd,
@@ -1486,17 +1504,17 @@ mod win_impl {
                     }
                 }
                 WM_NCACTIVATE => {
-                    // Preserve real lParam for DefSubclassProc so Windows 11 DWM activates the
-                    // Acrylic/SystemBackdrop frame on startup and focus transitions without
-                    // stalling in solid fallback (WS_EX_NOREDIRECTIONBITMAP prevents GDI chrome).
-                    if ACRYLIC_ENABLED.load(Ordering::Acquire) {
-                        let margins = DwmMargins {
-                            cx_left_width: -1,
-                            cx_right_width: -1,
-                            cy_top_height: -1,
-                            cy_bottom_height: -1,
+                    // Keep Windows 11 Native Acrylic (`DWMSBT_TRANSIENTWINDOW`) live across
+                    // focus/unfocus transitions without flashing to opaque solid fallback or
+                    // painting classic GDI caption chrome. Forward real params when minimized so
+                    // taskbar restore state remains intact.
+                    if IsIconic(hwnd.0) == 0 {
+                        let active_wparam = if ACRYLIC_ENABLED.load(Ordering::Acquire) {
+                            WPARAM(1)
+                        } else {
+                            wparam
                         };
-                        let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+                        return DefSubclassProc(hwnd, msg, active_wparam, LPARAM(-1));
                     }
                     return DefSubclassProc(hwnd, msg, wparam, lparam);
                 }
@@ -1550,64 +1568,13 @@ mod win_impl {
                             trim_working_set();
                             push_event(TrayEvent::HiddenToTray);
                         }
+                    } else if WINDOW_HIDDEN_OR_MIN.swap(false, Ordering::AcqRel) {
+                        push_event(TrayEvent::ShowWindow);
                     } else {
-                        if ACRYLIC_ENABLED.load(Ordering::Acquire) {
-                            let margins = DwmMargins {
-                                cx_left_width: -1,
-                                cx_right_width: -1,
-                                cy_top_height: -1,
-                                cy_bottom_height: -1,
-                            };
-                            let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
-                        }
-                        if WINDOW_HIDDEN_OR_MIN.swap(false, Ordering::AcqRel) {
-                            push_event(TrayEvent::ShowWindow);
-                        } else {
-                            push_event(TrayEvent::WindowMovedOrResized);
-                        }
+                        push_event(TrayEvent::WindowMovedOrResized);
                     }
                 }
-                WM_SHOWWINDOW => {
-                    if wparam.0 != 0 && ACRYLIC_ENABLED.load(Ordering::Acquire) {
-                        let margins = DwmMargins {
-                            cx_left_width: -1,
-                            cx_right_width: -1,
-                            cy_top_height: -1,
-                            cy_bottom_height: -1,
-                        };
-                        let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
-                        let none_b: i32 = DWMSBT_NONE;
-                        let acr_b: i32 = DWMSBT_TRANSIENTWINDOW;
-                        let _ = DwmSetWindowAttribute(
-                            hwnd,
-                            DWMWA_SYSTEMBACKDROP_TYPE,
-                            (&raw const none_b).cast(),
-                            std::mem::size_of::<i32>() as u32,
-                        );
-                        let _ = DwmSetWindowAttribute(
-                            hwnd,
-                            DWMWA_SYSTEMBACKDROP_TYPE,
-                            (&raw const acr_b).cast(),
-                            std::mem::size_of::<i32>() as u32,
-                        );
-                        let _ = SetWindowPos(
-                            hwnd,
-                            None,
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_FRAMECHANGED
-                                | SWP_NOMOVE
-                                | SWP_NOSIZE
-                                | SWP_NOZORDER
-                                | SWP_NOACTIVATE,
-                        );
-                        let _ = DwmFlush();
-                    }
-                    push_event(TrayEvent::WindowMovedOrResized);
-                }
-                WM_MOVE | WM_WINDOWPOSCHANGED => {
+                WM_SHOWWINDOW | WM_MOVE | WM_WINDOWPOSCHANGED => {
                     push_event(TrayEvent::WindowMovedOrResized);
                 }
                 WM_CLOSE => {

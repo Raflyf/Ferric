@@ -22,22 +22,81 @@ const BASE64URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
-/// The web-player token shares a rolling rate limit with the player. Without a gap between
-/// calls, a library sync (profile + pages + playlists) trips HTTP 429 almost immediately.
-static SPOTIFY_PACER: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+/// Adaptive pacing state shared across Spotify Web API calls so library sync stays well inside
+/// Spotify's rolling rate-limit window (especially for web-player tokens that share limits with
+/// the player itself).
+struct SpotifyPacerState {
+    last_request: Option<Instant>,
+    cooldown_until: Option<Instant>,
+    min_gap_ms: u64,
+}
 
-fn pace_spotify_api() {
-    const MIN_GAP: Duration = Duration::from_millis(200);
-    let mut last = SPOTIFY_PACER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(previous) = *last {
-        let elapsed = previous.elapsed();
-        if elapsed < MIN_GAP {
-            std::thread::sleep(MIN_GAP - elapsed);
+impl SpotifyPacerState {
+    const fn new() -> Self {
+        Self {
+            last_request: None,
+            cooldown_until: None,
+            min_gap_ms: 450,
         }
     }
-    *last = Some(Instant::now());
+}
+
+static SPOTIFY_PACER: std::sync::Mutex<SpotifyPacerState> =
+    std::sync::Mutex::new(SpotifyPacerState::new());
+
+fn pace_spotify_api(web_session: bool) {
+    let floor_ms = if web_session { 700 } else { 450 };
+    let sleep_dur = {
+        let mut state = SPOTIFY_PACER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        let gap = Duration::from_millis(state.min_gap_ms.max(floor_ms));
+        let mut target = now;
+        if let Some(prev) = state.last_request {
+            let next_allowed = prev + gap;
+            if next_allowed > target {
+                target = next_allowed;
+            }
+        }
+        if let Some(cd) = state.cooldown_until
+            && cd > target
+        {
+            target = cd;
+        }
+        state.last_request = Some(target);
+        target.saturating_duration_since(now)
+    };
+    if !sleep_dur.is_zero() {
+        std::thread::sleep(sleep_dur);
+    }
+}
+
+fn note_spotify_rate_limit(wait_secs: u64) {
+    let mut state = SPOTIFY_PACER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.min_gap_ms = state.min_gap_ms.saturating_add(350).min(2_000);
+    let until = Instant::now() + Duration::from_secs(wait_secs);
+    state.cooldown_until = Some(match state.cooldown_until {
+        Some(prev) if prev > until => prev,
+        _ => until,
+    });
+}
+
+fn note_spotify_success(web_session: bool) {
+    let floor_ms = if web_session { 700 } else { 450 };
+    let mut state = SPOTIFY_PACER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.min_gap_ms > floor_ms {
+        state.min_gap_ms = state.min_gap_ms.saturating_sub(50).max(floor_ms);
+    }
+}
+
+fn parse_retry_after_secs(raw: Option<&str>) -> Option<u64> {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +125,8 @@ pub struct CloudSyncReport {
     pub liked_tracks: Vec<Track>,
     pub playlists: Vec<SyncedPlaylistBundle>,
     pub etag_skipped: usize,
+    #[serde(default)]
+    pub rate_limited_skipped: usize,
 }
 
 #[derive(Debug)]
@@ -526,54 +587,139 @@ fn get_bearer_json<T: for<'de> Deserialize<'de>>(
     url: &str,
     access_token: &str,
 ) -> ProviderResult<T> {
-    const MAX_ATTEMPTS: usize = 3;
+    let resp = agent
+        .get(url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "Ferric/0.1.0")
+        .call()
+        .map_err(|e| ProviderError::Http(format!("API request failed: {e}")))?;
+
+    let status = resp.status().as_u16();
+    let bytes = resp
+        .into_body()
+        .into_with_config()
+        .limit(MAX_JSON_BYTES)
+        .read_to_vec()
+        .map_err(|e| ProviderError::Http(format!("Could not read API body: {e}")))?;
+
+    if status != 200 {
+        let snippet = String::from_utf8_lossy(&bytes);
+        let short: String = snippet.chars().take(180).collect();
+        return Err(ProviderError::Http(format!(
+            "API returned HTTP {status}: {short}"
+        )));
+    }
+
+    serde_json::from_slice(&bytes)
+        .map_err(|e| ProviderError::Http(format!("Failed to decode API JSON: {e}")))
+}
+
+enum SpotifyFetchError {
+    RateLimited { retry_after_secs: Option<u64> },
+    Other(ProviderError),
+}
+
+impl SpotifyFetchError {
+    fn into_provider_error(self) -> ProviderError {
+        match self {
+            Self::RateLimited {
+                retry_after_secs: Some(secs),
+            } => ProviderError::Http(format!(
+                "Spotify is rate-limiting this session (HTTP 429, Retry-After {secs}s). Wait ~{}s, then press Sync again.",
+                secs.max(10)
+            )),
+            Self::RateLimited {
+                retry_after_secs: None,
+            } => ProviderError::Http(
+                "Spotify is rate-limiting this session (HTTP 429). Wait a minute, then press Sync again."
+                    .to_string(),
+            ),
+            Self::Other(err) => err,
+        }
+    }
+}
+
+fn get_spotify_bearer_json<T: for<'de> Deserialize<'de>>(
+    agent: &ureq::Agent,
+    url: &str,
+    access_token: &str,
+    web_session: bool,
+) -> Result<T, SpotifyFetchError> {
+    const MAX_ATTEMPTS: usize = 4;
+    const MAX_INLINE_WAIT_SECS: u64 = 35;
+
     for attempt in 0..MAX_ATTEMPTS {
-        pace_spotify_api();
+        pace_spotify_api(web_session);
         let resp = agent
             .get(url)
             .header("Authorization", format!("Bearer {access_token}"))
             .header("Accept", "application/json")
             .header("User-Agent", "Ferric/0.1.0")
             .call()
-            .map_err(|e| ProviderError::Http(format!("API request failed: {e}")))?;
+            .map_err(|e| {
+                SpotifyFetchError::Other(ProviderError::Http(format!("API request failed: {e}")))
+            })?;
 
         let status = resp.status().as_u16();
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok());
+        let retry_after = parse_retry_after_secs(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+        );
         let bytes = resp
             .into_body()
             .into_with_config()
             .limit(MAX_JSON_BYTES)
             .read_to_vec()
-            .map_err(|e| ProviderError::Http(format!("Could not read API body: {e}")))?;
+            .map_err(|e| {
+                SpotifyFetchError::Other(ProviderError::Http(format!(
+                    "Could not read API body: {e}"
+                )))
+            })?;
 
         if status == 429 {
-            if attempt + 1 == MAX_ATTEMPTS {
-                return Err(ProviderError::Http(
-                    "Spotify is rate-limiting this session (HTTP 429). Wait a minute, then press Sync Web Library again."
-                        .to_string(),
-                ));
+            // If Spotify asks for a long cooldown (>35s), do not stall the worker silently —
+            // record cooldown, preserve partial sync progress, and tell the user clearly.
+            if let Some(secs) = retry_after
+                && secs > MAX_INLINE_WAIT_SECS
+            {
+                note_spotify_rate_limit(secs.min(120));
+                return Err(SpotifyFetchError::RateLimited {
+                    retry_after_secs: Some(secs),
+                });
             }
             let wait_secs = retry_after
-                .unwrap_or(3 * (attempt as u64 + 1))
-                .clamp(1, 20);
-            std::thread::sleep(Duration::from_secs(wait_secs));
+                .map(|s| s.saturating_add(1))
+                .unwrap_or_else(|| match attempt {
+                    0 => 4,
+                    1 => 8,
+                    _ => 15,
+                })
+                .clamp(2, MAX_INLINE_WAIT_SECS);
+            note_spotify_rate_limit(wait_secs);
+            if attempt + 1 == MAX_ATTEMPTS {
+                return Err(SpotifyFetchError::RateLimited {
+                    retry_after_secs: retry_after.or(Some(wait_secs)),
+                });
+            }
             continue;
         }
 
         if status != 200 {
             let snippet = String::from_utf8_lossy(&bytes);
             let short: String = snippet.chars().take(180).collect();
-            return Err(ProviderError::Http(format!(
+            return Err(SpotifyFetchError::Other(ProviderError::Http(format!(
                 "API returned HTTP {status}: {short}"
-            )));
+            ))));
         }
 
-        return serde_json::from_slice(&bytes)
-            .map_err(|e| ProviderError::Http(format!("Failed to decode API JSON: {e}")));
+        note_spotify_success(web_session);
+        return serde_json::from_slice(&bytes).map_err(|e| {
+            SpotifyFetchError::Other(ProviderError::Http(format!(
+                "Failed to decode API JSON: {e}"
+            )))
+        });
     }
     unreachable!("the retry loop always returns")
 }
@@ -738,9 +884,54 @@ fn map_spotify_track(raw: SpotifyTrackObject, liked: bool) -> Option<Track> {
 
 /// Synchronize user profile, up to 200 liked songs, and up to 30 playlists from Spotify Web API v1.
 pub fn sync_spotify_catalog(access_token: &str) -> ProviderResult<CloudSyncReport> {
+    sync_spotify_catalog_with_snapshots(access_token, &HashMap::new(), false)
+}
+
+fn should_skip_spotify_playlist(
+    playlist_id: &str,
+    snapshot_id: Option<&str>,
+    existing_snapshots: &HashMap<String, String>,
+) -> bool {
+    let Some(remote_snap) = snapshot_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let key = format!("spotify:playlist:{playlist_id}");
+    existing_snapshots
+        .get(&key)
+        .is_some_and(|local_snap| local_snap.trim() == remote_snap)
+}
+
+/// Synchronize Spotify profile, Liked Songs, and playlists while skipping playlists whose
+/// `snapshot_id` matches the local database and preserving partial progress if Spotify rate-limits
+/// mid-sync.
+pub fn sync_spotify_catalog_with_snapshots(
+    access_token: &str,
+    existing_snapshots: &HashMap<String, String>,
+    web_session: bool,
+) -> ProviderResult<CloudSyncReport> {
+    if web_session {
+        match crate::spotify_web::sync_spotify_web_catalog(access_token, existing_snapshots) {
+            Ok(report) => return Ok(report),
+            Err(crate::spotify_web::SpotifyWebSyncError::AuthExpired) => {
+                return Err(ProviderError::Http(
+                    "Spotify web session expired (1h token). Click 'Sign in via Web' to refresh."
+                        .to_string(),
+                ));
+            }
+            Err(crate::spotify_web::SpotifyWebSyncError::FallbackToRest(_)) => {
+                // Fall through to the paced Web API v1 path if Spotify rotates Pathfinder hashes.
+            }
+        }
+    }
+
     let agent = http_agent();
-    let profile: SpotifyProfile =
-        get_bearer_json(&agent, "https://api.spotify.com/v1/me", access_token)?;
+    let profile: SpotifyProfile = get_spotify_bearer_json(
+        &agent,
+        "https://api.spotify.com/v1/me",
+        access_token,
+        web_session,
+    )
+    .map_err(SpotifyFetchError::into_provider_error)?;
     let display_name = profile
         .display_name
         .map(|s| s.trim().to_string())
@@ -749,12 +940,23 @@ pub fn sync_spotify_catalog(access_token: &str) -> ProviderResult<CloudSyncRepor
 
     let mut liked_tracks = Vec::new();
     let mut liked_ids = HashSet::new();
+    let mut etag_skipped = 0usize;
+    let mut rate_limited_skipped = 0usize;
+    let mut hit_rate_limit = false;
 
     for page in 0..4_usize {
         let offset = page * 50;
         let url = format!("https://api.spotify.com/v1/me/tracks?limit=50&offset={offset}");
         let batch: SpotifyPaging<SpotifySavedTrackItem> =
-            get_bearer_json(&agent, &url, access_token)?;
+            match get_spotify_bearer_json(&agent, &url, access_token, web_session) {
+                Ok(b) => b,
+                Err(SpotifyFetchError::RateLimited { .. }) => {
+                    hit_rate_limit = true;
+                    rate_limited_skipped += 1;
+                    break;
+                }
+                Err(other) => return Err(other.into_provider_error()),
+            };
         if batch.items.is_empty() {
             break;
         }
@@ -773,64 +975,95 @@ pub fn sync_spotify_catalog(access_token: &str) -> ProviderResult<CloudSyncRepor
         }
     }
 
-    let playlists_page: SpotifyPaging<SpotifyPlaylistSummary> = get_bearer_json(
-        &agent,
-        "https://api.spotify.com/v1/me/playlists?limit=30",
-        access_token,
-    )?;
-
-    let mut playlists = Vec::with_capacity(playlists_page.items.len());
-    for pl in playlists_page.items {
-        if pl.id.trim().is_empty() {
-            continue;
-        }
-        let tracks_url = format!(
-            "https://api.spotify.com/v1/playlists/{}/tracks?limit=100",
-            url_encode(&pl.id)
-        );
-        let tracks_page: SpotifyPaging<SpotifySavedTrackItem> =
-            get_bearer_json(&agent, &tracks_url, access_token)?;
-
-        let mut bundle_tracks = Vec::with_capacity(tracks_page.items.len());
-        for item in tracks_page.items {
-            if let Some(raw_track) = item.track {
-                let is_liked = raw_track
-                    .id
-                    .as_deref()
-                    .is_some_and(|sid| liked_ids.contains(sid));
-                if let Some(track) = map_spotify_track(raw_track, is_liked) {
-                    bundle_tracks.push(track);
+    let mut playlists = Vec::new();
+    if !hit_rate_limit {
+        let playlists_page: Option<SpotifyPaging<SpotifyPlaylistSummary>> =
+            match get_spotify_bearer_json(
+                &agent,
+                "https://api.spotify.com/v1/me/playlists?limit=30",
+                access_token,
+                web_session,
+            ) {
+                Ok(p) => Some(p),
+                Err(SpotifyFetchError::RateLimited { .. }) => {
+                    rate_limited_skipped += 1;
+                    None
                 }
+                Err(other) => return Err(other.into_provider_error()),
+            };
+
+        if let Some(playlists_page) = playlists_page {
+            let total_items = playlists_page.items.len();
+            playlists.reserve(total_items);
+            for (idx, pl) in playlists_page.items.into_iter().enumerate() {
+                if pl.id.trim().is_empty() {
+                    continue;
+                }
+                if should_skip_spotify_playlist(
+                    &pl.id,
+                    pl.snapshot_id.as_deref(),
+                    existing_snapshots,
+                ) {
+                    etag_skipped += 1;
+                    continue;
+                }
+                let tracks_url = format!(
+                    "https://api.spotify.com/v1/playlists/{}/tracks?limit=100&fields=items(track(id,name,duration_ms,artists(name),album(name),external_ids(isrc))),next",
+                    url_encode(&pl.id)
+                );
+                let tracks_page: SpotifyPaging<SpotifySavedTrackItem> =
+                    match get_spotify_bearer_json(&agent, &tracks_url, access_token, web_session) {
+                        Ok(p) => p,
+                        Err(SpotifyFetchError::RateLimited { .. }) => {
+                            rate_limited_skipped += total_items.saturating_sub(idx);
+                            break;
+                        }
+                        Err(other) => return Err(other.into_provider_error()),
+                    };
+
+                let mut bundle_tracks = Vec::with_capacity(tracks_page.items.len());
+                for item in tracks_page.items {
+                    if let Some(raw_track) = item.track {
+                        let is_liked = raw_track
+                            .id
+                            .as_deref()
+                            .is_some_and(|sid| liked_ids.contains(sid));
+                        if let Some(track) = map_spotify_track(raw_track, is_liked) {
+                            bundle_tracks.push(track);
+                        }
+                    }
+                }
+
+                let playlist = Playlist {
+                    id: format!("spotify:playlist:{}", pl.id),
+                    name: if pl.name.trim().is_empty() {
+                        "Spotify Playlist".to_string()
+                    } else {
+                        pl.name.trim().to_string()
+                    },
+                    source: TrackSource::Spotify,
+                    etag: pl.snapshot_id,
+                    track_count: bundle_tracks.len(),
+                    description: pl
+                        .description
+                        .map(|d| d.trim().to_string())
+                        .unwrap_or_default(),
+                    thumbnail_url: None,
+                };
+                playlists.push(SyncedPlaylistBundle {
+                    playlist,
+                    tracks: bundle_tracks,
+                });
             }
         }
-
-        let playlist = Playlist {
-            id: format!("spotify:playlist:{}", pl.id),
-            name: if pl.name.trim().is_empty() {
-                "Spotify Playlist".to_string()
-            } else {
-                pl.name.trim().to_string()
-            },
-            source: TrackSource::Spotify,
-            etag: pl.snapshot_id,
-            track_count: bundle_tracks.len(),
-            description: pl
-                .description
-                .map(|d| d.trim().to_string())
-                .unwrap_or_default(),
-            thumbnail_url: None,
-        };
-        playlists.push(SyncedPlaylistBundle {
-            playlist,
-            tracks: bundle_tracks,
-        });
     }
 
     Ok(CloudSyncReport {
         display_name,
         liked_tracks,
         playlists,
-        etag_skipped: 0,
+        etag_skipped,
+        rate_limited_skipped,
     })
 }
 
@@ -1349,6 +1582,7 @@ pub fn sync_youtube_catalog(
         liked_tracks,
         playlists,
         etag_skipped,
+        rate_limited_skipped: 0,
     })
 }
 
@@ -1479,5 +1713,32 @@ mod tests {
         assert!(yt.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
         assert!(yt.contains("youtube.readonly"));
         assert!(yt.contains("code_challenge_method=S256"));
+    }
+
+    #[test]
+    fn spotify_snapshot_and_retry_after_helpers_skip_unchanged_and_parse_headers() {
+        let mut existing = HashMap::new();
+        existing.insert("spotify:playlist:pl123".to_string(), "snap_abc".to_string());
+        assert!(should_skip_spotify_playlist(
+            "pl123",
+            Some("snap_abc"),
+            &existing
+        ));
+        assert!(!should_skip_spotify_playlist(
+            "pl123",
+            Some("snap_new"),
+            &existing
+        ));
+        assert!(!should_skip_spotify_playlist("pl123", None, &existing));
+        assert!(!should_skip_spotify_playlist(
+            "pl999",
+            Some("snap_abc"),
+            &existing
+        ));
+
+        assert_eq!(parse_retry_after_secs(Some(" 12 ")), Some(12));
+        assert_eq!(parse_retry_after_secs(Some("0")), None);
+        assert_eq!(parse_retry_after_secs(Some("invalid")), None);
+        assert_eq!(parse_retry_after_secs(None), None);
     }
 }

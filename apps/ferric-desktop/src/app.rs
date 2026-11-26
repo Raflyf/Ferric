@@ -46,7 +46,8 @@ use ferric_providers::lyrics::{
 };
 use ferric_providers::oauth::{
     DEFAULT_OAUTH_CALLBACK_PATH, DEFAULT_OAUTH_CALLBACK_PORT, bind_loopback_callback,
-    generate_pkce_pair, spotify_authorize_url, spotify_exchange_code, sync_spotify_catalog,
+    generate_pkce_pair, spotify_authorize_url, spotify_exchange_code,
+    sync_spotify_catalog_with_snapshots,
 };
 use ferric_providers::public_sync::{
     import_spotify_public_url, import_youtube_public_url, parse_spotify_target,
@@ -907,6 +908,7 @@ live_design! {
         align: { y: 0.5 }
         spacing: 6,
         show_bg: true,
+        grab_key_focus: false,
         cursor: Hand,
         draw_bg: {
             instance active: 0.0
@@ -1043,6 +1045,158 @@ live_design! {
         }
     }
 
+    SidebarLibraryRow = <View> {
+        width: Fill,
+        height: 50,
+        padding: { left: 6, right: 6, top: 5, bottom: 5 }
+        flow: Right,
+        align: { y: 0.5 }
+        spacing: 9,
+        cursor: Hand,
+        grab_key_focus: false,
+        show_bg: true,
+        draw_bg: {
+            instance hover: 0.0
+            instance active: 0.0
+            uniform acrylic_on: 0.0
+            uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), mix(vec4(0.105, 0.112, 0.155, 1.0), vec4(0.05, 0.06, 0.10, 0.08), self.light_mode), self.hover);
+                let acr_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(ink, 0.095 + 0.025 * self.light_mode), self.hover);
+                let idle = mix(solid_idle, acr_idle, self.acrylic_on);
+                let act_solid = mix(mix(#191C26, vec4(0.05, 0.06, 0.10, 0.10), self.light_mode), vec4(self.accent_col.xyz, 0.18), 0.30);
+                let act_acr = vec4(mix(ink, self.accent_col.xyz, 0.28), 0.16);
+                sdf.fill_keep(mix(idle, mix(act_solid, act_acr, self.acrylic_on), self.active));
+                let rim = mix(vec4(ink, 0.05 * self.hover * self.acrylic_on), vec4(self.accent_col.xyz, 0.42), self.active);
+                sdf.stroke(rim, 1.0);
+                return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.14 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.10 } } apply: { draw_bg: { hover: 1.0 } } }
+            }
+        }
+        art = <FerricCoverArt> {
+            width: 40,
+            height: 40,
+            draw_bg: { radius: 5.0 }
+        }
+        <View> {
+            width: Fill,
+            height: Fit,
+            flow: Down,
+            spacing: 2,
+            title = <Label> {
+                width: Fill,
+                flow: Right,
+                padding: 0,
+                draw_text: { color: #ECEEF5, text_style: <THEME_FONT_BOLD> { font_size: 8.9, line_spacing: 1.0 } }
+                text: ""
+            }
+            sub = <Label> {
+                width: Fill,
+                flow: Right,
+                padding: 0,
+                draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 7.7, line_spacing: 1.0 } }
+                text: ""
+            }
+        }
+    }
+
+    SidebarSmartRow = <View> {
+        width: Fill,
+        height: 50,
+        padding: { left: 6, right: 6, top: 5, bottom: 5 }
+        flow: Right,
+        align: { y: 0.5 }
+        spacing: 9,
+        cursor: Hand,
+        grab_key_focus: false,
+        show_bg: true,
+        draw_bg: {
+            instance hover: 0.0
+            instance active: 0.0
+            uniform acrylic_on: 0.0
+            uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), mix(vec4(0.105, 0.112, 0.155, 1.0), vec4(0.05, 0.06, 0.10, 0.08), self.light_mode), self.hover);
+                let acr_idle = mix(vec4(0.0, 0.0, 0.0, 0.0), vec4(ink, 0.095 + 0.025 * self.light_mode), self.hover);
+                let idle = mix(solid_idle, acr_idle, self.acrylic_on);
+                let act_solid = mix(mix(#191C26, vec4(0.05, 0.06, 0.10, 0.10), self.light_mode), vec4(self.accent_col.xyz, 0.18), 0.30);
+                let act_acr = vec4(mix(ink, self.accent_col.xyz, 0.28), 0.16);
+                sdf.fill_keep(mix(idle, mix(act_solid, act_acr, self.acrylic_on), self.active));
+                let rim = mix(vec4(ink, 0.05 * self.hover * self.acrylic_on), vec4(self.accent_col.xyz, 0.42), self.active);
+                sdf.stroke(rim, 1.0);
+                return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.14 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.10 } } apply: { draw_bg: { hover: 1.0 } } }
+            }
+        }
+        badge = <View> {
+            width: 40,
+            height: 40,
+            align: { x: 0.5, y: 0.5 }
+            show_bg: true,
+            draw_bg: {
+                uniform bg_a: #4A35D6
+                uniform bg_b: #8A74F9
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 5.0);
+                    let t = clamp((self.pos.x + self.pos.y) * 0.5, 0.0, 1.0);
+                    sdf.fill(mix(self.bg_a, self.bg_b, t));
+                    return sdf.result;
+                }
+            }
+            icon = <Icon> {
+                icon_walk: { width: 17, height: 17 }
+                draw_icon: {
+                    curve: 1.15,
+                    linearize: 0.08,
+                    brightness: 1.08,
+                    svg_path: "M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z"
+                    color: #FFFFFF
+                }
+            }
+        }
+        <View> {
+            width: Fill,
+            height: Fit,
+            flow: Down,
+            spacing: 2,
+            title = <Label> {
+                width: Fill,
+                flow: Right,
+                padding: 0,
+                draw_text: { color: #ECEEF5, text_style: <THEME_FONT_BOLD> { font_size: 8.9, line_spacing: 1.0 } }
+                text: ""
+            }
+            sub = <Label> {
+                width: Fill,
+                flow: Right,
+                padding: 0,
+                draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 7.7, line_spacing: 1.0 } }
+                text: ""
+            }
+        }
+    }
+
     App = {{App}} {
         ui: <Root> {
             main_window = <Window> {
@@ -1137,89 +1291,164 @@ live_design! {
                                 }
                             }
 
-                            // Center drag area + inline direct search bar (no modal popup)
+                            // Center drag area + Spotify-style Home pill + Search bar + Recents pill
                             <View> {
                                 width: Fill,
                                 height: Fill,
                                 align: { x: 0.5, y: 0.5 }
-                                top_search_box = <View> {
-                                    width: 268,
-                                    height: 26,
-                                    padding: { left: 9, right: 6, top: 0, bottom: 0 }
+                                top_center_grp = <View> {
+                                    width: Fit,
+                                    height: Fit,
                                     flow: Right,
                                     align: { y: 0.5 }
-                                    spacing: 5,
-                                    show_bg: true,
-                                    draw_bg: {
-                                        instance hover: 0.0
-                                        uniform acrylic_on: 0.0
-                                        uniform accent_col: #E86A2C
-                                        uniform light_mode: 0.0
-                                        fn pixel(self) -> vec4 {
-                                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                            let r = (self.rect_size.y - 1.0) * 0.30;
-                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-                                            let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
-                                            let solid_c = mix(mix(#07080C, #12141F, self.hover), mix(#E4DDD0, #DAD1C1, self.hover), self.light_mode);
-                                            let acr_c = mix(vec4(ink, 0.065 + 0.03 * self.light_mode), vec4(ink, 0.14), self.hover);
-                                            sdf.fill_keep(mix(solid_c, acr_c, self.acrylic_on));
-                                            let b_col = mix(mix(mix(#212433, #3A3F57, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(ink, 0.15 + 0.06 * self.light_mode + 0.08 * self.hover), self.acrylic_on);
-                                            sdf.stroke(b_col, 1.0);
-                                            return sdf.result;
-                                        }
-                                    }
-                                    animator: {
-                                        hover = {
-                                            default: off,
-                                            off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 } } }
-                                            on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0 } } }
-                                        }
-                                    }
-                                    top_search_icon = <Icon> {
-                                        icon_walk: { width: 13, height: 13 }
-                                        draw_icon: {
-                                            curve: 1.15,
-                                            linearize: 0.08,
-                                            brightness: 1.05,
-                                            svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
-                                            color: #7D8090
-                                        }
-                                    }
-                                    top_search_input = <FerricInput> {
-                                        width: Fill,
-                                        height: Fill,
-                                        padding: { left: 2, right: 2, top: 0, bottom: 0 }
-                                        empty_text: "Search music... (Ctrl+K)"
+                                    spacing: 7,
+
+                                    nav_home = <FerricIconBtn> {
+                                        width: 28,
+                                        height: 28,
+                                        icon_walk: { width: Fit, height: 15 }
                                         draw_bg: {
-                                            color: #00000000,
-                                            color_empty: #00000000,
-                                            color_hover: #00000000,
-                                            color_focus: #00000000,
-                                            border_size: 0.0,
-                                            border_color_1: #00000000,
-                                            border_color_2: #00000000,
-                                            border_color_1_empty: #00000000,
-                                            border_color_2_empty: #00000000,
-                                            border_color_1_hover: #00000000,
-                                            border_color_2_hover: #00000000,
-                                            border_color_1_focus: #00000000,
-                                            border_color_2_focus: #00000000
+                                            active: 1.0
+                                            fn pixel(self) -> vec4 {
+                                                let p = self.pos * self.rect_size;
+                                                let sdf = Sdf2d::viewport(p);
+                                                let inset = 0.5 + self.down * 0.65;
+                                                let r = (self.rect_size.y - inset * 2.0) * 0.5;
+                                                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
+                                                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                                                let solid_idle = mix(mix(#14151D, #222533, self.hover), mix(#E4DDD0, #D8CFC0, self.hover), self.light_mode);
+                                                let acr_idle = mix(vec4(ink, 0.08 + 0.025 * self.light_mode), vec4(ink, 0.16), self.hover);
+                                                let idle = mix(solid_idle, acr_idle, self.acrylic_on);
+                                                let solid_act = mix(#252838, #12151F, self.light_mode);
+                                                let acr_act = vec4(ink, 0.21);
+                                                sdf.fill_keep(mix(idle, mix(solid_act, acr_act, self.acrylic_on), self.active));
+                                                let rim = mix(vec4(ink, 0.10 + 0.09 * self.hover), vec4(ink, 0.24), self.active);
+                                                sdf.stroke(rim, 1.0);
+                                                return sdf.result;
+                                            }
                                         }
-                                        draw_text: {
-                                            color: #F4F4F7,
-                                            color_empty: #7D8090,
-                                            text_style: <THEME_FONT_REGULAR> { font_size: 8.6, line_spacing: 1.0 }
+                                        draw_icon: {
+                                            svg_path: "M10 20V14H14V20H19V12H22L12 3L2 12H5V20H10Z"
+                                            color: #F4F4F7
                                         }
                                     }
-                                    top_search_clear_btn = <FerricIconBtn> {
-                                        visible: false,
-                                        width: 20,
-                                        height: 20,
-                                        icon_walk: { width: Fit, height: 11 }
+
+                                    top_search_box = <View> {
+                                        width: 306,
+                                        height: 28,
+                                        padding: { left: 10, right: 6, top: 0, bottom: 0 }
+                                        flow: Right,
+                                        align: { y: 0.5 }
+                                        spacing: 6,
+                                        show_bg: true,
+                                        draw_bg: {
+                                            instance hover: 0.0
+                                            uniform acrylic_on: 0.0
+                                            uniform accent_col: #E86A2C
+                                            uniform light_mode: 0.0
+                                            fn pixel(self) -> vec4 {
+                                                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                                let r = (self.rect_size.y - 1.0) * 0.50;
+                                                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
+                                                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                                                let solid_c = mix(mix(#11131B, #1A1D2B, self.hover), mix(#E4DDD0, #DAD1C1, self.hover), self.light_mode);
+                                                let acr_c = mix(vec4(ink, 0.075 + 0.03 * self.light_mode), vec4(ink, 0.145), self.hover);
+                                                sdf.fill_keep(mix(solid_c, acr_c, self.acrylic_on));
+                                                let b_col = mix(mix(mix(#242736, #3E445E, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(ink, 0.15 + 0.06 * self.light_mode + 0.08 * self.hover), self.acrylic_on);
+                                                sdf.stroke(b_col, 1.0);
+                                                return sdf.result;
+                                            }
+                                        }
+                                        animator: {
+                                            hover = {
+                                                default: off,
+                                                off = { from: { all: Forward { duration: 0.15 } } apply: { draw_bg: { hover: 0.0 } } }
+                                                on = { from: { all: Forward { duration: 0.11 } } apply: { draw_bg: { hover: 1.0 } } }
+                                            }
+                                        }
+                                        top_search_icon = <Icon> {
+                                            icon_walk: { width: 13, height: 13 }
+                                            draw_icon: {
+                                                curve: 1.15,
+                                                linearize: 0.08,
+                                                brightness: 1.05,
+                                                svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
+                                                color: #7D8090
+                                            }
+                                        }
+                                        top_search_input = <FerricInput> {
+                                            width: Fill,
+                                            height: Fill,
+                                            padding: { left: 2, right: 2, top: 0, bottom: 0 }
+                                            empty_text: "What do you want to play? (Ctrl+K)"
+                                            draw_bg: {
+                                                color: #00000000,
+                                                color_empty: #00000000,
+                                                color_hover: #00000000,
+                                                color_focus: #00000000,
+                                                border_size: 0.0,
+                                                border_color_1: #00000000,
+                                                border_color_2: #00000000,
+                                                border_color_1_empty: #00000000,
+                                                border_color_2_empty: #00000000,
+                                                border_color_1_hover: #00000000,
+                                                border_color_2_hover: #00000000,
+                                                border_color_1_focus: #00000000,
+                                                border_color_2_focus: #00000000
+                                            }
+                                            draw_text: {
+                                                color: #F4F4F7,
+                                                color_empty: #7D8090,
+                                                text_style: <THEME_FONT_REGULAR> { font_size: 8.6, line_spacing: 1.0 }
+                                            }
+                                        }
+                                        top_search_clear_btn = <FerricIconBtn> {
+                                            visible: false,
+                                            width: 20,
+                                            height: 20,
+                                            icon_walk: { width: Fit, height: 11 }
+                                            draw_icon: {
+                                                svg_path: "M19 6.41L17.59 5L12 10.59L6.41 5L5 6.41L10.59 12L5 17.59L6.41 19L12 13.41L17.59 19L19 17.59L13.41 12L19 6.41Z"
+                                                color: #8A8E9E,
+                                                color_hover: #FFFFFF
+                                            }
+                                        }
+                                        div_top_search = <SolidView> { width: 1, height: 14, draw_bg: { color: #2A2D3D } }
+                                        nav_search = <FerricIconBtn> {
+                                            width: 22,
+                                            height: 22,
+                                            icon_walk: { width: Fit, height: 13 }
+                                            draw_icon: {
+                                                svg_path: "M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM14.19 14.19L6 18L9.81 9.81L18 6L14.19 14.19ZM12 10.9C11.39 10.9 10.9 11.39 10.9 12C10.9 12.61 11.39 13.1 12 13.1C12.61 13.1 13.1 12.61 13.1 12C13.1 11.39 12.61 10.9 12 10.9Z"
+                                            }
+                                        }
+                                    }
+
+                                    nav_recents = <FerricIconBtn> {
+                                        width: 28,
+                                        height: 28,
+                                        icon_walk: { width: Fit, height: 14 }
+                                        draw_bg: {
+                                            fn pixel(self) -> vec4 {
+                                                let p = self.pos * self.rect_size;
+                                                let sdf = Sdf2d::viewport(p);
+                                                let inset = 0.5 + self.down * 0.65;
+                                                let r = (self.rect_size.y - inset * 2.0) * 0.5;
+                                                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
+                                                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                                                let solid_idle = mix(mix(#14151D, #222533, self.hover), mix(#E4DDD0, #D8CFC0, self.hover), self.light_mode);
+                                                let acr_idle = mix(vec4(ink, 0.08 + 0.025 * self.light_mode), vec4(ink, 0.16), self.hover);
+                                                let idle = mix(solid_idle, acr_idle, self.acrylic_on);
+                                                let solid_act = mix(#252838, #12151F, self.light_mode);
+                                                let acr_act = vec4(ink, 0.21);
+                                                sdf.fill_keep(mix(idle, mix(solid_act, acr_act, self.acrylic_on), self.active));
+                                                let rim = mix(vec4(ink, 0.10 + 0.09 * self.hover), vec4(ink, 0.24), self.active);
+                                                sdf.stroke(rim, 1.0);
+                                                return sdf.result;
+                                            }
+                                        }
                                         draw_icon: {
-                                            svg_path: "M19 6.41L17.59 5L12 10.59L6.41 5L5 6.41L10.59 12L5 17.59L6.41 19L12 13.41L17.59 19L19 17.59L13.41 12L19 6.41Z"
-                                            color: #8A8E9E,
-                                            color_hover: #FFFFFF
+                                            svg_path: "M13 3C8.03 3 4 7.03 4 12H1L4.89 15.89L4.96 16.03L9 12H6C6 8.13 9.13 5 13 5C16.87 5 20 8.13 20 12C20 15.87 16.87 19 13 19C11.07 19 9.32 18.21 8.06 16.94L6.64 18.36C8.27 19.99 10.51 21 13 21C17.97 21 22 16.97 22 12C22 7.03 17.97 3 13 3ZM12 8V13L16.28 15.54L17 14.33L13.5 12.25V8H12Z"
                                         }
                                     }
                                 }
@@ -1276,82 +1505,210 @@ live_design! {
                             height: Fill,
                             flow: Right,
 
-                            // LEFT SIDEBAR (168px, Pure Music Nav)
+                            // LEFT SIDEBAR (236px, Spotify-style "Your Library")
                             left_sidebar = <FerricSurface> {
-                                width: 168,
+                                width: 236,
                                 height: Fill,
                                 padding: { left: 8, right: 8, top: 8, bottom: 8 }
                                 flow: Down,
-                                spacing: 2,
+                                spacing: 5,
                                 draw_bg: { base_col: #09090D }
 
-                                nav_home = <FerricNavItem> {
-                                    text: "Home"
-                                    draw_bg: { active: 1.0 }
-                                    draw_icon: {
-                                        svg_path: "M10 20V14H14V20H19V12H22L12 3L2 12H5V20H10Z"
-                                        color: #F4F4F7
+                                // Header: Your Library + "+ Create"
+                                <View> {
+                                    width: Fill,
+                                    height: Fit,
+                                    padding: { left: 4, right: 2, top: 1, bottom: 1 }
+                                    flow: Right,
+                                    align: { y: 0.5 }
+                                    spacing: 6,
+
+                                    lib_hdr_icon = <Icon> {
+                                        icon_walk: { width: 15, height: 15 }
+                                        draw_icon: {
+                                            curve: 1.15,
+                                            linearize: 0.08,
+                                            brightness: 1.05,
+                                            svg_path: "M4 6H2V20C2 21.1 2.9 22 4 22H18V20H4V6ZM20 2H8C6.9 2 6 2.9 6 4V16C6 17.1 6.9 18 8 18H20C21.1 18 22 17.1 22 16V4C22 2.9 21.1 2 20 2ZM19 11H15V15H13V11H9V9H13V5H15V9H19V11Z"
+                                            color: #9A9CA8
+                                        }
                                     }
-                                    draw_text: { color: #F4F4F7 }
-                                }
-                                nav_search = <FerricNavItem> {
-                                    text: "Search"
-                                    draw_icon: { svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z" }
-                                }
-                                nav_recents = <FerricNavItem> {
-                                    text: "Recents"
-                                    draw_icon: { svg_path: "M13 3C8.03 3 4 7.03 4 12H1L4.89 15.89L4.96 16.03L9 12H6C6 8.13 9.13 5 13 5C16.87 5 20 8.13 20 12C20 15.87 16.87 19 13 19C11.07 19 9.32 18.21 8.06 16.94L6.64 18.36C8.27 19.99 10.51 21 13 21C17.97 21 22 16.97 22 12C22 7.03 17.97 3 13 3ZM12 8V13L16.28 15.54L17 14.33L13.5 12.25V8H12Z" }
-                                }
-
-                                lbl_m_library = <Label> {
-                                    margin: { left: 9, top: 10, bottom: 2 }
-                                    draw_text: { color: #8A8EA2, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
-                                    text: "LIBRARY"
-                                }
-                                nav_songs = <FerricNavItem> {
-                                    text: "Songs"
-                                    draw_icon: { svg_path: "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17C6 19.21 7.79 21 10 21C12.21 21 14 19.21 14 17V7H18V3H12Z" }
-                                }
-                                nav_albums = <FerricNavItem> {
-                                    text: "Albums"
-                                    draw_icon: { svg_path: "M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM12 14.5C10.62 14.5 9.5 13.38 9.5 12C9.5 10.62 10.62 9.5 12 9.5C13.38 9.5 14.5 10.62 14.5 12C14.5 13.38 13.38 14.5 12 14.5Z" }
-                                }
-                                nav_artists = <FerricNavItem> {
-                                    text: "Artists"
-                                    draw_icon: { svg_path: "M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z" }
-                                }
-                                nav_playlists = <FerricNavItem> {
-                                    text: "Playlists"
-                                    draw_icon: { svg_path: "M4 6H18V8H4V6ZM4 11H18V13H4V11ZM4 16H14V18H4V16ZM16 16V22L21 19L16 16Z" }
+                                    lbl_m_library = <Label> {
+                                        width: Fill,
+                                        draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 10.0 } }
+                                        text: "Your Library"
+                                    }
+                                    sidebar_create_pl_btn = <FerricBtn> {
+                                        height: 23,
+                                        padding: { left: 8, right: 9 }
+                                        draw_text: { text_style: { font_size: 8.1 } }
+                                        text: "+ Create"
+                                    }
                                 }
 
-                                lbl_m_pinned = <Label> {
-                                    margin: { left: 9, top: 10, bottom: 2 }
-                                    draw_text: { color: #8A8EA2, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
-                                    text: "PINNED"
+                                // Library category chips (Spotify-style filter/navigation row)
+                                <View> {
+                                    width: Fill,
+                                    height: Fit,
+                                    padding: { left: 2, right: 2 }
+                                    flow: Right,
+                                    spacing: 4,
+                                    nav_playlists = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, draw_text: { text_style: { font_size: 7.9 } }, text: "Playlists" }
+                                    nav_songs = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, draw_text: { text_style: { font_size: 7.9 } }, text: "Songs" }
+                                    nav_albums = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, draw_text: { text_style: { font_size: 7.9 } }, text: "Albums" }
+                                    nav_artists = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, draw_text: { text_style: { font_size: 7.9 } }, text: "Artists" }
                                 }
+
+                                // Inline filter search + count row
+                                sidebar_filter_box = <View> {
+                                    width: Fill,
+                                    height: 25,
+                                    padding: { left: 7, right: 7, top: 0, bottom: 0 }
+                                    flow: Right,
+                                    align: { y: 0.5 }
+                                    spacing: 5,
+                                    show_bg: true,
+                                    draw_bg: {
+                                        uniform acrylic_on: 0.0
+                                        uniform light_mode: 0.0
+                                        fn pixel(self) -> vec4 {
+                                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
+                                            let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                                            let solid_c = mix(#11131B, #E6DFD2, self.light_mode);
+                                            let acr_c = vec4(ink, 0.055 + 0.025 * self.light_mode);
+                                            sdf.fill_keep(mix(solid_c, acr_c, self.acrylic_on));
+                                            let b_col = mix(mix(#1E2130, #CBC2AC, self.light_mode), vec4(ink, 0.09 + 0.04 * self.light_mode), self.acrylic_on);
+                                            sdf.stroke(b_col, 1.0);
+                                            return sdf.result;
+                                        }
+                                    }
+                                    sidebar_filter_icon = <Icon> {
+                                        icon_walk: { width: 11, height: 11 }
+                                        draw_icon: {
+                                            curve: 1.15,
+                                            linearize: 0.08,
+                                            brightness: 1.05,
+                                            svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
+                                            color: #7D8090
+                                        }
+                                    }
+                                    sidebar_lib_filter_input = <FerricInput> {
+                                        width: Fill,
+                                        height: Fill,
+                                        padding: { left: 1, right: 1, top: 0, bottom: 0 }
+                                        empty_text: "Filter library..."
+                                        draw_bg: {
+                                            color: #00000000,
+                                            color_empty: #00000000,
+                                            color_hover: #00000000,
+                                            color_focus: #00000000,
+                                            border_size: 0.0,
+                                            border_color_1: #00000000,
+                                            border_color_2: #00000000,
+                                            border_color_1_empty: #00000000,
+                                            border_color_2_empty: #00000000,
+                                            border_color_1_hover: #00000000,
+                                            border_color_2_hover: #00000000,
+                                            border_color_1_focus: #00000000,
+                                            border_color_2_focus: #00000000
+                                        }
+                                        draw_text: {
+                                            color: #F4F4F7,
+                                            color_empty: #7D8090,
+                                            text_style: <THEME_FONT_REGULAR> { font_size: 8.0, line_spacing: 1.0 }
+                                        }
+                                    }
+                                    lbl_m_pinned = <Label> {
+                                        width: Fit,
+                                        draw_text: { color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 7.5 } }
+                                        text: "0"
+                                    }
+                                }
+
+                                // Scrollable rich playlist list (40x40 artwork + title + subtitle)
                                 <FerricScrollYView> {
                                     width: Fill,
                                     height: Fill,
                                     flow: Down,
-                                    spacing: 1,
-                                    pin_liked_btn = <FerricPinBtn> { text: "Liked Songs" }
-                                    pin_local_btn = <FerricPinBtn> { text: "Local Lossless" }
-                                    pin_slot_0 = <FerricPinBtn> { visible: false, text: "" }
-                                    pin_slot_1 = <FerricPinBtn> { visible: false, text: "" }
-                                    pin_slot_2 = <FerricPinBtn> { visible: false, text: "" }
-                                    pin_slot_3 = <FerricPinBtn> { visible: false, text: "" }
-                                    pin_slot_4 = <FerricPinBtn> { visible: false, text: "" }
+                                    spacing: 2,
+                                    pin_liked_row = <SidebarSmartRow> {
+                                        badge = {
+                                            draw_bg: { bg_a: #4A35D6, bg_b: #8F7BF9 }
+                                        }
+                                        title = { text: "Liked Songs" }
+                                        sub = { text: "Playlist · 0 songs" }
+                                    }
+                                    pin_local_row = <SidebarSmartRow> {
+                                        badge = {
+                                            draw_bg: { bg_a: #2E3446, bg_b: #5A627A }
+                                            icon = {
+                                                draw_icon: {
+                                                    svg_path: "M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM12 14.5C10.62 14.5 9.5 13.38 9.5 12C9.5 10.62 10.62 9.5 12 9.5C13.38 9.5 14.5 10.62 14.5 12C14.5 13.38 13.38 14.5 12 14.5Z"
+                                                }
+                                            }
+                                        }
+                                        title = { text: "Local Lossless" }
+                                        sub = { text: "Local · 0 songs" }
+                                    }
+                                    pin_slot_0 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_1 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_2 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_3 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_4 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_5 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_6 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_7 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_8 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_9 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_10 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_11 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_12 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_13 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_14 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_15 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_16 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_17 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_18 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_19 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_20 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_21 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_22 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_23 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_24 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_25 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_26 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_27 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_28 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_29 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_30 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_31 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_32 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_33 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_34 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_35 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_36 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_37 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_38 = <SidebarLibraryRow> { visible: false }
+                                    pin_slot_39 = <SidebarLibraryRow> { visible: false }
                                 }
 
-                                div_h_side = <FerricDividerH> { margin: { top: 4, bottom: 4 } }
-                                nav_settings = <FerricNavItem> {
-                                    text: "Settings"
-                                    draw_icon: { svg_path: "M19.14 12.94C19.18 12.64 19.2 12.33 19.2 12C19.2 11.68 19.18 11.36 19.13 11.06L21.16 9.48C21.34 9.34 21.39 9.07 21.28 8.87L19.36 5.55C19.24 5.33 18.99 5.26 18.77 5.33L16.38 6.29C15.88 5.91 15.35 5.59 14.76 5.35L14.4 2.81C14.36 2.57 14.16 2.4 13.92 2.4H10.08C9.84 2.4 9.65 2.57 9.61 2.81L9.25 5.35C8.66 5.59 8.12 5.92 7.63 6.29L5.24 5.33C5.02 5.25 4.77 5.33 4.65 5.55L2.74 8.87C2.62 9.08 2.66 9.34 2.86 9.48L4.89 11.06C4.84 11.36 4.8 11.69 4.8 12C4.8 12.31 4.82 12.64 4.87 12.94L2.84 14.52C2.66 14.66 2.61 14.93 2.72 15.13L4.64 18.45C4.76 18.67 5.01 18.74 5.23 18.67L7.62 17.71C8.12 18.09 8.65 18.41 9.24 18.65L9.6 21.19C9.65 21.43 9.84 21.6 10.08 21.6H13.92C14.16 21.6 14.36 21.43 14.39 21.19L14.75 18.65C15.34 18.41 15.88 18.09 16.37 17.71L18.76 18.67C18.98 18.75 19.23 18.67 19.35 18.45L21.27 15.13C21.39 14.91 21.34 14.66 21.15 14.52L19.14 12.94ZM12 15.6C10.02 15.6 8.4 13.98 8.4 12C8.4 10.02 10.02 8.4 12 8.4C13.98 8.4 15.6 10.02 15.6 12C15.6 13.98 13.98 15.6 12 15.6Z" }
-                                }
-                                sidebar_add_folder_btn = <FerricNavItem> {
-                                    text: "Add Folder"
-                                    draw_icon: { svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z" }
+                                div_h_side = <FerricDividerH> { margin: { top: 2, bottom: 2 } }
+                                <View> {
+                                    width: Fill,
+                                    height: Fit,
+                                    flow: Right,
+                                    spacing: 4,
+                                    nav_settings = <FerricNavItem> {
+                                        width: Fill,
+                                        text: "Settings"
+                                        draw_icon: { svg_path: "M19.14 12.94C19.18 12.64 19.2 12.33 19.2 12C19.2 11.68 19.18 11.36 19.13 11.06L21.16 9.48C21.34 9.34 21.39 9.07 21.28 8.87L19.36 5.55C19.24 5.33 18.99 5.26 18.77 5.33L16.38 6.29C15.88 5.91 15.35 5.59 14.76 5.35L14.4 2.81C14.36 2.57 14.16 2.4 13.92 2.4H10.08C9.84 2.4 9.65 2.57 9.61 2.81L9.25 5.35C8.66 5.59 8.12 5.92 7.63 6.29L5.24 5.33C5.02 5.25 4.77 5.33 4.65 5.55L2.74 8.87C2.62 9.08 2.66 9.34 2.86 9.48L4.89 11.06C4.84 11.36 4.8 11.69 4.8 12C4.8 12.31 4.82 12.64 4.87 12.94L2.84 14.52C2.66 14.66 2.61 14.93 2.72 15.13L4.64 18.45C4.76 18.67 5.01 18.74 5.23 18.67L7.62 17.71C8.12 18.09 8.65 18.41 9.24 18.65L9.6 21.19C9.65 21.43 9.84 21.6 10.08 21.6H13.92C14.16 21.6 14.36 21.43 14.39 21.19L14.75 18.65C15.34 18.41 15.88 18.09 16.37 17.71L18.76 18.67C18.98 18.75 19.23 18.67 19.35 18.45L21.27 15.13C21.39 14.91 21.34 14.66 21.15 14.52L19.14 12.94ZM12 15.6C10.02 15.6 8.4 13.98 8.4 12C8.4 10.02 10.02 8.4 12 8.4C13.98 8.4 15.6 10.02 15.6 12C15.6 13.98 13.98 15.6 12 15.6Z" }
+                                    }
+                                    sidebar_add_folder_btn = <FerricNavItem> {
+                                        width: Fill,
+                                        text: "Add Folder"
+                                        draw_icon: { svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z" }
+                                    }
                                 }
                             }
 
@@ -3397,6 +3754,8 @@ pub struct App {
     #[rust]
     home_loading_more: bool,
     #[rust]
+    home_request_seq: u64,
+    #[rust]
     home_more_cycle: usize,
     #[rust]
     missing_art_queue: Rc<RefCell<Vec<Track>>>,
@@ -3406,6 +3765,8 @@ pub struct App {
     artists_page: usize,
     #[rust]
     playlists_page: usize,
+    #[rust]
+    sidebar_filter_query: String,
     #[rust]
     search_result: YtmRichSearch,
     #[rust]
@@ -3428,6 +3789,10 @@ pub struct App {
     queue_context: String,
     #[rust]
     last_radio_seed_id: Option<String>,
+    #[rust]
+    radio_loading: bool,
+    #[rust]
+    spotify_sync_in_flight: bool,
     #[rust]
     theme: ThemeConfig,
     #[rust]
@@ -3930,7 +4295,7 @@ impl App {
             .set_text(cx, &format!("{:.0}%", z * 100.0));
 
         self.left_w_target = if self.left_sidebar_open {
-            (168.0 * z).max(132.0)
+            (236.0 * z).max(196.0)
         } else {
             0.0
         };
@@ -3953,7 +4318,7 @@ impl App {
         if self.left_sidebar_open {
             self.ui
                 .view(id!(left_sidebar))
-                .apply_over(cx, live! { width: ((168.0 * z).max(132.0)) });
+                .apply_over(cx, live! { width: ((236.0 * z).max(196.0)) });
         }
         if self.right_sidebar_open {
             self.ui
@@ -4034,22 +4399,12 @@ impl App {
         );
         self.sync_fullscreen_media_layout(cx);
 
-        for nid in [
-            id!(nav_home),
-            id!(nav_search),
-            id!(nav_recents),
-            id!(nav_songs),
-            id!(nav_albums),
-            id!(nav_artists),
-            id!(nav_playlists),
-            id!(nav_settings),
-            id!(sidebar_add_folder_btn),
-        ] {
+        for nid in [id!(nav_settings), id!(sidebar_add_folder_btn)] {
             self.ui.button(nid).apply_over(
                 cx,
                 live! {
                     height: (28.0 * z),
-                    draw_text: { text_style: { font_size: (9.2 * z) } }
+                    draw_text: { text_style: { font_size: (8.8 * z) } }
                 },
             );
         }
@@ -4705,8 +5060,8 @@ impl App {
             self.playlists = store.list_playlists().unwrap_or_default();
         }
         let init_z = self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
-        self.left_w_cur = 168.0 * init_z;
-        self.left_w_target = 168.0 * init_z;
+        self.left_w_cur = 236.0 * init_z;
+        self.left_w_target = 236.0 * init_z;
         self.right_w_cur = 260.0 * init_z;
         self.right_w_target = 260.0 * init_z;
         self.displayed_accent = rgba_vec4(&self.theme.accent_hex);
@@ -4917,19 +5272,38 @@ impl App {
             0.0_f32
         };
         let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
-        let nav_map = [
+        for (p, btn_id) in [
             (MainPage::Home, id!(nav_home)),
             (MainPage::Search, id!(nav_search)),
             (MainPage::Recents, id!(nav_recents)),
+        ] {
+            let active = p == target;
+            self.ui.button(btn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), light_mode: (lm) }
+                    draw_icon: { color: (if active { bright } else { icon_muted }), color_hover: (icon_hov), color_focus: (icon_hov), color_down: (icon_hov) }
+                },
+            );
+        }
+        for (p, btn_id) in [
+            (MainPage::Playlists, id!(nav_playlists)),
             (MainPage::Songs, id!(nav_songs)),
             (MainPage::Albums, id!(nav_albums)),
             (MainPage::Artists, id!(nav_artists)),
-            (MainPage::Playlists, id!(nav_playlists)),
-            (MainPage::Settings, id!(nav_settings)),
-        ];
-        for (p, btn_id) in nav_map {
+        ] {
             let active = p == target;
             self.ui.button(btn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), light_mode: (lm) }
+                    draw_text: { active: (if active { 1.0 } else { 0.0 }), light_mode: (lm), color: (muted) }
+                },
+            );
+        }
+        {
+            let active = target == MainPage::Settings;
+            self.ui.button(id!(nav_settings)).apply_over(
                 cx,
                 live! {
                     draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), light_mode: (lm) }
@@ -4977,6 +5351,7 @@ impl App {
             MainPage::Settings => self.refresh_storage_stats(cx),
             _ => {}
         }
+        self.refresh_sidebar_library(cx);
         self.page_reveal_t = 0.0;
         self.start_motion(cx);
         self.ui.redraw(cx);
@@ -5298,6 +5673,7 @@ impl App {
         } else if self.active_page == MainPage::Detail {
             self.refresh_detail_hero(cx);
         }
+        self.refresh_sidebar_library(cx);
         self.refresh_right_sidebar(cx);
         let is_playing = self
             .audio
@@ -5516,16 +5892,7 @@ impl App {
             cx,
             live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
         );
-        for nid in [
-            id!(nav_home),
-            id!(nav_search),
-            id!(nav_recents),
-            id!(nav_songs),
-            id!(nav_albums),
-            id!(nav_artists),
-            id!(nav_playlists),
-            id!(nav_settings),
-        ] {
+        for nid in [id!(nav_settings), id!(sidebar_add_folder_btn)] {
             self.ui.button(nid).apply_over(
                 cx,
                 live! { draw_bg: { accent_col: (accent), light_mode: (lm) } },
@@ -5873,40 +6240,12 @@ impl App {
             self.playlists_page = max_pl_page;
         }
 
-        // Sidebar Pinned slots (honors user pinned_ids across playlists, albums, and artists;
-        // falls back to first 5 saved playlists when nothing is explicitly pinned).
-        let pinned_items = self.resolve_pinned_sidebar_items();
-        let pin_slots = [
-            id!(pin_slot_0),
-            id!(pin_slot_1),
-            id!(pin_slot_2),
-            id!(pin_slot_3),
-            id!(pin_slot_4),
-        ];
-        for (i, slot) in pin_slots.into_iter().enumerate() {
-            if let Some(group) = pinned_items.get(i) {
-                self.ui.button(slot).set_visible(cx, true);
-                self.ui
-                    .button(slot)
-                    .set_text(cx, &clip_text(&clean_display_text(&group.title), 18));
-            } else {
-                self.ui.button(slot).set_visible(cx, false);
-            }
-        }
+        // Sidebar "Your Library" rich list (40x40 covers + pinned/saved playlists)
+        self.refresh_sidebar_library(cx);
 
-        // Top account status
+        // Top account status (reflects both Google/YouTube Music and Spotify sessions)
+        self.refresh_top_account_btn(cx);
         let yt_ok = self.accounts.youtube_connected && !self.accounts.youtube_sapisid.is_empty();
-        let top_acct = if yt_ok {
-            let n = self.accounts.youtube_channel_name.trim();
-            if n.is_empty() {
-                "Google".to_string()
-            } else {
-                clip_text(n, 16)
-            }
-        } else {
-            "Sign in".to_string()
-        };
-        self.ui.button(id!(top_account_btn)).set_text(cx, &top_acct);
         self.ui.label(id!(yt_state_lbl)).set_text(
             cx,
             &if yt_ok {
@@ -5920,50 +6259,282 @@ impl App {
         );
     }
 
-    fn resolve_pinned_sidebar_items(&self) -> Vec<CollectionGroup> {
+    fn refresh_top_account_btn(&self, cx: &mut Cx) {
+        let yt_ok = self.accounts.youtube_connected && !self.accounts.youtube_sapisid.is_empty();
+        let sp_ok = self.accounts.spotify_connected
+            && (!self.accounts.spotify_access_token.trim().is_empty()
+                || !self.accounts.spotify_web_cookie.trim().is_empty());
+        let yt_name = self.accounts.youtube_channel_name.trim();
+        let sp_name = self.accounts.spotify_user_name.trim();
+        let top_acct = if yt_ok && sp_ok {
+            if !yt_name.is_empty() {
+                clip_text(yt_name, 16)
+            } else if !sp_name.is_empty() {
+                clip_text(sp_name, 16)
+            } else {
+                "Connected".to_string()
+            }
+        } else if yt_ok {
+            if yt_name.is_empty() {
+                "Google".to_string()
+            } else {
+                clip_text(yt_name, 16)
+            }
+        } else if sp_ok {
+            if sp_name.is_empty() {
+                "Spotify".to_string()
+            } else {
+                clip_text(sp_name, 16)
+            }
+        } else {
+            "Sign in".to_string()
+        };
+        let pal = self.adaptive_palette();
+        let icon_col = if yt_ok || sp_ok {
+            if pal.is_light {
+                vec4(0.075, 0.478, 0.282, 1.0)
+            } else {
+                vec4(0.353, 0.820, 0.549, 1.0)
+            }
+        } else {
+            rgba_to_vec4(pal.brand_accent)
+        };
+        self.ui.button(id!(top_account_btn)).set_text(cx, &top_acct);
+        self.ui
+            .button(id!(top_account_btn))
+            .apply_over(cx, live! { draw_icon: { color: (icon_col) } });
+    }
+
+    fn resolve_sidebar_library_entries(&self) -> Vec<SidebarLibraryEntry> {
+        const MAX_SIDEBAR_SLOTS: usize = 40;
+        let query = self.sidebar_filter_query.trim().to_ascii_lowercase();
+        let matches_query = |title: &str, sub: &str| {
+            query.is_empty()
+                || title.to_ascii_lowercase().contains(&query)
+                || sub.to_ascii_lowercase().contains(&query)
+        };
+        let format_pl_sub = |pl: &Playlist, pinned: bool| {
+            let prefix = if pinned { "Pinned · " } else { "" };
+            let src = match pl.source {
+                TrackSource::Spotify => "Spotify",
+                TrackSource::Local => "Local",
+                TrackSource::Subsonic => "Subsonic",
+                _ => "YouTube",
+            };
+            format!("{prefix}Playlist · {src} · {} songs", pl.track_count)
+        };
+
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for pin_id in &self.session_state.pinned_ids {
-            if out.len() >= 5 {
+            if out.len() >= MAX_SIDEBAR_SLOTS {
                 break;
             }
             if let Some(pl) = self.playlists.iter().find(|p| &p.id == pin_id) {
-                let tracks = self
-                    .db
-                    .as_ref()
-                    .and_then(|d| d.list_playlist_tracks(&pl.id).ok())
-                    .unwrap_or_default();
-                out.push(CollectionGroup {
-                    id: pl.id.clone(),
-                    title: pl.name.clone(),
-                    subtitle: pl.description.clone(),
-                    kind: YtmCardKind::Playlist,
-                    thumbnail_url: pl.thumbnail_url.clone(),
-                    tracks,
-                });
+                let sub = format_pl_sub(pl, true);
+                if matches_query(&pl.name, &sub) && seen.insert(pl.id.clone()) {
+                    out.push(SidebarLibraryEntry {
+                        id: pl.id.clone(),
+                        title: pl.name.clone(),
+                        subtitle: sub,
+                        thumbnail_url: pl.thumbnail_url.clone(),
+                        is_circle: false,
+                    });
+                }
             } else if let Some(alb) = self.album_groups.iter().find(|g| &g.id == pin_id) {
-                out.push(alb.clone());
+                let sub = format!("Pinned · Album · {}", alb.subtitle);
+                if matches_query(&alb.title, &sub) && seen.insert(alb.id.clone()) {
+                    out.push(SidebarLibraryEntry {
+                        id: alb.id.clone(),
+                        title: alb.title.clone(),
+                        subtitle: sub,
+                        thumbnail_url: alb.thumbnail_url.clone(),
+                        is_circle: false,
+                    });
+                }
             } else if let Some(art) = self.artist_groups.iter().find(|g| &g.id == pin_id) {
-                out.push(art.clone());
+                let sub = "Pinned · Artist".to_string();
+                if matches_query(&art.title, &sub) && seen.insert(art.id.clone()) {
+                    out.push(SidebarLibraryEntry {
+                        id: art.id.clone(),
+                        title: art.title.clone(),
+                        subtitle: sub,
+                        thumbnail_url: art.thumbnail_url.clone(),
+                        is_circle: true,
+                    });
+                }
             }
         }
-        if out.is_empty() {
-            for pl in self.playlists.iter().take(5) {
-                let tracks = self
-                    .db
-                    .as_ref()
-                    .and_then(|d| d.list_playlist_tracks(&pl.id).ok())
-                    .unwrap_or_default();
-                out.push(CollectionGroup {
+        for pl in &self.playlists {
+            if out.len() >= MAX_SIDEBAR_SLOTS {
+                break;
+            }
+            let sub = format_pl_sub(pl, false);
+            if matches_query(&pl.name, &sub) && seen.insert(pl.id.clone()) {
+                out.push(SidebarLibraryEntry {
                     id: pl.id.clone(),
                     title: pl.name.clone(),
-                    subtitle: pl.description.clone(),
-                    kind: YtmCardKind::Playlist,
+                    subtitle: sub,
                     thumbnail_url: pl.thumbnail_url.clone(),
-                    tracks,
+                    is_circle: false,
                 });
             }
         }
         out
+    }
+
+    fn refresh_sidebar_library(&mut self, cx: &mut Cx) {
+        let entries = self.resolve_sidebar_library_entries();
+        if let Some(cache) = &mut self.artwork {
+            for entry in &entries {
+                if let Some(url) = entry.thumbnail_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+            }
+        }
+        let pal = self.adaptive_palette();
+        let acr = if self.theme.acrylic_enabled {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
+        let accent = rgba_to_vec4(pal.accent);
+        let title_col = rgba_to_vec4(pal.text_primary);
+        let sub_col = rgba_to_vec4(pal.text_muted);
+
+        let liked_count = self.all_tracks.iter().filter(|t| t.liked).count();
+        let local_count = self
+            .all_tracks
+            .iter()
+            .filter(|t| t.source == TrackSource::Local)
+            .count();
+        let query = self.sidebar_filter_query.trim().to_ascii_lowercase();
+
+        let liked_vis = query.is_empty() || "liked songs".contains(&query);
+        let liked_act =
+            self.active_page == MainPage::Songs && self.active_filter == LibraryFilter::Liked;
+        let liked_row = self.ui.view(id!(pin_liked_row));
+        liked_row.set_visible(cx, liked_vis);
+        liked_row.apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    active: (if liked_act { 1.0 } else { 0.0 }),
+                    acrylic_on: (acr),
+                    accent_col: (accent),
+                    light_mode: (lm)
+                }
+            },
+        );
+        liked_row.label(id!(title)).apply_over(
+            cx,
+            live! { draw_text: { color: (if liked_act { accent } else { title_col }) } },
+        );
+        liked_row
+            .label(id!(sub))
+            .set_text(cx, &format!("Playlist · {liked_count} songs"));
+        liked_row
+            .label(id!(sub))
+            .apply_over(cx, live! { draw_text: { color: (sub_col) } });
+
+        let local_vis = query.is_empty() || "local lossless".contains(&query);
+        let local_act =
+            self.active_page == MainPage::Songs && self.active_filter == LibraryFilter::Local;
+        let local_row = self.ui.view(id!(pin_local_row));
+        local_row.set_visible(cx, local_vis);
+        local_row.apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    active: (if local_act { 1.0 } else { 0.0 }),
+                    acrylic_on: (acr),
+                    accent_col: (accent),
+                    light_mode: (lm)
+                }
+            },
+        );
+        local_row.label(id!(title)).apply_over(
+            cx,
+            live! { draw_text: { color: (if local_act { accent } else { title_col }) } },
+        );
+        local_row
+            .label(id!(sub))
+            .set_text(cx, &format!("Local · {local_count} songs"));
+        local_row
+            .label(id!(sub))
+            .apply_over(cx, live! { draw_text: { color: (sub_col) } });
+
+        self.ui
+            .label(id!(lbl_m_pinned))
+            .set_text(cx, &format!("{}", entries.len()));
+
+        let active_detail_id =
+            (self.active_page == MainPage::Detail).then_some(self.detail_state.id.as_str());
+        for (i, slot) in sidebar_pin_slot_ids().into_iter().enumerate() {
+            let row = self.ui.view(slot);
+            if let Some(entry) = entries.get(i) {
+                row.set_visible(cx, true);
+                let is_act = active_detail_id == Some(entry.id.as_str());
+                row.apply_over(
+                    cx,
+                    live! {
+                        draw_bg: {
+                            active: (if is_act { 1.0 } else { 0.0 }),
+                            acrylic_on: (acr),
+                            accent_col: (accent),
+                            light_mode: (lm)
+                        }
+                    },
+                );
+                row.label(id!(title))
+                    .set_text(cx, &clip_text(&clean_display_text(&entry.title), 22));
+                row.label(id!(title)).apply_over(
+                    cx,
+                    live! { draw_text: { color: (if is_act { accent } else { title_col }) } },
+                );
+                row.label(id!(sub))
+                    .set_text(cx, &clip_text(&clean_display_text(&entry.subtitle), 27));
+                row.label(id!(sub))
+                    .apply_over(cx, live! { draw_text: { color: (sub_col) } });
+                self.bind_cover_art_url(
+                    cx,
+                    row.ferric_cover_art(id!(art)),
+                    entry.thumbnail_url.as_deref(),
+                    None,
+                    false,
+                    0.4,
+                    entry.is_circle,
+                );
+            } else {
+                row.set_visible(cx, false);
+            }
+        }
+    }
+
+    fn resolve_sidebar_collection(&self, target_id: &str) -> Option<CollectionGroup> {
+        if let Some(pl) = self.playlists.iter().find(|p| p.id == target_id) {
+            let tracks = self
+                .db
+                .as_ref()
+                .and_then(|d| d.list_playlist_tracks(&pl.id).ok())
+                .unwrap_or_default();
+            return Some(CollectionGroup {
+                id: pl.id.clone(),
+                title: pl.name.clone(),
+                subtitle: pl.description.clone(),
+                kind: YtmCardKind::Playlist,
+                thumbnail_url: pl.thumbnail_url.clone(),
+                tracks,
+            });
+        }
+        if let Some(alb) = self.album_groups.iter().find(|g| g.id == target_id) {
+            return Some(alb.clone());
+        }
+        if let Some(art) = self.artist_groups.iter().find(|g| g.id == target_id) {
+            return Some(art.clone());
+        }
+        None
     }
 
     fn home_quick_picks_pool(&self) -> Vec<Track> {
@@ -6389,9 +6960,14 @@ impl App {
         }
 
         // Up next (10 rows)
+        let upnext_txt = if upcoming.is_empty() && self.radio_loading {
+            "Up next (loading...)".to_string()
+        } else {
+            format!("Up next ({})", upcoming.len())
+        };
         self.ui
             .label(id!(q_upnext_header))
-            .set_text(cx, &format!("Up next ({})", upcoming.len()));
+            .set_text(cx, &upnext_txt);
         self.ui.label(id!(q_radio_status)).set_text(
             cx,
             if self.session_state.autoplay_radio {
@@ -6956,7 +7532,7 @@ impl App {
         self.ui.label(id!(cache_stats_lbl)).set_text(
             cx,
             &format!(
-                "Audio Stream Cache: {} · Artwork Cache: {}",
+                "Audio Stream Cache: {} / 512 MB (auto-clean) · Artwork Cache: {} / 128 MB (auto-clean)",
                 format_bytes_mb(audio_sz),
                 format_bytes_mb(art_sz)
             ),
@@ -7197,6 +7773,7 @@ impl App {
         } else {
             0.0_f32
         };
+        cx.set_win32_initial_acrylic(self.theme.acrylic_enabled);
         win32_set_native_acrylic(
             self.theme.acrylic_enabled,
             self.theme.acrylic_opacity,
@@ -7513,6 +8090,25 @@ impl App {
                 draw_cursor: { color: (brand_accent) }
             },
         );
+        self.ui.view(id!(sidebar_filter_box)).apply_over(
+            cx,
+            live! { draw_bg: { acrylic_on: (acr), light_mode: (lm) } },
+        );
+        self.ui
+            .widget(id!(sidebar_filter_icon))
+            .apply_over(cx, live! { draw_icon: { color: (icon_muted) } });
+        self.ui
+            .widget(id!(lib_hdr_icon))
+            .apply_over(cx, live! { draw_icon: { color: (icon_idle) } });
+        self.ui
+            .text_input(id!(sidebar_lib_filter_input))
+            .apply_over(
+                cx,
+                live! {
+                    draw_text: { color: (text_primary), color_empty: (text_muted) }
+                    draw_cursor: { color: (brand_accent) }
+                },
+            );
 
         let (inp_bg, inp_hov, inp_foc, inp_b, inp_bh) = if self.theme.acrylic_enabled {
             if pal.is_light {
@@ -7622,6 +8218,7 @@ impl App {
 
         for btn_id in [
             id!(top_account_btn),
+            id!(sidebar_create_pl_btn),
             id!(home_retry_btn),
             id!(home_play_all_btn),
             id!(home_load_more_btn),
@@ -7760,23 +8357,44 @@ impl App {
             );
         }
 
-        // Sidebar navigation items (preserve active highlight + adapt ink)
-        let nav_map = [
+        // Topbar icon nav pills (Home, Explore/Search, Recents)
+        for (p, nid) in [
             (MainPage::Home, id!(nav_home)),
             (MainPage::Search, id!(nav_search)),
             (MainPage::Recents, id!(nav_recents)),
-            (MainPage::Songs, id!(nav_songs)),
-            (MainPage::Albums, id!(nav_albums)),
-            (MainPage::Artists, id!(nav_artists)),
-            (MainPage::Playlists, id!(nav_playlists)),
-            (MainPage::Settings, id!(nav_settings)),
-        ];
-        for (p, nid) in nav_map {
+        ] {
             let active = p == self.active_page;
             self.ui.button(nid).apply_over(
                 cx,
                 live! {
-                    draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), light_mode: (lm) }
+                    draw_icon: { color: (if active { text_primary } else { icon_idle }), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
+                },
+            );
+        }
+        // Left sidebar library category chips (Playlists, Songs, Albums, Artists)
+        for (p, nid) in [
+            (MainPage::Playlists, id!(nav_playlists)),
+            (MainPage::Songs, id!(nav_songs)),
+            (MainPage::Albums, id!(nav_albums)),
+            (MainPage::Artists, id!(nav_artists)),
+        ] {
+            let active = p == self.active_page;
+            self.ui.button(nid).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), light_mode: (lm) }
+                    draw_text: { active: (if active { 1.0 } else { 0.0 }), light_mode: (lm), color: (text_secondary) }
+                },
+            );
+        }
+        // Left sidebar bottom utility items (Settings, Add Folder)
+        {
+            let active = self.active_page == MainPage::Settings;
+            self.ui.button(id!(nav_settings)).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
                     draw_icon: { color: (if active { text_primary } else { icon_idle }), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
                     draw_text: { color: (if active { text_primary } else { text_secondary }), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
                 },
@@ -7790,22 +8408,22 @@ impl App {
                 draw_text: { color: (text_secondary), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
             },
         );
-        for pin_id in [
-            id!(pin_liked_btn),
-            id!(pin_local_btn),
-            id!(pin_slot_0),
-            id!(pin_slot_1),
-            id!(pin_slot_2),
-            id!(pin_slot_3),
-            id!(pin_slot_4),
-        ] {
-            self.ui.button(pin_id).apply_over(
+        for row_id in [
+            id!(pin_liked_row) as &[LiveId],
+            id!(pin_local_row) as &[LiveId],
+        ]
+        .into_iter()
+        .chain(sidebar_pin_slot_ids())
+        {
+            let row = self.ui.view(row_id);
+            row.apply_over(
                 cx,
-                live! {
-                    draw_bg: { acrylic_on: (acr), light_mode: (lm) }
-                    draw_text: { color: (text_secondary), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
-                },
+                live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
             );
+            row.label(id!(title))
+                .apply_over(cx, live! { draw_text: { color: (text_primary) } });
+            row.label(id!(sub))
+                .apply_over(cx, live! { draw_text: { color: (text_muted) } });
         }
 
         // All Chip buttons (moods, filters, tabs, tint presets, quality, queue/lyrics tabs)
@@ -8055,6 +8673,7 @@ impl App {
         // Dividers adapt cleanly to light/dark background
         for div_id in [
             id!(div_top_l),
+            id!(div_top_search),
             id!(div_top_r),
             id!(div_h_top),
             id!(div_h_side),
@@ -8075,6 +8694,7 @@ impl App {
         // All primary shell labels -> WCAG-verified primary ink
         for lid in [
             id!(brand_title_lbl),
+            id!(lbl_m_library),
             id!(lbl_t_quick_picks),
             id!(sh0_title_lbl),
             id!(sh1_title_lbl),
@@ -8153,7 +8773,6 @@ impl App {
 
         // All secondary/muted shell labels -> WCAG-verified secondary/muted ink
         for lid in [
-            id!(lbl_m_library),
             id!(lbl_m_pinned),
             id!(home_status_lbl),
             id!(search_status_lbl),
@@ -8476,13 +9095,14 @@ impl App {
             return;
         };
         self.last_radio_seed_id = Some(track.id.clone());
+        self.radio_loading = true;
         let session = self.current_ytm_session();
         let seed_track_id = track.id.clone();
         let seed_title = track.title.clone();
         let seed_artist = track.artist.clone();
         let seed_album = track.album.clone();
         thread::spawn(move || {
-            if let Ok(tracks) = fetch_radio_up_next_for_track(
+            match fetch_radio_up_next_for_track(
                 &session,
                 &vid,
                 &seed_title,
@@ -8490,13 +9110,26 @@ impl App {
                 &seed_album,
                 15,
                 force,
-            ) && !tracks.is_empty()
-            {
-                let _ = tx.send(BgMessage::RadioLoaded {
-                    seed_track_id,
-                    seed_title,
-                    tracks,
-                });
+            ) {
+                Ok(tracks) if !tracks.is_empty() => {
+                    let _ = tx.send(BgMessage::RadioLoaded {
+                        seed_track_id,
+                        seed_title,
+                        tracks,
+                    });
+                }
+                Ok(_) => {
+                    let _ = tx.send(BgMessage::RadioFailed {
+                        seed_track_id,
+                        error: "Radio returned no tracks".to_string(),
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(BgMessage::RadioFailed {
+                        seed_track_id,
+                        error: err.to_string(),
+                    });
+                }
             }
         });
     }
@@ -9446,6 +10079,8 @@ impl App {
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
+        self.home_request_seq = self.home_request_seq.wrapping_add(1);
+        let seq = self.home_request_seq;
         self.active_mood_idx = mood_index;
         self.qp_page = 0;
         self.shelf_pages = [0; 8];
@@ -9462,12 +10097,16 @@ impl App {
             match fetch_rich_home(&session, mood_params.as_deref(), fresh_seed, &taste) {
                 Ok(home) => {
                     let _ = tx.send(BgMessage::YtmRichHomeLoaded {
+                        seq,
                         mood_index,
                         home: Box::new(home),
                     });
                 }
                 Err(err) => {
-                    let _ = tx.send(BgMessage::YtmRichHomeFailed(err.to_string()));
+                    let _ = tx.send(BgMessage::YtmRichHomeFailed {
+                        seq,
+                        error: err.to_string(),
+                    });
                 }
             }
         });
@@ -9845,6 +10484,7 @@ impl App {
                 .text_input(id!(spotify_client_input))
                 .set_text(cx, &self.accounts.spotify_client_id);
         }
+        self.refresh_top_account_btn(cx);
     }
 
     fn start_spotify_login(&mut self, cx: &mut Cx) {
@@ -9895,11 +10535,23 @@ impl App {
     }
 
     fn sync_spotify_library(&mut self, cx: &mut Cx) {
-        let status_lbl = if self.is_spotify_web_session_active() {
+        self.sync_spotify_library_with_delay(cx, 0);
+    }
+
+    fn sync_spotify_library_with_delay(&mut self, cx: &mut Cx, initial_delay_ms: u64) {
+        let web_session = self.is_spotify_web_session_active();
+        let status_lbl = if web_session {
             id!(spotify_web_status_lbl)
         } else {
             id!(spotify_oauth_status_lbl)
         };
+        if self.spotify_sync_in_flight {
+            self.ui.label(status_lbl).set_text(
+                cx,
+                "Spotify sync already in progress... Waiting for current request to finish.",
+            );
+            return;
+        }
         let token = self.accounts.spotify_access_token.trim().to_string();
         if token.is_empty() {
             self.ui.label(status_lbl).set_text(
@@ -9911,14 +10563,37 @@ impl App {
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
-        self.ui
-            .label(status_lbl)
-            .set_text(cx, "Syncing your Spotify library...");
+        let existing_snapshots: HashMap<String, String> = self
+            .playlists
+            .iter()
+            .filter(|pl| pl.id.starts_with("spotify:playlist:"))
+            .filter_map(|pl| {
+                pl.etag
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|snap| (pl.id.clone(), snap.to_string()))
+            })
+            .collect();
+        self.spotify_sync_in_flight = true;
+        self.ui.label(status_lbl).set_text(
+            cx,
+            if web_session {
+                "Syncing your Spotify library gently (respecting rate limits)..."
+            } else {
+                "Syncing your Spotify library..."
+            },
+        );
         thread::spawn(move || {
-            let msg = match sync_spotify_catalog(&token) {
-                Ok(report) => BgMessage::SpotifyCatalogSynced(Box::new(report)),
-                Err(err) => BgMessage::SpotifySyncFailed(err.to_string()),
-            };
+            if initial_delay_ms > 0 {
+                thread::sleep(Duration::from_millis(initial_delay_ms));
+            }
+            let msg =
+                match sync_spotify_catalog_with_snapshots(&token, &existing_snapshots, web_session)
+                {
+                    Ok(report) => BgMessage::SpotifyCatalogSynced(Box::new(report)),
+                    Err(err) => BgMessage::SpotifySyncFailed(err.to_string()),
+                };
             let _ = tx.send(msg);
         });
     }
@@ -10316,7 +10991,14 @@ impl App {
                         }
                     }
                 }
-                BgMessage::YtmRichHomeLoaded { mood_index, home } => {
+                BgMessage::YtmRichHomeLoaded {
+                    seq,
+                    mood_index,
+                    home,
+                } => {
+                    if seq != self.home_request_seq {
+                        continue;
+                    }
                     let home = *home;
                     let pick_n = home.quick_picks.len();
                     let shelf_n = home.shelves.len();
@@ -10365,7 +11047,10 @@ impl App {
                         self.play_track(cx, first);
                     }
                 }
-                BgMessage::YtmRichHomeFailed(err) => {
+                BgMessage::YtmRichHomeFailed { seq, error: err } => {
+                    if seq != self.home_request_seq {
+                        continue;
+                    }
                     self.home_loading_more = false;
                     self.ui.button(id!(home_retry_btn)).set_visible(cx, true);
                     let has_cached = !self.home_quick_picks_pool().is_empty();
@@ -10523,14 +11208,38 @@ impl App {
                     seed_title,
                     tracks,
                 } => {
+                    self.radio_loading = false;
                     if self.queue.current().map(|t| t.id.as_str()) == Some(seed_track_id.as_str()) {
                         let added = self.queue.append_tracks(tracks);
                         if added > 0 {
                             self.queue_context = format!("{seed_title} radio");
                             self.sync_next_deck_to_engine();
                             self.prefetch_next_online_track();
-                            self.refresh_right_sidebar(cx);
                         }
+                        self.refresh_right_sidebar(cx);
+                    }
+                }
+                BgMessage::RadioFailed {
+                    seed_track_id,
+                    error: _err,
+                } => {
+                    self.radio_loading = false;
+                    if self.queue.current().map(|t| t.id.as_str()) == Some(seed_track_id.as_str()) {
+                        self.last_radio_seed_id = None;
+                        if self.queue.peek_upcoming(5).is_empty() {
+                            let fallback: Vec<Track> = self
+                                .home_quick_picks_pool()
+                                .into_iter()
+                                .filter(|t| t.id != seed_track_id)
+                                .take(15)
+                                .collect();
+                            if !fallback.is_empty() {
+                                self.queue.append_tracks(fallback);
+                                self.sync_next_deck_to_engine();
+                                self.prefetch_next_online_track();
+                            }
+                        }
+                        self.refresh_right_sidebar(cx);
                     }
                 }
                 BgMessage::GoogleLoginResult(outcome) => match outcome {
@@ -10590,6 +11299,7 @@ impl App {
                         ),
                     );
                     self.rebuild_library_views(cx);
+                    self.refresh_playlists_grid(cx);
                     self.spawn_ytm_rich_home(cx, 0, None, false);
                 }
                 BgMessage::YtmAccountSyncFailed(err) => {
@@ -10618,15 +11328,23 @@ impl App {
                         .set_text(cx, &format!("Spotify sign-in failed: {err}"));
                 }
                 BgMessage::SpotifyCatalogSynced(report) => {
+                    self.spotify_sync_in_flight = false;
+                    if self.accounts.spotify_access_token.trim().is_empty() {
+                        continue;
+                    }
                     let report = *report;
                     self.accounts.spotify_connected = true;
-                    self.accounts.spotify_user_name = report.display_name.clone();
-                    self.accounts.spotify_liked_count = report.liked_tracks.len();
-                    self.accounts.spotify_playlist_count = report.playlists.len();
+                    if !report.display_name.trim().is_empty() {
+                        self.accounts.spotify_user_name = report.display_name.clone();
+                    }
                     let liked_n = report.liked_tracks.len();
-                    let pl_n = report.playlists.len();
+                    let pl_updated = report.playlists.len();
+                    let etag_skipped = report.etag_skipped;
+                    let rl_skipped = report.rate_limited_skipped;
+                    if liked_n > 0 || rl_skipped == 0 {
+                        self.accounts.spotify_liked_count = liked_n;
+                    }
                     if let Some(db) = &mut self.db {
-                        let _ = db.save_accounts(&self.accounts);
                         let _ = db.upsert_tracks(&report.liked_tracks);
                         for bundle in &report.playlists {
                             let _ = db.upsert_tracks(&bundle.tracks);
@@ -10638,26 +11356,55 @@ impl App {
                         self.all_tracks = db.list_tracks("").unwrap_or_default();
                         self.playlists = db.list_playlists().unwrap_or_default();
                     }
+                    let total_spotify_pl = self
+                        .playlists
+                        .iter()
+                        .filter(|p| p.source == TrackSource::Spotify)
+                        .count();
+                    self.accounts.spotify_playlist_count = total_spotify_pl.max(pl_updated);
+                    if let Some(db) = &self.db {
+                        let _ = db.save_accounts(&self.accounts);
+                    }
                     let status_lbl = if self.is_spotify_web_session_active() {
                         id!(spotify_web_status_lbl)
                     } else {
                         id!(spotify_oauth_status_lbl)
                     };
-                    self.ui.label(status_lbl).set_text(
-                        cx,
-                        &format!(
-                            "Spotify: {} · {liked_n} liked songs & {pl_n} playlists synced.",
+                    let status_msg = if rl_skipped > 0 {
+                        format!(
+                            "Spotify: {} · {liked_n} liked & {total_spotify_pl} playlists saved ({rl_skipped} deferred by HTTP 429 — wait ~1 min and press Sync again to finish).",
                             report.display_name
-                        ),
-                    );
+                        )
+                    } else if etag_skipped > 0 {
+                        format!(
+                            "Spotify: {} · {liked_n} liked, {pl_updated} updated ({etag_skipped} unchanged skipped).",
+                            report.display_name
+                        )
+                    } else {
+                        format!(
+                            "Spotify: {} · {liked_n} liked songs & {total_spotify_pl} playlists synced.",
+                            report.display_name
+                        )
+                    };
+                    self.ui.label(status_lbl).set_text(cx, &status_msg);
                     self.refresh_spotify_account_ui(cx);
                     self.rebuild_library_views(cx);
+                    self.refresh_playlists_grid(cx);
                     self.show_toast(
                         cx,
-                        &format!("Spotify library synced · {liked_n} liked, {pl_n} playlists"),
+                        &if rl_skipped > 0 {
+                            format!(
+                                "Spotify partially synced · {liked_n} liked, {total_spotify_pl} playlists ({rl_skipped} rate-limited)"
+                            )
+                        } else {
+                            format!(
+                                "Spotify library synced · {liked_n} liked, {total_spotify_pl} playlists"
+                            )
+                        },
                     );
                 }
                 BgMessage::SpotifySyncFailed(err) => {
+                    self.spotify_sync_in_flight = false;
                     let status_lbl = if self.is_spotify_web_session_active() {
                         id!(spotify_web_status_lbl)
                     } else {
@@ -10678,7 +11425,7 @@ impl App {
                             }
                             self.refresh_spotify_account_ui(cx);
                             self.show_toast(cx, "Spotify session connected! Reading library...");
-                            self.sync_spotify_library(cx);
+                            self.sync_spotify_library_with_delay(cx, 500);
                         }
                         Err(err) => {
                             self.ui
@@ -11304,7 +12051,7 @@ impl App {
             let z = self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
             self.left_sidebar_open = !self.left_sidebar_open;
             self.left_w_target = if self.left_sidebar_open {
-                168.0 * z
+                236.0 * z
             } else {
                 0.0
             };
@@ -11379,29 +12126,41 @@ impl App {
                 self.navigate_to(cx, page, true);
             }
         }
-        if self.ui.button(id!(pin_liked_btn)).clicked(actions) {
+        if self.ui.button(id!(sidebar_create_pl_btn)).clicked(actions) {
+            self.navigate_to(cx, MainPage::Playlists, true);
+            self.ui.widget(id!(pl_new_input)).set_key_focus(cx);
+            self.show_toast(cx, "Type a playlist name and press Enter to create");
+        }
+        if let Some(filter_txt) = self
+            .ui
+            .text_input(id!(sidebar_lib_filter_input))
+            .changed(actions)
+        {
+            self.sidebar_filter_query = filter_txt;
+            self.refresh_sidebar_library(cx);
+        }
+        if view_clicked(&self.ui.view(id!(pin_liked_row)), actions) {
             self.active_filter = LibraryFilter::Liked;
             self.rebuild_library_views(cx);
             self.navigate_to(cx, MainPage::Songs, true);
         }
-        if self.ui.button(id!(pin_local_btn)).clicked(actions) {
+        if view_clicked(&self.ui.view(id!(pin_local_row)), actions) {
             self.active_filter = LibraryFilter::Local;
             self.rebuild_library_views(cx);
             self.navigate_to(cx, MainPage::Songs, true);
         }
-        let pinned_items = self.resolve_pinned_sidebar_items();
-        for (i, slot) in [
-            id!(pin_slot_0),
-            id!(pin_slot_1),
-            id!(pin_slot_2),
-            id!(pin_slot_3),
-            id!(pin_slot_4),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if self.ui.button(slot).clicked(actions)
-                && let Some(group) = pinned_items.get(i).cloned()
+        let mut clicked_pin_idx = None;
+        for (i, slot) in sidebar_pin_slot_ids().into_iter().enumerate() {
+            let row = self.ui.view(slot);
+            if row.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&row, actions) {
+                clicked_pin_idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = clicked_pin_idx {
+            let entries = self.resolve_sidebar_library_entries();
+            if let Some(entry) = entries.get(i)
+                && let Some(group) = self.resolve_sidebar_collection(&entry.id)
             {
                 self.open_local_detail(cx, group);
             }
@@ -11480,9 +12239,7 @@ impl App {
         ];
         for (slot, vid) in qp_ids.into_iter().enumerate() {
             let v = self.ui.view(vid);
-            if v.ferric_cover_art(id!(art)).clicked(actions)
-                || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe))
-            {
+            if v.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&v, actions) {
                 let pool = self.home_quick_picks_pool();
                 let idx = self.qp_page * 8 + slot;
                 if let Some(track) = pool.get(idx).cloned() {
@@ -11612,11 +12369,7 @@ impl App {
             }
             for (ci, cid) in cards.into_iter().enumerate() {
                 let cv = self.ui.view(cid);
-                if cv.ferric_cover_art(id!(art)).clicked(actions)
-                    || cv
-                        .finger_up(actions)
-                        .is_some_and(|fe| is_desktop_click(&fe))
-                {
+                if cv.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&cv, actions) {
                     let idx = self.shelf_pages[si] * 5 + ci;
                     if let Some(card) = self
                         .rich_home
@@ -11678,11 +12431,7 @@ impl App {
             .enumerate()
         {
             let cv = self.ui.view(cid);
-            if cv.ferric_cover_art(id!(art)).clicked(actions)
-                || cv
-                    .finger_up(actions)
-                    .is_some_and(|fe| is_desktop_click(&fe))
-            {
+            if cv.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&cv, actions) {
                 let card_opt = self
                     .search_result
                     .cards
@@ -11809,8 +12558,7 @@ impl App {
         .enumerate()
         {
             let v = self.ui.view(vid);
-            if (v.ferric_cover_art(id!(art)).clicked(actions)
-                || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
+            if (v.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&v, actions))
                 && let Some(g) = self.album_groups.get(self.albums_page * 20 + i).cloned()
             {
                 self.open_local_detail(cx, g);
@@ -11854,8 +12602,7 @@ impl App {
         .enumerate()
         {
             let v = self.ui.view(vid);
-            if (v.ferric_cover_art(id!(art)).clicked(actions)
-                || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
+            if (v.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&v, actions))
                 && let Some(g) = self.artist_groups.get(self.artists_page * 20 + i).cloned()
             {
                 self.open_local_detail(cx, g);
@@ -11979,8 +12726,7 @@ impl App {
         .enumerate()
         {
             let v = self.ui.view(vid);
-            if (v.ferric_cover_art(id!(art)).clicked(actions)
-                || v.finger_up(actions).is_some_and(|fe| is_desktop_click(&fe)))
+            if (v.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&v, actions))
                 && let Some(pl) = self.playlists.get(self.playlists_page * 20 + i).cloned()
             {
                 let tracks = self
@@ -12321,19 +13067,34 @@ impl App {
             .collect();
         for (i, rid) in [id!(qh_0), id!(qh_1), id!(qh_2)].into_iter().enumerate() {
             let rv = self.ui.view(rid);
-            if (rv.ferric_cover_art(id!(art)).clicked(actions)
-                || rv
-                    .finger_up(actions)
-                    .is_some_and(|fe| is_desktop_click(&fe)))
+            if (rv.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&rv, actions))
                 && let Some(t) = hist_tracks.get(i).cloned()
             {
                 if self.queue.current().is_none() {
-                    self.queue_context = "History".to_string();
-                    self.queue.remove_track_by_id(&t.id);
-                }
-                self.queue.insert_play_next(t);
-                if let Some(next) = self.queue.jump_to_upcoming(0).cloned() {
-                    self.play_track(cx, next);
+                    if t.youtube_video_id.is_some() && self.session_state.autoplay_radio {
+                        self.queue_context = format!("{} radio", t.title);
+                        self.queue.set_tracks(vec![t.clone()], Some(0));
+                        self.last_radio_seed_id = None;
+                    } else {
+                        self.queue_context = "History".to_string();
+                        let mut rebuilt = vec![t.clone()];
+                        for cand in self.home_quick_picks_pool() {
+                            if cand.id != t.id && !rebuilt.iter().any(|x| x.id == cand.id) {
+                                rebuilt.push(cand);
+                                if rebuilt.len() >= 25 {
+                                    break;
+                                }
+                            }
+                        }
+                        self.queue.set_tracks(rebuilt, Some(0));
+                        self.last_radio_seed_id = None;
+                    }
+                    self.play_track(cx, t);
+                } else {
+                    self.queue.insert_play_next(t);
+                    if let Some(next) = self.queue.jump_to_upcoming(0).cloned() {
+                        self.play_track(cx, next);
+                    }
                 }
             }
         }
@@ -12372,10 +13133,7 @@ impl App {
                 }
                 continue;
             }
-            if (rv.ferric_cover_art(id!(art)).clicked(actions)
-                || rv
-                    .finger_up(actions)
-                    .is_some_and(|fe| is_desktop_click(&fe)))
+            if (rv.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&rv, actions))
                 && let Some(target) = self.queue.jump_to_upcoming(i).cloned()
             {
                 self.play_track(cx, target);
@@ -13954,7 +14712,7 @@ impl AppMain for App {
                 }
             } else {
                 let left_r = self.ui.view(id!(top_left_grp)).area().rect(cx);
-                let pill_r = self.ui.view(id!(top_search_box)).area().rect(cx);
+                let pill_r = self.ui.view(id!(top_center_grp)).area().rect(cx);
                 let right_r = self.ui.view(id!(top_right_grp)).area().rect(cx);
                 let in_left = left_r.size.x > 0.0 && dq.abs.x <= left_r.pos.x + left_r.size.x + 6.0;
                 let in_pill = pill_r.size.x > 0.0
@@ -14338,7 +15096,17 @@ fn format_compact_time_ms(ms: u64) -> String {
 }
 
 fn is_desktop_click(fe: &FingerUpEvent) -> bool {
-    fe.is_over && (fe.abs - fe.abs_start).length() < 16.0
+    fe.is_over && (fe.abs - fe.abs_start).length() < 24.0
+}
+
+/// Inspect EVERY action emitted for `view` in the current frame (Makepad's built-in
+/// `ViewRef::finger_up` only checks the first matching action and can miss `FingerUp` when
+/// `FingerHoverIn`/`FingerMove` was also emitted in the same batch).
+fn view_clicked(view: &ViewRef, actions: &Actions) -> bool {
+    let uid = view.widget_uid();
+    actions
+        .filter_widget_actions(uid)
+        .any(|item| matches!(item.cast::<ViewAction>(), ViewAction::FingerUp(fe) if is_desktop_click(&fe)))
 }
 
 fn clean_display_text(s: &str) -> String {
@@ -14364,6 +15132,59 @@ fn clear_flat_cache_files(dir: &std::path::Path) {
             }
         }
     }
+}
+
+struct SidebarLibraryEntry {
+    id: String,
+    title: String,
+    subtitle: String,
+    thumbnail_url: Option<String>,
+    is_circle: bool,
+}
+
+fn sidebar_pin_slot_ids() -> [&'static [LiveId]; 40] {
+    [
+        id!(pin_slot_0),
+        id!(pin_slot_1),
+        id!(pin_slot_2),
+        id!(pin_slot_3),
+        id!(pin_slot_4),
+        id!(pin_slot_5),
+        id!(pin_slot_6),
+        id!(pin_slot_7),
+        id!(pin_slot_8),
+        id!(pin_slot_9),
+        id!(pin_slot_10),
+        id!(pin_slot_11),
+        id!(pin_slot_12),
+        id!(pin_slot_13),
+        id!(pin_slot_14),
+        id!(pin_slot_15),
+        id!(pin_slot_16),
+        id!(pin_slot_17),
+        id!(pin_slot_18),
+        id!(pin_slot_19),
+        id!(pin_slot_20),
+        id!(pin_slot_21),
+        id!(pin_slot_22),
+        id!(pin_slot_23),
+        id!(pin_slot_24),
+        id!(pin_slot_25),
+        id!(pin_slot_26),
+        id!(pin_slot_27),
+        id!(pin_slot_28),
+        id!(pin_slot_29),
+        id!(pin_slot_30),
+        id!(pin_slot_31),
+        id!(pin_slot_32),
+        id!(pin_slot_33),
+        id!(pin_slot_34),
+        id!(pin_slot_35),
+        id!(pin_slot_36),
+        id!(pin_slot_37),
+        id!(pin_slot_38),
+        id!(pin_slot_39),
+    ]
 }
 
 fn eq_band_ids() -> [(&'static [LiveId], &'static [LiveId]); 10] {

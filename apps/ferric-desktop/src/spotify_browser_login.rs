@@ -110,15 +110,9 @@ fn run(profile_dir: PathBuf, clear_existing_cookies: bool) -> SpotifyLoginOutcom
         );
     }
 
-    let user_data = if clear_existing_cookies {
-        std::env::temp_dir().join(format!("ferric-spotify-browser-{}", std::process::id()))
-    } else {
-        profile_dir.join("browser")
-    };
+    let user_data = profile_dir.join("browser");
     if let Err(err) = std::fs::create_dir_all(&user_data) {
-        return SpotifyLoginOutcome::Failed(format!(
-            "Could not create the browser profile: {err}"
-        ));
+        return SpotifyLoginOutcome::Failed(format!("Could not create the browser profile: {err}"));
     }
 
     // A previous Ferric browser may still hold the profile. Chrome forwards a second launch to
@@ -178,7 +172,7 @@ fn run(profile_dir: PathBuf, clear_existing_cookies: bool) -> SpotifyLoginOutcom
     // next click while the browser is still alive.
     let _ = std::fs::write(user_data.join("ferric-debug-port"), port.to_string());
 
-    let outcome = drive(&mut child, port);
+    let outcome = drive(&mut child, port, clear_existing_cookies);
     if let Some(mut spawned) = child {
         let _ = spawned.kill();
         let _ = spawned.wait();
@@ -226,7 +220,11 @@ fn free_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
-fn drive(child: &mut Option<Child>, port: u16) -> SpotifyLoginOutcome {
+fn drive(
+    child: &mut Option<Child>,
+    port: u16,
+    clear_existing_cookies: bool,
+) -> SpotifyLoginOutcome {
     let deadline = Instant::now() + START_TIMEOUT;
     let ws_url = match wait_for_page(port, deadline, child) {
         Ok(url) => url,
@@ -249,6 +247,27 @@ fn drive(child: &mut Option<Child>, port: u16) -> SpotifyLoginOutcome {
     }
     if let Err(err) = cdp.call("Network.enable", json!({})) {
         return SpotifyLoginOutcome::Failed(err);
+    }
+    if clear_existing_cookies {
+        // Wipe all cookies & origin storage in Ferric's dedicated browser profile so clicking
+        // Sign Out -> Sign in via Web always opens a clean Spotify sign-in screen instead of
+        // auto-logging back into the previous account.
+        let _ = cdp.call("Network.clearBrowserCookies", json!({}));
+        let _ = cdp.call("Network.clearBrowserCache", json!({}));
+        for origin in [
+            "https://open.spotify.com",
+            "https://accounts.spotify.com",
+            "https://accounts.google.com",
+        ] {
+            let _ = cdp.call(
+                "Storage.clearDataForOrigin",
+                json!({ "origin": origin, "storageTypes": "all" }),
+            );
+        }
+        let _ = cdp.call(
+            "Runtime.evaluate",
+            json!({ "expression": "window.__ferricToken = null;", "returnByValue": true }),
+        );
     }
     if let Err(err) = cdp.call("Page.navigate", json!({ "url": LOGIN_URL })) {
         return SpotifyLoginOutcome::Failed(err);
@@ -276,16 +295,16 @@ fn drive(child: &mut Option<Child>, port: u16) -> SpotifyLoginOutcome {
                 .get("result")
                 .and_then(|value| value.get("value"))
                 .and_then(Value::as_str);
-            if let Some(text) = token_json {
-                if ferric_providers::spotify_web::parse_web_token_json(text).is_ok() {
-                    let sp_dc = read_sp_dc(&mut cdp).unwrap_or_default();
-                    // Closing is best-effort: the window is Ferric's own dedicated instance.
-                    let _ = cdp.call("Browser.close", json!({}));
-                    return SpotifyLoginOutcome::SignedIn {
-                        sp_dc,
-                        token_json: text.to_string(),
-                    };
-                }
+            if let Some(text) = token_json
+                && ferric_providers::spotify_web::parse_web_token_json(text).is_ok()
+            {
+                let sp_dc = read_sp_dc(&mut cdp).unwrap_or_default();
+                // Closing is best-effort: the window is Ferric's own dedicated instance.
+                let _ = cdp.call("Browser.close", json!({}));
+                return SpotifyLoginOutcome::SignedIn {
+                    sp_dc,
+                    token_json: text.to_string(),
+                };
             }
         }
 
@@ -306,7 +325,11 @@ fn read_sp_dc(cdp: &mut Cdp) -> Option<String> {
         })
 }
 
-fn wait_for_page(port: u16, deadline: Instant, child: &mut Option<Child>) -> Result<String, String> {
+fn wait_for_page(
+    port: u16,
+    deadline: Instant,
+    child: &mut Option<Child>,
+) -> Result<String, String> {
     let mut last_http = String::from("no HTTP response");
     while Instant::now() < deadline {
         if let Some(spawned) = child.as_mut() {
@@ -324,17 +347,14 @@ fn wait_for_page(port: u16, deadline: Instant, child: &mut Option<Child>) -> Res
 
         if let Some(body) = http_get(port, "/json/list") {
             last_http = body.chars().take(200).collect();
-            if let Ok(list) = serde_json::from_str::<Value>(&body) {
-                if let Some(items) = list.as_array() {
-                    for item in items {
-                        if item.get("type").and_then(Value::as_str) == Some("page") {
-                            if let Some(ws) = item
-                                .get("webSocketDebuggerUrl")
-                                .and_then(Value::as_str)
-                            {
-                                return Ok(ws.to_string());
-                            }
-                        }
+            if let Ok(list) = serde_json::from_str::<Value>(&body)
+                && let Some(items) = list.as_array()
+            {
+                for item in items {
+                    if item.get("type").and_then(Value::as_str) == Some("page")
+                        && let Some(ws) = item.get("webSocketDebuggerUrl").and_then(Value::as_str)
+                    {
+                        return Ok(ws.to_string());
                     }
                 }
             }
@@ -368,8 +388,7 @@ struct Cdp {
 
 impl Cdp {
     fn connect(url: &str) -> Result<Self, String> {
-        let (socket, _) =
-            connect(url).map_err(|err| format!("DevTools connect failed: {err}"))?;
+        let (socket, _) = connect(url).map_err(|err| format!("DevTools connect failed: {err}"))?;
         if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
             let _ = stream.set_read_timeout(Some(COMMAND_TIMEOUT));
         }
@@ -429,8 +448,8 @@ mod tests {
         let port = free_port().unwrap();
         let spawned = spawn_browser(&exe, &profile, port).unwrap();
         let mut child = Some(spawned);
-        let ws = wait_for_page(port, Instant::now() + START_TIMEOUT, &mut child)
-            .expect("devtools page");
+        let ws =
+            wait_for_page(port, Instant::now() + START_TIMEOUT, &mut child).expect("devtools page");
         let mut cdp = Cdp::connect(&ws).expect("cdp connect");
         cdp.call("Page.enable", json!({})).unwrap();
         let result = cdp

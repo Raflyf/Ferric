@@ -244,10 +244,14 @@ pub enum BgMessage {
         parsed: SyncedLyrics,
     },
     YtmRichHomeLoaded {
+        seq: u64,
         mood_index: usize,
         home: Box<YtmRichHome>,
     },
-    YtmRichHomeFailed(String),
+    YtmRichHomeFailed {
+        seq: u64,
+        error: String,
+    },
     YtmHomeMoreLoaded(Box<YtmRichHome>),
     YtmHomeMoreFailed(String),
     YtmBrowseDetailLoaded(Box<YtmBrowseDetail>),
@@ -269,6 +273,10 @@ pub enum BgMessage {
         seed_track_id: String,
         seed_title: String,
         tracks: Vec<Track>,
+    },
+    RadioFailed {
+        seed_track_id: String,
+        error: String,
     },
     GoogleLoginResult(GoogleLoginOutcome),
     YtmAccountSynced(Box<YtmAccountLibrary>),

@@ -60,11 +60,13 @@ pub fn is_allowed_stream_url(raw: &str) -> bool {
     host == "googlevideo.com" || host.ends_with(".googlevideo.com")
 }
 
-/// Enforce an LRU disk-space cap on a flat cache directory (removes oldest modified files first).
+/// Enforce an LRU disk-space cap on a flat cache directory (removes stale `.part` leftovers and
+/// oldest modified files first).
 fn prune_cache_dir_lru(cache_dir: &Path, max_bytes: u64) {
     let Ok(entries) = fs::read_dir(cache_dir) else {
         return;
     };
+    let now = SystemTime::now();
     let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
     let mut total: u64 = 0;
     for entry in entries.flatten() {
@@ -72,8 +74,19 @@ fn prune_cache_dir_lru(cache_dir: &Path, max_bytes: u64) {
         if let Ok(meta) = entry.metadata()
             && meta.is_file()
         {
-            let len = meta.len();
             let modified = meta.modified().unwrap_or(UNIX_EPOCH);
+            let is_stale_part = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("part"))
+                && now
+                    .duration_since(modified)
+                    .is_ok_and(|age| age > Duration::from_secs(30 * 60));
+            if is_stale_part {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            let len = meta.len();
             total = total.saturating_add(len);
             files.push((path, len, modified));
         }
@@ -348,15 +361,15 @@ pub fn download_artwork_bytes(url: &str, cache_dir: &Path) -> ProviderResult<Vec
 }
 
 fn build_http_agent_with_family(timeout_secs: u64, ipv4_only: bool) -> ureq::Agent {
-    let body_secs = timeout_secs.max(14);
+    let body_secs = timeout_secs.max(12);
     let mut cfg = ureq::Agent::config_builder()
         .max_redirects(0)
         .max_redirects_will_error(false)
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_recv_response(Some(Duration::from_secs(body_secs.min(18))))
-        .timeout_per_read(Some(Duration::from_secs(12)))
+        .timeout_connect(Some(Duration::from_secs(6)))
+        .timeout_recv_response(Some(Duration::from_secs(body_secs.min(16))))
+        .timeout_per_read(Some(Duration::from_secs(10)))
         .timeout_recv_body(Some(Duration::from_secs(body_secs)))
-        .timeout_global(Some(Duration::from_secs(body_secs + 10)))
+        .timeout_global(Some(Duration::from_secs(body_secs + 8)))
         .http_status_as_error(false);
     if ipv4_only {
         cfg = cfg.ip_family(ureq::config::IpFamily::Ipv4Only);
@@ -1124,7 +1137,7 @@ pub fn fetch_rich_home(
                 let h_r0 = s.spawn(|| {
                     s0.as_ref().and_then(|t| {
                         let vid = t.youtube_video_id.as_deref()?;
-                        fetch_radio_up_next_for_track(
+                        fetch_radio_up_next_inner(
                             &effective_session,
                             vid,
                             &t.title,
@@ -1132,6 +1145,7 @@ pub fn fetch_rich_home(
                             &t.album,
                             18,
                             fresh_seed,
+                            false,
                         )
                         .ok()
                     })
@@ -1139,7 +1153,7 @@ pub fn fetch_rich_home(
                 let h_r1 = s.spawn(|| {
                     s1.as_ref().and_then(|t| {
                         let vid = t.youtube_video_id.as_deref()?;
-                        fetch_radio_up_next_for_track(
+                        fetch_radio_up_next_inner(
                             &effective_session,
                             vid,
                             &t.title,
@@ -1147,6 +1161,7 @@ pub fn fetch_rich_home(
                             &t.album,
                             18,
                             fresh_seed,
+                            false,
                         )
                         .ok()
                     })
@@ -1154,7 +1169,7 @@ pub fn fetch_rich_home(
                 let h_r2 = s.spawn(|| {
                     s2.as_ref().and_then(|t| {
                         let vid = t.youtube_video_id.as_deref()?;
-                        fetch_radio_up_next_for_track(
+                        fetch_radio_up_next_inner(
                             &effective_session,
                             vid,
                             &t.title,
@@ -1162,6 +1177,7 @@ pub fn fetch_rich_home(
                             &t.album,
                             16,
                             fresh_seed,
+                            false,
                         )
                         .ok()
                     })
@@ -1928,6 +1944,29 @@ pub fn fetch_radio_up_next_for_track(
     limit: usize,
     force_fresh: bool,
 ) -> ProviderResult<Vec<Track>> {
+    fetch_radio_up_next_inner(
+        session,
+        video_id,
+        seed_title,
+        seed_artist,
+        seed_album,
+        limit,
+        force_fresh,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_radio_up_next_inner(
+    session: &YtmSession,
+    video_id: &str,
+    seed_title: &str,
+    seed_artist: &str,
+    seed_album: &str,
+    limit: usize,
+    force_fresh: bool,
+    allow_extra_hops: bool,
+) -> ProviderResult<Vec<Track>> {
     if !is_valid_video_id(video_id) {
         return Err(ProviderError::Metadata(
             "Invalid videoId for radio".to_string(),
@@ -1962,7 +2001,11 @@ pub fn fetch_radio_up_next_for_track(
     if force_fresh {
         body["params"] = json!(fresh_params[tick % fresh_params.len()]);
     }
-    let root = post_ytm_json("next", &body, &radio_session)?;
+    let root = if allow_extra_hops {
+        post_ytm_json("next", &body, &radio_session)?
+    } else {
+        post_ytm_json_fast("next", &body, &radio_session)?
+    };
     let mut raw_tracks = Vec::new();
     let mut seen = HashSet::new();
     seen.insert(video_id.to_string());
@@ -1986,7 +2029,7 @@ pub fn fetch_radio_up_next_for_track(
         })
         .filter_map(|t| t.youtube_video_id.clone())
         .collect();
-    if !hop_candidates.is_empty() {
+    if allow_extra_hops && !hop_candidates.is_empty() {
         let hop_idx = tick % hop_candidates.len();
         let hop_vid = &hop_candidates[hop_idx];
         let mut hop_body = json!({
@@ -2014,7 +2057,7 @@ pub fn fetch_radio_up_next_for_track(
     );
 
     // Locale-matched multi-artist fallback (NEVER raw `seed_artist` search, which spams same-artist covers)
-    if coherent.len() < target_limit.min(10) {
+    if allow_extra_hops && coherent.len() < target_limit.min(10) {
         let fallback_queries: &[&str] = match seed_locale {
             MusicLocale::GlobalEn => &[
                 "top pop hits radio",

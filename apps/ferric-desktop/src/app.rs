@@ -10482,8 +10482,8 @@ impl App {
                 BgMessage::SpotifyLoginResult { client_id, tokens } => {
                     self.accounts.spotify_client_id = client_id;
                     self.accounts.spotify_connected = true;
-                    self.accounts.spotify_access_token = tokens.access_token.clone();
-                    if let Some(refresh) = tokens.refresh_token.clone() {
+                    self.accounts.spotify_access_token = tokens.access_token;
+                    if let Some(refresh) = tokens.refresh_token {
                         self.accounts.spotify_refresh_token = refresh;
                     }
                     if let Some(db) = &self.db {

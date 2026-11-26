@@ -1,47 +1,49 @@
 # Panduan Handoff & Pemeliharaan (`AGENT_HANDOFF.md`) — Ferric
 
-- **Versi Dokumen:** 2.1.0 (Pre-Release `v0.1.0` Ready-for-Tag)
+- **Versi Dokumen:** 2.2.0 (Pre-Release `v0.1.0` Ready-for-Tag)
 - **Tanggal Pembaruan:** 26 November 2026
-- **Repositori:** `d:\code\project\music player\ferric` (branch `main`, remote `https://github.com/Raflyf/Ferric.git`)
-- **Kode Terverifikasi Live Terakhir:** `5c81b11` (CI run `45734632596` hijau, MSI terpasang & diaudit live)
-- **Binary Terpasang:** `C:\Users\RaflyF\AppData\Local\Programs\Ferric\ferric.exe` (`14.008.320` byte)
-- **Database Pengguna:** `C:\Users\RaflyF\AppData\Local\LivelyDesk\Ferric\data\ferric.db`
+- **Repositori:** `https://github.com/Raflyf/Ferric.git` (branch `main`)
+- **Kode Terverifikasi Live Terakhir:** Pre-release `v0.1.0` full security, GPU/VRAM, SMTC, Acrylic & clean-uninstall audit
+- **Binary Terpasang:** `%LOCALAPPDATA%\Programs\Ferric\ferric.exe`
+- **Database Pengguna:** `%LOCALAPPDATA%\LivelyDesk\Ferric\data\ferric.db`
 
 ---
 
 ## 1. Status Proyek Saat Ini
 
-**Aplikasi desktop Windows Ferric `v0.1.0` sudah rampung secara fitur, animasi 60 FPS, keamanan, pengerasan PE anti-RE, dan verifikasi live.** Seluruh CI check (`fmt`, `clippy -D warnings`, `cargo test`, `verify_pe_hardening.py`, WiX MSI, ZIP, `SHA256SUMS.txt`) hijau. Pekerjaan berikutnya hanya perbaikan minor tambahan jika diminta pengguna, lalu penandaan dan publikasi git tag `v0.1.0` setelah persetujuan eksplisit pengguna.
+**Aplikasi desktop Windows Ferric `v0.1.0` sudah rampung secara fitur, animasi 60 FPS, kebijakan GPU DX11 hemat-RAM (prioritas iGPU tanpa membangunkan dGPU, fallback GPU utama/WARP), integrasi SMTC penuh (thumbnail + timeline + seek), Adaptive Acrylic Tint, menu tray dark/light mengikuti sistem, clean uninstall MSI sampai akar, keamanan, pengerasan PE anti-RE, dan verifikasi live.** Seluruh CI check (`fmt`, `clippy -D warnings`, `cargo test`, `verify_pe_hardening.py`, WiX MSI, ZIP, `SHA256SUMS.txt`) hijau dan bebas kode debug/flag pengujian di profil release. Pekerjaan berikutnya hanya penandaan dan publikasi git tag `v0.1.0` setelah persetujuan eksplisit pengguna.
 
 ---
 
 ## 2. Peta Dokumen & Kode Sumber Kunci
 
 ### Dokumen
-- [README.md](file:///d:/code/project/music%20player/ferric/README.md) — ringkasan produk, kapabilitas, keamanan/PE hardening, dan perintah build.
-- [CHANGELOG.md](file:///d:/code/project/music%20player/ferric/CHANGELOG.md) — riwayat perubahan terverifikasi pre-`v0.1.0`.
-- [PRD.md](file:///d:/code/project/music%20player/ferric/docs/PRD.md) — cakupan fitur aktual, metrik live terukur, keamanan, batasan resmi Spotify, skema SQLite, dan roadmap pasca-`v0.1.0`.
-- [DESIGN.md](file:///d:/code/project/music%20player/ferric/docs/DESIGN.md) — 4 preset tema (default AMOLED Black + Burnt Orange `#E86A2C`), GPU HSV picker, WCAG Adaptive Contrast, font OS internasional, koreografi 60 FPS, dan pintasan keyboard.
-- [SYNC_AND_AUDIO_SPEC.md](file:///d:/code/project/music%20player/ferric/docs/SYNC_AND_AUDIO_SPEC.md) — detail implementasi `ferric-audio`, `ferric-providers`, `ferric-sync`, cold-start DWM Acrylic, DPAPI, mitigasi Win32, WebView2 sandbox, Discord RPC, dan PE hardening.
-- [RESEARCH_AND_RE_FINDINGS.md](file:///d:/code/project/music%20player/ferric/docs/RESEARCH_AND_RE_FINDINGS.md) — alasan stack Rust, temuan teknis Win32/font/keamanan, dan benchmark aktual.
+- [README.md](../README.md) — ringkasan produk, kapabilitas, keamanan/PE hardening, dan perintah build.
+- [CHANGELOG.md](../CHANGELOG.md) — riwayat perubahan terverifikasi pre-`v0.1.0`.
+- [PRD.md](./PRD.md) — cakupan fitur aktual, metrik live terukur, keamanan, batasan resmi Spotify, skema SQLite, dan roadmap pasca-`v0.1.0`.
+- [DESIGN.md](./DESIGN.md) — 4 preset tema (default AMOLED Black + Burnt Orange `#E86A2C`), GPU HSV picker, WCAG Adaptive Contrast, font OS internasional, koreografi 60 FPS, dan pintasan keyboard.
+- [SYNC_AND_AUDIO_SPEC.md](./SYNC_AND_AUDIO_SPEC.md) — detail implementasi `ferric-audio`, `ferric-providers`, `ferric-sync`, cold-start DWM Acrylic, DPAPI, mitigasi Win32, WebView2 sandbox, Discord RPC, dan PE hardening.
+- [RESEARCH_AND_RE_FINDINGS.md](./RESEARCH_AND_RE_FINDINGS.md) — alasan stack Rust, temuan teknis Win32/font/keamanan, dan benchmark aktual.
 
 ### Kode Sumber Utama
 | Berkas | Tanggung Jawab |
 | :--- | :--- |
-| [apps/ferric-desktop/src/main.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/main.rs) & [build.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/build.rs) | Entrypoint startup (`win32_harden_process`, AppUserModelID, single-instance), PE version info `Ferric`, manifest PerMonitorV2 UTF-8 |
-| [apps/ferric-desktop/src/app.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/app.rs) | Layout `live_design!`, 9 halaman UI, 6 tab Settings, animasi 60 FPS (`fs_reveal_t` 2-fase, `fs_video_morph_t`), theme live propagation, zoom, shortcut |
-| [apps/ferric-desktop/src/theme.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/theme.rs) | Token Makepad lokal, Inter v4.1 + 4 slot font virtual OS internasional (`__sys_cjk_jp/kr/cn`, `__sys_thai`) |
-| [apps/ferric-desktop/src/widgets.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/widgets.rs) | Widget kustom: `FerricAmbientStage` (21-tap aurora + opacity), `FerricLyricsView` (uniform active line + `reveal_alpha`), `FerricCoverArt` (morph), `FerricRepeatBtn` & `FerricVolumeBtn` (SDF), `FerricColorPicker` (HSV), `FerricBarSlider`, `FerricPlayBtn`, `FerricWinBtn`, `FerricEqGraph`, `FerricQrView` |
-| [apps/ferric-desktop/src/track_list.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/track_list.rs) | `PortalList` daftar lagu tervirtualisasi dengan frosted glass `TrackRow` |
-| [apps/ferric-desktop/src/shell.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/shell.rs) | Win32 hardening, subclass (`WM_GETMINMAXINFO`, `WM_NCCALCSIZE`, `WM_NCHITTEST`, `WM_NCACTIVATE`, `WM_SIZE`, `WM_CLOSE`), DWM Acrylic, Taskbar `ITaskbarList3`, System Tray, single-instance, TOCTOU-safe `msiexec`, RAM trim |
-| [apps/ferric-desktop/src/video_player.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/video_player.rs) & [google_login.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/google_login.rs) | Host WebView2 tersandbox ketat, `#stage` fade-in 220ms, kliping tunggal `16px` `CreateRoundRectRgn`, login Google opsional |
-| [apps/ferric-desktop/src/discord_rpc.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/discord_rpc.rs) | Klien IPC named-pipe Discord Rich Presence zero-dependency (`Listening to Ferric`, App ID bawaan, ikon kaset) |
-| [apps/ferric-desktop/src/artwork.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/artwork.rs) & [state.rs](file:///d:/code/project/music%20player/ferric/apps/ferric-desktop/src/state.rs) | Cache tekstur LRU (`MAX_CACHED_TEXTURES = 128`), ekstraksi warna HSV, state halaman/filter/sort (`SortField::Recent` default) |
-| [vendor/makepad-platform/src/](file:///d:/code/project/music%20player/ferric/vendor/makepad-platform/src) | Patch lokal: `d3d11.rs` (DirectComposition premultiplied-alpha + Commit), `win32_window.rs` (cold-start DWM Acrylic sebelum `CreateTargetForHwnd`, `WM_NCACTIVATE`/`WM_ACTIVATE`, `get_inner_size()`), `cx.rs`, `os/cx_native.rs` (OS CJK/Thai font loader) |
-| [crates/ferric-core/src/db.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-core/src/db.rs), [theme.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-core/src/theme.rs), [secrets.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-core/src/secrets.rs) | SQLite WAL, tema 4 preset + WCAG `AdaptivePalette`, enkripsi DPAPI (`dpapi:v1:`) + CSPRNG `BCryptGenRandom` |
-| [crates/ferric-providers/src/ytmusic.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-providers/src/ytmusic.rs), [lyrics.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-providers/src/lyrics.rs), [oauth.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-providers/src/oauth.rs) | Taste-driven Home, Smart Multi-Artist Radio, Official Video Resolver, LRCLIB clean filter & auto-heal, OAuth 2.0 PKCE read-only |
-| [crates/ferric-audio/src/engine.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-audio/src/engine.rs) & [dsp.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-audio/src/dsp.rs) | Dual-deck auto-only crossfade, Bass-Swap 140 Hz, 10-band Biquad EQ, spectrum analyzer |
-| [scripts/verify_pe_hardening.py](file:///d:/code/project/music%20player/ferric/scripts/verify_pe_hardening.py) & [.github/workflows/](file:///d:/code/project/music%20player/ferric/.github/workflows) | Gerbang verifikasi PE (`GUARD_CF`, `CETCOMPAT`, `BREPRO`, 0 leak), CI build & manual tag release |
+| `apps/ferric-desktop/src/main.rs` & `build.rs` | Entrypoint startup (`win32_harden_process`, AppUserModelID, single-instance), PE version info `Ferric`, manifest PerMonitorV2 UTF-8 |
+| `apps/ferric-desktop/src/app.rs` | Layout `live_design!`, 9 halaman UI, 7 tab Settings, animasi 60 FPS (`fs_reveal_t` 2-fase, `fs_video_morph_t`), theme live propagation, zoom, shortcut |
+| `apps/ferric-desktop/src/theme.rs` | Token Makepad lokal, Inter v4.1 + 4 slot font virtual OS internasional (`__sys_cjk_jp/kr/cn`, `__sys_thai`) |
+| `apps/ferric-desktop/src/widgets.rs` | Widget kustom: `FerricAmbientStage` (21-tap aurora + opacity), `FerricLyricsView` (uniform active line + `reveal_alpha`), `FerricCoverArt` (morph), `FerricRepeatBtn` & `FerricVolumeBtn` (SDF), `FerricColorPicker` (HSV), `FerricBarSlider`, `FerricPlayBtn`, `FerricWinBtn`, `FerricEqGraph`, `FerricQrView` |
+| `apps/ferric-desktop/src/track_list.rs` | `PortalList` daftar lagu tervirtualisasi dengan frosted glass `TrackRow` |
+| `apps/ferric-desktop/src/shell.rs` | Win32 hardening, subclass (`WM_GETMINMAXINFO`, `WM_NCCALCSIZE`, `WM_NCHITTEST`, `WM_NCACTIVATE`, `WM_ACTIVATE`, `WM_SIZE`, `WM_THEMECHANGED`, `WM_DWMCOMPOSITIONCHANGED`, `WM_CLOSE`), DWM Acrylic + pemulihan aktif/restore, menu tray dark/light mengikuti tema Windows (`uxtheme.dll` `#135`/`#136`), registrasi AUMID `Raflyf.Ferric`, Taskbar `ITaskbarList3`, System Tray, single-instance, TOCTOU-safe `msiexec`, RAM trim |
+| `apps/ferric-desktop/src/smtc.rs` | Windows SMTC penuh (`souvlaki 0.9.3`): thumbnail sampul lokal `file://` + fallback HTTPS, timeline `Position`/`EndTime` real-time (1 Hz & saat seek/ganti status), serta handler `SetPosition` / `Seek` untuk Windows 11 Quick Settings dan overlay pihak ketiga (Nusa Pro, NotchPixel, ModernFlyouts) |
+| `apps/ferric-desktop/src/video_player.rs`, `google_login.rs`, `spotify_browser_login.rs` | Host WebView2 tersandbox ketat, `#stage` fade-in 220ms, kliping tunggal `16px` `CreateRoundRectRgn`, login Google & Spotify Web opsional |
+| `apps/ferric-desktop/src/discord_rpc.rs` | Klien IPC named-pipe Discord Rich Presence zero-dependency (`Listening to Ferric`, App ID bawaan, ikon kaset) |
+| `apps/ferric-desktop/src/artwork.rs` & `state.rs` | Cache tekstur LRU (`MAX_CACHED_TEXTURES = 144`), downscaler *area-box* (`160px` kartu / `256px` hero), ekstraksi warna HSV, state halaman/filter sumber akun/sort (`Newest`/`Oldest`/`A-Z`, `SortField::Recent` default) |
+| `vendor/makepad-platform/src/` | Patch lokal: `d3d11.rs` (kebijakan hemat-RAM iGPU-pertama tanpa membangunkan dGPU + fallback GPU utama -> WARP CPU, sampler bilinear hardware eksplisit, tekstur sampul `D3D11_USAGE_IMMUTABLE`, bebas CPU `Vec<u32>` & `ID3DBlob` pasca-upload/kompilasi, DirectComposition premultiplied-alpha + Commit), `id_pool.rs` & `texture.rs` (`free_unused_textures`), `win32_window.rs` (cold-start DWM Acrylic sebelum `CreateTargetForHwnd`, penerusan `WM_NCACTIVATE`/`WM_ACTIVATE` asli, `get_inner_size()`), `cx.rs`, `os/cx_native.rs` (OS CJK/Thai font loader) |
+| `installer/Ferric.wxs` & `scripts/Installer.ps1` | WiX v3 per-user MSI: shortcut Start Menu + registrasi AUMID `Raflyf.Ferric`, serta `CleanUninstallUserData` (`WixQuietExec64`, kondisi `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`) untuk bersih total sampai akar saat uninstall tanpa mengganggu data saat upgrade |
+| `crates/ferric-core/src/{db,theme,secrets}.rs` | SQLite WAL, tema 4 preset + WCAG `AdaptivePalette`, enkripsi DPAPI (`dpapi:v1:`) + CSPRNG `BCryptGenRandom` + zeroization |
+| `crates/ferric-providers/src/{ytmusic,lyrics,oauth,spotify_web,subsonic,updater}.rs` | Taste-driven Home, Smart Multi-Artist Radio, Official Video Resolver, LRCLIB clean filter & auto-heal, OAuth 2.0 PKCE Premium-only gate, Spotify Web read-only sync, Subsonic HTTPS, SHA-256 updater |
+| `crates/ferric-audio/src/{engine,dsp}.rs` | Dual-deck auto-only crossfade, Bass-Swap 140 Hz, 10-band Biquad EQ, epoch-tagged lock-free ring buffer, WASAPI hot-swap recovery, NaN/Inf DSP firewall |
+| `scripts/{build-release.ps1,verify_pe_hardening.py,Installer.ps1}` & `.github/workflows/` | Build terisolasi & gerbang verifikasi PE (`GUARD_CF`, `CFTable`, `DependentLoadFlags=0x0800`, `CETCOMPAT`, `BREPRO`, 0 RWX, 0 leak), SHA-pinned CI & split release |
 
 ---
 
@@ -54,26 +56,23 @@
 3. **Satu Sudut Membulat Video Klip & Anti-Ghosting Fullscreen:** Pertahankan satu `CreateRoundRectRgn` (`16px` DPI-exact) pada jendela WebView2 video (jangan tambahkan `DWMWCP_ROUND` atau stroke border luar bertumpuk) dan urutan 2-fase pada `fs_reveal_t` (`bg_alpha: t/0.58`, `show_stage: t > 0.52`).
 4. **Zero-Bloat OS Fonts & Filter Polusi LRCLIB:** Jangan membundel font CJK puluhan megabyte ke dalam repo/installer; pertahankan slot virtual `__sys_*` di `theme.rs` + `cx_native.rs` serta `is_polluted_multilingual_lrc` auto-heal pada `lyrics_cache`.
 5. **Keamanan, DPAPI & Gerbang PE Hardening:** Pertahankan `win32_harden_process()`, enkripsi `dpapi:v1:` pada `accounts`, sandbox WebView2 ketat, re-hash SHA-256 tahan-TOCTOU sebelum `CreateProcessW(msiexec.exe)`, serta kelulusan 100% `scripts/verify_pe_hardening.py` (nol `.pdb`, `runneradmin`, `C:\Users\`, `D:\a\`).
-6. **Anti-Kedip Kartu & Kebersihan Tabel `Songs`:** Pertahankan `MAX_CACHED_TEXTURES = 128`, setter idempoten, dan larangan `db.upsert_tracks` pada hasil browse Home/Search/Detail/Radio.
-7. **Anggaran RAM (< 50 MB aktif, < 10 MB tray/idle):** Jangan menambah loop redraw 60 FPS permanen saat animasi selesai atau jendela tersembunyi; pertahankan trim working set.
+6. **Anti-Kedip Kartu & Kebersihan Tabel `Songs`:** Pertahankan `MAX_CACHED_TEXTURES = 144` (melebihi total slot Home + Sidebar + Queue), downscaler area-box (`160px`/`256px`) dengan `D3D11_USAGE_IMMUTABLE` + pembebasan CPU `Vec<u32>` pasca-upload di `d3d11.rs`, setter idempoten, dan larangan `db.upsert_tracks` pada hasil browse Home/Search/Detail/Radio.
+7. **Disiplin RAM (hemat-RAM iGPU-pertama):** Jangan menambah loop redraw 60 FPS permanen saat animasi selesai atau jendela tersembunyi; pertahankan prioritas iGPU tanpa membangunkan dGPU, `free_unused_textures()`, dan trim working set saat masuk system tray (`~35 MB` idle UI / `~7.4 MB` tray).
 8. **Zero Nama Merek Kompetitor, DRM Compliance & Aturan Tag Rilis:** Jangan tulis nama aplikasi kompetitor di kode/UI/docs; jangan implementasikan mekanisme bypass DRM/API privat; dorong ke `origin main` saja dan **jangan buat atau push git tag rilis (`v*`)** tanpa persetujuan eksplisit pengguna.
-9. **Keamanan Penghapusan File:** Jangan gunakan `rm -rf` atau `Remove-Item -Recurse -Force`; gunakan Recycle Bin (`safe-delete.ps1`).
+9. **Keamanan Penghapusan File & Clean Uninstall:** Jangan gunakan `rm -rf` atau `Remove-Item -Recurse -Force` di skrip dev; pertahankan kondisi ketat `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE` pada `CleanUninstallUserData` di `installer/Ferric.wxs`.
 
 ---
 
 ## 4. Alur Build, Verifikasi & Audit Standar
 
-> **Catatan Lingkungan Host:** Toolchain MSVC lokal di mesin pengembangan saat ini tidak sehat; lakukan `cargo fmt` dan validasi lockfile/skrip secara lokal, lalu andalkan GitHub Actions (`ci-desktop.yml` pada `windows-latest`) untuk kompilasi release, Clippy, unit test, `verify_pe_hardening.py`, serta pembuatan MSI & ZIP.
-
-1. Format & cek lockfile lokal sebelum push:
+1. Format, Clippy, unit tests, build hardened terisolasi, verifikasi PE, dan MSI lokal:
    ```powershell
-   cargo fmt --all
    cargo fmt --all -- --check
-   cargo metadata --locked --format-version 1 > $null
+   cargo clippy --workspace --all-targets --locked -- -D warnings
+   cargo test --workspace --locked
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
+   python .\scripts\verify_pe_hardening.py .\target\release\ferric.exe
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Installer.ps1
    ```
-   *(Catatan: `ci-desktop.yml` mengabaikan `docs/**`, `**.md`, dan `assets/ui_previews/**` pada `paths-ignore`, sehingga commit dokumentasi murni tidak memicu rebuild MSI; commit kode Rust/installer otomatis menjalankan full check, Clippy `-D warnings`, unit tests, build hardened terisolasi `CARGO_HOME=C:\c` + `subst S:`, `verify_pe_hardening.py`, WiX MSI, ZIP, dan `SHA256SUMS.txt`.)*
-2. Setelah CI hijau (`gh run watch <run_id> --exit-status`):
-   - Unduh artefak (`gh run download <run_id> -D <scratch_dir>`).
-   - Verifikasi **SHA-256 3/3** (`.msi`, `.zip`, dan `ferric.exe` terpasang vs isi ZIP).
-   - Pasang diam-diam: `msiexec /i ferricsetup-v0.1.0.msi /qn /norestart`.
-   - Jalankan verifikasi visual & telemetri langsung (`SHADER_ERROR_COUNT=0`, `APPLY_ERR=0`, `RES_MISS=0`, RAM open/close/minimized, CPU settled, serta tangkapan layar UI terkait) sebelum melapor ke pengguna.
+2. Pada GitHub Actions (`ci-desktop.yml`), setiap push kode ke `main` menjalankan seluruh gerbang yang sama plus paket Portable ZIP dan `SHA256SUMS.txt`. *(Catatan: `docs/**` dan `**.md` berada di `paths-ignore`.)*
+3. Publikasi GitHub Release hanya berjalan saat tag `v*` di-push secara eksplisit melalui `.github/workflows/release.yml`.

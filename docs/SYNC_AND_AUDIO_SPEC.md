@@ -1,6 +1,6 @@
 # Spesifikasi Teknis Implementasi: Audio, Radio, Win32 Acrylic, Keamanan & Sync (`SYNC_AND_AUDIO_SPEC.md`)
 
-- **Versi Dokumen:** 2.1.0 (Sesuai Implementasi Aktual Workspace Rust `v0.1.0` — `5c81b11`)
+- **Versi Dokumen:** 2.2.0 (Sesuai Implementasi Aktual Workspace Rust `v0.1.0`)
 - **Tanggal Pembaruan:** 26 November 2026
 
 Dokumen ini mendokumentasikan kontrak teknis aktual yang berjalan di `ferric-core`, `ferric-audio`, `ferric-providers`, `ferric-sync`, `apps/ferric-desktop`, dan `vendor/makepad-platform`.
@@ -9,7 +9,7 @@ Dokumen ini mendokumentasikan kontrak teknis aktual yang berjalan di `ferric-cor
 
 ## 1. Engine Audio Native Rust (`crates/ferric-audio`)
 
-Implementasi berada di [engine.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-audio/src/engine.rs), [dsp.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-audio/src/dsp.rs), dan [demo_synth.rs](file:///d:/code/project/music%20player/ferric/crates/ferric-audio/src/demo_synth.rs).
+Implementasi berada di `crates/ferric-audio/src/engine.rs`, `crates/ferric-audio/src/dsp.rs`, dan `crates/ferric-audio/src/demo_synth.rs`.
 
 ### 1.1 Pipeline Thread Bebas Lock
 ```mermaid
@@ -70,12 +70,20 @@ Dipanggil melalui `fetch_radio_up_next_for_track(...)`:
 
 ## 3. Win32 DirectComposition Acrylic, OS Fonts, IPC & Keamanan
 
-### 3.1 Cold-Start Per-Pixel Native Windows 11 Acrylic (`vendor/makepad-platform` + `shell.rs`)
-- **Urutan Inisialisasi Cold-Start (Kritis):**
+### 3.1 Kebijakan GPU Hemat-RAM DX11, Cold-Start Acrylic, SMTC & Menu Tray (`vendor/makepad-platform` + `shell.rs` + `smtc.rs`)
+- **Seleksi Adapter DXGI Hemat-RAM (`d3d11.rs::D3d11Cx::new`):**
+  1. **Tanpa opsi/pemaksaan Dedicated GPU:** Memeriksa `EnumAdapters1(0)` terlebih dahulu; bila sudah berupa Integrated GPU (`DedicatedVideoMemory < 1 GiB` non-software), langsung dipakai tanpa mengenumerasi adapter diskret sekunder sehingga driver dGPU tidak pernah termuat ke RAM.
+  2. Pada sistem hybrid dengan dGPU di slot `0`, mencari dan memprioritaskan Integrated GPU hemat-RAM terlebih dahulu; hanya menggunakan GPU utama bila sistem tidak memiliki iGPU sama sekali, lalu fallback otomatis ke **CPU WARP (`D3D_DRIVER_TYPE_WARP`)**.
+  3. `CxOsPass::set_states` mengikat `ID3D11SamplerState` eksplisit (`D3D11_FILTER_MIN_MAG_MIP_LINEAR`, `MaxLOD = f32::MAX`) pada slot `s0`; `update_vec_texture` mengunggah sampul sebagai `D3D11_USAGE_IMMUTABLE` lalu melepas `Vec<u32>` CPU; dan `CxOsDrawShader::new` langsung melepas `ID3DBlob` bytecode setelah shader dibuat.
+- **Urutan Inisialisasi Cold-Start & Pemulihan Acrylic:**
   1. `Event::Startup` di `app.rs` mengisi `INITIAL_ACRYLIC_BACKDROP` dari `ThemeConfig` SQLite sebelum jendela utama dibuat.
   2. Di `vendor/makepad-platform/src/os/windows/win32_window.rs` (`Win32Window::init`), `DWMWA_USE_IMMERSIVE_DARK_MODE`, `DWMWCP_ROUND`, `DwmExtendFrameIntoClientArea(-1)`, dan `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW` (`3`) diterapkan **sebelum `CreateTargetForHwnd` dan `ShowWindow(SW_SHOW)`**.
   3. `d3d11.rs` menggunakan `WS_EX_NOREDIRECTIONBITMAP` + `CreateSwapChainForComposition` (`DXGI_ALPHA_MODE_PREMULTIPLIED`) dan memanggil `dcomp_dev.Commit()` sebelum jendela ditampilkan.
-  4. `WM_NCACTIVATE` diteruskan dengan `LPARAM(-1)` dan `WM_ACTIVATE` (termasuk `WA_CLICKACTIVE`) diteruskan ke `DefWindowProcW`; toggle runtime di `shell.rs` memanggil `SetWindowPos(..., SWP_FRAMECHANGED)` + `DwmFlush()`.
+  4. `WM_NCACTIVATE` meneruskan `wparam` asli dengan `LPARAM(-1)` (tanpa memalsukan aktivasi agar state machine DWM tidak macet di solid fallback) dan menegaskan ulang backdrop saat aktif (`WM_NCACTIVATE`/`WM_ACTIVATE`), restore (`WM_SIZE`), dan perubahan tema/komposisi (`WM_THEMECHANGED`/`WM_DWMCOMPOSITIONCHANGED`).
+- **Windows SMTC Penuh (`smtc.rs`) & Identitas AUMID (`shell.rs` + `Ferric.wxs`):**
+  - Mendaftarkan `HKCU\Software\Classes\AppUserModelId\Raflyf.Ferric` (`DisplayName = "Ferric"`, `IconUri`) agar Windows 11 Quick Settings dan aplikasi overlay pihak ketiga Microsoft Store (Nusa Pro, NotchPixel, ModernFlyouts, Seelen UI) mengenali aplikasi Ferric.
+  - Menerbitkan thumbnail sampul lokal `file://` dari `artwork_cache/smtc_now_playing.{jpg|png}` (dengan fallback HTTPS) dan memperbarui `TimelineProperties` (`Position`, `StartTime`, `EndTime`, `MaxSeekTime`) secara real-time (1 Hz saat bermain, instan saat pause/seek/durasi terbaca — tidak pernah mereset posisi ke `00:00`), serta mendukung event `SetPosition` / `Seek` dari overlay eksternal.
+- **Menu Klik Kanan System Tray Mengikuti Tema Perangkat:** `sync_win32_popup_menu_theme()` membaca `HKCU\...\Themes\Personalize\SystemUsesLightTheme` dan memanggil `uxtheme.dll` ordinal `#135` (`SetPreferredAppMode`) + `#136` (`FlushMenuThemes`) saat inisialisasi, `WM_SETTINGCHANGE`, dan sebelum `TrackPopupMenu`.
 - **Anti-Ghost Caption & Maximize Presisi:**
   - `shell.rs` memastikan style jendela `WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU` (**tanpa `WS_CAPTION`**).
   - `WM_NCCALCSIZE` menjepit `rgrc[0] = mi.rcWork` saat maximize dan mengembalikan `LRESULT(0)` di semua state (`win32_window.rs` mengirim `self.get_inner_size()`).
@@ -87,9 +95,9 @@ Dipanggil melalui `fetch_radio_up_next_for_track(...)`:
 
 ### 3.2 Disiplin Memori, Virtual OS Fonts & Anti-Flicker
 - **Zero-Bloat OS Fallback Fonts (`vendor/makepad-platform/src/os/cx_native.rs`):** Slot virtual `__sys_cjk_jp.ttf`, `__sys_cjk_kr.ttf`, `__sys_cjk_cn.ttf`, dan `__sys_thai.ttf` dimuat pada pass kedua dari `%SystemRoot%\Fonts` dengan validasi header SFNT/TTC (`<= 32 MiB`) dan dibagikan sekali via `Rc<Vec<u8>>` / `Rc<Font>`, jatuh aman ke `Inter-Regular.ttf` jika font tidak ada.
-- **Artwork LRU Cache (`artwork.rs`):** `MAX_CACHED_TEXTURES = 128` dengan pinning lagu aktif dan validasi kunci bebas tabrakan pointer ABA.
-- **Setter Idempoten (`widgets.rs` & `app.rs`):** `FerricCoverArt::set_texture`, `FerricAmbientStage::set_state`, `FerricBarSlider::set_value`, `FerricWinBtn::set_maximized`, serta label waktu pada `handle_tick` hanya memicu `redraw` bila nilai berubah.
-- **Working-Set Trim:** Saat disembunyikan/diminimalkan, pasca-tutup Fullscreen, atau setelah `StreamReady`, `db.shrink_memory()` dan `win32_trim_working_set()` (`K32EmptyWorkingSet`) memangkas RAM ke kisaran `7,3–7,6 MB` (idle/tray) dan `41,3–44,1 MB` (streaming aktif).
+- **Artwork LRU Cache (`artwork.rs`):** `MAX_CACHED_TEXTURES = 144`, downscaler *area-box* (`160px` kartu / `256px` hero) dengan pinning lagu aktif, `CxTexturePool::free_unused_textures()`, tekstur GPU `D3D11_USAGE_IMMUTABLE`, dan pembebasan `Vec<u32>` CPU segera setelah upload.
+- **Setter Idempoten (`widgets.rs` & `app.rs`):** `FerricCoverArt::set_texture`, `FerricAmbientStage::set_state`, `FerricBarSlider::set_value` (deadband `2.5e-3`), `FerricWinBtn::set_maximized`, serta label waktu pada `handle_tick` hanya memicu `redraw` bila nilai berubah.
+- **Clean Uninstall MSI (`installer/Ferric.wxs`):** `CleanUninstallUserData` (`WixQuietExec64`, dijalankan hanya pada `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`) membersihkan `%LOCALAPPDATA%\LivelyDesk\Ferric` (SQLite DB + WAL/SHM, `artwork_cache`, `stream_cache`, profil WebView2, `updates`, `demo_tracks`), menghapus `%LOCALAPPDATA%\LivelyDesk` bila kosong, membersihkan `%LOCALAPPDATA%\Programs\Ferric`, `%TEMP%\ferric_spotify_capture.txt`, serta kunci registry `HKCU\Software\Raflyf\Ferric` dan `HKCU\Software\Classes\AppUserModelId\Raflyf.Ferric`.
 
 ### 3.3 Keamanan Runtime, Sandbox WebView2 & Pengerasan PE
 - **Enkripsi Rahasia at Rest (`crates/ferric-core/src/secrets.rs`):** Menggunakan `CryptProtectData`/`CryptUnprotectData` (`crypt32.dll`, prefix `dpapi:v1:`, entropy `Ferric.Accounts.DPAPI.v1`) dan `BCryptGenRandom` (`bcrypt.dll`) tanpa dependensi crate eksternal.

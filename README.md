@@ -1,80 +1,119 @@
 <p align="center">
-  <img src="assets/brand/ferric.png" width="128" height="128" alt="Ferric Oxide Cassette Icon" />
+  <img src="assets/brand/ferric.png" width="96" height="96" alt="Ferric logo">
 </p>
 
-# Ferric (`v0.1.0` Pre-Release)
+<h1 align="center">Ferric</h1>
+<p align="center"><strong>Native Rust desktop music player for Windows.</strong><br>Play local lossless files alongside YouTube Music and Spotify libraries, with synced lyrics and Windows 11 Acrylic.</p>
 
-Ultra-lightweight, 100% native Rust desktop Hi-Fi music player for **Windows 10/11** (`x86_64`), with shared core crates designed for future Android expansion.
+<p align="center">
+  <a href="https://github.com/Raflyf/Ferric/releases/latest"><img src="https://img.shields.io/github/v/release/Raflyf/Ferric?color=E86A2C" alt="Latest release"></a>
+  <a href="https://github.com/Raflyf/Ferric/actions/workflows/ci-desktop.yml"><img src="https://github.com/Raflyf/Ferric/actions/workflows/ci-desktop.yml/badge.svg" alt="Windows build checks"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-586575" alt="MIT license"></a>
+  <a href="https://saweria.co/BuyMatcha"><img src="https://img.shields.io/badge/Saweria-BuyMatcha-faae2b" alt="Saweria"></a>
+  <a href="https://yapp.ink/raflyf"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-raflyf-FFDD00" alt="Buy me a coffee"></a>
+</p>
 
-Part of the **LivelyDesk** visual product family (`LivelyDesk` · `WallpaperLive` · `TransparentBar` · `Ferric`), shipping with **AMOLED Black** (`#000000`, Burnt Orange `#E86A2C`) by default, optional **True Per-Pixel Native Windows 11 Acrylic** via DirectComposition, crisp **Inter v4.1** typography with zero-bloat OS international font fallbacks, hardened PE security, and sub-50 MB live RAM usage.
+<p align="center">
+  <a href="#download"><strong>Download</strong></a>
+  &nbsp;&middot;&nbsp; <a href="https://livelydesk.vercel.app/ferric">Product page</a>
+  &nbsp;&middot;&nbsp; <a href="#preview">Preview</a>
+  &nbsp;&middot;&nbsp; <a href="#features">Features</a>
+  &nbsp;&middot;&nbsp; <a href="#resource-use">Resource use</a>
+  &nbsp;&middot;&nbsp; <a href="CHANGELOG.md">Changelog</a>
+  &nbsp;&middot;&nbsp; <a href="#code-signing-policy">Code signing policy</a>
+  &nbsp;&middot;&nbsp; <a href="#privacy-policy">Privacy policy</a>
+</p>
 
-## Status
+Ferric is a native Windows desktop music player built in Rust with a GPU-accelerated DirectX 11 interface (`makepad-widgets`), a pure-Rust dual-deck audio engine, and a local SQLite library. It combines your local FLAC/MP3/Opus/AAC collection with YouTube Music discovery, optional Spotify library sync, synchronized lyrics, and native Windows 11 integration without Electron or a browser shell.
 
-Windows Desktop `v0.1.0` is **feature-complete, security-hardened, and live-verified** prior to tagging the first release. Measured on installed Windows 11 MSI builds (`5c81b11`):
+> Windows 10/11 x64. Unsigned per-user installer (no administrator rights required). Native Acrylic backdrop works best on Windows 11. Part of the [LivelyDesk](<https://livelydesk.vercel.app>) desktop suite alongside [WallpaperLive](<https://github.com/Raflyf/WallpaperLive>) and [TransparentBar](<https://github.com/Raflyf/TransparentBar>).
 
-- **RAM (Idle Open):** `~7.6 MB` Working Set
-- **RAM (Active Online Streaming + Artwork + Lyrics):** `~41.3–44.1 MB` Working Set
-- **RAM (Minimized / System Tray):** `~7.3 MB` Working Set
-- **CPU (Settled / Post-Close):** `~0.5%`
-- **GPU (Idle / Hidden):** `0%` (event-driven Makepad DX11 redraws halted when hidden/idle)
-- **Hardened Binary Size:** `~14.0 MB` (`ferric.exe`, fat LTO + stripped symbols + CFG + CET)
+## Preview
 
-## Core Capabilities
+<p align="center">
+  <img src="assets/screenshots/ferric-home-v0.1.0.png" width="1200" alt="Ferric v0.1.0 desktop workspace showing Library sidebar, Quick Picks, Recommended Stations, Queue panel, and bottom player bar with playback speed control">
+</p>
 
-- **Native Rust GPU UI (`makepad-widgets 1.0.0`, DX11 + vendored DirectComposition Acrylic):**
-  - Frameless 3-pane desktop layout (`36px` top chrome, collapsible `168px` left sidebar, 9 content pages, collapsible `260px` right Queue/History & Lyrics panel, zoom-safe centered 2-row `74px` bottom player bar).
-  - 4 theme presets (`AMOLED Black` fresh-install default with `acrylic_enabled: false`, `Native Acrylic`, `Obsidian Studio`, `Warm Cream Light`), **GPU HSV color picker**, customizable Acrylic tint color (`acrylic_tint_hex`), **WCAG 2.1 adaptive foreground/icon contrast** (`AdaptivePalette`), HSV-preserving adaptive artwork accent tinting, `.ferric-theme.json` import/export, and `65%–140%` live UI zoom (`Ctrl - / + / 0`).
-  - Cold-start safe **True Per-Pixel Windows 11 Acrylic** (`WS_EX_NOREDIRECTIONBITMAP` + `CreateSwapChainForComposition` + `DWMSBT_TRANSIENTWINDOW` initialized prior to `CreateTargetForHwnd` and `ShowWindow`, with `WM_NCACTIVATE`/`WM_ACTIVATE` forwarding) so window translucency works immediately on fresh launch while text, icons, and covers stay 100% opaque.
-  - Zero-bloat **runtime OS international font fallbacks** (Japanese `YuGothM.ttc`, Korean `malgunsl.ttf`, Chinese `msyh.ttc`, Thai `LeelawUI.ttf`) shared once via `Rc<Font>` across all UI font families (`0` bytes added to `ferric.exe`/MSI).
-  - 20-card (`5x4`) visual galleries for `Albums`, `Artists`, and `Playlists`; clean `Songs` library sorted by `Recent` by default; `Recents` history; live debounced inline top search bar with clear button; and full track context menu / playlist CRUD.
-- **Pure-Rust Dual-Deck Audiophile Engine (`ferric-audio`):**
-  - Decodes FLAC, MP3, AAC/M4A, ALAC, Ogg Vorbis, Opus, WAV, and AIFF (`symphonia 0.6.1` + pure-Rust `symphonia-opus 0.1.3`).
-  - Lock-free `rtrb 0.4.1` ring buffer -> `cpal 0.18.2` WASAPI output with `rubato 5.1.0` resampling.
-  - Dual-deck `Deck A + Deck B` pre-buffered transitions (`0–12 s` auto-only crossfade with immediate manual Next/Prev handoff, `140 Hz` complementary **Bass-Swap Automix**, **S-Curve Velvet**, **Equal-Power**, **Gapless Album Lock**, intro/outro silence trimming, Hermite micro-fade on play/pause/seek, ReplayGain, `0.75x–1.5x` speed, mono downmix, Sleep Timer).
-  - Live **10-band Parametric EQ** (`biquad 0.6.0`), **24 built-in AutoEq headphone profiles**, and **Equalizer APO `.txt`** import/export.
-- **Discovery, Smart Multi-Artist Radio, Synced Lyrics & HD Video (`ferric-providers`):**
-  - Local folder scanning (`lofty 0.25.5` + `walkdir`), `.m3u`/`.m3u8`/`.csv` playlist import/export, OpenSubsonic / Navidrome sync, public playlist/album/track URL import (works out-of-the-box without login), official Spotify / Google YouTube OAuth 2.0 PKCE read-only metadata sync (`oauth.rs`, no DRM bypass), and optional Google WebView2 sign-in.
-  - Taste-driven personalized Home discovery and locale-aware, multi-artist **Smart Radio Queue** with second-hop artist expansion, strict 1-track-per-artist diversity cap, cover/karaoke/pitch-shift filtering, and rotating Refresh Queue.
-  - 4-stage synced lyrics waterfall (sidecar `.lrc` -> embedded tags -> `LRCLIB` -> `Lyrics.ovh`) with **clean original LRCLIB selection** (penalizing polluted multi-language fan-sub columns and mojibake while auto-healing stale SQLite `lyrics_cache` entries).
-  - **60 FPS Fullscreen Lyrics Mode:** 2-phase aurora dissolve + `42px` glide open/close animation (zero shell ghosting), uniform full-line active illumination across wrapped lines, 21-tap liquid aurora backdrop, animated GPU SDF Repeat/Volume controls, **60 FPS Cover <-> Video Clip morph**, official music video resolver, and docked WebView2 HD video theater with a single crisp DPI-exact `16px` rounded border.
-- **Windows Integration, Discord RPC & Security Hardening:**
-  - Single-instance guard (`Local\FerricMusicPlayerSingleInstance_v1`), deterministic AppUserModelID (`Raflyf.Ferric`), clean `Ferric` Task Manager naming, dynamic now-playing window title, **Windows Taskbar Thumbnail Media Buttons** (`Prev` / `Play-Pause` / `Next`), Windows 11 SMTC media flyout & hardware keys (`souvlaki 0.9.3`), system tray (`Close to Tray`), and scroll-wheel volume adjustment.
-  - Built-in zero-dependency **Discord Rich Presence** (`\\.\pipe\discord-ipc-0..9`, Activity Type `Listening`, built-in Ferric Discord App ID, cassette icon badge, clean album metadata handling).
-  - **Defense-in-Depth & Anti-RE Hardening:** Windows DPAPI encryption (`dpapi:v1:`) for stored account tokens/cookies/passwords, OS CSPRNG (`BCryptGenRandom`), Win32 DLL hijacking & process mitigations (`SetDllDirectoryW`, `SetDefaultDllDirectories`, `HeapSetInformation`, `SetProcessMitigationPolicy`), strict WebView2 sandboxing (CSP, DevTools/popups/permissions disabled, URL allowlists), TOCTOU-safe SHA-256 MSI re-verification prior to `CreateProcessW` (`msiexec.exe`), and reproducible hardened PE builds (`GUARD_CF`, `CETCOMPAT`, `DYNAMICBASE`, `HIGHENTROPYVA`, `NXCOMPAT`, `BREPRO`, zero PDB or host path leaks verified by `scripts/verify_pe_hardening.py`).
+*Captured from Ferric `v0.1.0` (`1600x975`, Native Acrylic flattened over `#0B0C11`). Album artwork and track titles belong to their respective owners and are not bundled with the application.*
 
-## Workspace Layout
+## Features
 
-```text
-ferric/
-├── Cargo.toml                  # Workspace manifest (v0.1.0, Edition 2024, fat LTO, strip symbols, panic=abort)
-├── apps/
-│   └── ferric-desktop/         # Makepad 1.0 UI, Win32 shell/hardening/tray/Acrylic/taskbar, SMTC, Discord RPC, WebView2 video/login, build.rs
-├── crates/
-│   ├── ferric-core/            # SQLite WAL store, PlayQueue, ThemeConfig + AdaptivePalette, EqConfig, DPAPI secrets, models
-│   ├── ferric-audio/           # Dual-deck Symphonia + Opus + Rubato + 10-band Biquad EQ + rtrb + cpal
-│   ├── ferric-providers/       # Local scanner, YTM Home/Search/Radio/Video/Stream, Lyrics + clean filter, OAuth PKCE, Public Sync, AutoEq, Subsonic, Updater
-│   └── ferric-sync/            # Binary postcard frames, UDP LAN beacon (43821), pure-Rust QR pairing, Active Speaker Lease
-├── vendor/
-│   └── makepad-platform/       # Vendored patches: DirectComposition cold-start Acrylic, WM_NCACTIVATE forwarding, exact maximize geometry, OS CJK/Thai virtual fonts
-├── installer/                  # WiX v3 Ferric.wxs & ONLINE-NOTICE.txt
-├── scripts/
-│   ├── Installer.ps1           # WiX v3 per-user MSI packaging script
-│   └── verify_pe_hardening.py  # Post-build PE security flags & zero path/PDB leak verification gate
-├── assets/brand/               # ferric.svg, ferric.png, ferric.ico, wordmarks, monochrome glyph, WiX bitmaps
-└── docs/                       # PRD.md, DESIGN.md, SYNC_AND_AUDIO_SPEC.md, RESEARCH_AND_RE_FINDINGS.md, AGENT_HANDOFF.md
-```
+- **Unified local and online libraries:** Scan local audio folders (`FLAC`, `MP3`, `AAC`/`M4A`, `ALAC`, `Ogg Vorbis`, `Opus`, `WAV`, `AIFF`), browse YouTube Music Home, Search, and Recommended Stations, sync playlists from YouTube Music, Spotify (Web or OAuth PKCE), or OpenSubsonic/Navidrome, and import public playlist URLs or `.m3u`/`.csv` files.
+- **Pure-Rust dual-deck audio engine:** Gapless album playback, configurable auto-crossfade (`0–12 s`) with 140 Hz Bass-Swap Automix, S-Curve Velvet, and Equal-Power curves, 10-band parametric Biquad EQ with 24 built-in AutoEq profiles and Equalizer APO `.txt` import/export, ReplayGain, Mono downmix, Sleep Timer, and one-click bottom-bar Playback Speed (`0.75x` / `1.0x` / `1.25x` / `1.5x`).
+- **Synced lyrics, Fullscreen Lyrics, and docked video clips:** 4-stage lyrics waterfall (local `.lrc` sidecar, embedded tags, `LRCLIB`, `Lyrics.ovh`), timing offset controls (`-0.5s` / `+0.5s`), Fullscreen Lyrics aurora stage, and optional docked HD music video clips.
+- **Four themes with Windows 11 Acrylic and adaptive cover colors:** Switch between `AMOLED Black` (default), `Native Acrylic`, `Obsidian Studio`, and `Warm Cream Light`. Customize glass opacity and tint with a GPU HSV picker, or let Adaptive Artwork Accent and Adaptive Acrylic Tint harmonize automatically with the playing cover while maintaining WCAG AA contrast.
+- **Native Windows 11 integration:** Full Windows SMTC metadata, cover art, live timeline position, and seek support for Quick Settings and third-party overlays (Nusa Pro, NotchPixel, ModernFlyouts), plus taskbar thumbnail buttons (`Prev` / `Play-Pause` / `Next`) and a device-theme-aware dark/light system tray menu.
+- **Low-overhead GPU and tray residency:** Prefers the integrated GPU on hybrid laptops so discrete GPUs stay asleep, releases CPU cover buffers after GPU upload, and trims working set when minimized to the system tray.
+- **Optional Discord Rich Presence and Ferric Connect:** Zero-dependency local Discord IPC (`Listening to Ferric`) and LAN QR pairing discovery (active only while the Connect tab is open).
+- **Local credential protection and clean uninstall:** Stored tokens, cookies, and passwords are encrypted with Windows DPAPI (`CryptProtectData`); full MSI uninstallation removes `%LOCALAPPDATA%\LivelyDesk\Ferric` and app residue while upgrades preserve your database and settings.
 
-## Build Locally (Windows MSVC)
+## Resource use
+
+| State | Memory | CPU | Capture notes |
+| :--- | ---: | ---: | :--- |
+| Active streaming playback, UI open | 153.5 – 188.0 MB | 2.0 – 4.1% | Task Manager snapshots (26 Nov 2026) with cover artwork, Home shelves, and synced lyrics active |
+| UI open, idle (20 s after launch) | 35.1 MB | < 1% | Private Working Set (`18.1 MB` Working Set), `v0.1.0` build (27 Nov 2026), integrated GPU only (`0` NVIDIA DLLs loaded) |
+| Minimized to system tray (10 s after close-to-tray) | 7.4 MB | ~0.2% | Private Working Set (`11.5 MB` Working Set), `v0.1.0` build (27 Nov 2026), artwork cache released while hidden |
+
+*Observed on the author's Windows 11 laptop, not fixed ceilings or guarantees. Memory and CPU vary with display scaling, graphics driver, library size, streaming codec, and whether cover artwork or video clips are active.*
+
+## Download
+
+| Package | Best for |
+| :--- | :--- |
+| [Windows installer (`ferricsetup-v0.1.0.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.0.msi>) | Per-user installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
+| [Portable ZIP (`Ferric-v0.1.0-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.0-windows-x86_64.zip>) | Running without installation |
+| [SHA-256 checksums (`SHA256SUMS.txt`)](<https://github.com/Raflyf/Ferric/releases/latest/download/SHA256SUMS.txt>) | Verifying installer and portable archive integrity before running |
+
+**Requirements:** Windows 10 or Windows 11 on a 64-bit (`x86_64`) PC. No administrator rights are required. Native Windows Acrylic backdrop works best on Windows 11.
+
+Browse [all releases](<https://github.com/Raflyf/Ferric/releases>) &middot; [LivelyDesk showcase](<https://livelydesk.vercel.app/ferric>) &middot; [Report an issue](<https://github.com/Raflyf/Ferric/issues>)
+
+## Getting started
+
+1. Download the MSI installer or extract the portable ZIP, and verify its hash against `SHA256SUMS.txt`.
+2. Launch Ferric. Add local music folders under **Settings > Storage**, or optionally connect YouTube Music, Spotify, or OpenSubsonic/Navidrome under **Settings > Accounts**.
+3. Open **Settings > Appearance** to switch between `AMOLED Black`, `Native Acrylic`, `Obsidian Studio`, and `Warm Cream Light`, adjust UI zoom (`Ctrl -` / `Ctrl +` / `Ctrl 0`), or tune Acrylic opacity and glass tint.
+4. Useful shortcuts: `Space` (play/pause), `Shift+Left` / `Shift+Right` (previous/next track), `M` (mute), `S` (shuffle), `R` (repeat), `L` (lyrics panel), `F` (fullscreen lyrics), `Ctrl+K` (command palette), `Esc` (close overlay).
+
+## Building from source
+
+<details>
+<summary>Windows MSVC toolchain and release build commands</summary>
+
+Requires Rust stable (`x86_64-pc-windows-msvc`), Visual Studio C++ build tools, Windows SDK, and Python 3 (for PE hardening verification).
 
 ```powershell
 rustup default stable-x86_64-pc-windows-msvc
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo build --release -p ferric-desktop --locked
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 python .\scripts\verify_pe_hardening.py .\target\release\ferric.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Installer.ps1
 ```
 
-## Automated CI & Packaging
+</details>
 
-Every code push to `main` runs `.github/workflows/ci-desktop.yml`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace --locked`, PowerShell syntax validation, isolated reproducible hardened release build (`CARGO_HOME=C:\c`, `subst S:`, `/GUARD:CF`, `/CETCOMPAT`, `/BREPRO`, `/DEBUG:NONE`, `--remap-path-prefix`), `scripts/verify_pe_hardening.py`, WiX MSI packaging, portable ZIP packaging, and `SHA256SUMS.txt` generation. GitHub Releases are only published when a `v*` tag is manually pushed (`.github/workflows/release.yml`).
+## Support
+
+Optional support via [Buy me a coffee](<https://yapp.ink/raflyf>) or [Saweria](<https://saweria.co/BuyMatcha>). Ferric is free and open source; donations never gate or unlock features.
+
+## Code signing policy
+
+Ferric releases (including `v0.1.0`) are currently **unsigned** (no Authenticode code-signing certificate is active). Windows Defender SmartScreen may show an unknown-publisher warning on new releases. All official installers, portable archives, and `SHA256SUMS.txt` manifests are compiled transparently from public source via [GitHub Actions](<.github/workflows/release.yml>). Always download from [GitHub Releases](<https://github.com/Raflyf/Ferric/releases>), verify SHA-256 digests before installing, and keep Windows security protections enabled.
+
+## Privacy policy
+
+Ferric does not collect, store, or transmit analytics, crash telemetry, or local library paths to developer servers. Your SQLite database, settings, cached artwork, and stream cache stay locally under `%LOCALAPPDATA%\LivelyDesk\Ferric`, and saved account tokens, cookies, and passwords are encrypted at rest with Windows DPAPI (`CryptProtectData`).
+
+Network connections are limited to the following endpoints:
+
+- **Update check (startup, opt-out in Settings > Storage):** Sends one read-only HTTPS `GET` to `api.github.com/repos/Raflyf/Ferric/releases/latest` (`User-Agent: Ferric/<version>`). Updates download only after you click **Update Now** from `github.com` / `objects.githubusercontent.com` / `release-assets.githubusercontent.com` and verify against `SHA256SUMS.txt`.
+- **Home discovery & artwork (startup and browsing):** Loads YouTube Music shelves and recommendations from `music.youtube.com` and cover thumbnails from `*.googleusercontent.com`, `*.ggpht.com`, and `i.ytimg.com`. When signed in to Spotify, Recommended Stations also query `clienttoken.spotify.com` and `api-partner.spotify.com` (with `open.spotify.com` / `open.spotifycdn.com` on query hash refresh) and load covers from `*.scdn.co` / `*.spotifycdn.com`.
+- **Playback, video clips & lyrics (on play):** Online playback resolves streams via `www.youtube.com` and streams audio/video from `*.googlevideo.com`. When no local `.lrc` file or embedded tag is present, lyrics are queried from `lrclib.net` with `api.lyrics.ovh` as fallback.
+- **Optional accounts & integrations (user action only):** Sign-in and library sync contact `accounts.google.com`, `accounts.spotify.com`, `api.spotify.com`, or your user-configured OpenSubsonic/Navidrome server. Optional Discord Rich Presence communicates locally over `\\.\pipe\discord-ipc-0..9` (passing Ferric's public icon URL on `raw.githubusercontent.com` in the Discord activity payload). Optional Ferric Connect LAN discovery broadcasts on local UDP port `43821` only while **Settings > Connect** is open.
+
+## License
+
+[MIT](LICENSE) &copy; Rafly Firmansyah.

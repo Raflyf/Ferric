@@ -55,10 +55,10 @@ pub fn launch_google_ytm_login_window<F>(
     imp::launch(profile_dir, clear_existing_cookies, on_done);
 }
 
-/// Launch the Spotify web-player sign-in window and capture the `sp_dc` session cookie.
+/// Launch the Spotify web-player sign-in window and capture the signed-in session token.
 ///
 /// This path needs no Client ID and no developer app: the user signs in to Spotify's own web
-/// player, and the resulting session cookie is exchanged for a token in `ferric_providers`.
+/// player, and the access token that the player fetches for itself is captured from the page.
 pub fn launch_spotify_login_window<F>(
     profile_dir: PathBuf,
     clear_existing_cookies: bool,
@@ -87,7 +87,8 @@ mod imp {
         ICoreWebView2Settings3, ICoreWebView2Settings4,
     };
     use webview2_com::{
-        CoTaskMemPWSTR, CreateCoreWebView2ControllerCompletedHandler,
+        AddScriptToExecuteOnDocumentCreatedCompletedHandler, CoTaskMemPWSTR,
+        CreateCoreWebView2ControllerCompletedHandler,
         CreateCoreWebView2EnvironmentCompletedHandler, ExecuteScriptCompletedHandler,
         GetCookiesCompletedHandler, NavigationCompletedEventHandler,
         NavigationStartingEventHandler, NewWindowRequestedEventHandler,
@@ -114,6 +115,77 @@ mod imp {
     const SPOTIFY_COOKIE_URI: &str = "https://open.spotify.com";
     const SPOTIFY_COOKIE_HOST: &str = "open.spotify.com";
     const COOKIE_POLL_TIMER_ID: usize = 1001;
+
+    /// Installed on every Spotify document before the first navigation. The web player computes
+    /// its own per-session token challenge inside obfuscated JS; re-issuing the endpoint call from
+    /// outside that code path returns HTML. Hooking the player's own `fetch`/XHR responses keeps
+    /// the challenge where Spotify expects it in the request and only records the resulting JSON.
+    const SPOTIFY_TOKEN_HOOK_JS: &str = r#"
+(() => {
+  if (window.__ferricTokenHook) return;
+  window.__ferricTokenHook = true;
+  window.__ferricToken = null;
+  const isTokenUrl = (u) => {
+    try { return /(\/api\/token|get_access_token)/.test(String(u)); } catch (e) { return false; }
+  };
+  const remember = (text) => {
+    if (typeof text !== 'string' || text.length > 65536) return;
+    if (text.indexOf('accessToken') === -1) return;
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || !parsed.accessToken || parsed.isAnonymous === true) return;
+      window.__ferricToken = text;
+    } catch (e) {}
+  };
+  const originalFetch = window.fetch;
+  if (originalFetch) {
+    window.fetch = function (input, init) {
+      const url = (input && input.url) || input;
+      const pending = originalFetch.apply(this, arguments);
+      if (isTokenUrl(url)) {
+        pending.then((res) => res.clone().text()).then(remember).catch(() => {});
+      }
+      return pending;
+    };
+  }
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    if (isTokenUrl(url)) {
+      this.addEventListener('load', () => {
+        try { remember(this.responseText); } catch (e) {}
+      });
+    }
+    return originalOpen.apply(this, arguments);
+  };
+})();
+"#;
+
+    /// Reads the token the player fetched for itself. The direct `get_access_token` call is kept
+    /// only as a fallback for builds where the player has not issued the request within 10 s.
+    const SPOTIFY_TOKEN_READ_JS: &str = r#"
+(async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  for (let i = 0; i < 20; i += 1) {
+    if (window.__ferricToken) return window.__ferricToken;
+    await wait(500);
+  }
+  try {
+    const res = await fetch('/get_access_token?reason=transport&productType=web_player', {
+      credentials: 'include',
+      headers: { 'app-platform': 'WebPlayer' },
+    });
+    const text = await res.text();
+    if (text && text.indexOf('accessToken') !== -1) return text;
+  } catch (e) {
+    if (window.__ferricToken) return window.__ferricToken;
+  }
+  for (let i = 0; i < 20; i += 1) {
+    if (window.__ferricToken) return window.__ferricToken;
+    await wait(500);
+  }
+  return window.__ferricToken || 'ERR:no token captured from the web player';
+})()
+"#;
 
     impl LoginTarget {
         const fn login_url(self) -> &'static str {
@@ -544,6 +616,28 @@ mod imp {
             wv
         };
 
+        if target == LoginTarget::Spotify {
+            // Register before the first navigation so every document (login, redirect,
+            // web player) gets the hook ahead of the player's own token request.
+            let hook_wv = webview.clone();
+            let hook_js = SPOTIFY_TOKEN_HOOK_JS;
+            let _ = AddScriptToExecuteOnDocumentCreatedCompletedHandler::wait_for_async_operation(
+                Box::new(move |handler| {
+                    // SAFETY: `hook_wv` is on this STA thread; the script outlives the COM call.
+                    unsafe {
+                        let js = CoTaskMemPWSTR::from(hook_js);
+                        hook_wv
+                            .AddScriptToExecuteOnDocumentCreated(
+                                *js.as_ref().as_pcwstr(),
+                                &handler,
+                            )
+                            .map_err(webview2_com::Error::WindowsError)
+                    }
+                }),
+                Box::new(|error_code, _id| error_code),
+            );
+        }
+
         if clear_existing_cookies && let Ok(wv2) = webview.cast::<ICoreWebView2_2>() {
             // SAFETY: Clear cached Google cookies on explicit re-login after Sign Out.
             unsafe {
@@ -731,11 +825,7 @@ mod imp {
                                 Ok(())
                             },
                         ));
-                        let script = CoTaskMemPWSTR::from(
-                            "fetch('/get_access_token?reason=transport&productType=web_player',\
-                             {headers:{'app-platform':'WebPlayer'}}).then(r=>r.text())\
-                             .catch(e=>'ERR:'+e)",
-                        );
+                        let script = CoTaskMemPWSTR::from(SPOTIFY_TOKEN_READ_JS);
                         // SAFETY: Execute inside the signed-in page on the STA thread.
                         unsafe {
                             let _ = wv_inner.ExecuteScript(*script.as_ref().as_pcwstr(), &exec);

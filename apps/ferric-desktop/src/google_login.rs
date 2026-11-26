@@ -711,7 +711,6 @@ mod imp {
                         let done_inner = Rc::clone(&done_slot);
                         let dead_inner = Rc::clone(&dead_slot);
                         let wv_inner = wv_for_capture.clone();
-                        let header = cookie_header.clone();
                         let exec = ExecuteScriptCompletedHandler::create(Box::new(
                             move |status, result| {
                                 if status.is_err() || dead_inner.get() {
@@ -720,7 +719,7 @@ mod imp {
                                 emit_once(
                                     &done_inner,
                                     LoginPayload::SpotifySession {
-                                        cookie: header.clone(),
+                                        cookie: cookie_header.clone(),
                                         token_json: result,
                                     },
                                 );

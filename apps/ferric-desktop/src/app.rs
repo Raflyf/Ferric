@@ -3636,11 +3636,11 @@ impl App {
         }
 
         if (self.fs_reveal_target - self.fs_reveal_t).abs() > 0.004 {
-            // Graceful ~280ms ease-out rise on Open, brisk ~220ms glide-down on Close
+            // Graceful ~320ms 2-phase rise on Open, brisk ~240ms glide-down + dissolve on Close
             let rate = if self.fs_reveal_target > self.fs_reveal_t {
-                13.5
+                11.5
             } else {
-                15.5
+                14.5
             };
             let k_fs = (1.0 - (-rate * dt).exp()) as f32;
             self.fs_reveal_t = (self.fs_reveal_t
@@ -4356,8 +4356,8 @@ impl App {
         let box_h = cover_box + (video_box_h - cover_box) * tf;
         let cur_frame_h = (box_w * 9.0 / 16.0).round().max(110.0);
 
-        let reveal_content = Self::smoothstep01((self.fs_reveal_t - 0.18) / 0.82);
-        let reveal_scale = 0.90 + 0.10 * f64::from(reveal_content);
+        let reveal_content = Self::smoothstep01((self.fs_reveal_t - 0.52) / 0.48);
+        let reveal_scale = 0.92 + 0.08 * f64::from(reveal_content);
         let art_sz = (304.0 - 28.0 * tf) * z * reveal_scale;
         let art_alpha = Self::smoothstep01(1.0 - t / 0.62) * reveal_content;
         let art_radius = 28.0 - 8.0 * t;
@@ -5014,9 +5014,11 @@ impl App {
 
     fn apply_fullscreen_reveal(&self, cx: &mut Cx) {
         let t = self.fs_reveal_t.clamp(0.0, 1.0);
-        let bg_alpha = Self::smoothstep01(t / 0.85);
-        let content_alpha = Self::smoothstep01((t - 0.18) / 0.82);
-        let slide_y = (1.0 - f64::from(t)) * 64.0;
+        // 2-phase choreography: aurora backdrop dissolves to 100% opaque first (0.0 -> 0.58),
+        // then stage content glides up and blooms cleanly (0.52 -> 1.0) with zero UI ghosting over shell_col.
+        let bg_alpha = Self::smoothstep01(t / 0.58);
+        let content_alpha = Self::smoothstep01((t - 0.52) / 0.48);
+        let slide_y = (1.0 - f64::from(content_alpha)) * 42.0;
         let top_pad = 14.0 + slide_y;
         let bottom_pad = (18.0 - slide_y * 0.25).max(0.0);
 
@@ -5024,7 +5026,7 @@ impl App {
             .ferric_ambient_stage(id!(fs_backdrop))
             .set_opacity(cx, bg_alpha);
 
-        let show_stage = t > 0.18;
+        let show_stage = t > 0.52;
         self.ui
             .view(id!(fs_stage_content))
             .set_visible(cx, show_stage);

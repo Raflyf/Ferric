@@ -8,10 +8,12 @@ Install Ferric for your Windows user under %LOCALAPPDATA%\Programs\Ferric. No ad
 Network, Local IPC & Privacy Notice:
 - Setup itself makes no network requests.
 - By default, Ferric performs one lightweight HTTPS request on startup to https://api.github.com/repos/Raflyf/Ferric/releases/latest to check for newer stable releases (User-Agent includes only the app version, never library paths or preferences). You can disable automatic startup checks at any time from the update popup or inside Settings > Storage.
+- On normal startup, the Home discovery feed loads personalized YouTube Music shelves (music.youtube.com) and album artwork thumbnails (*.googleusercontent.com, *.ggpht.com, i.ytimg.com). When you are signed in to Spotify, Home Recommended Stations also query Spotify Web / Pathfinder API (clienttoken.spotify.com, api-partner.spotify.com) and load cover thumbnails (*.scdn.co, *.spotifycdn.com).
 - Updates are never downloaded or installed silently without your click. When you click Update Now, Ferric downloads SHA256SUMS.txt and ferricsetup-vX.Y.Z.msi exclusively from official GitHub hosts, re-verifies the exact SHA-256 digest right before launching %SystemRoot%\System32\msiexec.exe, and deletes temporary files on any mismatch.
-- Optional synced lyrics lookup queries open lyrics services (lrclib.net / lyrics.ovh) only when no local sidecar .lrc file or embedded tag lyrics are found.
-- Optional music discovery, public playlist URL import, official Spotify/Google OAuth 2.0 PKCE read-only metadata sync, OpenSubsonic/Navidrome sync, or Google WebView2 sign-in operate strictly on user action; stored tokens, cookies, and passwords are encrypted at rest on Windows using DPAPI (CryptProtectData).
-- Optional Discord Rich Presence communicates locally over the Windows Discord desktop IPC pipe (\\.\pipe\discord-ipc-*) only when enabled in Settings > Accounts.
+- Optional synced lyrics lookup queries open lyrics services (lrclib.net / api.lyrics.ovh) only when no local sidecar .lrc file or embedded tag lyrics are found.
+- Public playlist URL import, Spotify Direct OAuth 2.0 PKCE (Premium) or Spotify Web Sign-In read-only metadata sync, OpenSubsonic/Navidrome sync, and Google WebView2 sign-in operate on user action; stored tokens, cookies, and passwords are encrypted at rest on Windows using DPAPI (CryptProtectData).
+- Optional Discord Rich Presence communicates locally over the Windows Discord desktop IPC pipe (\\.\pipe\discord-ipc-*) only when enabled in Settings > Integrations.
+- Optional Ferric Connect LAN peer discovery (UDP port 43821) starts only when you open Settings > Connect.
 
 Unsigned builds prior to code signing activation:
 Keep Windows security protections enabled and obtain releases only from https://github.com/Raflyf/Ferric/releases verified against SHA256SUMS.txt.

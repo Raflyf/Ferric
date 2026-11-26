@@ -42,13 +42,19 @@ foreach ($requiredAsset in @(
     }
 }
 
-# Locate Makepad widgets runtime resources (IBMPlexSans fonts + SVG icons)
+# Locate exact locked makepad-widgets runtime resources (IBMPlexSans fonts + SVG icons)
 if (-not $PSBoundParameters.ContainsKey('MakepadWidgetsResources') -or [string]::IsNullOrWhiteSpace($MakepadWidgetsResources)) {
     $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
     $regSrc = Join-Path $cargoHome 'registry\src'
-    $MakepadWidgetsResources = Get-ChildItem -LiteralPath $regSrc -Recurse -Directory -Filter 'makepad-widgets-*' |
+    $lockRaw = Get-Content -LiteralPath (Join-Path $root 'Cargo.lock') -Raw
+    $mwFilter = 'makepad-widgets-*'
+    if ($lockRaw -match '(?ms)name\s*=\s*"makepad-widgets"\r?\nversion\s*=\s*"([^"]+)"') {
+        $mwFilter = "makepad-widgets-$($Matches[1])"
+    }
+    $MakepadWidgetsResources = Get-ChildItem -LiteralPath $regSrc -Recurse -Directory -Filter $mwFilter |
         ForEach-Object { Join-Path $_.FullName 'resources' } |
         Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
+        Sort-Object FullName -Descending |
         Select-Object -First 1
 }
 if (-not $MakepadWidgetsResources -or -not (Test-Path -LiteralPath (Join-Path $MakepadWidgetsResources 'IBMPlexSans-Text.ttf') -PathType Leaf)) {
@@ -207,11 +213,36 @@ $($refLines -join "`r`n")
 "@
 [IO.File]::WriteAllText($resWxs, $resXml, [Text.Encoding]::UTF8)
 
-# Generate combined RTF license notice (ONLINE-NOTICE.txt + LICENSE)
+# Generate combined RTF license notice (ONLINE-NOTICE.txt + LICENSE) with UTF-16 RTF escapes
+function ConvertTo-RtfText {
+    param([string]$Text)
+    $sb = New-Object System.Text.StringBuilder
+    $norm = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    foreach ($ch in $norm.ToCharArray()) {
+        $code = [int]$ch
+        if ($ch -eq '\') {
+            [void]$sb.Append('\\')
+        } elseif ($ch -eq '{') {
+            [void]$sb.Append('\{')
+        } elseif ($ch -eq '}') {
+            [void]$sb.Append('\}')
+        } elseif ($ch -eq "`n") {
+            [void]$sb.Append("\par`r`n")
+        } elseif ($code -ge 32 -and $code -le 126) {
+            [void]$sb.Append($ch)
+        } elseif ($code -eq 9) {
+            [void]$sb.Append('\tab ')
+        } else {
+            $signed = if ($code -gt 32767) { $code - 65536 } else { $code }
+            [void]$sb.Append("\u${signed}?")
+        }
+    }
+    return $sb.ToString()
+}
 $noticeText = (Get-Content -LiteralPath (Join-Path $root 'installer\ONLINE-NOTICE.txt') -Raw).Trim()
 $licenseText = (Get-Content -LiteralPath (Join-Path $root 'LICENSE') -Raw).Trim()
 $combinedText = "$noticeText`r`n`r`n---`r`n`r`n$licenseText"
-$escapedRtf = $combinedText.Replace('\', '\\').Replace('{', '\{').Replace('}', '\}').Replace("`r`n", "`n").Replace("`n", "\par`r`n")
+$escapedRtf = ConvertTo-RtfText -Text $combinedText
 $licenseRtf = Join-Path $staging 'license.rtf'
 [IO.File]::WriteAllText($licenseRtf, "{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}}\fs18 $escapedRtf}", [Text.Encoding]::ASCII)
 

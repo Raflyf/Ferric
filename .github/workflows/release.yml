@@ -6,18 +6,41 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release-windows:
-    name: Build & Publish Windows MSI + Portable Release
+  build-windows:
+    name: Build, Verify & Package Windows MSI + Portable Release
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Validate release tag matches Cargo.toml version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(\d+\.\d+\.\d+)$') {
+            throw "Release tag '$($env:RELEASE_TAG)' must match vX.Y.Z"
+          }
+          $tagVer = $Matches[1]
+          $toml = Get-Content -Raw Cargo.toml
+          if ($toml -notmatch '(?m)^version\s*=\s*"(\d+\.\d+\.\d+)"') {
+            throw "Numeric X.Y.Z version missing in Cargo.toml"
+          }
+          if ($Matches[1] -ne $tagVer) {
+            throw "Tag version ($tagVer) does not match Cargo.toml ($($Matches[1]))"
+          }
 
       - name: Setup Rust stable (MSVC)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          components: clippy, rustfmt
 
       - name: Configure neutral CARGO_HOME (prevent runner username path leaks)
         shell: pwsh
@@ -26,56 +49,17 @@ jobs:
           "CARGO_HOME=C:\c" >> $env:GITHUB_ENV
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      - name: Verify tests before release
-        run: cargo test --workspace --locked
+      - name: Check formatting, Clippy, and unit tests before release
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
 
       - name: Build hardened release binary
         shell: pwsh
-        env:
-          MAKEPAD_PACKAGE_DIR: makepad
-        run: |
-          $ws = (Resolve-Path .).ProviderPath
-          $wsSlash = $ws.Replace('\', '/')
-          $cargoHome = $env:CARGO_HOME
-          $cargoSlash = $cargoHome.Replace('\', '/')
-          $userProf = $env:USERPROFILE
-          $userSlash = $userProf.Replace('\', '/')
-          subst S: $ws
-          try {
-            Push-Location S:\
-            $env:CFLAGS = "/guard:cf /d1trimfile:S:\ /d1trimfile:$cargoHome"
-            $env:CXXFLAGS = "/guard:cf /d1trimfile:S:\ /d1trimfile:$cargoHome"
-            $flags = @(
-              '-C', 'control-flow-guard=yes',
-              '-C', 'link-arg=/GUARD:CF',
-              '-C', 'link-arg=/CETCOMPAT',
-              '-C', 'link-arg=/DYNAMICBASE',
-              '-C', 'link-arg=/HIGHENTROPYVA',
-              '-C', 'link-arg=/NXCOMPAT',
-              '-C', 'link-arg=/DEBUG:NONE',
-              '-C', 'link-arg=/NOCOFFGRPINFO',
-              '-C', 'link-arg=/INCREMENTAL:NO',
-              '-C', 'link-arg=/OPT:REF',
-              '-C', 'link-arg=/OPT:ICF',
-              '-C', 'link-arg=/BREPRO',
-              '--remap-path-prefix=S:\=/s',
-              '--remap-path-prefix=S:/=/s',
-              "--remap-path-prefix=$ws=/s",
-              "--remap-path-prefix=$wsSlash=/s",
-              "--remap-path-prefix=$cargoHome=/c",
-              "--remap-path-prefix=$cargoSlash=/c",
-              "--remap-path-prefix=$userProf=/u",
-              "--remap-path-prefix=$userSlash=/u"
-            )
-            $env:CARGO_ENCODED_RUSTFLAGS = $flags -join ([char]0x1F)
-            cargo build --release -p ferric-desktop --locked
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } finally {
-            Pop-Location
-            subst S: /D | Out-Null
-          }
+        run: .\scripts\build-release.ps1
 
       - name: Verify PE hardening flags and zero path/PDB leaks
         shell: pwsh
@@ -83,8 +67,10 @@ jobs:
 
       - name: Build MSI installer & portable ZIP
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:RELEASE_TAG
           & .\scripts\Installer.ps1
           $msiName = "ferricsetup-$tag.msi"
           $msiPath = Join-Path .\dist $msiName
@@ -107,12 +93,18 @@ jobs:
           Copy-Item "apps/ferric-desktop/resources/*" "$stage/makepad/ferric/resources/" -Recurse -Force
 
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
-          $mwRes = Get-ChildItem (Join-Path $cargoHome "registry/src") -Recurse -Directory -Filter "makepad-widgets-*" |
+          $lockRaw = Get-Content -Raw Cargo.lock
+          $mwFilter = "makepad-widgets-*"
+          if ($lockRaw -match '(?ms)name\s*=\s*"makepad-widgets"\r?\nversion\s*=\s*"([^"]+)"') {
+            $mwFilter = "makepad-widgets-$($Matches[1])"
+          }
+          $mwRes = Get-ChildItem (Join-Path $cargoHome "registry/src") -Recurse -Directory -Filter $mwFilter |
             ForEach-Object { Join-Path $_.FullName "resources" } |
             Where-Object { Test-Path $_ } |
+            Sort-Object FullName -Descending |
             Select-Object -First 1
           if (-not $mwRes) {
-            throw "Failed to locate makepad-widgets resources directory under $cargoHome"
+            throw "Failed to locate $mwFilter resources directory under $cargoHome"
           }
           Copy-Item "$mwRes/*" "$stage/makepad/makepad_widgets/resources/" -Recurse -Force
 
@@ -126,8 +118,33 @@ jobs:
           $sums = "$msiHash  $msiName`n$zipHash  $zipName`n$exeHash  ferric.exe`n"
           [IO.File]::WriteAllText((Join-Path $PWD "dist\SHA256SUMS.txt"), $sums, [Text.Encoding]::ASCII)
 
+      - name: Upload verified release payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-payload
+          path: |
+            dist/ferricsetup-${{ github.ref_name }}.msi
+            dist/Ferric-${{ github.ref_name }}-windows-x86_64.zip
+            dist/SHA256SUMS.txt
+          retention-days: 5
+          if-no-files-found: error
+          compression-level: 0
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-payload
+          path: dist
+
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
           files: |

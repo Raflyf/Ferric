@@ -15,6 +15,9 @@ on:
       - "assets/ui_previews/**"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ferric-desktop-ci-${{ github.ref }}
   cancel-in-progress: true
@@ -29,21 +32,23 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Rust stable (MSVC)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: clippy, rustfmt
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run Clippy across workspace
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run workspace unit tests
         run: cargo test --workspace --locked
@@ -59,15 +64,17 @@ jobs:
           }
 
   build-windows-artifact:
-    name: Build Windows MSI Setup & Portable ZIP (v0.1.0)
+    name: Build Windows MSI Setup & Portable ZIP
     needs: check-and-test
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Rust stable (MSVC)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
       - name: Configure neutral CARGO_HOME (prevent runner username path leaks)
         shell: pwsh
@@ -76,7 +83,7 @@ jobs:
           "CARGO_HOME=C:\c" >> $env:GITHUB_ENV
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Read package version
         id: meta
@@ -92,49 +99,7 @@ jobs:
 
       - name: Build hardened release binary (ferric.exe)
         shell: pwsh
-        env:
-          MAKEPAD_PACKAGE_DIR: makepad
-        run: |
-          $ws = (Resolve-Path .).ProviderPath
-          $wsSlash = $ws.Replace('\', '/')
-          $cargoHome = $env:CARGO_HOME
-          $cargoSlash = $cargoHome.Replace('\', '/')
-          $userProf = $env:USERPROFILE
-          $userSlash = $userProf.Replace('\', '/')
-          subst S: $ws
-          try {
-            Push-Location S:\
-            $env:CFLAGS = "/guard:cf /d1trimfile:S:\ /d1trimfile:$cargoHome"
-            $env:CXXFLAGS = "/guard:cf /d1trimfile:S:\ /d1trimfile:$cargoHome"
-            $flags = @(
-              '-C', 'control-flow-guard=yes',
-              '-C', 'link-arg=/GUARD:CF',
-              '-C', 'link-arg=/CETCOMPAT',
-              '-C', 'link-arg=/DYNAMICBASE',
-              '-C', 'link-arg=/HIGHENTROPYVA',
-              '-C', 'link-arg=/NXCOMPAT',
-              '-C', 'link-arg=/DEBUG:NONE',
-              '-C', 'link-arg=/NOCOFFGRPINFO',
-              '-C', 'link-arg=/INCREMENTAL:NO',
-              '-C', 'link-arg=/OPT:REF',
-              '-C', 'link-arg=/OPT:ICF',
-              '-C', 'link-arg=/BREPRO',
-              '--remap-path-prefix=S:\=/s',
-              '--remap-path-prefix=S:/=/s',
-              "--remap-path-prefix=$ws=/s",
-              "--remap-path-prefix=$wsSlash=/s",
-              "--remap-path-prefix=$cargoHome=/c",
-              "--remap-path-prefix=$cargoSlash=/c",
-              "--remap-path-prefix=$userProf=/u",
-              "--remap-path-prefix=$userSlash=/u"
-            )
-            $env:CARGO_ENCODED_RUSTFLAGS = $flags -join ([char]0x1F)
-            cargo build --release -p ferric-desktop --locked
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } finally {
-            Pop-Location
-            subst S: /D | Out-Null
-          }
+        run: .\scripts\build-release.ps1
 
       - name: Verify PE hardening flags and zero path/PDB leaks
         shell: pwsh
@@ -149,8 +114,10 @@ jobs:
 
       - name: Package portable Windows archive & SHA256SUMS
         shell: pwsh
+        env:
+          APP_VER: ${{ steps.meta.outputs.version }}
         run: |
-          $ver = "${{ steps.meta.outputs.version }}"
+          $ver = $env:APP_VER
           $stage = "dist/Ferric-v$ver-windows-x86_64"
           New-Item -ItemType Directory -Force -Path "$stage/resources" | Out-Null
           New-Item -ItemType Directory -Force -Path "$stage/makepad/makepad_widgets/resources" | Out-Null
@@ -167,12 +134,18 @@ jobs:
           Copy-Item "apps/ferric-desktop/resources/*" "$stage/makepad/ferric/resources/" -Recurse -Force
 
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
-          $mwRes = Get-ChildItem (Join-Path $cargoHome "registry/src") -Recurse -Directory -Filter "makepad-widgets-*" |
+          $lockRaw = Get-Content -Raw Cargo.lock
+          $mwFilter = "makepad-widgets-*"
+          if ($lockRaw -match '(?ms)name\s*=\s*"makepad-widgets"\r?\nversion\s*=\s*"([^"]+)"') {
+            $mwFilter = "makepad-widgets-$($Matches[1])"
+          }
+          $mwRes = Get-ChildItem (Join-Path $cargoHome "registry/src") -Recurse -Directory -Filter $mwFilter |
             ForEach-Object { Join-Path $_.FullName "resources" } |
             Where-Object { Test-Path $_ } |
+            Sort-Object FullName -Descending |
             Select-Object -First 1
           if (-not $mwRes) {
-            throw "Failed to locate makepad-widgets resources directory under $cargoHome"
+            throw "Failed to locate $mwFilter resources directory under $cargoHome"
           }
           Copy-Item "$mwRes/*" "$stage/makepad/makepad_widgets/resources/" -Recurse -Force
           if (-not (Test-Path "$stage/makepad/makepad_widgets/resources/IBMPlexSans-Text.ttf")) {
@@ -195,7 +168,7 @@ jobs:
           Get-Content "dist/SHA256SUMS.txt"
 
       - name: Upload downloadable preview artifact (MSI + ZIP + SHA256SUMS, no tag created)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Ferric-v${{ steps.meta.outputs.version }}-windows-x86_64
           path: |

@@ -46,6 +46,26 @@
         DllEntry="WixShellExec"
         Impersonate="yes" />
 
+    <!-- Clean Uninstall: wipe all Ferric caches, logs, WebView2 profiles, updates & SQLite DB
+         strictly on full Uninstall (NEVER during in-place MSI upgrade). Removes parent
+         %LOCALAPPDATA%\LivelyDesk only when empty so sibling LivelyDesk apps remain untouched. -->
+    <CustomAction
+        Id="SetCleanUninstallCmd"
+        Property="CleanUninstallUserData"
+        Value="&quot;[System64Folder]cmd.exe&quot; /d /c &quot;if exist &quot;%LOCALAPPDATA%\LivelyDesk\Ferric&quot; rd /s /q &quot;%LOCALAPPDATA%\LivelyDesk\Ferric&quot; &amp; rd &quot;%LOCALAPPDATA%\LivelyDesk&quot; 2&gt;nul &amp; if exist &quot;%LOCALAPPDATA%\Programs\Ferric&quot; rd /s /q &quot;%LOCALAPPDATA%\Programs\Ferric&quot; &amp; if exist &quot;%TEMP%\ferric_spotify_capture.txt&quot; del /f /q &quot;%TEMP%\ferric_spotify_capture.txt&quot;&quot;" />
+    <CustomAction
+        Id="CleanUninstallUserData"
+        BinaryKey="WixCA"
+        DllEntry="WixQuietExec64"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="SetCleanUninstallCmd" Before="CleanUninstallUserData">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="CleanUninstallUserData" After="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+
     <UI>
       <UIRef Id="WixUI_InstallDir" />
       <UIRef Id="WixUI_ErrorProgressText" />
@@ -74,6 +94,10 @@
             Value="[INSTALLFOLDER]"
             KeyPath="yes" />
         <RegistryKey Root="HKCU" Key="Software\Raflyf\Ferric" ForceDeleteOnUninstall="yes" />
+        <RegistryKey Root="HKCU" Key="Software\Classes\AppUserModelId\Raflyf.Ferric" ForceDeleteOnUninstall="yes">
+          <RegistryValue Name="DisplayName" Type="string" Value="Ferric" />
+          <RegistryValue Name="IconUri" Type="string" Value="[#FerricIconFile]" />
+        </RegistryKey>
         <File Id="FerricExe" Source="$(var.AppExe)" />
         <File Id="ReadmeMd" Source="$(var.RepoRoot)\README.md" />
         <File Id="LicenseTxt" Source="$(var.RepoRoot)\LICENSE" />

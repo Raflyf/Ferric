@@ -107,6 +107,39 @@ pub fn access_token_from_sp_dc(sp_dc: &str) -> ProviderResult<String> {
     }
 }
 
+/// Parse the token JSON produced by the in-page `get_access_token` fetch.
+///
+/// WebView2's `ExecuteScript` returns the result JSON-encoded, so the payload may arrive as a
+/// quoted, escaped string rather than raw JSON.
+pub fn parse_web_token_json(raw: &str) -> ProviderResult<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(ProviderError::Http(
+            "Spotify returned an empty token response".to_string(),
+        ));
+    }
+    let text = serde_json::from_str::<String>(raw).unwrap_or_else(|_| raw.to_string());
+    let text = text.trim();
+    if let Some(err) = text.strip_prefix("ERR:") {
+        return Err(ProviderError::Http(format!(
+            "Spotify token fetch failed inside the page: {err}"
+        )));
+    }
+    let parsed: WebTokenResponse = serde_json::from_str(text)
+        .map_err(|e| ProviderError::Http(format!("Invalid Spotify token JSON: {e}")))?;
+    if parsed.is_anonymous {
+        return Err(ProviderError::Metadata(
+            "Spotify returned an anonymous token; the session is not signed in".to_string(),
+        ));
+    }
+    match parsed.access_token {
+        Some(token) if !token.trim().is_empty() => Ok(token),
+        _ => Err(ProviderError::Http(
+            "Spotify token response had no access token".to_string(),
+        )),
+    }
+}
+
 /// Read the signed-in user's profile, Liked Songs and playlists into a sync report.
 pub fn sync_catalog_via_sp_dc(sp_dc: &str) -> ProviderResult<crate::oauth::CloudSyncReport> {
     let token = access_token_from_sp_dc(sp_dc)?;
@@ -134,5 +167,22 @@ mod tests {
     fn rejects_malformed_cookie_value() {
         assert!(access_token_from_sp_dc("").is_err());
         assert!(access_token_from_sp_dc("bad;value").is_err());
+    }
+
+    #[test]
+    fn parses_raw_and_quoted_token_json() {
+        let raw = r#"{"accessToken":"tok_123","isAnonymous":false}"#;
+        assert_eq!(parse_web_token_json(raw).unwrap(), "tok_123");
+
+        let quoted = serde_json::to_string(raw).unwrap();
+        assert_eq!(parse_web_token_json(&quoted).unwrap(), "tok_123");
+    }
+
+    #[test]
+    fn rejects_anonymous_and_error_payloads() {
+        let anon = r#"{"accessToken":"x","isAnonymous":true}"#;
+        assert!(parse_web_token_json(anon).is_err());
+        assert!(parse_web_token_json("ERR:boom").is_err());
+        assert!(parse_web_token_json("").is_err());
     }
 }

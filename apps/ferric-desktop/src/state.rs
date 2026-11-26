@@ -319,7 +319,10 @@ pub enum BgMessage {
     SpotifyLoginFailed(String),
     SpotifyCatalogSynced(Box<ferric_providers::oauth::CloudSyncReport>),
     SpotifySyncFailed(String),
-    SpotifyWebLoginResult(String),
+    SpotifyWebLoginResult {
+        sp_dc: String,
+        token_json: String,
+    },
     SpotifyWebLoginFailed(String),
 }
 

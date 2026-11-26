@@ -9733,38 +9733,17 @@ impl App {
             "Opening Spotify sign-in window... Sign in normally; no Client ID needed.",
         );
         let profile_dir = app_data_dir().join("spotify_web_profile");
-        let clear_cookies = !self.accounts.spotify_web_cookie.trim().is_empty();
+        // Keep the persisted Spotify session so a re-click silently re-authorises.
+        let clear_cookies = false;
         launch_spotify_login_window(profile_dir, clear_cookies, move |outcome| {
             let msg = match outcome {
-                SpotifyLoginOutcome::SignedIn { sp_dc } => BgMessage::SpotifyWebLoginResult(sp_dc),
+                SpotifyLoginOutcome::SignedIn { sp_dc, token_json } => {
+                    BgMessage::SpotifyWebLoginResult { sp_dc, token_json }
+                }
                 SpotifyLoginOutcome::Cancelled => {
                     BgMessage::SpotifyWebLoginFailed("Sign-in window closed".to_string())
                 }
                 SpotifyLoginOutcome::Failed(err) => BgMessage::SpotifyWebLoginFailed(err),
-            };
-            let _ = tx.send(msg);
-        });
-    }
-
-    fn sync_spotify_web_library(&mut self, cx: &mut Cx) {
-        let cookie = self.accounts.spotify_web_cookie.trim().to_string();
-        if cookie.is_empty() {
-            self.ui.label(id!(oauth_status_lbl)).set_text(
-                cx,
-                "Connect your Spotify web session first (no Client ID needed).",
-            );
-            return;
-        }
-        let Some(tx) = self.bg_tx.clone() else {
-            return;
-        };
-        self.ui
-            .label(id!(oauth_status_lbl))
-            .set_text(cx, "Reading your Spotify library...");
-        thread::spawn(move || {
-            let msg = match ferric_providers::spotify_web::sync_catalog_via_sp_dc(&cookie) {
-                Ok(report) => BgMessage::SpotifyCatalogSynced(Box::new(report)),
-                Err(err) => BgMessage::SpotifySyncFailed(err.to_string()),
             };
             let _ = tx.send(msg);
         });
@@ -10597,15 +10576,25 @@ impl App {
                         .label(id!(oauth_status_lbl))
                         .set_text(cx, &format!("Spotify sync failed: {err}"));
                 }
-                BgMessage::SpotifyWebLoginResult(sp_dc) => {
-                    self.accounts.spotify_web_cookie = sp_dc;
-                    self.accounts.spotify_connected = true;
-                    if let Some(db) = &self.db {
-                        let _ = db.save_accounts(&self.accounts);
+                BgMessage::SpotifyWebLoginResult { sp_dc, token_json } => {
+                    match ferric_providers::spotify_web::parse_web_token_json(&token_json) {
+                        Ok(token) => {
+                            self.accounts.spotify_web_cookie = sp_dc;
+                            self.accounts.spotify_access_token = token;
+                            self.accounts.spotify_connected = true;
+                            if let Some(db) = &self.db {
+                                let _ = db.save_accounts(&self.accounts);
+                            }
+                            self.refresh_spotify_account_ui(cx);
+                            self.show_toast(cx, "Spotify session connected! Reading library...");
+                            self.sync_spotify_library(cx);
+                        }
+                        Err(err) => {
+                            self.ui
+                                .label(id!(oauth_status_lbl))
+                                .set_text(cx, &format!("Spotify token error: {err}"));
+                        }
                     }
-                    self.refresh_spotify_account_ui(cx);
-                    self.show_toast(cx, "Spotify session connected! Reading library...");
-                    self.sync_spotify_web_library(cx);
                 }
                 BgMessage::SpotifyWebLoginFailed(err) => {
                     self.ui
@@ -12757,7 +12746,11 @@ impl App {
             self.start_spotify_web_login(cx);
         }
         if self.ui.button(id!(spotify_web_sync_btn)).clicked(actions) {
-            self.sync_spotify_web_library(cx);
+            if self.accounts.spotify_access_token.trim().is_empty() {
+                self.start_spotify_web_login(cx);
+            } else {
+                self.sync_spotify_library(cx);
+            }
         }
         if self.ui.button(id!(spotify_logout_btn)).clicked(actions) {
             self.accounts.spotify_connected = false;

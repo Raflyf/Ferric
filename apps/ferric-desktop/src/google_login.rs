@@ -15,9 +15,10 @@ pub enum GoogleLoginOutcome {
 /// Result of the Spotify web-session sign-in window.
 #[derive(Debug, Clone)]
 pub enum SpotifyLoginOutcome {
-    /// `sp_dc` session cookie captured from a signed-in open.spotify.com session.
+    /// `sp_dc` session cookie plus the access-token JSON fetched inside the signed-in page.
     SignedIn {
         sp_dc: String,
+        token_json: String,
     },
     Cancelled,
     Failed(String),
@@ -33,6 +34,12 @@ pub(crate) enum LoginTarget {
 /// Internal payload handed from the login window thread back to the caller.
 pub(crate) enum LoginPayload {
     Cookie(String),
+    /// Spotify only: captured `sp_dc` cookie plus the token JSON fetched from inside the
+    /// signed-in page context.
+    SpotifySession {
+        cookie: String,
+        token_json: String,
+    },
     Cancelled,
     Failed(String),
 }
@@ -81,10 +88,10 @@ mod imp {
     };
     use webview2_com::{
         CoTaskMemPWSTR, CreateCoreWebView2ControllerCompletedHandler,
-        CreateCoreWebView2EnvironmentCompletedHandler, GetCookiesCompletedHandler,
-        NavigationCompletedEventHandler, NavigationStartingEventHandler,
-        NewWindowRequestedEventHandler, PermissionRequestedEventHandler, SourceChangedEventHandler,
-        take_pwstr,
+        CreateCoreWebView2EnvironmentCompletedHandler, ExecuteScriptCompletedHandler,
+        GetCookiesCompletedHandler, NavigationCompletedEventHandler,
+        NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+        PermissionRequestedEventHandler, SourceChangedEventHandler, take_pwstr,
     };
     use windows::Win32::Foundation::{E_POINTER, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::UpdateWindow;
@@ -259,12 +266,17 @@ mod imp {
             clear_existing_cookies,
             Box::new(move |payload| {
                 let outcome = match payload {
-                    LoginPayload::Cookie(cookie) => match extract_sp_dc(&cookie) {
-                        Some(sp_dc) => SpotifyLoginOutcome::SignedIn { sp_dc },
-                        None => SpotifyLoginOutcome::Failed(
-                            "Spotify cookies captured but sp_dc was missing".to_string(),
-                        ),
-                    },
+                    LoginPayload::SpotifySession { cookie, token_json } => {
+                        match extract_sp_dc(&cookie) {
+                            Some(sp_dc) => SpotifyLoginOutcome::SignedIn { sp_dc, token_json },
+                            None => SpotifyLoginOutcome::Failed(
+                                "Spotify cookies captured but sp_dc was missing".to_string(),
+                            ),
+                        }
+                    }
+                    LoginPayload::Cookie(_) => SpotifyLoginOutcome::Failed(
+                        "Spotify session did not return an access token".to_string(),
+                    ),
                     LoginPayload::Cancelled => SpotifyLoginOutcome::Cancelled,
                     LoginPayload::Failed(err) => SpotifyLoginOutcome::Failed(err),
                 };
@@ -641,6 +653,7 @@ mod imp {
         let done_slot = Rc::clone(done_cb);
         let flag_slot = Rc::clone(capture_in_flight);
         let dead_slot = Rc::clone(destroyed);
+        let wv_for_capture = webview.clone();
 
         let handler = GetCookiesCompletedHandler::create(Box::new(move |status, list_opt| {
             flag_slot.set(false);
@@ -687,11 +700,54 @@ mod imp {
                 LoginTarget::Spotify => extract_sp_dc(&cookie_header).is_some(),
             };
             if captured {
-                emit_once(&done_slot, LoginPayload::Cookie(cookie_header));
-                if !dead_slot.get() {
-                    // SAFETY: Auto-close login window once authenticated cookies are captured.
-                    unsafe {
-                        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                match target {
+                    LoginTarget::Spotify => {
+                        // The token endpoint rejects non-browser clients with a 403 edge block,
+                        // so the token is fetched from inside the signed-in page context where
+                        // the request carries the real session cookies and TLS fingerprint.
+                        let done_inner = Rc::clone(&done_slot);
+                        let dead_inner = Rc::clone(&dead_slot);
+                        let wv_inner = wv_for_capture.clone();
+                        let header = cookie_header.clone();
+                        let exec = ExecuteScriptCompletedHandler::create(Box::new(
+                            move |status, result| {
+                                if status.is_err() || dead_inner.get() {
+                                    return Ok(());
+                                }
+                                let token_json = take_pwstr(result);
+                                emit_once(
+                                    &done_inner,
+                                    LoginPayload::SpotifySession {
+                                        cookie: header.clone(),
+                                        token_json,
+                                    },
+                                );
+                                // SAFETY: Close the login window once the session payload is out.
+                                unsafe {
+                                    let _ =
+                                        PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                                }
+                                Ok(())
+                            },
+                        ));
+                        let script = CoTaskMemPWSTR::from(
+                            "fetch('/get_access_token?reason=transport&productType=web_player',\
+                             {headers:{'app-platform':'WebPlayer'}}).then(r=>r.text())\
+                             .catch(e=>'ERR:'+e)",
+                        );
+                        // SAFETY: Execute inside the signed-in page on the STA thread.
+                        unsafe {
+                            let _ = wv_inner.ExecuteScript(*script.as_ref().as_pcwstr(), &exec);
+                        }
+                    }
+                    LoginTarget::GoogleYtm => {
+                        emit_once(&done_slot, LoginPayload::Cookie(cookie_header));
+                        if !dead_slot.get() {
+                            // SAFETY: Auto-close once authenticated cookies are captured.
+                            unsafe {
+                                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                            }
+                        }
                     }
                 }
             }

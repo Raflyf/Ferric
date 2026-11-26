@@ -3,11 +3,20 @@ use ferric_core::eq::{EqConfig, EqFilterKind};
 use ferric_core::models::FadeCurve;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
+#[inline]
+fn sanitize_sample(s: f32) -> f32 {
+    if s.is_finite() { s } else { 0.0 }
+}
+
 /// Compute equal-power crossfade gains `(g_a, g_b)` for `t in [0.0, 1.0]`.
 /// Satisfies `g_a^2 + g_b^2 == 1.0` to maintain constant acoustic loudness across transitions.
 #[inline]
 pub fn equal_power_gains(progress: f32) -> (f32, f32) {
-    let t = progress.clamp(0.0, 1.0);
+    let t = if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let theta = FRAC_PI_2 * t;
     (theta.cos(), theta.sin())
 }
@@ -15,14 +24,22 @@ pub fn equal_power_gains(progress: f32) -> (f32, f32) {
 /// Hermite cubic S-curve envelope (`3t^2 - 2t^3`) for click-free micro-fades on Play, Pause, and Seek.
 #[inline]
 pub fn smooth_fade_envelope(progress: f32) -> f32 {
-    let t = progress.clamp(0.0, 1.0);
+    let t = if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     t * t * (3.0 - 2.0 * t)
 }
 
 /// Compute deck crossfade gains `(g_a, g_b)` for `progress in [0.0, 1.0]` using the selected `FadeCurve`.
 #[inline]
 pub fn transition_gains(progress: f32, curve: FadeCurve) -> (f32, f32) {
-    let t = progress.clamp(0.0, 1.0);
+    let t = if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     match curve {
         FadeCurve::EqualPower | FadeCurve::BassSwapAutomix => equal_power_gains(t),
         FadeCurve::SCurveVelvet => {
@@ -78,23 +95,31 @@ impl BassSwapMixer {
         progress: f32,
         curve: FadeCurve,
     ) -> (f32, f32) {
-        let t = progress.clamp(0.0, 1.0);
+        let a_l = sanitize_sample(deck_a.0);
+        let a_r = sanitize_sample(deck_a.1);
+        let b_l = sanitize_sample(deck_b.0);
+        let b_r = sanitize_sample(deck_b.1);
+        let t = if progress.is_finite() {
+            progress.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let (ga, gb) = transition_gains(t, curve);
 
         if curve != FadeCurve::BassSwapAutomix {
-            return (deck_a.0 * ga + deck_b.0 * gb, deck_a.1 * ga + deck_b.1 * gb);
+            return (a_l * ga + b_l * gb, a_r * ga + b_r * gb);
         }
 
         let a = self.alpha;
-        self.lp_a_l += a * (deck_a.0 - self.lp_a_l);
-        self.lp_a_r += a * (deck_a.1 - self.lp_a_r);
-        self.lp_b_l += a * (deck_b.0 - self.lp_b_l);
-        self.lp_b_r += a * (deck_b.1 - self.lp_b_r);
+        self.lp_a_l = sanitize_sample(self.lp_a_l + a * (a_l - self.lp_a_l));
+        self.lp_a_r = sanitize_sample(self.lp_a_r + a * (a_r - self.lp_a_r));
+        self.lp_b_l = sanitize_sample(self.lp_b_l + a * (b_l - self.lp_b_l));
+        self.lp_b_r = sanitize_sample(self.lp_b_r + a * (b_r - self.lp_b_r));
 
-        let hp_a_l = deck_a.0 - self.lp_a_l;
-        let hp_a_r = deck_a.1 - self.lp_a_r;
-        let hp_b_l = deck_b.0 - self.lp_b_l;
-        let hp_b_r = deck_b.1 - self.lp_b_r;
+        let hp_a_l = a_l - self.lp_a_l;
+        let hp_a_r = a_r - self.lp_a_r;
+        let hp_b_l = b_l - self.lp_b_l;
+        let hp_b_r = b_r - self.lp_b_r;
 
         // Sub-bass (<140 Hz) uses constant-amplitude S-curve handoff to avoid low-end boom,
         // while mid/highs (>=140 Hz) float across with constant-power gains.
@@ -104,7 +129,7 @@ impl BassSwapMixer {
 
         let out_l = (self.lp_a_l * low_ga + self.lp_b_l * low_gb) + (hp_a_l * ga + hp_b_l * gb);
         let out_r = (self.lp_a_r * low_ga + self.lp_b_r * low_gb) + (hp_a_r * ga + hp_b_r * gb);
-        (out_l, out_r)
+        (sanitize_sample(out_l), sanitize_sample(out_r))
     }
 }
 
@@ -152,10 +177,10 @@ impl SpectrumAnalyzer8 {
         }
 
         let mut energy_sum = [0.0_f32; 8];
-        for &[l, r] in frames {
-            let mono = 0.5 * (l + r);
+        for &[raw_l, raw_r] in frames {
+            let mono = 0.5 * (sanitize_sample(raw_l) + sanitize_sample(raw_r));
             for (lp, &alpha) in self.lp_state.iter_mut().zip(&self.alphas) {
-                *lp += alpha * (mono - *lp);
+                *lp = sanitize_sample(*lp + alpha * (mono - *lp));
             }
             let bands = [
                 self.lp_state[0],
@@ -214,7 +239,21 @@ pub fn soft_limit(sample: f32) -> f32 {
     }
 }
 
-/// Stereo 10-band parametric EQ processor built on click-minimized `DirectForm1` biquads.
+const UNITY_BIQUAD: Coefficients<f32> = Coefficients {
+    a1: 0.0,
+    a2: 0.0,
+    b0: 1.0,
+    b1: 0.0,
+    b2: 0.0,
+};
+
+#[inline]
+fn coeffs_are_finite(c: &Coefficients<f32>) -> bool {
+    c.a1.is_finite() && c.a2.is_finite() && c.b0.is_finite() && c.b1.is_finite() && c.b2.is_finite()
+}
+
+/// Stereo parametric EQ processor built on click-minimized `DirectForm1` biquads with persistent
+/// per-band slots (unity bypass for 0 dB / disabled bands) and full `NaN`/`Inf` firewalling.
 pub struct StereoEqProcessor {
     sample_rate: f32,
     enabled: bool,
@@ -245,26 +284,42 @@ impl StereoEqProcessor {
     }
 
     pub fn apply_config(&mut self, config: &EqConfig) {
+        const MAX_EQ_BANDS: usize = 32;
         self.enabled = config.enabled;
-        self.preamp_linear = db_to_linear(config.preamp_db);
+        let preamp_db = if config.preamp_db.is_finite() {
+            config.preamp_db.clamp(-18.0, 18.0)
+        } else {
+            0.0
+        };
+        self.preamp_linear = db_to_linear(preamp_db);
         let nyquist = self.sample_rate * 0.48;
         let fs = self.sample_rate.hz();
 
-        let mut coeffs_list = Vec::with_capacity(config.bands.len());
-        for band in &config.bands {
-            if !band.enabled || band.gain_db.abs() < 0.05 {
+        let band_slice = &config.bands[..config.bands.len().min(MAX_EQ_BANDS)];
+        let mut coeffs_list = Vec::with_capacity(band_slice.len());
+        for band in band_slice {
+            if !band.enabled
+                || !band.gain_db.is_finite()
+                || !band.freq_hz.is_finite()
+                || !band.q.is_finite()
+                || band.gain_db.abs() < 0.05
+            {
+                coeffs_list.push(UNITY_BIQUAD);
                 continue;
             }
+            let gain_db = band.gain_db.clamp(-18.0, 18.0);
             let fc = band.freq_hz.clamp(20.0, nyquist).hz();
-            let q = band.q.clamp(0.1, 16.0);
+            let q = band.q.clamp(0.1, 18.0);
             let ftype = match band.kind {
-                EqFilterKind::Peaking => Type::PeakingEQ(band.gain_db),
-                EqFilterKind::LowShelf => Type::LowShelf(band.gain_db),
-                EqFilterKind::HighShelf => Type::HighShelf(band.gain_db),
+                EqFilterKind::Peaking => Type::PeakingEQ(gain_db),
+                EqFilterKind::LowShelf => Type::LowShelf(gain_db),
+                EqFilterKind::HighShelf => Type::HighShelf(gain_db),
             };
-            if let Ok(c) = Coefficients::<f32>::from_params(ftype, fs, fc, q) {
-                coeffs_list.push(c);
-            }
+            let coeffs = Coefficients::<f32>::from_params(ftype, fs, fc, q)
+                .ok()
+                .filter(coeffs_are_finite)
+                .unwrap_or(UNITY_BIQUAD);
+            coeffs_list.push(coeffs);
         }
 
         if self.left_filters.len() == coeffs_list.len() {
@@ -300,23 +355,38 @@ impl StereoEqProcessor {
         current_vol: &mut f32,
         target_vol: f32,
     ) {
-        let target = target_vol.clamp(0.0, 1.5);
+        let target = if target_vol.is_finite() {
+            target_vol.clamp(0.0, 1.5)
+        } else {
+            0.85
+        };
+        if !current_vol.is_finite() {
+            *current_vol = target;
+        }
         for frame in samples.as_chunks_mut::<2>().0 {
             *current_vol += (target - *current_vol) * 0.004;
             if (target - *current_vol).abs() < 1e-4 {
                 *current_vol = target;
             }
             let vol = *current_vol;
-            let mut l = frame[0];
-            let mut r = frame[1];
+            let mut l = sanitize_sample(frame[0]);
+            let mut r = sanitize_sample(frame[1]);
             if self.enabled {
                 l *= self.preamp_linear;
                 r *= self.preamp_linear;
                 for flt in &mut self.left_filters {
                     l = flt.run(l);
+                    if !l.is_finite() {
+                        flt.reset_state();
+                        l = 0.0;
+                    }
                 }
                 for flt in &mut self.right_filters {
                     r = flt.run(r);
+                    if !r.is_finite() {
+                        flt.reset_state();
+                        r = 0.0;
+                    }
                 }
             }
             frame[0] = soft_limit(l * vol);
@@ -326,7 +396,11 @@ impl StereoEqProcessor {
 
     /// Process interleaved stereo `[L, R, L, R, ...]` samples in place.
     pub fn process_interleaved_stereo(&mut self, samples: &mut [f32], volume: f32) {
-        let target = volume.clamp(0.0, 1.5);
+        let target = if volume.is_finite() {
+            volume.clamp(0.0, 1.5)
+        } else {
+            0.85
+        };
         let mut cur = target;
         self.process_interleaved_stereo_ramped(samples, &mut cur, target);
     }
@@ -334,7 +408,10 @@ impl StereoEqProcessor {
 
 #[inline]
 pub fn db_to_linear(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
+    if !db.is_finite() {
+        return 1.0;
+    }
+    10.0_f32.powf(db.clamp(-48.0, 24.0) / 20.0)
 }
 
 #[cfg(test)]

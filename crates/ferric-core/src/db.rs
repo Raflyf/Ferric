@@ -20,9 +20,13 @@ impl LibraryDb {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "secure_delete", "ON")?;
+        conn.pragma_update(None, "journal_size_limit", 16_777_216_i64)?;
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -30,9 +34,24 @@ impl LibraryDb {
 
     pub fn open_in_memory() -> CoreResult<Self> {
         let conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
+    }
+
+    fn has_column(&self, table: &str, col_name: &str) -> CoreResult<bool> {
+        // Table name is exclusively a compile-time constant passed by `migrate()`.
+        let pragma_sql = format!("PRAGMA table_info({table})");
+        let mut stmt = self.conn.prepare(&pragma_sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name.eq_ignore_ascii_case(col_name) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn migrate(&self) -> CoreResult<()> {
@@ -61,6 +80,9 @@ impl LibraryDb {
             CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
             CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
             CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
+            CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(source);
+            CREATE INDEX IF NOT EXISTS idx_tracks_artist_nocase
+                ON tracks(artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE);
 
             CREATE TABLE IF NOT EXISTS playlists (
                 id TEXT PRIMARY KEY,
@@ -78,6 +100,8 @@ impl LibraryDb {
                 track_id TEXT NOT NULL,
                 PRIMARY KEY (playlist_id, position)
             );
+            CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track_id
+                ON playlist_tracks(track_id);
 
             CREATE TABLE IF NOT EXISTS music_folders (
                 path TEXT PRIMARY KEY,
@@ -94,6 +118,8 @@ impl LibraryDb {
                 synced_lrc TEXT NOT NULL,
                 updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );
+            CREATE INDEX IF NOT EXISTS idx_lyrics_cache_updated
+                ON lyrics_cache(updated_at);
 
             CREATE TABLE IF NOT EXISTS paired_devices (
                 device_id TEXT PRIMARY KEY,
@@ -102,13 +128,27 @@ impl LibraryDb {
             );
             "#,
         )?;
-        // Safe idempotent schema upgrades for existing user databases.
-        let _ = self
-            .conn
-            .execute("ALTER TABLE tracks ADD COLUMN thumbnail_url TEXT", []);
-        let _ = self
-            .conn
-            .execute("ALTER TABLE playlists ADD COLUMN thumbnail_url TEXT", []);
+        // Checked schema upgrades for existing user databases (never silently swallow real SQLite errors).
+        if !self.has_column("tracks", "thumbnail_url")? {
+            self.conn
+                .execute("ALTER TABLE tracks ADD COLUMN thumbnail_url TEXT", [])?;
+        }
+        if !self.has_column("playlists", "thumbnail_url")? {
+            self.conn
+                .execute("ALTER TABLE playlists ADD COLUMN thumbnail_url TEXT", [])?;
+        }
+        if !self.has_column("playlists", "created_at")? {
+            self.conn.execute(
+                "ALTER TABLE playlists ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            // Backfill legacy playlists with deterministic millisecond timestamps derived from
+            // `updated_at` and insertion `rowid` so newer playlists sort first cleanly.
+            self.conn.execute(
+                "UPDATE playlists SET created_at = (updated_at * 1000) + rowid WHERE created_at = 0",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -280,10 +320,8 @@ impl LibraryDb {
                 ))
             })?;
             for row in rows {
-                let (id, title, artist) = row?;
-                let is_mc = title.to_ascii_lowercase().contains("minecraft")
-                    || artist.to_ascii_lowercase().contains("minecraft");
-                if !keep.contains(id.as_str()) || is_mc {
+                let (id, _title, _artist) = row?;
+                if !keep.contains(id.as_str()) {
                     stale_ids.push(id);
                 }
             }
@@ -304,18 +342,23 @@ impl LibraryDb {
     }
 
     pub fn upsert_playlist(&mut self, playlist: &Playlist, track_ids: &[String]) -> CoreResult<()> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
         let tx = self.conn.transaction()?;
         tx.execute(
             r#"
-            INSERT INTO playlists (id, name, source, etag, description, thumbnail_url, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))
+            INSERT INTO playlists (id, name, source, etag, description, thumbnail_url, updated_at, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'), ?7)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 source = excluded.source,
                 etag = excluded.etag,
                 description = excluded.description,
                 thumbnail_url = COALESCE(excluded.thumbnail_url, playlists.thumbnail_url),
-                updated_at = strftime('%s','now')
+                updated_at = strftime('%s','now'),
+                created_at = CASE WHEN playlists.created_at > 0 THEN playlists.created_at ELSE excluded.created_at END
             "#,
             params![
                 playlist.id,
@@ -324,6 +367,7 @@ impl LibraryDb {
                 playlist.etag,
                 playlist.description,
                 playlist.thumbnail_url,
+                now_ms,
             ],
         )?;
         tx.execute(
@@ -343,15 +387,21 @@ impl LibraryDb {
     }
 
     pub fn add_track_to_playlist(&mut self, playlist_id: &str, track_id: &str) -> CoreResult<()> {
-        let next_pos: i64 = self.conn.query_row(
+        let tx = self.conn.transaction()?;
+        let next_pos: i64 = tx.query_row(
             "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
             [playlist_id],
             |row| row.get(0),
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT OR IGNORE INTO playlist_tracks (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
             params![playlist_id, next_pos, track_id],
         )?;
+        tx.execute(
+            "UPDATE playlists SET updated_at = strftime('%s','now') WHERE id = ?1",
+            [playlist_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -360,10 +410,16 @@ impl LibraryDb {
         playlist_id: &str,
         track_id: &str,
     ) -> CoreResult<()> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
             params![playlist_id, track_id],
         )?;
+        tx.execute(
+            "UPDATE playlists SET updated_at = strftime('%s','now') WHERE id = ?1",
+            [playlist_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -410,11 +466,39 @@ impl LibraryDb {
     pub fn delete_spotify_synced_playlists(&mut self) -> CoreResult<usize> {
         let tx = self.conn.transaction()?;
         tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id LIKE 'spotify:playlist:%' OR playlist_id LIKE 'spotify:premium:playlist:%'",
+            [],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM playlists WHERE id LIKE 'spotify:playlist:%' OR id LIKE 'spotify:premium:playlist:%'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    pub fn delete_spotify_web_synced_playlists(&mut self) -> CoreResult<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "DELETE FROM playlist_tracks WHERE playlist_id LIKE 'spotify:playlist:%'",
             [],
         )?;
         let removed = tx.execute(
             "DELETE FROM playlists WHERE id LIKE 'spotify:playlist:%'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    pub fn delete_spotify_premium_synced_playlists(&mut self) -> CoreResult<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id LIKE 'spotify:premium:playlist:%'",
+            [],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM playlists WHERE id LIKE 'spotify:premium:playlist:%'",
             [],
         )?;
         tx.commit()?;
@@ -432,7 +516,7 @@ impl LibraryDb {
                 (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count,
                 p.thumbnail_url
             FROM playlists p
-            ORDER BY p.name COLLATE NOCASE ASC
+            ORDER BY p.created_at DESC, p.rowid DESC
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
@@ -493,7 +577,7 @@ impl LibraryDb {
 
         {
             let mut stmt = self.conn.prepare(
-                "SELECT file_path, codec, sample_rate, bit_depth, bitrate_kbps, isrc, title, artist FROM tracks WHERE file_path IS NOT NULL AND file_path != ''",
+                "SELECT file_path, codec, sample_rate, bit_depth, bitrate_kbps, isrc, title, artist FROM tracks WHERE file_path IS NOT NULL AND file_path != '' AND UPPER(source) = 'LOCAL' AND file_path NOT LIKE '%stream_cache%'",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
@@ -647,11 +731,12 @@ impl LibraryDb {
     }
 
     pub fn save_eq(&self, eq: &EqConfig) -> CoreResult<()> {
-        self.set_setting("eq", eq)
+        self.set_setting("eq", &eq.sanitized())
     }
 
     pub fn load_eq(&self) -> CoreResult<EqConfig> {
-        Ok(self.get_setting("eq")?.unwrap_or_default())
+        let loaded: EqConfig = self.get_setting("eq")?.unwrap_or_default();
+        Ok(loaded.sanitized())
     }
 
     pub fn save_playback_dsp(&self, dsp: &PlaybackDspSettings) -> CoreResult<()> {
@@ -666,33 +751,38 @@ impl LibraryDb {
     pub fn save_accounts(&self, accounts: &AccountSettings) -> CoreResult<()> {
         let mut protected = accounts.clone();
         protected.spotify_access_token =
-            crate::secrets::protect_secret(&protected.spotify_access_token);
+            crate::secrets::protect_secret(&protected.spotify_access_token)?;
         protected.spotify_refresh_token =
-            crate::secrets::protect_secret(&protected.spotify_refresh_token);
+            crate::secrets::protect_secret(&protected.spotify_refresh_token)?;
+        protected.spotify_web_access_token =
+            crate::secrets::protect_secret(&protected.spotify_web_access_token)?;
         protected.spotify_web_cookie =
-            crate::secrets::protect_secret(&protected.spotify_web_cookie);
+            crate::secrets::protect_secret(&protected.spotify_web_cookie)?;
         protected.youtube_client_secret =
-            crate::secrets::protect_secret(&protected.youtube_client_secret);
+            crate::secrets::protect_secret(&protected.youtube_client_secret)?;
         protected.youtube_access_token =
-            crate::secrets::protect_secret(&protected.youtube_access_token);
+            crate::secrets::protect_secret(&protected.youtube_access_token)?;
         protected.youtube_refresh_token =
-            crate::secrets::protect_secret(&protected.youtube_refresh_token);
-        protected.youtube_cookie = crate::secrets::protect_secret(&protected.youtube_cookie);
-        protected.youtube_sapisid = crate::secrets::protect_secret(&protected.youtube_sapisid);
-        protected.subsonic_password = crate::secrets::protect_secret(&protected.subsonic_password);
+            crate::secrets::protect_secret(&protected.youtube_refresh_token)?;
+        protected.youtube_cookie = crate::secrets::protect_secret(&protected.youtube_cookie)?;
+        protected.youtube_sapisid = crate::secrets::protect_secret(&protected.youtube_sapisid)?;
+        protected.subsonic_password = crate::secrets::protect_secret(&protected.subsonic_password)?;
         self.set_setting("accounts", &protected)
     }
 
     pub fn load_accounts(&self) -> CoreResult<AccountSettings> {
         let mut loaded: AccountSettings = self.get_setting("accounts")?.unwrap_or_default();
         let mut migrated = false;
+        let mut dec_failed = false;
         let mut dec = |slot: &mut String| {
-            let (plain, needs_mig) = crate::secrets::unprotect_secret(slot);
-            *slot = plain;
-            migrated |= needs_mig;
+            let outcome = crate::secrets::unprotect_secret_checked(slot);
+            *slot = outcome.plaintext;
+            migrated |= outcome.needs_migration;
+            dec_failed |= outcome.failed;
         };
         dec(&mut loaded.spotify_access_token);
         dec(&mut loaded.spotify_refresh_token);
+        dec(&mut loaded.spotify_web_access_token);
         dec(&mut loaded.spotify_web_cookie);
         dec(&mut loaded.youtube_client_secret);
         dec(&mut loaded.youtube_access_token);
@@ -700,9 +790,27 @@ impl LibraryDb {
         dec(&mut loaded.youtube_cookie);
         dec(&mut loaded.youtube_sapisid);
         dec(&mut loaded.subsonic_password);
-        if migrated {
-            let _ = self.save_accounts(&loaded);
-            let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        // Migrate legacy shared-slot Spotify Web Sign-In sessions into their isolated web fields
+        // so Direct OAuth (Premium) and Spotify Web Sign-In never overwrite or sign out each other.
+        if !loaded.spotify_web_cookie.trim().is_empty()
+            && !loaded.spotify_web_connected
+            && loaded.spotify_connected
+        {
+            loaded.spotify_web_connected = true;
+            if loaded.spotify_web_access_token.trim().is_empty() {
+                loaded.spotify_web_access_token = std::mem::take(&mut loaded.spotify_access_token);
+            }
+            if loaded.spotify_web_user_name.trim().is_empty() {
+                loaded.spotify_web_user_name = std::mem::take(&mut loaded.spotify_user_name);
+            }
+            loaded.spotify_connected = false;
+            crate::secrets::zeroize_string(&mut loaded.spotify_refresh_token);
+            migrated = true;
+        }
+        if migrated && !dec_failed && self.save_accounts(&loaded).is_ok() {
+            let _ = self
+                .conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;");
         }
         Ok(loaded)
     }
@@ -716,11 +824,12 @@ impl LibraryDb {
     }
 
     pub fn save_session_state(&self, state: &SessionResumeState) -> CoreResult<()> {
-        self.set_setting("session_resume", state)
+        self.set_setting("session_resume", &state.sanitized())
     }
 
     pub fn load_session_state(&self) -> CoreResult<SessionResumeState> {
-        Ok(self.get_setting("session_resume")?.unwrap_or_default())
+        let loaded: SessionResumeState = self.get_setting("session_resume")?.unwrap_or_default();
+        Ok(loaded.sanitized())
     }
 
     pub fn save_discord_rpc(&self, cfg: &DiscordRpcSettings) -> CoreResult<()> {
@@ -744,10 +853,15 @@ impl LibraryDb {
     }
 
     pub fn save_cached_lyrics(&self, track_key: &str, lrc: &str) -> CoreResult<()> {
+        const MAX_LYRICS_CACHE_ROWS: i64 = 500;
         self.conn.execute(
-            "INSERT OR REPLACE INTO lyrics_cache (track_key, synced_lrc) VALUES (?1, ?2)",
+            "INSERT OR REPLACE INTO lyrics_cache (track_key, synced_lrc, updated_at) VALUES (?1, ?2, strftime('%s','now'))",
             params![track_key, lrc],
         )?;
+        let _ = self.conn.execute(
+            "DELETE FROM lyrics_cache WHERE track_key NOT IN (SELECT track_key FROM lyrics_cache ORDER BY updated_at DESC LIMIT ?1)",
+            params![MAX_LYRICS_CACHE_ROWS],
+        );
         Ok(())
     }
 
@@ -773,6 +887,14 @@ impl LibraryDb {
             Some(txt) => Ok(Some(serde_json::from_str(&txt)?)),
             None => Ok(None),
         }
+    }
+}
+
+impl Drop for LibraryDb {
+    fn drop(&mut self) {
+        let _ = self
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA optimize;");
     }
 }
 
@@ -1078,6 +1200,8 @@ mod tests {
             youtube_connected: true,
             youtube_cookie: "SAPISID=secret_cookie_val".to_string(),
             youtube_sapisid: "secret_sapisid_val".to_string(),
+            spotify_web_connected: true,
+            spotify_web_access_token: "secret_sp_web_tok".to_string(),
             spotify_web_cookie: "secret_sp_dc_cookie_val".to_string(),
             subsonic_password: "secret_subsonic_pw".to_string(),
             ..AccountSettings::default()
@@ -1094,6 +1218,7 @@ mod tests {
         if cfg!(target_os = "windows") {
             assert!(!raw_json.contains("secret_cookie_val"));
             assert!(!raw_json.contains("secret_sapisid_val"));
+            assert!(!raw_json.contains("secret_sp_web_tok"));
             assert!(!raw_json.contains("secret_sp_dc_cookie_val"));
             assert!(!raw_json.contains("secret_subsonic_pw"));
             assert!(raw_json.contains(crate::secrets::DPAPI_PREFIX));
@@ -1101,7 +1226,117 @@ mod tests {
         let loaded = db.load_accounts().expect("load accounts");
         assert_eq!(loaded.youtube_cookie, "SAPISID=secret_cookie_val");
         assert_eq!(loaded.youtube_sapisid, "secret_sapisid_val");
+        assert!(loaded.spotify_web_connected);
+        assert_eq!(loaded.spotify_web_access_token, "secret_sp_web_tok");
         assert_eq!(loaded.spotify_web_cookie, "secret_sp_dc_cookie_val");
         assert_eq!(loaded.subsonic_password, "secret_subsonic_pw");
+
+        // Legacy shared-slot Spotify Web session migrates cleanly into isolated web fields.
+        let legacy = AccountSettings {
+            spotify_connected: true,
+            spotify_user_name: "Rafly".to_string(),
+            spotify_access_token: "legacy_web_tok".to_string(),
+            spotify_web_cookie: "legacy_sp_dc".to_string(),
+            ..AccountSettings::default()
+        };
+        db.save_accounts(&legacy).expect("save legacy");
+        let migrated = db.load_accounts().expect("load migrated");
+        assert!(!migrated.spotify_connected);
+        assert!(migrated.spotify_access_token.is_empty());
+        assert!(migrated.spotify_web_connected);
+        assert_eq!(migrated.spotify_web_user_name, "Rafly");
+        assert_eq!(migrated.spotify_web_access_token, "legacy_web_tok");
+        assert_eq!(migrated.spotify_web_cookie, "legacy_sp_dc");
+    }
+
+    #[test]
+    fn spotify_web_and_premium_playlist_deletions_stay_isolated() {
+        let mut db = LibraryDb::open_in_memory().expect("open mem db");
+        let pl_web = Playlist {
+            id: "spotify:playlist:web1".to_string(),
+            name: "Web Mix".to_string(),
+            source: TrackSource::Spotify,
+            etag: None,
+            track_count: 0,
+            description: String::new(),
+            thumbnail_url: None,
+        };
+        let pl_prem = Playlist {
+            id: "spotify:premium:playlist:prem1".to_string(),
+            name: "Premium Mix".to_string(),
+            source: TrackSource::Spotify,
+            etag: None,
+            track_count: 0,
+            description: String::new(),
+            thumbnail_url: None,
+        };
+        let pl_yt = Playlist {
+            id: "ytm:pl:VL1".to_string(),
+            name: "YT Mix".to_string(),
+            source: TrackSource::YouTubeMusic,
+            etag: None,
+            track_count: 0,
+            description: String::new(),
+            thumbnail_url: None,
+        };
+        db.upsert_playlist(&pl_web, &[]).expect("upsert web");
+        db.upsert_playlist(&pl_prem, &[]).expect("upsert prem");
+        db.upsert_playlist(&pl_yt, &[]).expect("upsert yt");
+
+        let removed_prem = db
+            .delete_spotify_premium_synced_playlists()
+            .expect("delete prem");
+        assert_eq!(removed_prem, 1);
+        let ids_after_prem: Vec<String> = db
+            .list_playlists()
+            .expect("list")
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(ids_after_prem.contains(&pl_web.id));
+        assert!(ids_after_prem.contains(&pl_yt.id));
+        assert!(!ids_after_prem.contains(&pl_prem.id));
+
+        let removed_web = db
+            .delete_spotify_web_synced_playlists()
+            .expect("delete web");
+        assert_eq!(removed_web, 1);
+        let ids_after_web: Vec<String> = db
+            .list_playlists()
+            .expect("list")
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids_after_web, vec![pl_yt.id]);
+    }
+
+    #[test]
+    fn list_playlists_returns_newest_added_first_and_preserves_created_at_on_update() {
+        let mut db = LibraryDb::open_in_memory().expect("db");
+        let make = |id: &str, name: &str| Playlist {
+            id: id.to_string(),
+            name: name.to_string(),
+            source: TrackSource::Local,
+            etag: None,
+            track_count: 0,
+            description: String::new(),
+            thumbnail_url: None,
+        };
+        let p_first = make("local:pl:first", "Alpha First");
+        db.upsert_playlist(&p_first, &[]).expect("first");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let p_second = make("local:pl:second", "YOASOBI Radio");
+        db.upsert_playlist(&p_second, &[]).expect("second");
+
+        // Re-saving older playlist must NOT bump it ahead of the newly added playlist.
+        let mut p_first_renamed = p_first.clone();
+        p_first_renamed.name = "Alpha Updated".to_string();
+        db.upsert_playlist(&p_first_renamed, &[])
+            .expect("update first");
+
+        let listed = db.list_playlists().expect("list");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, "local:pl:second");
+        assert_eq!(listed[1].id, "local:pl:first");
     }
 }

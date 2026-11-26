@@ -228,6 +228,11 @@ impl Default for PlaybackDspSettings {
 
 impl PlaybackDspSettings {
     pub fn sanitized(&self) -> Self {
+        let speed = if self.playback_speed.is_finite() {
+            self.playback_speed.clamp(0.5, 2.0)
+        } else {
+            1.0
+        };
         Self {
             crossfade_ms: self.crossfade_ms.min(12_000),
             fade_in_play_ms: self.fade_in_play_ms.min(2_000),
@@ -236,7 +241,7 @@ impl PlaybackDspSettings {
             trim_silence: self.trim_silence,
             replay_gain: self.replay_gain,
             mono_audio: self.mono_audio,
-            playback_speed: self.playback_speed.clamp(0.5, 2.0),
+            playback_speed: speed,
             sleep_timer_fade_out: self.sleep_timer_fade_out,
             audio_quality: self.audio_quality,
             video_quality: self.video_quality,
@@ -353,6 +358,12 @@ pub struct AccountSettings {
     #[serde(default)]
     pub spotify_liked_count: usize,
     #[serde(default)]
+    pub spotify_web_connected: bool,
+    #[serde(default)]
+    pub spotify_web_user_name: String,
+    #[serde(default)]
+    pub spotify_web_access_token: String,
+    #[serde(default)]
     pub spotify_web_cookie: String,
     #[serde(default)]
     pub youtube_client_id: String,
@@ -400,6 +411,12 @@ impl std::fmt::Debug for AccountSettings {
             )
             .field("spotify_playlist_count", &self.spotify_playlist_count)
             .field("spotify_liked_count", &self.spotify_liked_count)
+            .field("spotify_web_connected", &self.spotify_web_connected)
+            .field("spotify_web_user_name", &self.spotify_web_user_name)
+            .field(
+                "spotify_web_access_token",
+                &redact(&self.spotify_web_access_token),
+            )
             .field("spotify_web_cookie", &redact(&self.spotify_web_cookie))
             .field("youtube_client_id", &self.youtube_client_id)
             .field(
@@ -439,6 +456,9 @@ impl Default for AccountSettings {
             spotify_refresh_token: String::new(),
             spotify_playlist_count: 0,
             spotify_liked_count: 0,
+            spotify_web_connected: false,
+            spotify_web_user_name: String::new(),
+            spotify_web_access_token: String::new(),
             spotify_web_cookie: String::new(),
             youtube_client_id: String::new(),
             youtube_client_secret: String::new(),
@@ -459,7 +479,32 @@ impl Default for AccountSettings {
     }
 }
 
+impl AccountSettings {
+    pub fn zeroize_spotify_direct_secrets(&mut self) {
+        crate::secrets::zeroize_string(&mut self.spotify_access_token);
+        crate::secrets::zeroize_string(&mut self.spotify_refresh_token);
+    }
+
+    pub fn zeroize_spotify_web_secrets(&mut self) {
+        crate::secrets::zeroize_string(&mut self.spotify_web_access_token);
+        crate::secrets::zeroize_string(&mut self.spotify_web_cookie);
+    }
+
+    pub fn zeroize_youtube_secrets(&mut self) {
+        crate::secrets::zeroize_string(&mut self.youtube_client_secret);
+        crate::secrets::zeroize_string(&mut self.youtube_access_token);
+        crate::secrets::zeroize_string(&mut self.youtube_refresh_token);
+        crate::secrets::zeroize_string(&mut self.youtube_cookie);
+        crate::secrets::zeroize_string(&mut self.youtube_sapisid);
+    }
+
+    pub fn zeroize_subsonic_secrets(&mut self) {
+        crate::secrets::zeroize_string(&mut self.subsonic_password);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UpdateSettings {
     pub auto_check_on_startup: bool,
 }
@@ -519,6 +564,31 @@ impl Default for SessionResumeState {
 }
 
 impl SessionResumeState {
+    pub fn sanitized(&self) -> Self {
+        let mut out = self.clone();
+        out.volume = if out.volume.is_finite() {
+            out.volume.clamp(0.0, 1.5)
+        } else {
+            default_volume()
+        };
+        out.recent_track_ids.truncate(50);
+        out.recent_searches.truncate(12);
+        out.pinned_ids.truncate(16);
+        if out.track_play_counts.len() > 200 {
+            let mut entries: Vec<(String, u32)> = out.track_play_counts.into_iter().collect();
+            entries.sort_by_key(|a| std::cmp::Reverse(a.1));
+            entries.truncate(200);
+            out.track_play_counts = entries.into_iter().collect();
+        }
+        if out.artist_play_counts.len() > 100 {
+            let mut entries: Vec<(String, u32)> = out.artist_play_counts.into_iter().collect();
+            entries.sort_by_key(|a| std::cmp::Reverse(a.1));
+            entries.truncate(100);
+            out.artist_play_counts = entries.into_iter().collect();
+        }
+        out
+    }
+
     pub fn record_play(&mut self, track_id: &str, duration_ms: u64) {
         self.record_play_with_artist(track_id, "", duration_ms);
     }
@@ -683,13 +753,20 @@ pub fn parse_playlist_import_text(
                 .and_then(|i| cols.get(i))
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .unwrap_or(0);
-            let uri = idx_uri.and_then(|i| cols.get(i)).copied().unwrap_or("");
+            let uri = idx_uri
+                .and_then(|i| cols.get(i))
+                .copied()
+                .unwrap_or("")
+                .trim();
             let isrc = idx_isrc
                 .and_then(|i| cols.get(i))
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            let id = if !uri.is_empty() {
-                uri.to_string()
+            let valid_spotify_id = uri
+                .strip_prefix("spotify:track:")
+                .filter(|id| id.len() == 22 && id.bytes().all(|b| b.is_ascii_alphanumeric()));
+            let id = if let Some(sp_id) = valid_spotify_id {
+                format!("spotify:track:{sp_id}")
             } else {
                 format!("{pl_id}:{line_idx}")
             };
@@ -706,7 +783,7 @@ pub fn parse_playlist_import_text(
                 bit_depth: 0,
                 bitrate_kbps: 0,
                 isrc,
-                spotify_id: uri.strip_prefix("spotify:track:").map(ToOwned::to_owned),
+                spotify_id: valid_spotify_id.map(ToOwned::to_owned),
                 youtube_video_id: None,
                 thumbnail_url: None,
                 replay_gain_db: 0,
@@ -730,7 +807,7 @@ pub fn parse_playlist_import_text(
                     .unwrap_or_else(|| {
                         ("Unknown Artist".to_string(), info_part.trim().to_string())
                     });
-                pending_meta = Some((secs * 1_000, artist, title));
+                pending_meta = Some((secs.saturating_mul(1_000), artist, title));
                 continue;
             }
             if line.starts_with('#') {
@@ -792,10 +869,16 @@ pub fn parse_playlist_import_text(
     (playlist, tracks)
 }
 
-/// Reject UNC / Windows device paths, URL schemes, control characters, and `..` directory traversal
-/// so importing an untrusted `.m3u` / `.m3u8` cannot trigger SMB Net-NTLMv2 leaks or path escapes.
+/// Reject UNC / Windows device paths, NTFS Alternate Data Streams, drive-relative/drive-rooted
+/// ambiguities, symlinks, non-audio extensions, URL schemes, control characters, and `..` traversal
+/// so importing an untrusted `.m3u` / `.m3u8` cannot trigger SMB Net-NTLMv2 leaks or arbitrary file reads.
 fn sanitize_m3u_local_path(raw_line: &str, base_dir: Option<&std::path::Path>) -> Option<PathBuf> {
     use std::path::{Component, Prefix};
+
+    const ALLOWED_AUDIO_EXTS: &[&str] = &[
+        "flac", "mp3", "m4a", "aac", "alac", "ogg", "opus", "wav", "aiff", "aif", "wma", "webm",
+        "mka",
+    ];
 
     let s = raw_line.trim();
     if s.is_empty() || s.bytes().any(|b| b.is_ascii_control()) {
@@ -813,18 +896,81 @@ fn sanitize_m3u_local_path(raw_line: &str, base_dir: Option<&std::path::Path>) -
     }
 
     let p = PathBuf::from(s);
-    for comp in p.components() {
+    let mut comps = p.components().peekable();
+    let mut saw_disk_prefix = false;
+    while let Some(comp) = comps.next() {
         match comp {
             Component::Prefix(pref) => match pref.kind() {
                 Prefix::UNC(_, _)
                 | Prefix::VerbatimUNC(_, _)
                 | Prefix::DeviceNS(_)
                 | Prefix::Verbatim(_) => return None,
-                Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {}
+                Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {
+                    saw_disk_prefix = true;
+                    // Reject drive-relative paths like `C:foo.mp3` (must be followed by root `\`).
+                    if !matches!(comps.peek(), Some(Component::RootDir)) {
+                        return None;
+                    }
+                }
             },
+            Component::RootDir => {
+                // On Windows, reject drive-rooted paths without a drive prefix (e.g. `\Windows\...`).
+                if cfg!(target_os = "windows") && !saw_disk_prefix {
+                    return None;
+                }
+            }
             Component::ParentDir => return None,
-            _ => {}
+            Component::Normal(seg) => {
+                let seg_str = seg.to_str()?;
+                // Reject NTFS Alternate Data Streams (`file.mp3:zone`) or embedded colons.
+                if seg_str.contains(':') {
+                    return None;
+                }
+                // Reject Windows reserved device names (`CON`, `NUL`, `AUX`, `PRN`, `COM1..9`, `LPT1..9`).
+                let stem = seg_str
+                    .split('.')
+                    .next()
+                    .unwrap_or(seg_str)
+                    .trim_end_matches([' ', '.'])
+                    .to_ascii_uppercase();
+                if matches!(
+                    stem.as_str(),
+                    "CON"
+                        | "PRN"
+                        | "AUX"
+                        | "NUL"
+                        | "COM1"
+                        | "COM2"
+                        | "COM3"
+                        | "COM4"
+                        | "COM5"
+                        | "COM6"
+                        | "COM7"
+                        | "COM8"
+                        | "COM9"
+                        | "LPT1"
+                        | "LPT2"
+                        | "LPT3"
+                        | "LPT4"
+                        | "LPT5"
+                        | "LPT6"
+                        | "LPT7"
+                        | "LPT8"
+                        | "LPT9"
+                ) {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
         }
+    }
+
+    let ext = p.extension().and_then(|e| e.to_str())?;
+    if !ALLOWED_AUDIO_EXTS
+        .iter()
+        .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+    {
+        return None;
     }
 
     let resolved = if p.is_absolute() {
@@ -834,6 +980,18 @@ fn sanitize_m3u_local_path(raw_line: &str, base_dir: Option<&std::path::Path>) -
     } else {
         p
     };
+
+    if let Ok(meta) = std::fs::symlink_metadata(&resolved)
+        && meta.file_type().is_symlink()
+    {
+        return None;
+    }
+    if let Ok(canon) = std::fs::canonicalize(&resolved) {
+        let canon_str = canon.to_string_lossy();
+        if canon_str.starts_with(r"\\?\UNC\") || canon_str.starts_with(r"\\?\unc\") {
+            return None;
+        }
+    }
     Some(resolved)
 }
 

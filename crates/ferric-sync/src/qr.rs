@@ -379,7 +379,10 @@ impl QrMatrix {
     #[inline]
     pub fn get(&self, x: usize, y: usize) -> bool {
         if x < self.size && y < self.size {
-            self.modules[y * self.size + x]
+            y.checked_mul(self.size)
+                .and_then(|row| row.checked_add(x))
+                .and_then(|idx| self.modules.get(idx).copied())
+                .unwrap_or(false)
         } else {
             false
         }

@@ -20,6 +20,8 @@ pub enum CoreError {
     InvalidHex(String),
     #[error("invalid equalizer apo config: {0}")]
     InvalidEqApo(String),
+    #[error("secret protection error: {0}")]
+    SecretProtection(String),
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;

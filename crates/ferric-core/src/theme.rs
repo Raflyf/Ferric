@@ -22,6 +22,53 @@ fn default_acrylic_tint_hex() -> String {
     "#0B0D14".to_string()
 }
 
+fn default_adaptive_acrylic_tint() -> bool {
+    true
+}
+
+/// Derive a deep, moody (or soft pastel-light) translucent Acrylic glass tint RGB `[0..1]`
+/// from the currently playing song's extracted cover accent color, keeping high WCAG text contrast.
+pub fn derive_acrylic_tint_from_accent(accent_rgb: [f32; 3], is_light: bool) -> [f32; 3] {
+    let r = accent_rgb[0].clamp(0.0, 1.0);
+    let g = accent_rgb[1].clamp(0.0, 1.0);
+    let b = accent_rgb[2].clamp(0.0, 1.0);
+    if is_light {
+        // Frosted warm cream glass gently infused with the cover hue (preserves dark-ink AA/AAA contrast)
+        let base = [0.925_f32, 0.905_f32, 0.870_f32];
+        let mix_amt = 0.16_f32;
+        [
+            (base[0] + (r - base[0]) * mix_amt).clamp(0.76, 0.96),
+            (base[1] + (g - base[1]) * mix_amt).clamp(0.74, 0.95),
+            (base[2] + (b - base[2]) * mix_amt).clamp(0.70, 0.95),
+        ]
+    } else {
+        // Rich jewel-toned dark smoked glass (or crisp charcoal-graphite for monochrome covers):
+        // preserve authentic hue/chroma cleanly while clamping luminance deep enough that
+        // white/light foreground typography stays > 7.5:1 WCAG AAA legible.
+        let avg = (r + g + b) / 3.0;
+        let chroma = r.max(g).max(b) - r.min(g).min(b);
+        let boost = if chroma < 0.08 { 1.0 } else { 1.32 };
+        let sat_r = (avg + (r - avg) * boost).clamp(0.0, 1.0);
+        let sat_g = (avg + (g - avg) * boost).clamp(0.0, 1.0);
+        let sat_b = (avg + (b - avg) * boost).clamp(0.0, 1.0);
+        let mut tr = 0.018 + sat_r * 0.24;
+        let mut tg = 0.019 + sat_g * 0.24;
+        let mut tb = 0.024 + sat_b * 0.24;
+        let lum = 0.2126 * tr + 0.7152 * tg + 0.0722 * tb;
+        if lum > 0.145 {
+            let scale = 0.145 / lum;
+            tr *= scale;
+            tg *= scale;
+            tb *= scale;
+        }
+        [
+            tr.clamp(0.018, 0.30),
+            tg.clamp(0.018, 0.30),
+            tb.clamp(0.020, 0.32),
+        ]
+    }
+}
+
 /// Complete theme contract matching `.ferric-theme.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -50,6 +97,9 @@ pub struct ThemeConfig {
     /// Customizable Native Acrylic glass tint color (`#RRGGBB`).
     #[serde(default = "default_acrylic_tint_hex")]
     pub acrylic_tint_hex: String,
+    /// Dynamically tint Native Acrylic glass smoothly from the currently playing cover art.
+    #[serde(default = "default_adaptive_acrylic_tint")]
+    pub adaptive_acrylic_tint: bool,
 }
 
 impl Default for ThemeConfig {
@@ -74,6 +124,7 @@ impl Default for ThemeConfig {
             acrylic_enabled: false,
             acrylic_opacity: 0.72,
             acrylic_tint_hex: default_acrylic_tint_hex(),
+            adaptive_acrylic_tint: true,
         }
     }
 }
@@ -118,8 +169,10 @@ impl ThemeConfig {
             text_primary_hex: "#111111".to_string(),
             text_secondary_hex: "#524B42".to_string(),
             accent_hex: "#D9541E".to_string(),
+            acrylic_tint_hex: "#EFE8DA".to_string(),
             background_mode: BackgroundMode::WarmCream,
             adaptive_album_art: false,
+            adaptive_acrylic_tint: false,
             ..Self::default()
         }
     }
@@ -155,23 +208,93 @@ impl ThemeConfig {
         wcag_contrast_ratio((15, 17, 23), bg) > wcag_contrast_ratio((244, 244, 247), bg)
     }
 
-    /// Compute WCAG-verified adaptive foreground, icon, divider, and accent colors for the active background.
+    /// Compute WCAG-verified adaptive foreground, icon, divider, and accent colors for the active background
+    /// and elevated surface/card backdrops so text & icons never drop below AA contrast on cards.
     pub fn adaptive_palette(&self, active_accent_rgb: (u8, u8, u8)) -> AdaptivePalette {
-        let bg = self.effective_bg_rgb();
+        let canvas = self.effective_bg_rgb();
+        let surface = if self.acrylic_enabled {
+            canvas
+        } else {
+            parse_hex_rgb(&self.surface_hex).unwrap_or(canvas)
+        };
+        let is_light = wcag_contrast_ratio((15, 17, 23), canvas)
+            > wcag_contrast_ratio((244, 244, 247), canvas);
+        let card = if is_light {
+            lerp_rgb(surface, (255, 255, 255), 0.28)
+        } else {
+            lerp_rgb(surface, (28, 31, 44), 0.35)
+        };
         let brand_rgb = parse_hex_rgb(&self.accent_hex).unwrap_or((232, 106, 44));
-        AdaptivePalette::for_background(bg, active_accent_rgb, brand_rgb, self.acrylic_enabled)
+        AdaptivePalette::for_surfaces(
+            canvas,
+            &[canvas, surface, card],
+            active_accent_rgb,
+            brand_rgb,
+            self.acrylic_enabled,
+        )
+    }
+
+    pub fn sanitized(&self) -> Self {
+        let mut out = self.clone();
+        out.corner_radius_px = if out.corner_radius_px.is_finite() {
+            out.corner_radius_px.clamp(0.0, 24.0)
+        } else {
+            8.0
+        };
+        out.track_row_height_px = if out.track_row_height_px.is_finite() {
+            out.track_row_height_px.clamp(34.0, 72.0)
+        } else {
+            46.0
+        };
+        out.panel_opacity = if out.panel_opacity.is_finite() {
+            out.panel_opacity.clamp(0.25, 1.0)
+        } else {
+            1.0
+        };
+        out.ui_zoom = if out.ui_zoom.is_finite() {
+            out.ui_zoom.clamp(0.65, 1.40)
+        } else {
+            1.0
+        };
+        out.acrylic_opacity = if out.acrylic_opacity.is_finite() {
+            out.acrylic_opacity.clamp(0.18, 0.94)
+        } else {
+            default_acrylic_opacity()
+        };
+        out
     }
 
     pub fn export_to_file(&self, path: &Path) -> CoreResult<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        let json = serde_json::to_string_pretty(&self.sanitized())?;
+        let tmp = path.with_extension("ferric-theme.tmp");
+        std::fs::write(&tmp, &json)?;
+        if std::fs::rename(&tmp, path).is_err() {
+            std::fs::write(path, &json)?;
+            let _ = std::fs::remove_file(&tmp);
+        }
         Ok(())
     }
 
     pub fn import_from_file(path: &Path) -> CoreResult<Self> {
-        let raw = std::fs::read_to_string(path)?;
+        use std::io::Read;
+        const MAX_THEME_BYTES: u64 = 256 * 1024;
+        let file = std::fs::File::open(path)?;
+        let mut buf = Vec::new();
+        file.take(MAX_THEME_BYTES + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_THEME_BYTES {
+            return Err(CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Theme file exceeds 256 KiB limit",
+            )));
+        }
+        let raw = String::from_utf8(buf).map_err(|_| {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Theme file is not valid UTF-8",
+            ))
+        })?;
         let parsed: Self = serde_json::from_str(&raw)?;
-        Ok(parsed)
+        Ok(parsed.sanitized())
     }
 }
 
@@ -275,9 +398,57 @@ pub fn ensure_min_contrast_rgb(
     best
 }
 
+/// Push `fg` smoothly toward `target` until it meets `min_ratio` contrast against every surface in `surfaces`.
+pub fn ensure_min_contrast_multi_rgb(
+    fg: (u8, u8, u8),
+    surfaces: &[(u8, u8, u8)],
+    target: (u8, u8, u8),
+    min_ratio: f64,
+) -> (u8, u8, u8) {
+    let worst = |cand: (u8, u8, u8)| -> f64 {
+        surfaces
+            .iter()
+            .map(|&s| wcag_contrast_ratio(cand, s))
+            .fold(f64::INFINITY, f64::min)
+    };
+    if surfaces.is_empty() || worst(fg) >= min_ratio {
+        return fg;
+    }
+    let mut lo = 0.0_f32;
+    let mut hi = 1.0_f32;
+    let mut best = target;
+    for _ in 0..14 {
+        let mid = (lo + hi) * 0.5;
+        let cand = lerp_rgb(fg, target, mid);
+        if worst(cand) >= min_ratio {
+            best = cand;
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    best
+}
+
 impl AdaptivePalette {
     pub fn for_background(
         bg: (u8, u8, u8),
+        active_accent_rgb: (u8, u8, u8),
+        brand_accent_rgb: (u8, u8, u8),
+        acrylic_enabled: bool,
+    ) -> Self {
+        Self::for_surfaces(
+            bg,
+            &[bg],
+            active_accent_rgb,
+            brand_accent_rgb,
+            acrylic_enabled,
+        )
+    }
+
+    pub fn for_surfaces(
+        bg: (u8, u8, u8),
+        surfaces: &[(u8, u8, u8)],
         active_accent_rgb: (u8, u8, u8),
         brand_accent_rgb: (u8, u8, u8),
         acrylic_enabled: bool,
@@ -309,20 +480,23 @@ impl AdaptivePalette {
                 )
             };
 
-        let text_primary_rgb = ensure_min_contrast_rgb(primary_rgb, bg, target_ink, 4.5);
-        let text_secondary_rgb = ensure_min_contrast_rgb(sec_base, bg, target_ink, 4.5);
-        let text_muted_rgb = ensure_min_contrast_rgb(muted_base, bg, target_ink, 4.2);
-        let icon_idle_rgb = ensure_min_contrast_rgb(icon_base, bg, target_ink, 4.5);
-        let icon_muted_rgb = ensure_min_contrast_rgb(icon_mut_base, bg, target_ink, 4.0);
+        let text_primary_rgb =
+            ensure_min_contrast_multi_rgb(primary_rgb, surfaces, target_ink, 4.6);
+        let text_secondary_rgb = ensure_min_contrast_multi_rgb(sec_base, surfaces, target_ink, 4.6);
+        let text_muted_rgb = ensure_min_contrast_multi_rgb(muted_base, surfaces, target_ink, 4.6);
+        let icon_idle_rgb = ensure_min_contrast_multi_rgb(icon_base, surfaces, target_ink, 4.6);
+        let icon_muted_rgb =
+            ensure_min_contrast_multi_rgb(icon_mut_base, surfaces, target_ink, 4.5);
 
-        let accent_rgb = ensure_min_contrast_rgb(active_accent_rgb, bg, target_ink, 4.5);
-        let brand_rgb = ensure_min_contrast_rgb(brand_accent_rgb, bg, target_ink, 4.5);
+        let accent_rgb =
+            ensure_min_contrast_multi_rgb(active_accent_rgb, surfaces, target_ink, 4.6);
+        let brand_rgb = ensure_min_contrast_multi_rgb(brand_accent_rgb, surfaces, target_ink, 4.6);
         let danger_base = if is_light {
             (185, 28, 28)
         } else {
             (255, 120, 133)
         };
-        let danger_rgb = ensure_min_contrast_rgb(danger_base, bg, target_ink, 4.5);
+        let danger_rgb = ensure_min_contrast_multi_rgb(danger_base, surfaces, target_ink, 4.6);
 
         let divider = if is_light {
             if acrylic_enabled {
@@ -433,5 +607,43 @@ mod tests {
         assert!(parse_hex_rgb("#€€").is_err());
         assert!(parse_hex_rgb("ZZZZZZ").is_err());
         assert_eq!(parse_hex_rgb("#E86A2C").expect("valid hex"), (232, 106, 44));
+    }
+
+    #[test]
+    fn adaptive_acrylic_tint_preserves_wcag_contrast_and_serde_default() {
+        // Legacy theme JSON lacking `adaptive_acrylic_tint` must deserialize cleanly with default true.
+        let legacy: ThemeConfig =
+            serde_json::from_str(r#"{"acrylic_enabled":true}"#).expect("legacy theme json");
+        assert!(legacy.adaptive_acrylic_tint);
+
+        for accent in [
+            [0.95, 0.42, 0.18], // Vivid orange
+            [0.98, 0.96, 0.40], // Bright yellow
+            [0.20, 0.85, 0.55], // Emerald
+            [0.22, 0.48, 0.96], // Electric blue
+            [0.96, 0.30, 0.68], // Neon pink
+        ] {
+            let dark_tint = derive_acrylic_tint_from_accent(accent, false);
+            let dark_u8 = (
+                (dark_tint[0] * 255.0).round() as u8,
+                (dark_tint[1] * 255.0).round() as u8,
+                (dark_tint[2] * 255.0).round() as u8,
+            );
+            assert!(
+                wcag_contrast_ratio((244, 244, 247), dark_u8) >= 7.0,
+                "dark adaptive acrylic tint {dark_u8:?} must keep AAA contrast for white text"
+            );
+
+            let light_tint = derive_acrylic_tint_from_accent(accent, true);
+            let light_u8 = (
+                (light_tint[0] * 255.0).round() as u8,
+                (light_tint[1] * 255.0).round() as u8,
+                (light_tint[2] * 255.0).round() as u8,
+            );
+            assert!(
+                wcag_contrast_ratio((17, 17, 17), light_u8) >= 7.0,
+                "light adaptive acrylic tint {light_u8:?} must keep AAA contrast for dark text"
+            );
+        }
     }
 }

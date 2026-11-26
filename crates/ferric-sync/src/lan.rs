@@ -11,8 +11,33 @@ const PEER_STALE_TIMEOUT_MS: u64 = 30_000;
 const MAX_DATAGRAM_BYTES: usize = 1024;
 const MAX_POLL_PACKETS_PER_TICK: usize = 64;
 const MAX_DISCOVERED_PEERS: usize = 32;
+const MAX_PEERS_PER_IP: usize = 2;
 const MAX_DEVICE_ID_LEN: usize = 64;
 const MAX_DEVICE_NAME_CHARS: usize = 64;
+
+fn is_lan_or_loopback(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || ((v6.segments()[0] & 0xfe00) == 0xfc00) // ULA fc00::/7
+                || ((v6.segments()[0] & 0xffc0) == 0xfe80) // link-local fe80::/10
+        }
+    }
+}
+
+fn is_bidi_or_control(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c as u32,
+            0x061C
+                | 0x200E
+                | 0x200F
+                | 0x202A..=0x202E
+                | 0x2066..=0x2069
+                | 0xFEFF
+        )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredPeer {
@@ -135,8 +160,19 @@ impl LanDiscoveryBeacon {
             let (n, src_addr) = match self.socket.recv_from(&mut buf) {
                 Ok(pair) => pair,
                 Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        ErrorKind::ConnectionReset | ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
                 Err(_) => break,
             };
+            if !is_lan_or_loopback(src_addr.ip()) {
+                continue;
+            }
             if n <= BEACON_MAGIC.len() || &buf[..4] != BEACON_MAGIC {
                 continue;
             }
@@ -154,6 +190,36 @@ impl LanDiscoveryBeacon {
                 continue;
             }
 
+            let src_ip_str = src_addr.ip().to_string();
+            // Prevent cross-IP spoofing of an active peer's device_id before its entry expires.
+            if let Some(existing) = self.peers.get(clean_id) {
+                let existing_ip = existing
+                    .addr
+                    .rsplit_once(':')
+                    .map(|(ip, _)| ip)
+                    .unwrap_or("");
+                let is_fresh =
+                    now_ms.saturating_sub(existing.last_seen_ms) <= PEER_STALE_TIMEOUT_MS;
+                if is_fresh && existing_ip != src_ip_str {
+                    continue;
+                }
+            } else {
+                // Limit newly learned peers per source IP to prevent single-host table flooding.
+                let same_ip_count = self
+                    .peers
+                    .values()
+                    .filter(|p| {
+                        now_ms.saturating_sub(p.last_seen_ms) <= PEER_STALE_TIMEOUT_MS
+                            && p.addr
+                                .rsplit_once(':')
+                                .is_some_and(|(ip, _)| ip == src_ip_str)
+                    })
+                    .count();
+                if same_ip_count >= MAX_PEERS_PER_IP {
+                    continue;
+                }
+            }
+
             // Drop unknown peers when table is saturated (existing peers still refresh).
             if !self.peers.contains_key(clean_id) && self.peers.len() >= MAX_DISCOVERED_PEERS {
                 self.peers.retain(|_, peer| {
@@ -169,11 +235,11 @@ impl LanDiscoveryBeacon {
             } else {
                 FERRIC_LAN_UDP_PORT
             };
-            let peer_addr = format!("{}:{effective_port}", src_addr.ip());
+            let peer_addr = format!("{src_ip_str}:{effective_port}");
             let sanitized_name: String = ann
                 .device_name
                 .chars()
-                .filter(|c| !c.is_control())
+                .filter(|c| !is_bidi_or_control(*c))
                 .take(MAX_DEVICE_NAME_CHARS)
                 .collect();
             let device_name = if sanitized_name.trim().is_empty() {

@@ -29,14 +29,28 @@ const SPOTIFY_WEB_CLIENT_VERSION: &str = "1.2.58.0.g00000000";
 const PATHFINDER_URL: &str = "https://api-partner.spotify.com/pathfinder/v2/query";
 const CLIENT_TOKEN_URL: &str = "https://clienttoken.spotify.com/v1/clienttoken";
 const MAX_PATHFINDER_JSON_BYTES: u64 = 12 * 1024 * 1024;
+const MAX_WEB_BUNDLE_BYTES: u64 = 12 * 1024 * 1024;
 
+const HASH_ACCOUNT_ATTRIBUTES: &str =
+    "be4ce359daee01463ddb8e77536220e108e3d28105e12199f244d7a5954e9d14";
 const HASH_PROFILE_ATTRIBUTES: &str =
-    "53bcb064f6cd18c23f752bc324a791194d20df612d8e1239c735144ab0399ced";
+    "08ffb4730af3746e04a8301396f20875dbbce10c75243803091a9274eacc8ac0";
 const HASH_FETCH_LIBRARY_TRACKS: &str =
     "087278b20b743578a6262c2b0b4bcd20d879c503cc359a2285baf083ef944240";
-const HASH_LIBRARY_V3: &str = "973e511ca44261fda7eebac8b653155e7caee3675abb4fb110cc1b8c78b091c3";
+const HASH_LIBRARY_V3: &str = "390c78e5b951029bad359785e69b07b536a509c581cbcd0aded5e5067f187455";
 const HASH_FETCH_PLAYLIST: &str =
-    "7982b11e21535cd2594badc40030b745671b61a1fa66766e569d45e6364f3422";
+    "21ea11a6ac75a5f3e01fd365d29c18e0a4a8b7dc09f89bbb5d73910190c6acaf";
+const HASH_HOME: &str = "5fb7da7a03ee2776c0670856609cb85a189a3cecc36cc160b91cde79063b9cf1";
+
+/// A personalized Recommended Station returned directly by Spotify's Pathfinder `home` query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpotifyStationCard {
+    pub playlist_id: String,
+    pub title: String,
+    pub display_name: String,
+    pub subtitle: String,
+    pub thumbnail_url: Option<String>,
+}
 
 /// Outcome when syncing a Spotify Web Player session through `api-partner.spotify.com/pathfinder`.
 #[derive(Debug)]
@@ -54,6 +68,165 @@ struct CachedClientToken {
 }
 
 static CLIENT_TOKEN_CACHE: OnceLock<Mutex<Option<CachedClientToken>>> = OnceLock::new();
+static RESOLVED_HASH_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpotifyTierVerdict {
+    Premium,
+    NotPremium(String),
+    Unknown,
+}
+
+/// Fail-closed classifier for Spotify subscription tier fields from Pathfinder `accountAttributes`
+/// (`data.me.account.product` and `data.me.account.attributes.catalogue`) or REST `/v1/me`
+/// (`product`). Non-premium tiers (`free`, `open`, `shuffle-restricted`, `ads`) are explicitly
+/// rejected; missing/unknown values return `Unknown` so callers fail closed.
+pub fn classify_spotify_premium(
+    product: Option<&str>,
+    catalogue: Option<&str>,
+) -> SpotifyTierVerdict {
+    let norm = |raw: Option<&str>| -> Option<String> {
+        raw.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase)
+    };
+    let prod = norm(product);
+    let cat = norm(catalogue);
+
+    for val in [prod.as_deref(), cat.as_deref()].into_iter().flatten() {
+        if matches!(
+            val,
+            "free" | "open" | "shuffle-restricted" | "ads" | "ad-supported"
+        ) || val.starts_with("free")
+        {
+            return SpotifyTierVerdict::NotPremium(val.to_string());
+        }
+    }
+
+    if prod.as_deref() == Some("premium") || cat.as_deref() == Some("premium") {
+        return SpotifyTierVerdict::Premium;
+    }
+
+    if let Some(other) = prod.or(cat) {
+        return SpotifyTierVerdict::NotPremium(other);
+    }
+
+    SpotifyTierVerdict::Unknown
+}
+
+fn parse_account_attributes_tier(val: &Value) -> (Option<String>, Option<String>) {
+    let product = val
+        .pointer("/data/me/account/product")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let catalogue = val
+        .pointer("/data/me/account/attributes/catalogue")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    (product, catalogue)
+}
+
+fn extract_web_bundle_url_from_html(html: &str) -> Option<String> {
+    const PREFIX: &str = "https://open.spotifycdn.com/cdn/build/web-player/web-player.";
+    let start = html.find(PREFIX)?;
+    let rest = &html[start..];
+    let end = rest.find(".js")?;
+    let candidate = &rest[..end + 3];
+    if candidate.len() <= 200
+        && candidate
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'/' | b'.' | b'-' | b'_'))
+    {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_operation_hash_from_bundle(js: &str, operation: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let needle = format!("{quote}{operation}{quote},{quote}query{quote},{quote}");
+        if let Some(pos) = js.find(&needle) {
+            let hash_start = pos + needle.len();
+            if let Some(cand) = js.get(hash_start..hash_start + 64)
+                && cand.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Some(cand.to_ascii_lowercase());
+            }
+        }
+    }
+    None
+}
+
+fn lookup_cached_hash(operation: &str, fallback: &str) -> String {
+    let lock = RESOLVED_HASH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(h) = guard.get(operation) {
+        return h.clone();
+    }
+    fallback.to_string()
+}
+
+fn refresh_hashes_from_web_bundle(agent: &ureq::Agent) -> Option<HashMap<String, String>> {
+    let resp = agent
+        .get("https://open.spotify.com/")
+        .header("User-Agent", SPOTIFY_WEB_UA)
+        .call()
+        .ok()?;
+    if resp.status().as_u16() != 200 {
+        return None;
+    }
+    let html_bytes = resp
+        .into_body()
+        .into_with_config()
+        .limit(2 * 1024 * 1024)
+        .read_to_vec()
+        .ok()?;
+    let html = String::from_utf8_lossy(&html_bytes);
+    let bundle_url = extract_web_bundle_url_from_html(&html)?;
+
+    let js_resp = agent
+        .get(&bundle_url)
+        .header("User-Agent", SPOTIFY_WEB_UA)
+        .call()
+        .ok()?;
+    if js_resp.status().as_u16() != 200 {
+        return None;
+    }
+    let js_bytes = js_resp
+        .into_body()
+        .into_with_config()
+        .limit(MAX_WEB_BUNDLE_BYTES)
+        .read_to_vec()
+        .ok()?;
+    let js = String::from_utf8_lossy(&js_bytes);
+
+    let mut refreshed = HashMap::new();
+    for op in [
+        "accountAttributes",
+        "profileAttributes",
+        "fetchLibraryTracks",
+        "libraryV3",
+        "fetchPlaylist",
+        "home",
+    ] {
+        if let Some(hash) = extract_operation_hash_from_bundle(&js, op) {
+            refreshed.insert(op.to_string(), hash);
+        }
+    }
+    if !refreshed.is_empty() {
+        let lock = RESOLVED_HASH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        for (k, v) in &refreshed {
+            guard.insert(k.clone(), v.clone());
+        }
+    }
+    Some(refreshed)
+}
 
 #[derive(Debug, Deserialize)]
 struct WebTokenResponse {
@@ -119,35 +292,42 @@ pub fn parse_web_token_json(raw: &str) -> ProviderResult<String> {
     }
 }
 
+static PATHFINDER_HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+
 fn pathfinder_agent() -> ureq::Agent {
-    // `api-partner.spotify.com` intermittently resets IPv6 rustls connections on Windows;
-    // pinning IPv4 matches Spotify's web-player edge and avoids OS 10054 resets.
-    let cfg = ureq::Agent::config_builder()
-        .ip_family(ureq::config::IpFamily::Ipv4Only)
-        .max_redirects(0)
-        .max_redirects_will_error(false)
-        .timeout_connect(Some(Duration::from_secs(8)))
-        .timeout_recv_response(Some(Duration::from_secs(16)))
-        .timeout_global(Some(Duration::from_secs(24)))
-        .http_status_as_error(false)
-        .build();
-    ureq::Agent::new_with_config(cfg)
+    PATHFINDER_HTTP_AGENT
+        .get_or_init(|| {
+            // `api-partner.spotify.com` intermittently resets IPv6 rustls connections on Windows;
+            // pinning IPv4 matches Spotify's web-player edge and avoids OS 10054 resets.
+            let cfg = ureq::Agent::config_builder()
+                .ip_family(ureq::config::IpFamily::Ipv4Only)
+                .max_redirects(0)
+                .max_redirects_will_error(false)
+                .timeout_connect(Some(Duration::from_secs(8)))
+                .timeout_recv_response(Some(Duration::from_secs(16)))
+                .timeout_global(Some(Duration::from_secs(24)))
+                .http_status_as_error(false)
+                .build();
+            ureq::Agent::new_with_config(cfg)
+        })
+        .clone()
 }
 
 fn invalidate_cached_client_token() {
     let lock = CLIENT_TOKEN_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = lock.lock() {
-        *guard = None;
-    }
+    let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    *guard = None;
 }
 
 fn fetch_client_token(agent: &ureq::Agent) -> Result<String, SpotifyWebSyncError> {
     let lock = CLIENT_TOKEN_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = lock.lock()
-        && let Some(cached) = guard.as_ref()
-        && Instant::now() < cached.expires_at
     {
-        return Ok(cached.token.clone());
+        let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(cached) = guard.as_ref()
+            && Instant::now() < cached.expires_at
+        {
+            return Ok(cached.token.clone());
+        }
     }
 
     let device_id = format!("ferric-{}", ferric_core::secrets::csprng_hex(12));
@@ -205,7 +385,8 @@ fn fetch_client_token(agent: &ureq::Agent) -> Result<String, SpotifyWebSyncError
         .unwrap_or(1800)
         .clamp(300, 3600);
 
-    if let Ok(mut guard) = lock.lock() {
+    {
+        let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Some(CachedClientToken {
             token: token.clone(),
             expires_at: Instant::now() + Duration::from_secs(refresh_secs.saturating_sub(60)),
@@ -219,22 +400,25 @@ fn call_pathfinder(
     access_token: &str,
     client_token: &mut String,
     operation: &str,
-    sha256_hash: &str,
+    default_sha256_hash: &str,
     variables: Value,
 ) -> Result<Value, SpotifyWebSyncError> {
-    let body = json!({
-        "variables": variables,
-        "operationName": operation,
-        "extensions": {
-            "persistedQuery": {
-                "version": 1,
-                "sha256Hash": sha256_hash
-            }
-        }
-    })
-    .to_string();
+    let mut active_hash = lookup_cached_hash(operation, default_sha256_hash);
+    let mut refreshed_hashes = false;
 
-    for attempt in 0..2 {
+    for attempt in 0..3 {
+        let body = json!({
+            "variables": variables,
+            "operationName": operation,
+            "extensions": {
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": active_hash
+                }
+            }
+        })
+        .to_string();
+
         let resp = agent
             .post(PATHFINDER_URL)
             .header("Authorization", format!("Bearer {access_token}"))
@@ -282,6 +466,16 @@ fn call_pathfinder(
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("GraphQL error");
+            if msg.contains("PersistedQueryNotFound")
+                && !refreshed_hashes
+                && let Some(map) = refresh_hashes_from_web_bundle(agent)
+                && let Some(new_hash) = map.get(operation)
+                && new_hash != &active_hash
+            {
+                refreshed_hashes = true;
+                active_hash = new_hash.clone();
+                continue;
+            }
             return Err(SpotifyWebSyncError::FallbackToRest(format!(
                 "{operation}: {msg}"
             )));
@@ -293,6 +487,89 @@ fn call_pathfinder(
     Err(SpotifyWebSyncError::FallbackToRest(format!(
         "{operation} exhausted retries"
     )))
+}
+
+/// Verify that the signed-in Spotify OAuth account holds an active Spotify Premium subscription
+/// (fail-closed).
+///
+/// Queries Spotify's Pathfinder `accountAttributes` endpoint first (avoiding `api.spotify.com/v1`
+/// shared rate limits) and only falls back to `/v1/me` if Pathfinder cannot return a tier. Free,
+/// open, or unverifiable accounts are rejected immediately.
+pub fn verify_spotify_premium_account(access_token: &str) -> ProviderResult<String> {
+    let agent = pathfinder_agent();
+    let pathfinder_err: Option<String> = match fetch_client_token(&agent) {
+        Ok(mut client_token) => {
+            match call_pathfinder(
+                &agent,
+                access_token,
+                &mut client_token,
+                "accountAttributes",
+                HASH_ACCOUNT_ATTRIBUTES,
+                json!({}),
+            ) {
+                Ok(acct_val) => {
+                    let (product, catalogue) = parse_account_attributes_tier(&acct_val);
+                    match classify_spotify_premium(product.as_deref(), catalogue.as_deref()) {
+                        SpotifyTierVerdict::Premium => {
+                            let display_name = call_pathfinder(
+                                &agent,
+                                access_token,
+                                &mut client_token,
+                                "profileAttributes",
+                                HASH_PROFILE_ATTRIBUTES,
+                                json!({}),
+                            )
+                            .map(|v| parse_profile_display_name(&v))
+                            .unwrap_or_else(|_| "Spotify Premium".to_string());
+                            return Ok(display_name);
+                        }
+                        SpotifyTierVerdict::NotPremium(tier) => {
+                            return Err(ProviderError::Http(format!(
+                                "Spotify Premium required — this account is on Spotify Free ({tier}). Use 'Spotify Web Sign-In' below for Free accounts."
+                            )));
+                        }
+                        SpotifyTierVerdict::Unknown => {
+                            Some("accountAttributes did not include a product tier".to_string())
+                        }
+                    }
+                }
+                Err(SpotifyWebSyncError::AuthExpired) => {
+                    return Err(ProviderError::Http(
+                        "Spotify rejected the OAuth access token (HTTP 401). Please try signing in again."
+                            .to_string(),
+                    ));
+                }
+                Err(SpotifyWebSyncError::FallbackToRest(msg)) => Some(msg),
+            }
+        }
+        Err(SpotifyWebSyncError::AuthExpired) => {
+            return Err(ProviderError::Http(
+                "Spotify rejected the OAuth access token (HTTP 401).".to_string(),
+            ));
+        }
+        Err(SpotifyWebSyncError::FallbackToRest(msg)) => Some(msg),
+    };
+
+    match crate::oauth::fetch_spotify_profile_tier(access_token) {
+        Ok((display_name, product)) => match classify_spotify_premium(product.as_deref(), None) {
+            SpotifyTierVerdict::Premium => Ok(display_name),
+            SpotifyTierVerdict::NotPremium(tier) => Err(ProviderError::Http(format!(
+                "Spotify Premium required — this account is on Spotify Free ({tier}). Use 'Spotify Web Sign-In' below for Free accounts."
+            ))),
+            SpotifyTierVerdict::Unknown => Err(ProviderError::Http(
+                "Could not verify Spotify Premium subscription status from your account profile. Direct OAuth sign-in requires Spotify Premium; use 'Spotify Web Sign-In' below for Free accounts."
+                    .to_string(),
+            )),
+        },
+        Err(rest_err) => {
+            let detail = pathfinder_err
+                .map(|p| format!("{p}; REST fallback: {rest_err}"))
+                .unwrap_or_else(|| rest_err.to_string());
+            Err(ProviderError::Http(format!(
+                "Could not verify Spotify Premium subscription status ({detail}). Sign-in blocked; retry shortly or use 'Spotify Web Sign-In' below."
+            )))
+        }
+    }
 }
 
 fn pick_best_cover_url(sources: Option<&Value>) -> Option<String> {
@@ -607,6 +884,18 @@ pub fn sync_spotify_web_catalog(
     access_token: &str,
     existing_snapshots: &HashMap<String, String>,
 ) -> Result<CloudSyncReport, SpotifyWebSyncError> {
+    sync_spotify_web_catalog_with_prefix(access_token, existing_snapshots, "spotify:playlist:")
+}
+
+/// Sync the signed-in user's Spotify profile, Liked Songs (up to 500), and playlists (up to 150,
+/// with up to 500 tracks per playlist) via Spotify's Web Player Pathfinder GraphQL API, using
+/// `playlist_id_prefix` (`"spotify:playlist:"` for Web Sign-In or `"spotify:premium:playlist:"`
+/// for Direct OAuth Premium) so both sessions stay isolated in SQLite.
+pub fn sync_spotify_web_catalog_with_prefix(
+    access_token: &str,
+    existing_snapshots: &HashMap<String, String>,
+    playlist_id_prefix: &str,
+) -> Result<CloudSyncReport, SpotifyWebSyncError> {
     let agent = pathfinder_agent();
     let mut client_token = fetch_client_token(&agent)?;
 
@@ -707,7 +996,7 @@ pub fn sync_spotify_web_catalog(
     let total_stubs = stubs.len();
 
     for (idx, stub) in stubs.into_iter().enumerate() {
-        let local_key = format!("spotify:playlist:{}", stub.id);
+        let local_key = format!("{playlist_id_prefix}{}", stub.id);
         if let Some(rev) = stub.revision_id.as_deref()
             && existing_snapshots
                 .get(&local_key)
@@ -739,6 +1028,7 @@ pub fn sync_spotify_web_catalog(
             Err(_) => continue,
         };
         let mut bundle = parse_playlist_v2_bundle(&stub, &pl_val, &liked_ids);
+        bundle.playlist.id = local_key;
         let first_node = pl_val.pointer("/data/playlistV2").unwrap_or(&pl_val);
         let first_raw_count = first_node
             .pointer("/content/items")
@@ -750,13 +1040,14 @@ pub fn sync_spotify_web_catalog(
             .map(|n| n as usize);
 
         if first_raw_count >= 100 && total_pl_tracks.is_none_or(|tot| tot > 100) {
+            let mut partial_page_failed = false;
             for page in 1..5_usize {
                 let offset = page * 100;
                 if total_pl_tracks.is_some_and(|tot| offset >= tot) {
                     break;
                 }
                 thread::sleep(Duration::from_millis(140));
-                let Ok(next_val) = call_pathfinder(
+                let next_val = match call_pathfinder(
                     &agent,
                     access_token,
                     &mut client_token,
@@ -768,8 +1059,15 @@ pub fn sync_spotify_web_catalog(
                         "limit": 100,
                         "enableWatchFeedEntrypoint": false
                     }),
-                ) else {
-                    break;
+                ) {
+                    Ok(v) => v,
+                    Err(SpotifyWebSyncError::AuthExpired) => {
+                        return Err(SpotifyWebSyncError::AuthExpired);
+                    }
+                    Err(_) => {
+                        partial_page_failed = true;
+                        break;
+                    }
                 };
                 let next_node = next_val.pointer("/data/playlistV2").unwrap_or(&next_val);
                 let (more_tracks, _, raw_count) = parse_playlist_v2_items(next_node, &liked_ids);
@@ -777,6 +1075,10 @@ pub fn sync_spotify_web_catalog(
                 if raw_count < 100 || total_pl_tracks.is_some_and(|tot| offset + raw_count >= tot) {
                     break;
                 }
+            }
+            if partial_page_failed {
+                // Do not persist revision snapshot on partial playlist pagination so next sync fetches missing pages.
+                bundle.playlist.etag = None;
             }
             bundle.playlist.track_count = bundle.tracks.len();
         }
@@ -790,6 +1092,250 @@ pub fn sync_spotify_web_catalog(
         etag_skipped,
         rate_limited_skipped,
     })
+}
+
+fn strip_html_tags(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn strip_radio_suffix(title: &str) -> String {
+    let trimmed = title.trim();
+    for suffix in [" Radio", " radio", " RADIO"] {
+        if let Some(base) = trimmed.strip_suffix(suffix) {
+            let clean = base.trim();
+            if !clean.is_empty() {
+                return clean.to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+fn extract_station_from_home_item(item: &Value) -> Option<SpotifyStationCard> {
+    let content = item
+        .get("content")
+        .or_else(|| item.get("item"))
+        .unwrap_or(item);
+    let data = content.get("data").unwrap_or(content);
+    let typename = data.get("__typename").and_then(Value::as_str);
+    if let Some(tn) = typename
+        && tn != "Playlist"
+        && tn != "PlaylistResponseWrapper"
+    {
+        return None;
+    }
+    let uri = item
+        .get("uri")
+        .or_else(|| content.get("_uri"))
+        .or_else(|| content.get("uri"))
+        .or_else(|| data.get("uri"))
+        .and_then(Value::as_str)?
+        .trim();
+    let playlist_id = uri.strip_prefix("spotify:playlist:")?.trim();
+    if playlist_id.is_empty()
+        || playlist_id.len() > 64
+        || !playlist_id.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let title = data
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let subtitle = data
+        .get("description")
+        .and_then(Value::as_str)
+        .map(strip_html_tags)
+        .unwrap_or_default();
+    let thumbnail_url = pick_best_cover_url(data.pointer("/images/items/0/sources"))
+        .or_else(|| pick_best_cover_url(data.pointer("/coverArt/sources")));
+    let display_name = strip_radio_suffix(&title);
+    Some(SpotifyStationCard {
+        playlist_id: playlist_id.to_string(),
+        title,
+        display_name,
+        subtitle,
+        thumbnail_url,
+    })
+}
+
+fn section_title_of(section: &Value) -> String {
+    section
+        .pointer("/data/title/transformedLabel")
+        .or_else(|| section.pointer("/data/title/text"))
+        .or_else(|| section.pointer("/data/title"))
+        .or_else(|| section.pointer("/title/transformedLabel"))
+        .or_else(|| section.pointer("/title/text"))
+        .or_else(|| section.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn is_radio_station_section_title(title: &str) -> bool {
+    let lower = title.to_ascii_lowercase();
+    lower.contains("recommended station")
+        || lower.contains("stasiun")
+        || lower.contains("radio station")
+        || lower == "stations"
+        || lower.contains("popular radio")
+        || lower.contains("recommended radio")
+}
+
+fn is_radio_station_card(card: &SpotifyStationCard) -> bool {
+    let lower_title = card.title.to_ascii_lowercase();
+    let lower_sub = card.subtitle.to_ascii_lowercase();
+    card.playlist_id.starts_with("37i9dQZF1E4")
+        || card.playlist_id.starts_with("37i9dQZF1E8")
+        || lower_title.ends_with(" radio")
+        || lower_sub.starts_with("with ")
+}
+
+fn parse_home_recommended_stations(val: &Value) -> Vec<SpotifyStationCard> {
+    let Some(sections) = val
+        .pointer("/data/home/sectionContainer/sections/items")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Pass 1: Dedicated "Recommended Stations" / "Popular Radio" sections returned by Spotify Home.
+    for section in sections {
+        let title = section_title_of(section);
+        if !is_radio_station_section_title(&title) {
+            continue;
+        }
+        let Some(items) = section
+            .pointer("/sectionItems/items")
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for item in items {
+            if let Some(card) = extract_station_from_home_item(item)
+                && seen.insert(card.playlist_id.clone())
+            {
+                out.push(card);
+                if out.len() >= 10 {
+                    return out;
+                }
+            }
+        }
+    }
+
+    // Pass 2: Any other Spotify Home shelf containing Radio Station playlists (`37i9dQZF1E4/8` or `"* Radio"`),
+    // ensuring localized Spotify accounts still populate authentic Recommended Stations.
+    for section in sections {
+        let Some(items) = section
+            .pointer("/sectionItems/items")
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for item in items {
+            if let Some(card) = extract_station_from_home_item(item)
+                && is_radio_station_card(&card)
+                && seen.insert(card.playlist_id.clone())
+            {
+                out.push(card);
+                if out.len() >= 10 {
+                    return out;
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// Fetch the signed-in user's personalized Spotify "Recommended Stations" shelf directly from
+/// Spotify's Pathfinder `home` GraphQL endpoint.
+pub fn fetch_spotify_recommended_stations(
+    access_token: &str,
+) -> Result<Vec<SpotifyStationCard>, SpotifyWebSyncError> {
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let val = call_pathfinder(
+        &agent,
+        access_token,
+        &mut client_token,
+        "home",
+        HASH_HOME,
+        json!({
+            "timeZone": "Asia/Jakarta",
+            "sp_t": "",
+            "facet": "",
+            "sectionItemsLimit": 12,
+            "includeHomeChapterVideoCards": false,
+            "homeEndUserIntegration": "INTEGRATION_WEB_PLAYER",
+            "includeEpisodeContentRatingsV2": false
+        }),
+    )?;
+    Ok(parse_home_recommended_stations(&val))
+}
+
+/// Fetch the full tracklist (~50 songs) of any Spotify Radio Station or playlist by its 22-char
+/// playlist ID via Pathfinder `fetchPlaylist`.
+pub fn fetch_spotify_playlist_by_id(
+    access_token: &str,
+    playlist_id: &str,
+    liked_ids: &HashSet<String>,
+) -> Result<SyncedPlaylistBundle, SpotifyWebSyncError> {
+    let pid = playlist_id.trim();
+    if pid.is_empty() || pid.len() > 64 || !pid.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(SpotifyWebSyncError::FallbackToRest(
+            "Invalid Spotify playlist ID".to_string(),
+        ));
+    }
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let uri = format!("spotify:playlist:{pid}");
+    let pl_val = call_pathfinder(
+        &agent,
+        access_token,
+        &mut client_token,
+        "fetchPlaylist",
+        HASH_FETCH_PLAYLIST,
+        json!({
+            "uri": uri,
+            "offset": 0,
+            "limit": 100,
+            "enableWatchFeedEntrypoint": false
+        }),
+    )?;
+    let stub = PathfinderPlaylistStub {
+        id: pid.to_string(),
+        uri,
+        name: "Spotify Radio".to_string(),
+        description: String::new(),
+        revision_id: None,
+        thumbnail_url: None,
+    };
+    let mut bundle = parse_playlist_v2_bundle(&stub, &pl_val, liked_ids);
+    bundle.playlist.description = strip_html_tags(&bundle.playlist.description);
+    Ok(bundle)
 }
 
 #[cfg(test)]
@@ -937,5 +1483,147 @@ mod tests {
         assert_eq!(bundle.playlist.track_count, 1);
         assert_eq!(bundle.tracks.len(), 1);
         assert!(bundle.tracks[0].liked);
+    }
+
+    #[test]
+    fn classifies_spotify_premium_tier_fail_closed() {
+        assert_eq!(
+            classify_spotify_premium(Some("premium"), Some("premium")),
+            SpotifyTierVerdict::Premium
+        );
+        assert_eq!(
+            classify_spotify_premium(Some("PREMIUM"), None),
+            SpotifyTierVerdict::Premium
+        );
+        assert_eq!(
+            classify_spotify_premium(None, Some("premium")),
+            SpotifyTierVerdict::Premium
+        );
+        assert_eq!(
+            classify_spotify_premium(Some("free"), Some("free")),
+            SpotifyTierVerdict::NotPremium("free".to_string())
+        );
+        assert_eq!(
+            classify_spotify_premium(Some("open"), None),
+            SpotifyTierVerdict::NotPremium("open".to_string())
+        );
+        assert_eq!(
+            classify_spotify_premium(Some("premium"), Some("shuffle-restricted")),
+            SpotifyTierVerdict::NotPremium("shuffle-restricted".to_string())
+        );
+        assert_eq!(
+            classify_spotify_premium(None, None),
+            SpotifyTierVerdict::Unknown
+        );
+        assert_eq!(
+            classify_spotify_premium(Some("   "), Some("")),
+            SpotifyTierVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn parses_account_attributes_and_bundle_hashes() {
+        let acct = json!({
+            "data": {
+                "me": {
+                    "account": {
+                        "product": "free",
+                        "attributes": { "catalogue": "free", "ads": true }
+                    }
+                }
+            }
+        });
+        let (prod, cat) = parse_account_attributes_tier(&acct);
+        assert_eq!(prod.as_deref(), Some("free"));
+        assert_eq!(cat.as_deref(), Some("free"));
+        assert_eq!(
+            classify_spotify_premium(prod.as_deref(), cat.as_deref()),
+            SpotifyTierVerdict::NotPremium("free".to_string())
+        );
+
+        let html = r#"<script src="https://open.spotifycdn.com/cdn/build/web-player/web-player.641ce497.js"></script>"#;
+        assert_eq!(
+            extract_web_bundle_url_from_html(html).as_deref(),
+            Some("https://open.spotifycdn.com/cdn/build/web-player/web-player.641ce497.js")
+        );
+
+        let js = r#"new aX.l("accountAttributes","query","be4ce359daee01463ddb8e77536220e108e3d28105e12199f244d7a5954e9d14",null)"#;
+        assert_eq!(
+            extract_operation_hash_from_bundle(js, "accountAttributes").as_deref(),
+            Some("be4ce359daee01463ddb8e77536220e108e3d28105e12199f244d7a5954e9d14")
+        );
+    }
+
+    #[test]
+    fn parses_home_recommended_stations_and_strips_html() {
+        let payload = json!({
+            "data": {
+                "home": {
+                    "sectionContainer": {
+                        "sections": {
+                            "items": [
+                                {
+                                    "data": {
+                                        "__typename": "HomeGenericSectionData",
+                                        "title": { "transformedLabel": "Recommended Stations" }
+                                    },
+                                    "sectionItems": {
+                                        "items": [
+                                            {
+                                                "uri": "spotify:playlist:37i9dQZF1E4v1234567890",
+                                                "content": {
+                                                    "data": {
+                                                        "__typename": "Playlist",
+                                                        "uri": "spotify:playlist:37i9dQZF1E4v1234567890",
+                                                        "name": "JVKE Radio",
+                                                        "description": "With <a href=\"spotify:artist:1\">d4vd</a>, MAX, ZVC and more",
+                                                        "images": {
+                                                            "items": [{
+                                                                "sources": [
+                                                                    { "height": 300, "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/jvke" }
+                                                                ]
+                                                            }]
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            {
+                                                "uri": "spotify:playlist:37i9dQZF1E8a9876543210",
+                                                "content": {
+                                                    "data": {
+                                                        "__typename": "Playlist",
+                                                        "uri": "spotify:playlist:37i9dQZF1E8a9876543210",
+                                                        "name": "Kill Bill Radio",
+                                                        "description": "With SZA, Ariana Grande, Kendrick Lamar and more",
+                                                        "images": {
+                                                            "items": [{
+                                                                "sources": [
+                                                                    { "height": 300, "url": "https://seed-mix-image.spotifycdn.com/v6/img/killbill" }
+                                                                ]
+                                                            }]
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let stations = parse_home_recommended_stations(&payload);
+        assert_eq!(stations.len(), 2);
+        assert_eq!(stations[0].playlist_id, "37i9dQZF1E4v1234567890");
+        assert_eq!(stations[0].title, "JVKE Radio");
+        assert_eq!(stations[0].display_name, "JVKE");
+        assert_eq!(stations[0].subtitle, "With d4vd, MAX, ZVC and more");
+        assert_eq!(
+            stations[0].thumbnail_url.as_deref(),
+            Some("https://pickasso.spotifycdn.com/image/ab67c0de0000deef/jvke")
+        );
+        assert_eq!(stations[1].display_name, "Kill Bill");
     }
 }

@@ -160,18 +160,19 @@ pub fn decode_frame(bytes: &[u8]) -> SyncResult<SyncFrame> {
 }
 
 fn validate_frame(frame: &SyncFrame) -> SyncResult<()> {
+    let valid_vol = |v: f32| v.is_finite() && (0.0..=1.5).contains(&v);
     match frame {
-        SyncFrame::StateSnapshot(st) if !st.volume_norm.is_finite() => Err(
-            SyncError::InvalidPairingUri("non-finite volume in StateSnapshot".to_string()),
+        SyncFrame::StateSnapshot(st) if !valid_vol(st.volume_norm) => Err(
+            SyncError::InvalidPairingUri("out-of-range volume in StateSnapshot".to_string()),
         ),
-        SyncFrame::PlaybackDelta { volume_norm, .. } if !volume_norm.is_finite() => Err(
-            SyncError::InvalidPairingUri("non-finite volume in PlaybackDelta".to_string()),
+        SyncFrame::PlaybackDelta { volume_norm, .. } if !valid_vol(*volume_norm) => Err(
+            SyncError::InvalidPairingUri("out-of-range volume in PlaybackDelta".to_string()),
         ),
         SyncFrame::Command {
             action: RemoteAction::SetVolume { volume_norm, .. },
             ..
-        } if !volume_norm.is_finite() => Err(SyncError::InvalidPairingUri(
-            "non-finite volume in SetVolume".to_string(),
+        } if !valid_vol(*volume_norm) => Err(SyncError::InvalidPairingUri(
+            "out-of-range volume in SetVolume".to_string(),
         )),
         SyncFrame::Command {
             action: RemoteAction::SetSimulcastMode { participants, .. },
@@ -217,11 +218,28 @@ impl ActiveSpeakerLease {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PairingPayload {
     pub endpoint_id: String,
     pub token_hex: String,
     pub device_name: String,
+}
+
+impl std::fmt::Debug for PairingPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairingPayload")
+            .field("endpoint_id", &self.endpoint_id)
+            .field(
+                "token_hex",
+                &if self.token_hex.is_empty() {
+                    ""
+                } else {
+                    "[REDACTED]"
+                },
+            )
+            .field("device_name", &self.device_name)
+            .finish()
+    }
 }
 
 fn pct_encode(s: &str) -> String {
@@ -288,11 +306,33 @@ impl PairingPayload {
                 }
             }
         }
+        let endpoint_id = endpoint_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_graphic() && !b.is_ascii_control())
+            })
+            .ok_or_else(|| SyncError::InvalidPairingUri("invalid or empty id".to_string()))?;
+        let token_hex = token_hex
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.len() >= 16 && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| SyncError::InvalidPairingUri("invalid or empty token".to_string()))?;
+        let clean_name: String = device_name
+            .unwrap_or_else(|| "Ferric Device".to_string())
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect();
         Ok(Self {
-            endpoint_id: endpoint_id
-                .ok_or_else(|| SyncError::InvalidPairingUri(uri.to_string()))?,
-            token_hex: token_hex.ok_or_else(|| SyncError::InvalidPairingUri(uri.to_string()))?,
-            device_name: device_name.unwrap_or_else(|| "Ferric Device".to_string()),
+            endpoint_id,
+            token_hex,
+            device_name: if clean_name.trim().is_empty() {
+                "Ferric Device".to_string()
+            } else {
+                clean_name.trim().to_string()
+            },
         })
     }
 }

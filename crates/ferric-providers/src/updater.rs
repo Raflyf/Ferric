@@ -97,10 +97,15 @@ pub fn validate_https_download_url(url: &str) -> Result<(&str, &str), String> {
     }
     if authority.eq_ignore_ascii_case("github.com") {
         let expected_prefix = format!("/{GITHUB_REPO}/");
+        let low_path = path.to_ascii_lowercase();
         if !path
             .get(..expected_prefix.len())
             .is_some_and(|p| p.eq_ignore_ascii_case(&expected_prefix))
             || path.contains("..")
+            || path.contains('\\')
+            || low_path.contains("%2e")
+            || low_path.contains("%2f")
+            || low_path.contains("%5c")
         {
             return Err("Untrusted GitHub repository path".to_string());
         }
@@ -152,12 +157,11 @@ pub fn resolve_installer_from_sums(
     Ok((msi_name, digest))
 }
 
-pub fn sha256_file(path: &Path) -> Result<[u8; 32], String> {
-    let mut file = File::open(path).map_err(|e| format!("Could not read downloaded file: {e}"))?;
+pub fn sha256_reader(reader: &mut impl Read) -> Result<[u8; 32], String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file
+        let n = reader
             .read(&mut buf)
             .map_err(|e| format!("Could not hash downloaded file: {e}"))?;
         if n == 0 {
@@ -169,6 +173,11 @@ pub fn sha256_file(path: &Path) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     Ok(out)
+}
+
+pub fn sha256_file(path: &Path) -> Result<[u8; 32], String> {
+    let mut file = File::open(path).map_err(|e| format!("Could not read downloaded file: {e}"))?;
+    sha256_reader(&mut file)
 }
 
 /// Strictly parse GitHub `/releases/latest` JSON against `current_version`.
@@ -471,6 +480,10 @@ pub fn download_verified_installer(
         return Err(err);
     }
 
+    if let Err(err) = check_cancelled(cancelled, deadline) {
+        let _ = fs::remove_file(&part_path);
+        return Err(err);
+    }
     on_progress(Some(100));
     let actual_sha = match sha256_file(&part_path) {
         Ok(digest) => digest,
@@ -479,6 +492,10 @@ pub fn download_verified_installer(
             return Err(err);
         }
     };
+    if let Err(err) = check_cancelled(cancelled, deadline) {
+        let _ = fs::remove_file(&part_path);
+        return Err(err);
+    }
     if actual_sha != expected_sha {
         let _ = fs::remove_file(&part_path);
         return Err("Installer SHA-256 verification failed".to_string());

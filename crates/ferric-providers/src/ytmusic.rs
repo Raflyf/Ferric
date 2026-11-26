@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const YTM_ORIGIN: &str = "https://music.youtube.com";
 const YT_ORIGIN: &str = "https://www.youtube.com";
@@ -23,16 +24,48 @@ const MAX_SINGLE_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_STREAM_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
+use std::sync::{Mutex, OnceLock};
+
+static CACHE_PRUNE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static ARTWORK_HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+static GUEST_VISITOR_CACHE: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
+static VISIONOS_AUTH_REJECTED: AtomicBool = AtomicBool::new(false);
+static HOME_REFRESH_EPOCH: AtomicUsize = AtomicUsize::new(0);
+static HOME_MORE_EPOCH: AtomicUsize = AtomicUsize::new(0);
+
 fn extract_strict_https_host(raw: &str) -> Option<String> {
-    if raw.bytes().any(|b| b.is_ascii_control() || b == b' ') {
+    if raw
+        .bytes()
+        .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\')
+    {
         return None;
     }
     let rest = raw.strip_prefix("https://")?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') || authority.contains(':') {
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains(':')
+        || authority.contains('[')
+        || authority.contains(']')
+    {
         return None;
     }
-    Some(authority.to_ascii_lowercase())
+    let host = authority.to_ascii_lowercase();
+    if host.starts_with('.') || host.ends_with('.') || !host.contains('.') {
+        return None;
+    }
+    for label in host.split('.') {
+        if label.is_empty()
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return None;
+        }
+    }
+    Some(host)
 }
 
 /// Strictly allowlist HTTPS album/artist cover hosts (prevents SSRF via untrusted thumbnail URLs).
@@ -60,9 +93,12 @@ pub fn is_allowed_stream_url(raw: &str) -> bool {
     host == "googlevideo.com" || host.ends_with(".googlevideo.com")
 }
 
-/// Enforce an LRU disk-space cap on a flat cache directory (removes stale `.part` leftovers and
-/// oldest modified files first).
-fn prune_cache_dir_lru(cache_dir: &Path, max_bytes: u64) {
+/// Enforce a serialized LRU disk-space cap on a flat cache directory.
+/// Removes stale `.part` leftovers (>30 min old) without touching active `.part` files or
+/// `protect_path`, then evicts oldest-modified finalized files until `total <= max_bytes`.
+fn prune_cache_dir_lru(cache_dir: &Path, max_bytes: u64, protect_path: Option<&Path>) {
+    let lock = CACHE_PRUNE_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
     let Ok(entries) = fs::read_dir(cache_dir) else {
         return;
     };
@@ -75,19 +111,24 @@ fn prune_cache_dir_lru(cache_dir: &Path, max_bytes: u64) {
             && meta.is_file()
         {
             let modified = meta.modified().unwrap_or(UNIX_EPOCH);
-            let is_stale_part = path
+            let is_part = path
                 .extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("part"))
-                && now
+                .is_some_and(|e| e.eq_ignore_ascii_case("part"));
+            if is_part {
+                if now
                     .duration_since(modified)
-                    .is_ok_and(|age| age > Duration::from_secs(30 * 60));
-            if is_stale_part {
-                let _ = fs::remove_file(&path);
+                    .is_ok_and(|age| age > Duration::from_secs(30 * 60))
+                {
+                    let _ = fs::remove_file(&path);
+                }
                 continue;
             }
             let len = meta.len();
             total = total.saturating_add(len);
+            if protect_path.is_some_and(|p| p == path.as_path()) {
+                continue;
+            }
             files.push((path, len, modified));
         }
     }
@@ -105,11 +146,51 @@ fn prune_cache_dir_lru(cache_dir: &Path, max_bytes: u64) {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+fn touch_cache_mtime(path: &Path) {
+    if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
+        let _ = file.set_modified(SystemTime::now());
+    }
+}
+
+fn is_valid_audio_container_header(path: &Path, ext: &str) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut hdr = [0u8; 16];
+    let Ok(n) = file.read(&mut hdr) else {
+        return false;
+    };
+    if n < 12 {
+        return false;
+    }
+    if ext.eq_ignore_ascii_case("webm") {
+        // EBML / Matroska / WebM header signature.
+        hdr[0..4] == [0x1A, 0x45, 0xDF, 0xA3]
+    } else if ext.eq_ignore_ascii_case("m4a") {
+        // ISO BMFF / MP4 top-level box type (`ftyp`, `moov`, `mdat`, `free`, `wide`).
+        matches!(&hdr[4..8], b"ftyp" | b"moov" | b"mdat" | b"free" | b"wide")
+    } else {
+        true
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct YtmSession {
     pub visitor_data: String,
     pub cookie: String,
     pub sapisid: String,
+}
+
+impl std::fmt::Debug for YtmSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |s: &str| if s.is_empty() { "" } else { "[REDACTED]" };
+        f.debug_struct("YtmSession")
+            .field("visitor_data", &redact(&self.visitor_data))
+            .field("cookie", &redact(&self.cookie))
+            .field("sapisid", &redact(&self.sapisid))
+            .finish()
+    }
 }
 
 impl YtmSession {
@@ -244,9 +325,9 @@ pub fn normalize_ytm_thumbnail_url(raw: &str) -> String {
             && let Some(eq_rel) = no_query[slash_idx..].find('=')
         {
             let base = &no_query[..slash_idx + eq_rel];
-            return format!("{base}=w180-h180-l85-rj");
+            return format!("{base}=w300-h300-l90-rj");
         }
-        return format!("{no_query}=w180-h180-l85-rj");
+        return format!("{no_query}=w300-h300-l90-rj");
     }
 
     if host == "i.ytimg.com" || host == "i9.ytimg.com" {
@@ -303,6 +384,17 @@ fn is_supported_image_bytes(bytes: &[u8]) -> bool {
             && bytes[3] == 0x47)
 }
 
+/// Return the local disk-cache path for an artwork URL if already downloaded and valid.
+pub fn cached_artwork_file(url: &str, cache_dir: &Path) -> Option<std::path::PathBuf> {
+    let normalized = normalize_ytm_thumbnail_url(url);
+    if normalized.is_empty() {
+        return None;
+    }
+    let key = sha1_hex(normalized.as_bytes());
+    let dest = cache_dir.join(format!("{key}.img"));
+    dest.is_file().then_some(dest)
+}
+
 /// Download and disk-cache album/playlist/artist artwork bytes (JPEG or PNG) with 0 ms cache hits,
 /// strict HTTPS host allowlist, zero redirects, and a 128 MiB LRU disk cap.
 pub fn download_artwork_bytes(url: &str, cache_dir: &Path) -> ProviderResult<Vec<u8>> {
@@ -321,10 +413,11 @@ pub fn download_artwork_bytes(url: &str, cache_dir: &Path) -> ProviderResult<Vec
     if let Ok(existing) = fs::read(&dest)
         && is_supported_image_bytes(&existing)
     {
+        touch_cache_mtime(&dest);
         return Ok(existing);
     }
 
-    let agent = build_http_agent(12);
+    let agent = ARTWORK_HTTP_AGENT.get_or_init(|| build_http_agent(12));
     let resp = agent
         .get(&normalized)
         .header("User-Agent", WEB_REMIX_UA)
@@ -354,11 +447,14 @@ pub fn download_artwork_bytes(url: &str, cache_dir: &Path) -> ProviderResult<Vec
         if fs::rename(&part, &dest).is_err() {
             let _ = fs::remove_file(&part);
         } else {
-            prune_cache_dir_lru(cache_dir, MAX_ARTWORK_CACHE_BYTES);
+            prune_cache_dir_lru(cache_dir, MAX_ARTWORK_CACHE_BYTES, Some(&dest));
         }
     }
     Ok(bytes)
 }
+
+static YTM_API_AGENT_DEFAULT: OnceLock<ureq::Agent> = OnceLock::new();
+static YTM_API_AGENT_IPV4: OnceLock<ureq::Agent> = OnceLock::new();
 
 fn build_http_agent_with_family(timeout_secs: u64, ipv4_only: bool) -> ureq::Agent {
     let body_secs = timeout_secs.max(12);
@@ -375,6 +471,14 @@ fn build_http_agent_with_family(timeout_secs: u64, ipv4_only: bool) -> ureq::Age
         cfg = cfg.ip_family(ureq::config::IpFamily::Ipv4Only);
     }
     ureq::Agent::new_with_config(cfg.build())
+}
+
+fn shared_http_agent(ipv4_only: bool) -> &'static ureq::Agent {
+    if ipv4_only {
+        YTM_API_AGENT_IPV4.get_or_init(|| build_http_agent_with_family(22, true))
+    } else {
+        YTM_API_AGENT_DEFAULT.get_or_init(|| build_http_agent_with_family(20, false))
+    }
 }
 
 fn build_http_agent(timeout_secs: u64) -> ureq::Agent {
@@ -489,8 +593,8 @@ fn post_ytm_json_with_opts(
         // Attempt 0 uses the system default stack; retries force IPv4 + fresh Connection: close
         // to immediately escape Windows ISP IPv6 blackholes and stalled chunked keep-alive sockets.
         let ipv4_only = attempt >= 1;
-        let req_timeout = timeout_secs + (attempt as u64) * 6;
-        let agent = build_http_agent_with_family(req_timeout, ipv4_only);
+        let _ = timeout_secs;
+        let agent = shared_http_agent(ipv4_only);
         let mut req = agent
             .post(&url)
             .header("Content-Type", "application/json")
@@ -1051,8 +1155,13 @@ pub fn fetch_rich_home(
     };
 
     let is_default_home = mood_params.map(str::trim).is_none_or(str::is_empty);
-    let has_taste = !taste.top_tracks.is_empty();
+    let has_taste = !taste.top_tracks.is_empty() || !taste.top_artists.is_empty();
     let taste_locale = dominant_taste_locale(&taste.top_tracks);
+    let refresh_epoch = if fresh_seed {
+        HOME_REFRESH_EPOCH.fetch_add(1, Ordering::Relaxed) + 1
+    } else {
+        HOME_REFRESH_EPOCH.load(Ordering::Relaxed)
+    };
 
     let mut body = json!({
         "browseId": "FEmusic_home",
@@ -1062,27 +1171,57 @@ pub fn fetch_rich_home(
         body["params"] = json!(params);
     }
 
-    // Pick up to 3 distinct-artist seed tracks from user's top-played / liked / recent tracks
+    // Build a deep, deduplicated artist list across the user's entire taste profile (recent,
+    // liked, play counts, and synced Spotify/YouTube/Local playlists), rotating aggressively
+    // across `refresh_epoch` so every Refresh explores genuinely new corners of user's taste.
+    let mut all_taste_artists: Vec<String> = Vec::new();
+    for a in &taste.top_artists {
+        let trimmed = a.trim();
+        if !trimmed.is_empty()
+            && !trimmed.eq_ignore_ascii_case("unknown artist")
+            && !all_taste_artists
+                .iter()
+                .any(|x| x.eq_ignore_ascii_case(trimmed))
+        {
+            all_taste_artists.push(trimmed.to_string());
+        }
+    }
+    for t in &taste.top_tracks {
+        let a = primary_artist_display(&t.artist);
+        if !a.is_empty()
+            && !a.eq_ignore_ascii_case("unknown artist")
+            && !all_taste_artists.iter().any(|x| x.eq_ignore_ascii_case(&a))
+        {
+            all_taste_artists.push(a);
+        }
+    }
+    if fresh_seed && all_taste_artists.len() > 3 {
+        let shift = (refresh_epoch * 3 + fastrand::usize(..all_taste_artists.len().clamp(1, 5)))
+            % all_taste_artists.len();
+        all_taste_artists.rotate_left(shift);
+    }
+
+    // Pick up to 3 distinct-artist seed tracks with YouTube video IDs, striding through the
+    // full taste pool on Refresh so collaborative radios change drastically every time.
     let mut seed_tracks: Vec<Track> = Vec::new();
     if is_default_home && has_taste {
         let mut used_artists: HashSet<String> = HashSet::new();
-        let candidates: Vec<Track> = taste
+        let mut candidates: Vec<Track> = taste
             .top_tracks
             .iter()
             .filter(|t| t.youtube_video_id.as_deref().is_some_and(is_valid_video_id))
             .cloned()
             .collect();
-        let start_offset = if fresh_seed && candidates.len() > 3 {
-            fastrand::usize(..candidates.len().min(6))
-        } else {
-            0
-        };
+        if fresh_seed && candidates.len() > 3 {
+            let shift = (refresh_epoch * 4 + fastrand::usize(..candidates.len().clamp(1, 7)))
+                % candidates.len();
+            candidates.rotate_left(shift);
+        }
         for pass in 0..2 {
-            for i in 0..candidates.len() {
+            for t in &candidates {
                 if seed_tracks.len() >= 3 {
                     break;
                 }
-                let t = &candidates[(i + start_offset) % candidates.len()];
                 let an = primary_artist_norm(&t.artist);
                 if pass == 0 && !an.is_empty() && !used_artists.insert(an) {
                     continue;
@@ -1094,173 +1233,193 @@ pub fn fetch_rich_home(
         }
     }
 
-    let mut top_artists: Vec<String> = taste
-        .top_artists
-        .iter()
-        .map(|a| a.trim().to_string())
-        .filter(|a| !a.is_empty())
-        .collect();
-    for t in &taste.top_tracks {
-        let a = t
-            .artist
-            .split(['&', ',', '•', '·'])
-            .next()
-            .unwrap_or(&t.artist)
-            .trim()
-            .to_string();
-        if !a.is_empty()
-            && !a.eq_ignore_ascii_case("unknown artist")
-            && !top_artists.iter().any(|x| x.eq_ignore_ascii_case(&a))
-        {
-            top_artists.push(a);
-        }
-        if top_artists.len() >= 4 {
-            break;
-        }
-    }
-    let artist_1 = top_artists.first().cloned();
-    let artist_2 = top_artists.get(1).cloned();
+    let artist_1 = all_taste_artists.first().cloned();
+    let artist_2 = all_taste_artists.get(1).cloned();
+    let artist_3 = all_taste_artists.get(2).cloned();
+    let artist_4 = all_taste_artists.get(3).cloned();
 
-    // Parallel fan-out:
-    // - Personalized Home (has listening history): FEmusic_home (for Mood Chips) + 3 collaborative
-    //   seed radios + 2 top-artist popular playlists/albums searches (~1 RTT total).
-    // - Cold start (no history): FEmusic_home + FEmusic_explore + FEmusic_charts.
-    let (home_res, explore_res, charts_res, radio_pools, artist_search_1, artist_search_2) =
-        if is_default_home && !seed_tracks.is_empty() {
-            let s0 = seed_tracks.first().cloned();
-            let s1 = seed_tracks.get(1).cloned();
-            let s2 = seed_tracks.get(2).cloned();
-            let a1_q = artist_1.as_ref().map(|a| format!("{a} popular hits"));
-            let a2_q = artist_2.as_ref().map(|a| format!("{a} mix playlist"));
-            std::thread::scope(|s| {
-                let h_home = s.spawn(|| post_ytm_json_fast("browse", &body, &effective_session));
-                let h_r0 = s.spawn(|| {
-                    s0.as_ref().and_then(|t| {
-                        let vid = t.youtube_video_id.as_deref()?;
-                        fetch_radio_up_next_inner(
-                            &effective_session,
-                            vid,
-                            &t.title,
-                            &t.artist,
-                            &t.album,
-                            18,
-                            fresh_seed,
-                            false,
-                        )
-                        .ok()
-                    })
+    // Rotate query suffixes per refresh epoch so Album / Playlist / Artist discovery shelves
+    // uncover fresh releases, essentials, and peer artists rather than repeating static top hits.
+    const ALBUM_SUFFIXES: [&str; 4] = ["albums", "album", "discography", "new album"];
+    const MIX_SUFFIXES: [&str; 4] = ["playlist mix", "essentials", "radio hits", "best songs"];
+    const DISCOVER_SUFFIXES: [&str; 4] = [
+        "similar artists",
+        "popular songs",
+        "top tracks",
+        "live acoustic mix",
+    ];
+    let album_suf = ALBUM_SUFFIXES[refresh_epoch % ALBUM_SUFFIXES.len()];
+    let mix_suf = MIX_SUFFIXES[(refresh_epoch + 1) % MIX_SUFFIXES.len()];
+    let disc_suf = DISCOVER_SUFFIXES[(refresh_epoch + 2) % DISCOVER_SUFFIXES.len()];
+
+    // Parallel multi-facet fan-out (~1 single RTT):
+    // Always include FEmusic_home + FEmusic_explore (real New Releases & Albums) + 3 rotating
+    // collaborative seed radios + 3 rotating Album/Playlist/Artist discovery searches!
+    let (
+        home_res,
+        explore_res,
+        charts_res,
+        radio_pools,
+        artist_search_1,
+        artist_search_2,
+        artist_search_3,
+    ) = if is_default_home && has_taste {
+        let s0 = seed_tracks.first().cloned();
+        let s1 = seed_tracks.get(1).cloned();
+        let s2 = seed_tracks.get(2).cloned();
+        let a1_q = artist_1.as_ref().map(|a| format!("{a} {album_suf}"));
+        let a2_q = artist_2.as_ref().map(|a| format!("{a} {mix_suf}"));
+        let a3_q = artist_3
+            .as_ref()
+            .or(artist_4.as_ref())
+            .map(|a| format!("{a} {disc_suf}"));
+        std::thread::scope(|s| {
+            let h_home = s.spawn(|| post_ytm_json_fast("browse", &body, &effective_session));
+            let h_explore = s.spawn(|| {
+                let sup_body = json!({
+                    "browseId": "FEmusic_explore",
+                    "context": web_remix_context_for_locale(&effective_session, taste_locale),
                 });
-                let h_r1 = s.spawn(|| {
-                    s1.as_ref().and_then(|t| {
-                        let vid = t.youtube_video_id.as_deref()?;
-                        fetch_radio_up_next_inner(
-                            &effective_session,
-                            vid,
-                            &t.title,
-                            &t.artist,
-                            &t.album,
-                            18,
-                            fresh_seed,
-                            false,
-                        )
-                        .ok()
-                    })
-                });
-                let h_r2 = s.spawn(|| {
-                    s2.as_ref().and_then(|t| {
-                        let vid = t.youtube_video_id.as_deref()?;
-                        fetch_radio_up_next_inner(
-                            &effective_session,
-                            vid,
-                            &t.title,
-                            &t.artist,
-                            &t.album,
-                            16,
-                            fresh_seed,
-                            false,
-                        )
-                        .ok()
-                    })
-                });
-                let h_a1 = s.spawn(|| {
-                    a1_q.as_deref()
-                        .and_then(|q| fetch_rich_search(&effective_session, q, 14).ok())
-                });
-                let h_a2 = s.spawn(|| {
-                    a2_q.as_deref()
-                        .and_then(|q| fetch_rich_search(&effective_session, q, 12).ok())
-                });
-                let mut pools = Vec::new();
-                for res in [
-                    h_r0.join().ok().flatten(),
-                    h_r1.join().ok().flatten(),
-                    h_r2.join().ok().flatten(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if !res.is_empty() {
-                        pools.push(res);
-                    }
+                post_ytm_json_fast("browse", &sup_body, &effective_session)
+            });
+            let h_r0 = s.spawn(|| {
+                s0.as_ref().and_then(|t| {
+                    let vid = t.youtube_video_id.as_deref()?;
+                    fetch_radio_up_next_inner(
+                        &effective_session,
+                        vid,
+                        &t.title,
+                        &t.artist,
+                        &t.album,
+                        20,
+                        fresh_seed,
+                        false,
+                    )
+                    .ok()
+                })
+            });
+            let h_r1 = s.spawn(|| {
+                s1.as_ref().and_then(|t| {
+                    let vid = t.youtube_video_id.as_deref()?;
+                    fetch_radio_up_next_inner(
+                        &effective_session,
+                        vid,
+                        &t.title,
+                        &t.artist,
+                        &t.album,
+                        20,
+                        fresh_seed,
+                        false,
+                    )
+                    .ok()
+                })
+            });
+            let h_r2 = s.spawn(|| {
+                s2.as_ref().and_then(|t| {
+                    let vid = t.youtube_video_id.as_deref()?;
+                    fetch_radio_up_next_inner(
+                        &effective_session,
+                        vid,
+                        &t.title,
+                        &t.artist,
+                        &t.album,
+                        18,
+                        fresh_seed,
+                        false,
+                    )
+                    .ok()
+                })
+            });
+            let h_a1 = s.spawn(|| {
+                a1_q.as_deref()
+                    .and_then(|q| fetch_rich_search(&effective_session, q, 16).ok())
+            });
+            let h_a2 = s.spawn(|| {
+                a2_q.as_deref()
+                    .and_then(|q| fetch_rich_search(&effective_session, q, 16).ok())
+            });
+            let h_a3 = s.spawn(|| {
+                a3_q.as_deref()
+                    .and_then(|q| fetch_rich_search(&effective_session, q, 16).ok())
+            });
+            let mut pools = Vec::new();
+            for res in [
+                h_r0.join().ok().flatten(),
+                h_r1.join().ok().flatten(),
+                h_r2.join().ok().flatten(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !res.is_empty() {
+                    pools.push(res);
                 }
-                (
-                    h_home.join().unwrap_or_else(|_| {
-                        Err(ProviderError::Http(
-                            "YouTube Music Home thread failed".to_string(),
-                        ))
-                    }),
-                    None,
-                    None,
-                    pools,
-                    h_a1.join().ok().flatten(),
-                    h_a2.join().ok().flatten(),
-                )
-            })
-        } else if is_default_home {
-            std::thread::scope(|s| {
-                let h_home = s.spawn(|| post_ytm_json("browse", &body, &effective_session));
-                let h_explore = s.spawn(|| {
-                    let sup_body = json!({
-                        "browseId": "FEmusic_explore",
-                        "context": web_remix_context_for_locale(&effective_session, taste_locale),
-                    });
-                    post_ytm_json_fast("browse", &sup_body, &effective_session)
-                });
-                let h_charts = s.spawn(|| {
-                    let sup_body = json!({
-                        "browseId": "FEmusic_charts",
-                        "context": web_remix_context_for_locale(&effective_session, taste_locale),
-                    });
-                    post_ytm_json_fast("browse", &sup_body, &effective_session)
-                });
-                (
-                    h_home.join().unwrap_or_else(|_| {
-                        Err(ProviderError::Http(
-                            "YouTube Music Home thread failed".to_string(),
-                        ))
-                    }),
-                    h_explore.join().ok().and_then(Result::ok),
-                    h_charts.join().ok().and_then(Result::ok),
-                    Vec::new(),
-                    None,
-                    None,
-                )
-            })
-        } else {
+            }
             (
-                post_ytm_json("browse", &body, &effective_session),
+                h_home.join().unwrap_or_else(|_| {
+                    Err(ProviderError::Http(
+                        "YouTube Music Home thread failed".to_string(),
+                    ))
+                }),
+                h_explore.join().ok().and_then(Result::ok),
                 None,
-                None,
+                pools,
+                h_a1.join().ok().flatten(),
+                h_a2.join().ok().flatten(),
+                h_a3.join().ok().flatten(),
+            )
+        })
+    } else if is_default_home {
+        std::thread::scope(|s| {
+            let h_home = s.spawn(|| post_ytm_json("browse", &body, &effective_session));
+            let h_explore = s.spawn(|| {
+                let sup_body = json!({
+                    "browseId": "FEmusic_explore",
+                    "context": web_remix_context_for_locale(&effective_session, taste_locale),
+                });
+                post_ytm_json_fast("browse", &sup_body, &effective_session)
+            });
+            let h_charts = s.spawn(|| {
+                let sup_body = json!({
+                    "browseId": "FEmusic_charts",
+                    "context": web_remix_context_for_locale(&effective_session, taste_locale),
+                });
+                post_ytm_json_fast("browse", &sup_body, &effective_session)
+            });
+            (
+                h_home.join().unwrap_or_else(|_| {
+                    Err(ProviderError::Http(
+                        "YouTube Music Home thread failed".to_string(),
+                    ))
+                }),
+                h_explore.join().ok().and_then(Result::ok),
+                h_charts.join().ok().and_then(Result::ok),
                 Vec::new(),
                 None,
                 None,
+                None,
             )
-        };
+        })
+    } else {
+        (
+            post_ytm_json("browse", &body, &effective_session),
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+    };
 
     let home_root = match home_res {
         Ok(root) => Some(root),
         Err(err) => {
-            if explore_res.is_none() && charts_res.is_none() && radio_pools.is_empty() {
+            if explore_res.is_none()
+                && charts_res.is_none()
+                && radio_pools.is_empty()
+                && artist_search_1.is_none()
+            {
                 return Err(err);
             }
             None
@@ -1290,7 +1449,40 @@ pub fn fetch_rich_home(
     let mut next_sess = effective_session;
     next_sess.visitor_data = visitor_data.clone();
 
-    // Cold-start or Mood-chip browse: follow up to 2 fast continuations + Explore/Charts
+    // Also harvest Explore / Charts shelves (New Releases, Albums, Trending Mixes) for BOTH
+    // personalized and cold-start Home so users always have abundant clickable albums & releases.
+    let mut explore_shelves: Vec<YtmHomeShelf> = Vec::new();
+    for sup_root in [explore_res, charts_res].into_iter().flatten() {
+        if visitor_data.is_empty() {
+            visitor_data = extract_visitor_data(&sup_root, &visitor_data);
+        }
+        if chips.is_empty() {
+            collect_mood_chips(&sup_root, &mut chips);
+        }
+        let mut sup_picks = Vec::new();
+        let mut sup_shelves = Vec::new();
+        collect_home_shelves(
+            &sup_root,
+            &mut sup_picks,
+            &mut seen_tracks,
+            &mut sup_shelves,
+        );
+        for t in sup_picks {
+            if raw_home_picks.len() < 48 && !raw_home_picks.iter().any(|q| q.id == t.id) {
+                raw_home_picks.push(t);
+            }
+        }
+        for shelf in sup_shelves {
+            if !explore_shelves
+                .iter()
+                .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
+            {
+                explore_shelves.push(shelf);
+            }
+        }
+    }
+
+    // Cold-start or Mood-chip browse: follow up to 2 fast continuations
     if !has_taste || !is_default_home {
         for _ in 0..2 {
             let Some(tok) = continuation_token.clone() else {
@@ -1322,33 +1514,12 @@ pub fn fetch_rich_home(
             continuation_token = extract_continuation_token(&cont_root);
         }
 
-        for sup_root in [explore_res, charts_res].into_iter().flatten() {
-            if visitor_data.is_empty() {
-                visitor_data = extract_visitor_data(&sup_root, &visitor_data);
-            }
-            if chips.is_empty() {
-                collect_mood_chips(&sup_root, &mut chips);
-            }
-            let mut sup_picks = Vec::new();
-            let mut sup_shelves = Vec::new();
-            collect_home_shelves(
-                &sup_root,
-                &mut sup_picks,
-                &mut seen_tracks,
-                &mut sup_shelves,
-            );
-            for t in sup_picks {
-                if raw_home_picks.len() < 48 && !raw_home_picks.iter().any(|q| q.id == t.id) {
-                    raw_home_picks.push(t);
-                }
-            }
-            for shelf in sup_shelves {
-                if !raw_home_shelves
-                    .iter()
-                    .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
-                {
-                    raw_home_shelves.push(shelf);
-                }
+        for shelf in explore_shelves.iter().cloned() {
+            if !raw_home_shelves
+                .iter()
+                .any(|s| s.title.eq_ignore_ascii_case(&shelf.title))
+            {
+                raw_home_shelves.push(shelf);
             }
         }
     }
@@ -1356,53 +1527,106 @@ pub fn fetch_rich_home(
     let mut quick_picks: Vec<Track> = Vec::new();
     let mut shelves: Vec<YtmHomeShelf> = Vec::new();
 
-    if is_default_home && has_taste && !radio_pools.is_empty() {
+    if is_default_home
+        && has_taste
+        && (!radio_pools.is_empty()
+            || artist_search_1.is_some()
+            || artist_search_2.is_some()
+            || artist_search_3.is_some())
+    {
         let mut artist_popular_tracks: Vec<Track> = Vec::new();
-        let mut taste_cards: Vec<YtmShelfCard> = Vec::new();
+        let mut album_cards: Vec<YtmShelfCard> = Vec::new();
+        let mut playlist_cards: Vec<YtmShelfCard> = Vec::new();
+        let mut artist_cards: Vec<YtmShelfCard> = Vec::new();
         let mut seen_card_ids: HashSet<String> = HashSet::new();
 
-        for search_opt in [artist_search_1.as_ref(), artist_search_2.as_ref()]
-            .into_iter()
-            .flatten()
+        for search_opt in [
+            artist_search_1.as_ref(),
+            artist_search_2.as_ref(),
+            artist_search_3.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
-            for t in search_opt.tracks.iter().take(10) {
+            for t in search_opt.tracks.iter().take(14) {
                 if !artist_popular_tracks.iter().any(|x| x.id == t.id) {
                     artist_popular_tracks.push(t.clone());
                 }
             }
             for c in &search_opt.cards {
-                if matches!(
-                    c.kind,
-                    YtmCardKind::Playlist | YtmCardKind::Album | YtmCardKind::Artist
-                ) && seen_card_ids.insert(c.id.clone())
-                {
-                    taste_cards.push(c.clone());
+                if !seen_card_ids.insert(c.id.clone()) {
+                    continue;
+                }
+                match c.kind {
+                    YtmCardKind::Album => album_cards.push(c.clone()),
+                    YtmCardKind::Playlist => playlist_cards.push(c.clone()),
+                    YtmCardKind::Artist => artist_cards.push(c.clone()),
+                    YtmCardKind::Song => {}
                 }
             }
         }
 
-        let ranked_discovery = rank_personalized_home_candidates(
+        // Enrich Albums, Playlists, and Artists from Explore & Home shelves (locale-safe)
+        for shelf in explore_shelves.iter().chain(raw_home_shelves.iter()) {
+            if is_regional_geoip_chart_shelf(&shelf.title, &shelf.cards, taste_locale) {
+                continue;
+            }
+            for c in &shelf.cards {
+                if !seen_card_ids.insert(c.id.clone()) {
+                    continue;
+                }
+                match c.kind {
+                    YtmCardKind::Album if album_cards.len() < 15 => album_cards.push(c.clone()),
+                    YtmCardKind::Playlist if playlist_cards.len() < 15 => {
+                        playlist_cards.push(c.clone())
+                    }
+                    YtmCardKind::Artist if artist_cards.len() < 15 => artist_cards.push(c.clone()),
+                    _ => {}
+                }
+            }
+        }
+
+        if fresh_seed {
+            if album_cards.len() > 3 {
+                fastrand::shuffle(&mut album_cards);
+            }
+            if playlist_cards.len() > 3 {
+                fastrand::shuffle(&mut playlist_cards);
+            }
+            if artist_cards.len() > 3 {
+                fastrand::shuffle(&mut artist_cards);
+            }
+        }
+
+        let mut ranked_discovery = rank_personalized_home_candidates(
             &radio_pools,
             &artist_popular_tracks,
             taste,
             taste_locale,
             2,
         );
+        if fresh_seed && ranked_discovery.len() > 6 {
+            // Shuffle within top tiers on Refresh so Quick Picks & discovery shelves feel genuinely renewed
+            let split = ranked_discovery.len().min(28);
+            fastrand::shuffle(&mut ranked_discovery[..split]);
+        }
 
-        // Quick Picks: blend 30% user's top-played favorites + 70% top collaborative crowd-favorites
-        // matching the user's exact listening taste (zero regional GeoIP spam).
+        // Quick Picks (32 songs = 4 pages): blend rotated user favorites + fresh collaborative hits
         let mut qp_seen: HashSet<String> = HashSet::new();
-        let mut fav_iter = taste
+        let mut fav_pool: Vec<Track> = taste
             .top_tracks
             .iter()
             .filter(|t| t.youtube_video_id.is_some())
-            .take(8)
             .cloned()
-            .peekable();
+            .collect();
+        if fresh_seed && fav_pool.len() > 4 {
+            fastrand::shuffle(&mut fav_pool);
+        }
+        let mut fav_iter = fav_pool.into_iter().take(10).peekable();
         let mut disc_iter = ranked_discovery.iter().cloned().peekable();
         let mut slot = 0usize;
         while quick_picks.len() < 32 && (fav_iter.peek().is_some() || disc_iter.peek().is_some()) {
-            let pick = if slot.is_multiple_of(3) {
+            let pick = if slot.is_multiple_of(4) {
                 fav_iter.next().or_else(|| disc_iter.next())
             } else {
                 disc_iter.next().or_else(|| fav_iter.next())
@@ -1415,28 +1639,36 @@ pub fn fetch_rich_home(
                 }
             }
         }
+        for t in &raw_home_picks {
+            if quick_picks.len() >= 32 {
+                break;
+            }
+            let k = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+            if qp_seen.insert(k) {
+                quick_picks.push(t.clone());
+            }
+        }
 
-        // Shelf 1: Listen again (user's most frequently played & liked songs)
-        let listen_again_cards = tracks_to_song_cards(
-            &taste
-                .top_tracks
-                .iter()
-                .take(15)
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
-        if listen_again_cards.len() >= 3 {
+        // Shelf 0: Recommended Albums for You (dedicated clickable Album showcase!)
+        if album_cards.len() >= 3 {
             shelves.push(YtmHomeShelf {
-                title: "Listen again".to_string(),
-                cards: listen_again_cards,
+                title: "Recommended albums for you".to_string(),
+                cards: album_cards.into_iter().take(15).collect(),
             });
         }
 
-        // Shelf 2: Popular with listeners like you (unseen/fresh collaborative hits)
-        let top_ids: HashSet<&str> = taste.top_tracks.iter().map(|t| t.id.as_str()).collect();
+        // Shelf 1: Popular with Listeners Like You (15 fresh unseen songs, zero overlap with first 8 Quick Picks)
+        let first_qp_ids: HashSet<&str> =
+            quick_picks.iter().take(8).map(|t| t.id.as_str()).collect();
+        let top_ids: HashSet<&str> = taste
+            .top_tracks
+            .iter()
+            .take(12)
+            .map(|t| t.id.as_str())
+            .collect();
         let popular_discovery: Vec<Track> = ranked_discovery
             .iter()
-            .filter(|t| !top_ids.contains(t.id.as_str()))
+            .filter(|t| !first_qp_ids.contains(t.id.as_str()) && !top_ids.contains(t.id.as_str()))
             .take(15)
             .cloned()
             .collect();
@@ -1448,7 +1680,7 @@ pub fn fetch_rich_home(
             });
         }
 
-        // Shelf 3: Because you listen to <Top Artist 1>
+        // Shelf 2: Because You Listen to <Rotated Artist 1>
         if let Some(a1) = &artist_1 {
             let mut artist_mix: Vec<Track> = Vec::new();
             if let Some(first_pool) = radio_pools.first() {
@@ -1458,9 +1690,11 @@ pub fn fetch_rich_home(
                     }
                 }
             }
-            for t in &artist_popular_tracks {
-                if !artist_mix.iter().any(|x| x.id == t.id) {
-                    artist_mix.push(t.clone());
+            if let Some(s1) = artist_search_1.as_ref() {
+                for t in &s1.tracks {
+                    if !artist_mix.iter().any(|x| x.id == t.id) {
+                        artist_mix.push(t.clone());
+                    }
                 }
             }
             let a1_cards =
@@ -1473,19 +1707,36 @@ pub fn fetch_rich_home(
             }
         }
 
-        // Shelf 4: Albums, Artists & Playlists matching user's taste (replaces generic regional charts!)
-        if taste_cards.len() >= 3 {
+        // Shelf 3: Curated Playlists & Mixes (dedicated clickable Playlist showcase!)
+        if playlist_cards.len() >= 3 {
             shelves.push(YtmHomeShelf {
-                title: "Recommended albums & playlists for you".to_string(),
-                cards: taste_cards.into_iter().take(15).collect(),
+                title: "Playlists & mixes for you".to_string(),
+                cards: playlist_cards.into_iter().take(15).collect(),
             });
         }
 
-        // Shelf 5+: Second seed's vibe mix (if distinct)
-        if let Some(a2) = &artist_2
-            && let Some(second_pool) = radio_pools.get(1)
-        {
-            let a2_cards = tracks_to_song_cards(second_pool);
+        // Shelf 4: Artists You Might Like (circular Artist cards!)
+        if artist_cards.len() >= 3 {
+            shelves.push(YtmHomeShelf {
+                title: "Artists you might like".to_string(),
+                cards: artist_cards.into_iter().take(15).collect(),
+            });
+        }
+
+        // Shelf 5: More Like <Rotated Artist 2>
+        if let Some(a2) = &artist_2 {
+            let mut mix2: Vec<Track> = Vec::new();
+            if let Some(second_pool) = radio_pools.get(1) {
+                mix2.extend(second_pool.iter().cloned());
+            }
+            if let Some(s2) = artist_search_2.as_ref() {
+                for t in &s2.tracks {
+                    if !mix2.iter().any(|x| x.id == t.id) {
+                        mix2.push(t.clone());
+                    }
+                }
+            }
+            let a2_cards = tracks_to_song_cards(&mix2.into_iter().take(15).collect::<Vec<_>>());
             if a2_cards.len() >= 4 {
                 shelves.push(YtmHomeShelf {
                     title: format!("More like {a2}"),
@@ -1494,8 +1745,50 @@ pub fn fetch_rich_home(
             }
         }
 
-        // Append ONLY locale-compatible non-regional-spam shelves from FEmusic_home below
-        for shelf in raw_home_shelves {
+        // Shelf 6: Discover <Rotated Artist 3> & Friends (or Explore New Releases)
+        if let Some(a3) = &artist_3
+            && let Some(s3) = artist_search_3.as_ref()
+        {
+            let mut mix3: Vec<Track> = Vec::new();
+            if let Some(third_pool) = radio_pools.get(2) {
+                mix3.extend(third_pool.iter().cloned());
+            }
+            for t in &s3.tracks {
+                if !mix3.iter().any(|x| x.id == t.id) {
+                    mix3.push(t.clone());
+                }
+            }
+            let a3_cards = tracks_to_song_cards(&mix3.into_iter().take(15).collect::<Vec<_>>());
+            if a3_cards.len() >= 4 {
+                shelves.push(YtmHomeShelf {
+                    title: format!("Discover {a3} & similar"),
+                    cards: a3_cards,
+                });
+            }
+        }
+
+        // Shelf 7: Listen Again / Rediscover Your Library (rotates across deeper favorites on Refresh)
+        let mut listen_pool: Vec<Track> = taste.top_tracks.clone();
+        if fresh_seed && listen_pool.len() > 6 {
+            let shift = (refresh_epoch * 5) % listen_pool.len();
+            listen_pool.rotate_left(shift);
+        }
+        let listen_again_cards =
+            tracks_to_song_cards(&listen_pool.into_iter().take(15).collect::<Vec<_>>());
+        if listen_again_cards.len() >= 3 {
+            shelves.push(YtmHomeShelf {
+                title: if fresh_seed && refresh_epoch % 2 == 1 {
+                    "Rediscover your favorites".to_string()
+                } else {
+                    "Listen again".to_string()
+                },
+                cards: listen_again_cards,
+            });
+        }
+
+        // Append non-regional Explore (New Releases, Moods) + FEmusic_home shelves so Load More
+        // and all 8 Home shelf slots are always brimming with diverse albums, mixes & releases.
+        for shelf in explore_shelves.into_iter().chain(raw_home_shelves) {
             if is_regional_geoip_chart_shelf(&shelf.title, &shelf.cards, taste_locale) {
                 continue;
             }
@@ -1508,7 +1801,11 @@ pub fn fetch_rich_home(
         }
 
         // Aggregate all_tracks cleanly
-        for t in quick_picks.iter().chain(ranked_discovery.iter()) {
+        for t in quick_picks
+            .iter()
+            .chain(ranked_discovery.iter())
+            .chain(artist_popular_tracks.iter())
+        {
             if !all_tracks.iter().any(|a| a.id == t.id) {
                 all_tracks.push(t.clone());
             }
@@ -1521,8 +1818,12 @@ pub fn fetch_rich_home(
             shelves.retain(|s| !is_regional_geoip_chart_shelf(&s.title, &s.cards, taste_locale));
         }
         all_tracks.extend(quick_picks.iter().cloned());
-        if !session.is_signed_in() && quick_picks.len() > 8 {
+        if (fresh_seed || !session.is_signed_in()) && quick_picks.len() > 8 {
             fastrand::shuffle(&mut quick_picks);
+        }
+        if fresh_seed && shelves.len() > 2 {
+            let rot = refresh_epoch % shelves.len();
+            shelves.rotate_left(rot);
         }
     }
 
@@ -1547,12 +1848,15 @@ pub fn fetch_rich_home(
     })
 }
 
-/// Load additional endless recommendation shelves using a `continuation` token (or a random Mood chip fallback).
+/// Load additional endless recommendation shelves using a `continuation` token PLUS
+/// personalized deep-catalog album/playlist/artist expansion so exploration never runs dry.
 pub fn fetch_home_continuation(
     session: &YtmSession,
     continuation: Option<&str>,
     fallback_mood_params: Option<&str>,
+    taste: &YtmHomeTasteProfile,
 ) -> ProviderResult<YtmRichHome> {
+    let epoch = HOME_MORE_EPOCH.fetch_add(1, Ordering::Relaxed);
     let body = if let Some(tok) = continuation.map(str::trim).filter(|s| !s.is_empty()) {
         json!({
             "continuation": tok,
@@ -1574,22 +1878,141 @@ pub fn fetch_home_continuation(
         })
     };
 
-    let root = post_ytm_json("browse", &body, session)?;
-    let visitor_data = extract_visitor_data(&root, &session.visitor_data);
+    // Pick 2 fresh taste artists (or curated genre queries on cold start) for endless personalized shelves
+    let deep_queries: (String, String, String, String) = if !taste.top_artists.is_empty() {
+        let n = taste.top_artists.len();
+        let a1 = &taste.top_artists[(epoch * 2 + 2) % n];
+        let a2 = &taste.top_artists[(epoch * 2 + 3) % n];
+        let suf1 = ["albums", "playlist", "essentials", "deep cuts"][epoch % 4];
+        let suf2 = ["similar artists", "mix", "top songs", "radio"][(epoch + 1) % 4];
+        (
+            format!("{a1} {suf1}"),
+            format!("Explore {a1} & albums"),
+            format!("{a2} {suf2}"),
+            format!("Vibes like {a2}"),
+        )
+    } else {
+        let presets = [
+            (
+                "indie pop albums",
+                "Indie & alt albums",
+                "chill r&b playlist",
+                "Late-night R&B mixes",
+            ),
+            (
+                "electronic synthwave albums",
+                "Electronic & synth",
+                "acoustic folk playlist",
+                "Acoustic & stripped",
+            ),
+            (
+                "j-pop anime hits",
+                "J-Pop & anime",
+                "pop indonesia indie",
+                "Indonesian indie gems",
+            ),
+            (
+                "hip hop classic albums",
+                "Essential hip-hop",
+                "dream pop shoegaze",
+                "Dream pop & atmospheric",
+            ),
+        ];
+        let p = presets[epoch % presets.len()];
+        (
+            p.0.to_string(),
+            p.1.to_string(),
+            p.2.to_string(),
+            p.3.to_string(),
+        )
+    };
+
+    let (cont_res, extra_1, extra_2) = std::thread::scope(|s| {
+        let h_cont = s.spawn(|| post_ytm_json("browse", &body, session));
+        let h_e1 = s.spawn(|| fetch_rich_search(session, &deep_queries.0, 14).ok());
+        let h_e2 = s.spawn(|| fetch_rich_search(session, &deep_queries.2, 14).ok());
+        (
+            h_cont.join().unwrap_or_else(|_| {
+                Err(ProviderError::Http(
+                    "Continuation thread failed".to_string(),
+                ))
+            }),
+            h_e1.join().ok().flatten(),
+            h_e2.join().ok().flatten(),
+        )
+    });
+
+    let mut visitor_data = session.visitor_data.clone();
     let mut quick_picks = Vec::new();
     let mut seen_tracks = HashSet::new();
     let mut shelves = Vec::new();
-    collect_home_shelves(&root, &mut quick_picks, &mut seen_tracks, &mut shelves);
+    let mut all_tracks = Vec::new();
+    let mut next_tok = None;
 
-    let mut all_tracks = quick_picks.clone();
-    collect_music_items(
-        &root,
-        "YouTube Music",
-        48,
-        &mut seen_tracks,
-        &mut all_tracks,
-    );
-    let next_tok = extract_continuation_token(&root);
+    if let Ok(root) = cont_res {
+        visitor_data = extract_visitor_data(&root, &session.visitor_data);
+        collect_home_shelves(&root, &mut quick_picks, &mut seen_tracks, &mut shelves);
+        all_tracks.extend(quick_picks.iter().cloned());
+        collect_music_items(
+            &root,
+            "YouTube Music",
+            48,
+            &mut seen_tracks,
+            &mut all_tracks,
+        );
+        next_tok = extract_continuation_token(&root);
+    }
+
+    for (res_opt, shelf_title) in [(extra_1, deep_queries.1), (extra_2, deep_queries.3)] {
+        if let Some(res) = res_opt {
+            let mut cards: Vec<YtmShelfCard> = res
+                .cards
+                .into_iter()
+                .filter(|c| {
+                    matches!(
+                        c.kind,
+                        YtmCardKind::Album | YtmCardKind::Playlist | YtmCardKind::Artist
+                    )
+                })
+                .take(12)
+                .collect();
+            if cards.len() < 5 {
+                let song_cards = tracks_to_song_cards(&res.tracks);
+                for sc in song_cards {
+                    if !cards.iter().any(|c| c.id == sc.id) {
+                        cards.push(sc);
+                    }
+                    if cards.len() >= 12 {
+                        break;
+                    }
+                }
+            }
+            if cards.len() >= 3 {
+                shelves.insert(
+                    0,
+                    YtmHomeShelf {
+                        title: shelf_title,
+                        cards,
+                    },
+                );
+            }
+            for t in res.tracks.into_iter().take(10) {
+                if !quick_picks.iter().any(|q| q.id == t.id) {
+                    quick_picks.push(t.clone());
+                }
+                if !all_tracks.iter().any(|a| a.id == t.id) {
+                    all_tracks.push(t);
+                }
+            }
+        }
+    }
+
+    if shelves.is_empty() && quick_picks.is_empty() {
+        return Err(ProviderError::Http(
+            "No additional recommendations returned".to_string(),
+        ));
+    }
+
     Ok(YtmRichHome {
         visitor_data,
         chips: Vec::new(),
@@ -2011,7 +2434,7 @@ fn fetch_radio_up_next_inner(
     seen.insert(video_id.to_string());
     collect_radio_panel_items(
         &root,
-        (target_limit * 3).max(36),
+        target_limit.saturating_mul(3).max(36),
         &mut seen,
         &mut raw_tracks,
     );
@@ -2140,6 +2563,670 @@ pub fn fetch_radio_up_next(
     limit: usize,
 ) -> ProviderResult<Vec<Track>> {
     fetch_radio_up_next_for_track(session, video_id, "", "", "", limit, false)
+}
+
+/// Personalized Home "Recommended Station" card (Spotify Radio parity).
+///
+/// Populated either directly by Engine A (`spotify_web::fetch_spotify_recommended_stations`,
+/// carrying Spotify's pre-rendered 3-circle Radio artwork & live 50-song playlist ID) or by
+/// Engine B (`build_algorithmic_recommended_stations`, generating multi-locale artist- and
+/// song-seeded stations with 3-circle triptych covers and lazy multi-hop co-listening expansion).
+#[derive(Debug, Clone)]
+pub struct RecommendedStation {
+    pub id: String,
+    pub title: String,
+    pub display_name: String,
+    pub subtitle: String,
+    pub palette_idx: u8,
+    pub is_spotify_prebuilt_art: bool,
+    pub center_art_url: Option<String>,
+    pub left_art_url: Option<String>,
+    pub right_art_url: Option<String>,
+    pub spotify_playlist_id: Option<String>,
+    pub seed_video_id: Option<String>,
+    pub seed_artist: String,
+    pub seed_title: String,
+    pub is_spotify_origin: bool,
+    pub cached_tracks: Vec<Track>,
+}
+
+impl RecommendedStation {
+    /// Convert a live Spotify Pathfinder `home` Recommended Station card into the unified model.
+    pub fn from_spotify_card(
+        card: &crate::spotify_web::SpotifyStationCard,
+        palette_idx: u8,
+    ) -> Self {
+        let has_art = card.thumbnail_url.is_some();
+        let subtitle = if card.subtitle.trim().is_empty() {
+            format!("Non-stop radio inspired by {}", card.display_name)
+        } else {
+            card.subtitle.clone()
+        };
+        Self {
+            id: format!("sp:station:{}", card.playlist_id),
+            title: card.title.clone(),
+            display_name: card.display_name.clone(),
+            subtitle,
+            palette_idx: palette_idx % 8,
+            is_spotify_prebuilt_art: has_art,
+            center_art_url: card.thumbnail_url.clone(),
+            left_art_url: None,
+            right_art_url: None,
+            spotify_playlist_id: Some(card.playlist_id.clone()),
+            seed_video_id: None,
+            seed_artist: card.display_name.clone(),
+            seed_title: card.display_name.clone(),
+            is_spotify_origin: true,
+            cached_tracks: Vec::new(),
+        }
+    }
+}
+
+fn stable_palette_index(label: &str, prev_idx: Option<u8>) -> u8 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in label.to_ascii_lowercase().bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let mut idx = (hash % 8) as u8;
+    if prev_idx == Some(idx) {
+        idx = (idx + 3) % 8;
+    }
+    idx
+}
+
+fn primary_artist_display(raw: &str) -> String {
+    let first = raw
+        .split(['&', ',', '•', '·'])
+        .next()
+        .unwrap_or(raw)
+        .split(" feat.")
+        .next()
+        .unwrap_or(raw)
+        .split(" ft.")
+        .next()
+        .unwrap_or(raw)
+        .trim();
+    if first.is_empty() {
+        raw.trim().to_string()
+    } else {
+        first.to_string()
+    }
+}
+
+fn clean_station_song_label(title: &str) -> String {
+    let mut s = title.trim().to_string();
+    for sep in [" (feat.", " (ft.", " (with ", " [Official", " (Official"] {
+        if let Some(pos) = s.to_ascii_lowercase().find(&sep.to_ascii_lowercase())
+            && pos >= 2
+        {
+            s.truncate(pos);
+        }
+    }
+    s.trim().to_string()
+}
+
+/// Format companion artists using Spotify Radio's exact `"With A1, A2, A3 and more"` phrasing.
+pub fn format_station_subtitle(companions: &[String], fallback_seed: &str) -> String {
+    let mut uniq: Vec<&str> = Vec::new();
+    for c in companions {
+        let trimmed = c.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !uniq.iter().any(|u| u.eq_ignore_ascii_case(trimmed)) {
+            uniq.push(trimmed);
+            if uniq.len() >= 3 {
+                break;
+            }
+        }
+    }
+    match uniq.len() {
+        0 => format!("Non-stop radio based on {fallback_seed}"),
+        1 => format!("With {} and more", uniq[0]),
+        2 => format!("With {}, {} and more", uniq[0], uniq[1]),
+        _ => format!("With {}, {}, {} and more", uniq[0], uniq[1], uniq[2]),
+    }
+}
+
+/// Interleave a station tracklist so no two consecutive songs share the same primary artist,
+/// while preserving high-affinity track ordering (Spotify Radio sequencing rule).
+pub fn interleave_station_tracks(tracks: Vec<Track>, max_tracks: usize) -> Vec<Track> {
+    let target = max_tracks.min(tracks.len());
+    let mut pool = tracks;
+    let mut out: Vec<Track> = Vec::with_capacity(target);
+    let mut last_artist = String::new();
+
+    while out.len() < target && !pool.is_empty() {
+        let pick_idx = pool
+            .iter()
+            .position(|t| {
+                let ak = primary_artist_key(&t.artist);
+                last_artist.is_empty() || ak.is_empty() || ak != last_artist
+            })
+            .unwrap_or(0);
+        let chosen = pool.remove(pick_idx);
+        last_artist = primary_artist_key(&chosen.artist);
+        out.push(chosen);
+    }
+    out
+}
+
+/// Build up to `max_stations` diverse artist- and song-seeded Recommended Stations using a
+/// Spotify-parity affinity model:
+/// 1. Exponential recency/play-count decay across `taste.top_tracks` & `taste.top_artists`,
+///    merged with Liked Songs and cross-library frequency (`library_tracks`) + cold-start `home_tracks`.
+/// 2. Stratified multi-locale round-robin across active taste clusters (English, Indonesian,
+///    Japanese, Korean) so mixed-language listeners mirror Spotify's Home shelf diversity.
+/// 3. Alternating Artist-seeded (`"JVKE Radio"`) and Song-seeded (`"Kill Bill Radio"`) stations,
+///    strictly 1 station per primary artist, paired with same-cluster companion artists and 3
+///    distinct cover art URLs for the pastel 3-circle triptych.
+pub fn build_algorithmic_recommended_stations(
+    taste: &YtmHomeTasteProfile,
+    library_tracks: &[Track],
+    home_tracks: &[Track],
+    max_stations: usize,
+) -> Vec<RecommendedStation> {
+    build_algorithmic_recommended_stations_rotated(
+        taste,
+        library_tracks,
+        home_tracks,
+        max_stations,
+        0,
+    )
+}
+
+/// Same as `build_algorithmic_recommended_stations` with an explicit `rotation_epoch` so pressing
+/// Refresh deals genuinely new seed artists/songs from deeper in the user's multi-locale taste graph.
+pub fn build_algorithmic_recommended_stations_rotated(
+    taste: &YtmHomeTasteProfile,
+    library_tracks: &[Track],
+    home_tracks: &[Track],
+    max_stations: usize,
+    rotation_epoch: usize,
+) -> Vec<RecommendedStation> {
+    if max_stations == 0 {
+        return Vec::new();
+    }
+
+    #[derive(Clone)]
+    struct ArtistClusterNode {
+        norm: String,
+        display: String,
+        locale: MusicLocale,
+        score: i32,
+        best_track: Track,
+        best_track_score: i32,
+    }
+
+    let mut artist_nodes: HashMap<String, ArtistClusterNode> = HashMap::new();
+
+    let absorb_track =
+        |nodes: &mut HashMap<String, ArtistClusterNode>, t: &Track, base_weight: i32| {
+            if t.title.trim().is_empty()
+                || t.artist.trim().is_empty()
+                || t.artist.eq_ignore_ascii_case("Unknown Artist")
+                || is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+            {
+                return;
+            }
+            let norm = primary_artist_norm(&t.artist);
+            if norm.is_empty() || norm == "various artists" {
+                return;
+            }
+            let display = primary_artist_display(&t.artist);
+            let locale = detect_track_locale(&t.title, &t.artist, &t.album);
+            let art_bonus = if t.thumbnail_url.is_some() { 14 } else { 0 };
+            let vid_bonus = if t.youtube_video_id.is_some() { 6 } else { 0 };
+            let liked_bonus = if t.liked { 26 } else { 0 };
+            let track_score = base_weight + art_bonus + vid_bonus + liked_bonus;
+
+            nodes
+                .entry(norm.clone())
+                .and_modify(|node| {
+                    node.score += base_weight.max(4);
+                    if track_score > node.best_track_score {
+                        node.best_track_score = track_score;
+                        node.best_track = t.clone();
+                        node.locale = locale;
+                    } else if node.best_track.thumbnail_url.is_none() && t.thumbnail_url.is_some() {
+                        node.best_track = t.clone();
+                    }
+                })
+                .or_insert_with(|| ArtistClusterNode {
+                    norm,
+                    display,
+                    locale,
+                    score: base_weight + liked_bonus,
+                    best_track: t.clone(),
+                    best_track_score: track_score,
+                });
+        };
+
+    // Signal 1: Recent / heavily played taste profile tracks (strongest decay curve)
+    for (idx, t) in taste.top_tracks.iter().take(48).enumerate() {
+        let w = 120_i32.saturating_sub((idx as i32) * 3).max(24);
+        absorb_track(&mut artist_nodes, t, w);
+    }
+    // Signal 2: Full library (Liked Songs + synced Spotify/YouTube/Local playlists)
+    for t in library_tracks.iter().take(1200) {
+        let w = if t.liked { 38 } else { 14 };
+        absorb_track(&mut artist_nodes, t, w);
+    }
+    // Signal 3: Explicit top artists affinity boost
+    for (idx, a) in taste.top_artists.iter().take(24).enumerate() {
+        let norm = primary_artist_norm(a);
+        if let Some(node) = artist_nodes.get_mut(&norm) {
+            node.score += 105_i32.saturating_sub((idx as i32) * 6).max(18);
+        }
+    }
+    // Signal 4: Live Home quick picks (ensures Guest / brand-new users still get vibrant stations)
+    let home_w: i32 = if artist_nodes.len() < max_stations {
+        48
+    } else {
+        12
+    };
+    for (idx, t) in home_tracks.iter().take(40).enumerate() {
+        let w = home_w.saturating_sub((idx as i32) / 2).max(6);
+        absorb_track(&mut artist_nodes, t, w);
+    }
+
+    let mut all_nodes: Vec<ArtistClusterNode> = artist_nodes.into_values().collect();
+    all_nodes.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.display.cmp(&b.display))
+    });
+    if all_nodes.is_empty() {
+        return Vec::new();
+    }
+
+    // Group into locale buckets so multi-language libraries mirror Spotify's cross-cluster variety.
+    let mut locale_buckets: Vec<(MusicLocale, i32, Vec<ArtistClusterNode>)> = Vec::new();
+    for loc in [
+        MusicLocale::GlobalEn,
+        MusicLocale::Indonesian,
+        MusicLocale::Japanese,
+        MusicLocale::Korean,
+    ] {
+        let mut members: Vec<ArtistClusterNode> = all_nodes
+            .iter()
+            .filter(|n| n.locale == loc)
+            .cloned()
+            .collect();
+        if !members.is_empty() {
+            let total_w: i32 = members.iter().take(6).map(|m| m.score).sum();
+            if rotation_epoch > 0 && members.len() > 2 {
+                let shift = (rotation_epoch * 3) % members.len();
+                members.rotate_left(shift);
+            }
+            locale_buckets.push((loc, total_w, members));
+        }
+    }
+    locale_buckets.sort_by_key(|a| std::cmp::Reverse(a.1));
+
+    // Weighted round-robin seed selection: dominant locale gets 2 slots per cycle, secondary locales 1 slot.
+    let mut cursors = vec![0usize; locale_buckets.len()];
+    let mut chosen_seeds: Vec<ArtistClusterNode> = Vec::with_capacity(max_stations);
+    let mut chosen_norms: HashSet<String> = HashSet::new();
+
+    while chosen_seeds.len() < max_stations {
+        let mut progressed = false;
+        for (bi, (_, _, members)) in locale_buckets.iter().enumerate() {
+            let quota = if bi == 0 && locale_buckets.len() > 1 {
+                2
+            } else {
+                1
+            };
+            for _ in 0..quota {
+                if chosen_seeds.len() >= max_stations {
+                    break;
+                }
+                while cursors[bi] < members.len() {
+                    let cand = &members[cursors[bi]];
+                    cursors[bi] += 1;
+                    if chosen_norms.insert(cand.norm.clone()) {
+                        chosen_seeds.push(cand.clone());
+                        progressed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    let mut stations = Vec::with_capacity(chosen_seeds.len());
+    let mut prev_palette: Option<u8> = None;
+
+    for (idx, seed) in chosen_seeds.into_iter().enumerate() {
+        // Alternate song-seeded and artist-seeded stations (0: Song, 1: Artist, 2: Song, 3: Artist...)
+        let clean_song = clean_station_song_label(&seed.best_track.title);
+        let use_song_seed = idx % 2 == 0
+            && !clean_song.is_empty()
+            && clean_song.chars().count() <= 26
+            && !clean_song.eq_ignore_ascii_case(&seed.display);
+
+        let display_name = if use_song_seed {
+            clean_song
+        } else {
+            seed.display.clone()
+        };
+        let title = format!("{display_name} Radio");
+
+        // Gather companion artists from the same locale cluster first, then global affinity pool.
+        let mut companion_nodes: Vec<&ArtistClusterNode> = all_nodes
+            .iter()
+            .filter(|n| n.norm != seed.norm && n.locale == seed.locale)
+            .collect();
+        if companion_nodes.len() < 3 {
+            for n in &all_nodes {
+                if n.norm != seed.norm && !companion_nodes.iter().any(|c| c.norm == n.norm) {
+                    companion_nodes.push(n);
+                    if companion_nodes.len() >= 6 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Rotate companion starting offset slightly by station index so cards don't all repeat the same 3 names.
+        let comp_len = companion_nodes.len();
+        let mut rotated_companions: Vec<&ArtistClusterNode> = Vec::with_capacity(3);
+        if comp_len > 0 {
+            let start = (idx * 2) % comp_len;
+            for step in 0..comp_len.min(3) {
+                rotated_companions.push(companion_nodes[(start + step) % comp_len]);
+            }
+        }
+
+        let companion_names: Vec<String> = if use_song_seed {
+            let mut names = vec![seed.display.clone()];
+            for c in &rotated_companions {
+                names.push(c.display.clone());
+            }
+            names
+        } else {
+            rotated_companions
+                .iter()
+                .map(|c| c.display.clone())
+                .collect()
+        };
+        let subtitle = format_station_subtitle(&companion_names, &display_name);
+
+        let center_art_url = seed.best_track.thumbnail_url.clone();
+        let left_art_url = rotated_companions
+            .first()
+            .and_then(|c| c.best_track.thumbnail_url.clone())
+            .filter(|u| Some(u) != center_art_url.as_ref());
+        let right_art_url = rotated_companions
+            .get(1)
+            .and_then(|c| c.best_track.thumbnail_url.clone())
+            .filter(|u| Some(u) != center_art_url.as_ref() && Some(u) != left_art_url.as_ref())
+            .or_else(|| {
+                rotated_companions
+                    .get(2)
+                    .and_then(|c| c.best_track.thumbnail_url.clone())
+                    .filter(|u| {
+                        Some(u) != center_art_url.as_ref() && Some(u) != left_art_url.as_ref()
+                    })
+            });
+
+        let palette_idx = stable_palette_index(&display_name, prev_palette);
+        prev_palette = Some(palette_idx);
+
+        let slug: String = display_name
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        stations.push(RecommendedStation {
+            id: format!("ferric:station:{idx}:{slug}"),
+            title,
+            display_name,
+            subtitle,
+            palette_idx,
+            is_spotify_prebuilt_art: false,
+            center_art_url,
+            left_art_url,
+            right_art_url,
+            spotify_playlist_id: None,
+            seed_video_id: seed.best_track.youtube_video_id.clone(),
+            seed_artist: seed.display,
+            seed_title: seed.best_track.title,
+            is_spotify_origin: false,
+            cached_tracks: Vec::new(),
+        });
+    }
+
+    stations
+}
+
+/// Result of lazily expanding a `RecommendedStation` via multi-hop co-listening graph traversal.
+#[derive(Debug, Clone)]
+pub struct ExpandedStationTracks {
+    pub tracks: Vec<Track>,
+    pub subtitle: String,
+    pub left_art: Option<String>,
+    pub right_art: Option<String>,
+}
+
+/// Lazily expand an algorithmic Recommended Station into a full 35–50 track curated Spotify-Radio-style
+/// playlist via multi-hop `RDAMVM` co-listening graph expansion, strict artist caps, locale coherence,
+/// and zero-back-to-back artist interleaving.
+pub fn expand_recommended_station_tracks(
+    session: &YtmSession,
+    station: &RecommendedStation,
+    library_pool: &[Track],
+) -> ProviderResult<ExpandedStationTracks> {
+    let seed_artist_norm = primary_artist_norm(&station.seed_artist);
+    let seed_locale = detect_track_locale(&station.seed_title, &station.seed_artist, "");
+
+    // 1. Resolve anchor video ID (existing video_id, or fast YTM Songs lookup for seed song/artist).
+    let mut seed_track: Option<Track> = library_pool
+        .iter()
+        .find(|t| {
+            t.youtube_video_id.is_some()
+                && primary_artist_norm(&t.artist) == seed_artist_norm
+                && normalize_core_title(&t.title) == normalize_core_title(&station.seed_title)
+        })
+        .cloned();
+
+    let seed_vid = if let Some(vid) = station
+        .seed_video_id
+        .as_deref()
+        .filter(|v| is_valid_video_id(v))
+    {
+        vid.to_string()
+    } else if let Some(vid) = seed_track
+        .as_ref()
+        .and_then(|t| t.youtube_video_id.clone())
+        .filter(|v| is_valid_video_id(v))
+    {
+        vid
+    } else {
+        let query = if station
+            .seed_title
+            .eq_ignore_ascii_case(&station.seed_artist)
+            || station.seed_title.trim().is_empty()
+        {
+            station.seed_artist.clone()
+        } else {
+            format!("{} {}", station.seed_artist, station.seed_title)
+        };
+        let search_body = json!({
+            "query": query,
+            "params": "EgWKAQIIAWoMEAMQBBAJEAoQBRAV",
+            "context": web_remix_context_for_locale(session, seed_locale),
+        });
+        let root = post_ytm_json("search", &search_body, session)?;
+        let mut hits = Vec::new();
+        let mut seen = HashSet::new();
+        collect_music_items(&root, &station.title, 8, &mut seen, &mut hits);
+        let picked = hits
+            .into_iter()
+            .find(|t| {
+                t.youtube_video_id.is_some()
+                    && !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+            })
+            .ok_or_else(|| {
+                ProviderError::Metadata(format!(
+                    "Could not resolve seed song for {}",
+                    station.title
+                ))
+            })?;
+        let vid = picked.youtube_video_id.clone().unwrap_or_default();
+        seed_track = Some(picked);
+        vid
+    };
+
+    // 2. Primary RDAMVM collaborative co-listening neighborhood
+    let mut raw_candidates: Vec<Track> = Vec::new();
+    if let Ok(hop1) = fetch_radio_up_next_for_track(
+        session,
+        &seed_vid,
+        &station.seed_title,
+        &station.seed_artist,
+        "",
+        26,
+        false,
+    ) {
+        raw_candidates.extend(hop1);
+    }
+
+    // 3. Second-hop expansion from 2 distinct companion artists (yields ~45-65 collaborative candidates)
+    let hop2_seeds: Vec<Track> = {
+        let mut picked = Vec::new();
+        let mut seen_a = HashSet::new();
+        seen_a.insert(seed_artist_norm.clone());
+        for t in &raw_candidates {
+            let ak = primary_artist_norm(&t.artist);
+            if !ak.is_empty() && t.youtube_video_id.is_some() && seen_a.insert(ak) {
+                picked.push(t.clone());
+                if picked.len() >= 2 {
+                    break;
+                }
+            }
+        }
+        picked
+    };
+    for h in &hop2_seeds {
+        if let Some(hvid) = h.youtube_video_id.as_deref()
+            && let Ok(hop2) = fetch_radio_up_next_inner(
+                session, hvid, &h.title, &h.artist, &h.album, 18, false, false,
+            )
+        {
+            raw_candidates.extend(hop2);
+        }
+    }
+
+    // 4. Seed-artist anchor songs (Spotify Radio includes ~3-4 hits by the seed artist spaced through the 50 songs)
+    let mut seed_artist_hits: Vec<Track> = Vec::new();
+    if let Some(st) = seed_track {
+        seed_artist_hits.push(st);
+    }
+    for t in library_pool {
+        if seed_artist_hits.len() >= 4 {
+            break;
+        }
+        if primary_artist_norm(&t.artist) == seed_artist_norm
+            && !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+            && !seed_artist_hits
+                .iter()
+                .any(|x| normalize_core_title(&x.title) == normalize_core_title(&t.title))
+        {
+            seed_artist_hits.push(t.clone());
+        }
+    }
+
+    // 5. Merge + deduplicate + enforce artist caps (seed <= 4, companion <= 2) + locale coherence
+    let mut curated: Vec<Track> = Vec::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut seen_titles: HashSet<String> = HashSet::new();
+    let mut artist_counts: HashMap<String, usize> = HashMap::new();
+
+    for t in seed_artist_hits.into_iter().chain(raw_candidates) {
+        if curated.len() >= 45 {
+            break;
+        }
+        if is_low_quality_radio_candidate(&t.title, &t.artist, &station.seed_title, t.duration_ms) {
+            continue;
+        }
+        let cand_locale = detect_track_locale(&t.title, &t.artist, &t.album);
+        if seed_locale == MusicLocale::GlobalEn && cand_locale == MusicLocale::Indonesian {
+            continue;
+        }
+        let title_key = normalize_core_title(&t.title);
+        if title_key.is_empty() || !seen_titles.insert(title_key) {
+            continue;
+        }
+        let dedup_id = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+        if !seen_ids.insert(dedup_id) {
+            continue;
+        }
+        let ak = primary_artist_norm(&t.artist);
+        let cap = if ak == seed_artist_norm { 4 } else { 2 };
+        let cnt = artist_counts.entry(ak).or_insert(0);
+        if *cnt >= cap {
+            continue;
+        }
+        *cnt += 1;
+        curated.push(t);
+    }
+
+    if curated.is_empty() {
+        return Err(ProviderError::Metadata(format!(
+            "No playable tracks found for {}",
+            station.title
+        )));
+    }
+
+    // 6. Sequence with zero back-to-back same artist (seed song locked at index 0)
+    let sequenced = interleave_station_tracks(curated, 45);
+
+    // 7. Compute authentic companion subtitle & 2 side-circle artworks from top companion artists
+    let mut companion_names: Vec<String> = Vec::new();
+    let mut side_arts: Vec<String> = Vec::new();
+    for t in &sequenced {
+        let ak = primary_artist_norm(&t.artist);
+        if ak.is_empty() || ak == seed_artist_norm {
+            continue;
+        }
+        let disp = primary_artist_display(&t.artist);
+        if !companion_names
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&disp))
+        {
+            companion_names.push(disp);
+            if let Some(url) = t.thumbnail_url.as_ref()
+                && Some(url) != station.center_art_url.as_ref()
+                && !side_arts.contains(url)
+            {
+                side_arts.push(url.clone());
+            }
+        }
+        if companion_names.len() >= 3 && side_arts.len() >= 2 {
+            break;
+        }
+    }
+    let subtitle = format_station_subtitle(&companion_names, &station.display_name);
+    let left_art = side_arts
+        .first()
+        .cloned()
+        .or_else(|| station.left_art_url.clone());
+    let right_art = side_arts
+        .get(1)
+        .cloned()
+        .or_else(|| station.right_art_url.clone());
+
+    Ok(ExpandedStationTracks {
+        tracks: sequenced,
+        subtitle,
+        left_art,
+        right_art,
+    })
 }
 
 /// Search YouTube Music returning both playable studio songs (with full Artist, Album & Duration)
@@ -2338,7 +3425,83 @@ pub fn fetch_account_library(session: &YtmSession) -> ProviderResult<YtmAccountL
     })
 }
 
+fn cached_guest_visitor_data(force_refresh: bool) -> String {
+    let lock = GUEST_VISITOR_CACHE.get_or_init(|| Mutex::new(None));
+    if !force_refresh {
+        let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((vd, fetched_at)) = guard.as_ref()
+            && fetched_at.elapsed() < Duration::from_secs(20 * 60)
+            && !vd.is_empty()
+        {
+            return vd.clone();
+        }
+    }
+    let guest = YtmSession::guest(String::new());
+    let prime_body = json!({
+        "browseId": "FEmusic_home",
+        "context": web_remix_context(&guest),
+    });
+    let vd = post_ytm_json("browse", &prime_body, &guest)
+        .map(|r| extract_visitor_data(&r, ""))
+        .unwrap_or_default();
+    if !vd.is_empty() {
+        let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = Some((vd.clone(), Instant::now()));
+    }
+    vd
+}
+
+fn fetch_player_root_as_clean_guest(video_id: &str) -> ProviderResult<Value> {
+    let vd = cached_guest_visitor_data(false);
+    let guest = YtmSession::guest(vd);
+    match fetch_player_root_once(video_id, &guest, false) {
+        Ok(root) => Ok(root),
+        Err(first_err) => {
+            let fresh_vd = cached_guest_visitor_data(true);
+            let fresh_guest = YtmSession::guest(fresh_vd);
+            fetch_player_root_once(video_id, &fresh_guest, false).map_err(|_| first_err)
+        }
+    }
+}
+
+/// Resolve the player response. A stale/mismatched stored `visitorData` or account cookie makes
+/// InnerTube answer HTTP 400 / `LOGIN_REQUIRED`; in that case retry once as a clean guest session
+/// with freshly primed `visitorData` (stream URLs from guest VISIONOS are fully playable).
 fn fetch_player_root(video_id: &str, session: &YtmSession) -> ProviderResult<Value> {
+    if session.is_signed_in() && VISIONOS_AUTH_REJECTED.load(Ordering::Relaxed) {
+        return fetch_player_root_as_clean_guest(video_id);
+    }
+    match fetch_player_root_once(video_id, session, false) {
+        Ok(root) => Ok(root),
+        Err(first_err) => {
+            let retryable = match &first_err {
+                ProviderError::Http(msg) => {
+                    msg.contains("HTTP 400")
+                        || msg.contains("HTTP 401")
+                        || msg.contains("HTTP 403")
+                        || msg.contains("player request failed")
+                }
+                ProviderError::Metadata(msg) => {
+                    msg.contains("LOGIN_REQUIRED") || msg.contains("UNKNOWN")
+                }
+                _ => false,
+            };
+            if !retryable {
+                return Err(first_err);
+            }
+            if session.is_signed_in() {
+                VISIONOS_AUTH_REJECTED.store(true, Ordering::Relaxed);
+            }
+            fetch_player_root_as_clean_guest(video_id).map_err(|_| first_err)
+        }
+    }
+}
+
+fn fetch_player_root_once(
+    video_id: &str,
+    session: &YtmSession,
+    force_fresh_visitor: bool,
+) -> ProviderResult<Value> {
     if !is_valid_video_id(video_id) {
         return Err(ProviderError::Metadata(
             "Invalid YouTube video ID".to_string(),
@@ -2346,7 +3509,11 @@ fn fetch_player_root(video_id: &str, session: &YtmSession) -> ProviderResult<Val
     }
 
     // Ensure fresh visitorData (required by VISIONOS 1.02)
-    let mut visitor_data = session.visitor_data.clone();
+    let mut visitor_data = if force_fresh_visitor {
+        String::new()
+    } else {
+        session.visitor_data.clone()
+    };
     if visitor_data.is_empty() {
         let prime_body = json!({
             "browseId": "FEmusic_home",
@@ -2451,17 +3618,21 @@ pub fn resolve_and_cache_audio_stream_with_quality(
         if let Ok(meta) = fs::metadata(&candidate)
             && meta.len() > 16_384
         {
-            let br = match quality {
-                AudioQuality::Low => 64,
-                AudioQuality::Normal => 128,
-                AudioQuality::High | AudioQuality::Best => fallback_br,
-            };
-            return Ok(CachedAudioStream {
-                path: candidate,
-                codec: codec.to_string(),
-                bitrate_kbps: br,
-                duration_ms: 0,
-            });
+            if is_valid_audio_container_header(&candidate, ext) {
+                touch_cache_mtime(&candidate);
+                let br = match quality {
+                    AudioQuality::Low => 64,
+                    AudioQuality::Normal => 128,
+                    AudioQuality::High | AudioQuality::Best => fallback_br,
+                };
+                return Ok(CachedAudioStream {
+                    path: candidate,
+                    codec: codec.to_string(),
+                    bitrate_kbps: br,
+                    duration_ms: 0,
+                });
+            }
+            let _ = fs::remove_file(&candidate);
         }
     }
 
@@ -2472,12 +3643,16 @@ pub fn resolve_and_cache_audio_stream_with_quality(
             if let Ok(meta) = fs::metadata(&legacy)
                 && meta.len() > 16_384
             {
-                return Ok(CachedAudioStream {
-                    path: legacy,
-                    codec: codec.to_string(),
-                    bitrate_kbps: br,
-                    duration_ms: 0,
-                });
+                if is_valid_audio_container_header(&legacy, ext) {
+                    touch_cache_mtime(&legacy);
+                    return Ok(CachedAudioStream {
+                        path: legacy,
+                        codec: codec.to_string(),
+                        bitrate_kbps: br,
+                        duration_ms: 0,
+                    });
+                }
+                let _ = fs::remove_file(&legacy);
             }
         }
     }
@@ -2497,14 +3672,22 @@ pub fn resolve_and_cache_audio_stream_with_quality(
         let _ = fs::remove_file(&part_path);
         return Err(err);
     }
+    if !is_valid_audio_container_header(&part_path, selected.ext) {
+        let _ = fs::remove_file(&part_path);
+        return Err(ProviderError::Metadata(
+            "Downloaded audio stream failed container header validation".to_string(),
+        ));
+    }
     if let Err(err) = fs::rename(&part_path, &dest_path) {
         let _ = fs::remove_file(&part_path);
         // Another concurrent prefetch/play worker may have already finalized `dest_path`.
-        if !fs::metadata(&dest_path).is_ok_and(|m| m.len() > 16_384) {
+        if !fs::metadata(&dest_path).is_ok_and(|m| m.len() > 16_384)
+            || !is_valid_audio_container_header(&dest_path, selected.ext)
+        {
             return Err(err.into());
         }
     }
-    prune_cache_dir_lru(cache_dir, MAX_STREAM_CACHE_BYTES);
+    prune_cache_dir_lru(cache_dir, MAX_STREAM_CACHE_BYTES, Some(&dest_path));
 
     Ok(CachedAudioStream {
         path: dest_path,
@@ -3044,13 +4227,13 @@ fn select_audio_format_for_quality(
             AudioQuality::High => {
                 // High transparency Opus (itag 251) or top AAC
                 if itag == 251 {
-                    990_000 + kbps
+                    990_000u32.saturating_add(kbps)
                 } else if itag == 140 {
-                    920_000 + kbps
+                    920_000u32.saturating_add(kbps)
                 } else if codec == "OPUS" {
-                    880_000 + kbps
+                    880_000u32.saturating_add(kbps)
                 } else {
-                    800_000 + kbps
+                    800_000u32.saturating_add(kbps)
                 }
             }
             AudioQuality::Best => {
@@ -3120,7 +4303,7 @@ fn open_verified_stream_get(
     ))
 }
 
-fn download_single_stream(url: &str, dest: &Path) -> ProviderResult<()> {
+fn download_single_stream(url: &str, expected_len: u64, dest: &Path) -> ProviderResult<()> {
     let (status, body) = open_verified_stream_get(url, None, 45)?;
     if !(200..300).contains(&status) {
         return Err(ProviderError::Http(format!("Audio CDN HTTP {status}")));
@@ -3130,9 +4313,19 @@ fn download_single_stream(url: &str, dest: &Path) -> ProviderResult<()> {
         .limit(MAX_SINGLE_STREAM_BYTES)
         .reader();
     let mut file = File::create(dest)?;
-    std::io::copy(&mut reader, &mut file)
+    let written = std::io::copy(&mut reader, &mut file)
         .map_err(|e| ProviderError::Http(format!("Audio stream read failed: {e}")))?;
     file.flush()?;
+    if written == 0 {
+        return Err(ProviderError::Http(
+            "Audio stream returned empty body".to_string(),
+        ));
+    }
+    if expected_len > 0 && written != expected_len {
+        return Err(ProviderError::Http(format!(
+            "Audio stream truncated ({written} of {expected_len} bytes)"
+        )));
+    }
     Ok(())
 }
 
@@ -3148,7 +4341,7 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
         ));
     }
     if content_length == 0 {
-        return download_single_stream(url, dest);
+        return download_single_stream(url, 0, dest);
     }
 
     let mut ranges = Vec::new();
@@ -3165,6 +4358,7 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
     }
 
     let mut file = File::create(dest)?;
+    let mut total_written = 0u64;
     let mut idx = 0usize;
     while idx < ranges.len() {
         let batch_end = (idx + STREAM_CONCURRENCY).min(ranges.len());
@@ -3173,26 +4367,54 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
             let mut handles = Vec::with_capacity(batch.len());
             for &(s, e) in batch {
                 handles.push(scope.spawn(move || {
+                    let expected_len = e - s + 1;
                     let range_hdr = format!("bytes={s}-{e}");
-                    let (st, body) = open_verified_stream_get(url, Some(&range_hdr), 25)?;
-                    if st == 200 {
-                        // Server ignored Range header; do NOT concatenate full body N times!
-                        return Ok(ChunkOutcome::Full200Fallback);
+                    let mut last_err = None;
+                    for attempt in 0..3 {
+                        if attempt > 0 {
+                            std::thread::sleep(Duration::from_millis(150 * attempt as u64));
+                        }
+                        let (st, body) = match open_verified_stream_get(url, Some(&range_hdr), 25) {
+                            Ok(pair) => pair,
+                            Err(err) => {
+                                last_err = Some(err);
+                                continue;
+                            }
+                        };
+                        if st == 200 {
+                            // Server ignored Range header; do NOT concatenate full body N times!
+                            return Ok(ChunkOutcome::Full200Fallback);
+                        }
+                        if st != 206 {
+                            last_err = Some(ProviderError::Http(format!(
+                                "Audio chunk returned HTTP {st}"
+                            )));
+                            if st >= 500 || st == 429 {
+                                continue;
+                            }
+                            break;
+                        }
+                        let expected_max = expected_len.min(4 * 1024 * 1024);
+                        match body.into_with_config().limit(expected_max).read_to_vec() {
+                            Ok(bytes) if bytes.len() as u64 == expected_len => {
+                                return Ok(ChunkOutcome::Partial(bytes));
+                            }
+                            Ok(bytes) => {
+                                last_err = Some(ProviderError::Http(format!(
+                                    "Audio chunk short read ({} of {expected_len} bytes)",
+                                    bytes.len()
+                                )));
+                            }
+                            Err(err) => {
+                                last_err = Some(ProviderError::Http(format!(
+                                    "Audio chunk read failed: {err}"
+                                )));
+                            }
+                        }
                     }
-                    if st != 206 {
-                        return Err(ProviderError::Http(format!(
-                            "Audio chunk returned HTTP {st}"
-                        )));
-                    }
-                    let expected_max = (e - s + 1).min(4 * 1024 * 1024);
-                    let bytes = body
-                        .into_with_config()
-                        .limit(expected_max)
-                        .read_to_vec()
-                        .map_err(|err| {
-                            ProviderError::Http(format!("Audio chunk read failed: {err}"))
-                        })?;
-                    Ok(ChunkOutcome::Partial(bytes))
+                    Err(last_err.unwrap_or_else(|| {
+                        ProviderError::Http("Audio chunk download failed".to_string())
+                    }))
                 }));
             }
             handles
@@ -3208,10 +4430,13 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
         });
         for res in results {
             match res? {
-                ChunkOutcome::Partial(chunk) => file.write_all(&chunk)?,
+                ChunkOutcome::Partial(chunk) => {
+                    file.write_all(&chunk)?;
+                    total_written = total_written.saturating_add(chunk.len() as u64);
+                }
                 ChunkOutcome::Full200Fallback => {
                     drop(file);
-                    return download_single_stream(url, dest);
+                    return download_single_stream(url, content_length, dest);
                 }
             }
         }
@@ -3219,6 +4444,11 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
     }
 
     file.flush()?;
+    if total_written != content_length {
+        return Err(ProviderError::Http(format!(
+            "Audio download incomplete ({total_written} of {content_length} bytes)"
+        )));
+    }
     Ok(())
 }
 
@@ -3962,8 +5192,17 @@ fn parse_clock_ms(text: &str) -> Option<u64> {
         .filter_map(|p| p.trim().parse::<u64>().ok())
         .collect();
     match parts.as_slice() {
-        [m, s] => Some((m * 60 + s) * 1_000),
-        [h, m, s] => Some((h * 3600 + m * 60 + s) * 1_000),
+        [m, s] => Some(
+            m.saturating_mul(60)
+                .saturating_add(*s)
+                .saturating_mul(1_000),
+        ),
+        [h, m, s] => Some(
+            h.saturating_mul(3_600)
+                .saturating_add(m.saturating_mul(60))
+                .saturating_add(*s)
+                .saturating_mul(1_000),
+        ),
         _ => None,
     }
 }
@@ -4078,7 +5317,7 @@ mod tests {
         );
         assert_eq!(
             norm,
-            "https://lh3.googleusercontent.com/abc123XYZ=w180-h180-l85-rj"
+            "https://lh3.googleusercontent.com/abc123XYZ=w300-h300-l90-rj"
         );
         assert_eq!(
             normalize_ytm_thumbnail_url("https://i.ytimg.com/vi/abc12345678/maxresdefault.jpg"),
@@ -4105,7 +5344,7 @@ mod tests {
         assert_eq!(tracks[0].duration_ms, 215_000);
         assert_eq!(
             tracks[0].thumbnail_url.as_deref(),
-            Some("https://lh3.googleusercontent.com/cover99=w180-h180-l85-rj")
+            Some("https://lh3.googleusercontent.com/cover99=w300-h300-l90-rj")
         );
     }
 
@@ -4248,5 +5487,159 @@ mod tests {
             s_omv > s_ugc + 150,
             "official OMV must crush slowed/lyrics UGC ({s_omv} vs {s_ugc})"
         );
+    }
+
+    #[test]
+    fn algorithmic_stations_preserve_multilocale_diversity_and_zero_consecutive_artists() {
+        let make =
+            |id: &str, title: &str, artist: &str, album: &str, thumb: &str, liked: bool| Track {
+                id: id.to_string(),
+                title: title.to_string(),
+                artist: artist.to_string(),
+                album: album.to_string(),
+                duration_ms: 210_000,
+                path: None,
+                source: TrackSource::YouTubeMusic,
+                codec: "YT AAC".to_string(),
+                sample_rate: 44_100,
+                bit_depth: 16,
+                bitrate_kbps: 128,
+                isrc: None,
+                spotify_id: None,
+                youtube_video_id: Some(format!("{id:0<11}")),
+                thumbnail_url: Some(thumb.to_string()),
+                replay_gain_db: 0,
+                liked,
+            };
+        let lib = vec![
+            make(
+                "t1",
+                "Kill Bill",
+                "SZA",
+                "SOS",
+                "https://i.scdn.co/image/sza",
+                true,
+            ),
+            make(
+                "t2",
+                "Blinding Lights",
+                "The Weeknd",
+                "After Hours",
+                "https://i.scdn.co/image/wknd",
+                true,
+            ),
+            make(
+                "t3",
+                "Golden Hour",
+                "JVKE",
+                "this is what ____ feels like",
+                "https://i.scdn.co/image/jvke",
+                true,
+            ),
+            make(
+                "t4",
+                "Akad",
+                "Payung Teduh",
+                "Ruang Tunggu",
+                "https://i.scdn.co/image/payung",
+                true,
+            ),
+            make(
+                "t5",
+                "Hati-Hati di Jalan",
+                "Tulus",
+                "Manusia",
+                "https://i.scdn.co/image/tulus",
+                true,
+            ),
+            make(
+                "t6",
+                "Gurenge",
+                "LiSA",
+                "LEO-NiNE",
+                "https://i.scdn.co/image/lisa",
+                true,
+            ),
+            make(
+                "t7",
+                "From The Start",
+                "Laufey",
+                "Bewitched",
+                "https://i.scdn.co/image/laufey",
+                false,
+            ),
+        ];
+        let taste = YtmHomeTasteProfile {
+            top_tracks: lib[..4].to_vec(),
+            top_artists: vec!["SZA".into(), "The Weeknd".into(), "Payung Teduh".into()],
+            recent_searches: Vec::new(),
+        };
+        let stations = build_algorithmic_recommended_stations(&taste, &lib, &[], 6);
+        assert_eq!(stations.len(), 6);
+        // Must surface both English and Indonesian stations in the first 6 cards
+        assert!(stations.iter().any(|s| s.seed_artist == "Payung Teduh"));
+        assert!(stations.iter().any(|s| s.seed_artist == "SZA"));
+        // Every station has "With ..." subtitle and non-repeating adjacent pastel colors
+        for win in stations.windows(2) {
+            assert_ne!(win[0].palette_idx, win[1].palette_idx);
+        }
+        assert!(stations[0].subtitle.starts_with("With "));
+
+        // Interleaver must prevent back-to-back same artist
+        let clumped = vec![
+            make(
+                "a1",
+                "Song 1",
+                "JVKE",
+                "A",
+                "https://i.scdn.co/image/1",
+                false,
+            ),
+            make(
+                "a2",
+                "Song 2",
+                "JVKE",
+                "A",
+                "https://i.scdn.co/image/2",
+                false,
+            ),
+            make(
+                "a3",
+                "Song 3",
+                "JVKE",
+                "A",
+                "https://i.scdn.co/image/3",
+                false,
+            ),
+            make(
+                "b1",
+                "Song 4",
+                "d4vd",
+                "B",
+                "https://i.scdn.co/image/4",
+                false,
+            ),
+            make(
+                "c1",
+                "Song 5",
+                "MAX",
+                "C",
+                "https://i.scdn.co/image/5",
+                false,
+            ),
+        ];
+        let seq = interleave_station_tracks(clumped, 5);
+        assert_eq!(seq.len(), 5);
+        for win in seq.windows(2) {
+            assert_ne!(
+                primary_artist_key(&win[0].artist),
+                primary_artist_key(&win[1].artist)
+            );
+        }
+
+        // Rotation epoch must produce genuinely different leading station order on Refresh
+        let rotated = build_algorithmic_recommended_stations_rotated(&taste, &lib, &[], 6, 1);
+        assert_eq!(rotated.len(), 6);
+        assert_ne!(stations[0].seed_artist, rotated[0].seed_artist);
     }
 }

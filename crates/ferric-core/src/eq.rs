@@ -5,14 +5,16 @@ pub const STANDARD_10_BAND_FREQS: [f32; 10] = [
     31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EqFilterKind {
+    #[default]
     Peaking,
     LowShelf,
     HighShelf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EqBand {
     pub freq_hz: f32,
     pub gain_db: f32,
@@ -21,7 +23,44 @@ pub struct EqBand {
     pub enabled: bool,
 }
 
+impl Default for EqBand {
+    fn default() -> Self {
+        Self {
+            freq_hz: 1_000.0,
+            gain_db: 0.0,
+            q: 1.41,
+            kind: EqFilterKind::Peaking,
+            enabled: true,
+        }
+    }
+}
+
+impl EqBand {
+    pub fn sanitized(&self) -> Self {
+        Self {
+            freq_hz: if self.freq_hz.is_finite() {
+                self.freq_hz.clamp(20.0, 20_000.0)
+            } else {
+                1_000.0
+            },
+            gain_db: if self.gain_db.is_finite() {
+                self.gain_db.clamp(-18.0, 18.0)
+            } else {
+                0.0
+            },
+            q: if self.q.is_finite() {
+                self.q.clamp(0.1, 18.0)
+            } else {
+                1.41
+            },
+            kind: self.kind,
+            enabled: self.enabled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EqConfig {
     pub enabled: bool,
     pub preamp_db: f32,
@@ -80,8 +119,29 @@ impl EqConfig {
         }
     }
 
+    /// Sanitize all numeric fields (`NaN`/`Inf` firewall) and cap band count to prevent DSP blowups.
+    pub fn sanitized(&self) -> Self {
+        const MAX_EQ_BANDS: usize = 32;
+        Self {
+            enabled: self.enabled,
+            preamp_db: if self.preamp_db.is_finite() {
+                self.preamp_db.clamp(-18.0, 18.0)
+            } else {
+                0.0
+            },
+            bands: self
+                .bands
+                .iter()
+                .take(MAX_EQ_BANDS)
+                .map(EqBand::sanitized)
+                .collect(),
+            preset_name: self.preset_name.clone(),
+        }
+    }
+
     /// Parse standard Equalizer APO `.txt` configuration (AutoEq / Peace compatible).
     pub fn from_equalizer_apo(text: &str) -> CoreResult<Self> {
+        const MAX_EQ_BANDS: usize = 32;
         let mut preamp_db = 0.0_f32;
         let mut bands = Vec::new();
 
@@ -95,13 +155,19 @@ impl EqConfig {
                     .split_whitespace()
                     .next()
                     .ok_or_else(|| CoreError::InvalidEqApo(line.to_string()))?;
-                preamp_db = num
+                let parsed_preamp = num
                     .parse::<f32>()
-                    .map_err(|_| CoreError::InvalidEqApo(line.to_string()))?
-                    .clamp(-18.0, 18.0);
+                    .map_err(|_| CoreError::InvalidEqApo(line.to_string()))?;
+                if !parsed_preamp.is_finite() {
+                    return Err(CoreError::InvalidEqApo(line.to_string()));
+                }
+                preamp_db = parsed_preamp.clamp(-18.0, 18.0);
                 continue;
             }
             if let Some(rest) = line.strip_prefix("Filter") {
+                if bands.len() >= MAX_EQ_BANDS {
+                    break;
+                }
                 let Some((_, body)) = rest.split_once(':') else {
                     continue;
                 };
@@ -122,18 +188,24 @@ impl EqConfig {
                 while i + 1 < tokens.len() {
                     match tokens[i] {
                         "Fc" => {
-                            if let Ok(v) = tokens[i + 1].parse::<f32>() {
+                            if let Ok(v) = tokens[i + 1].parse::<f32>()
+                                && v.is_finite()
+                            {
                                 freq_hz = v.clamp(20.0, 20_000.0);
                             }
                         }
                         "Gain" => {
-                            if let Ok(v) = tokens[i + 1].parse::<f32>() {
+                            if let Ok(v) = tokens[i + 1].parse::<f32>()
+                                && v.is_finite()
+                            {
                                 gain_db = v.clamp(-18.0, 18.0);
                             }
                         }
                         "Q" => {
-                            if let Ok(v) = tokens[i + 1].parse::<f32>() {
-                                q = v.clamp(0.1, 16.0);
+                            if let Ok(v) = tokens[i + 1].parse::<f32>()
+                                && v.is_finite()
+                            {
+                                q = v.clamp(0.1, 18.0);
                             }
                         }
                         _ => {}
@@ -193,7 +265,7 @@ impl EqConfig {
     /// Compute the cascaded RBJ biquad magnitude response in dB at `freq_hz`,
     /// including `preamp_db`, clamped to `-18.0..=18.0`.
     pub fn response_db_at(&self, freq_hz: f32, sample_rate: u32) -> f32 {
-        if !self.enabled {
+        if !self.enabled || !freq_hz.is_finite() {
             return 0.0;
         }
         let fs = f64::from(sample_rate.max(8_000));
@@ -205,19 +277,28 @@ impl EqConfig {
         let cos_2w = (2.0 * w).cos();
         let sin_2w = (2.0 * w).sin();
 
-        let mut total_db = f64::from(self.preamp_db);
+        let mut total_db = if self.preamp_db.is_finite() {
+            f64::from(self.preamp_db.clamp(-18.0, 18.0))
+        } else {
+            0.0
+        };
 
-        for band in &self.bands {
-            if !band.enabled || band.gain_db.abs() < 1e-4 {
+        for band in self.bands.iter().take(32) {
+            if !band.enabled
+                || !band.gain_db.is_finite()
+                || !band.freq_hz.is_finite()
+                || !band.q.is_finite()
+                || band.gain_db.abs() < 1e-4
+            {
                 continue;
             }
             let fc = f64::from(band.freq_hz).clamp(20.0, nyquist);
-            let q = f64::from(band.q).clamp(0.1, 16.0);
+            let q = f64::from(band.q).clamp(0.1, 18.0);
             let w0 = 2.0 * std::f64::consts::PI * fc / fs;
             let omega_s = w0.sin();
             let omega_c = w0.cos();
             let alpha = omega_s / (2.0 * q);
-            let a = 10.0_f64.powf(f64::from(band.gain_db) / 40.0);
+            let a = 10.0_f64.powf(f64::from(band.gain_db.clamp(-18.0, 18.0)) / 40.0);
             let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
 
             let (b0, b1, b2, a1, a2) = match band.kind {

@@ -43,26 +43,44 @@ pub struct AudioTelemetry {
     pub is_crossfading: AtomicBool,
     /// Lock-free 8-band visualizer energy levels (`0..=1000`).
     pub spectrum_bins: [AtomicU32; 8],
-    pub(crate) flush_ring: AtomicBool,
+    /// Monotonic epoch incremented on seek/load/stop so the RT callback drops stale frames
+    /// without a race between `flush_ring` and newly pushed samples.
+    pub(crate) active_epoch: AtomicU32,
+    /// Set to `true` when WASAPI/cpal reports a stream disconnect or device stall.
+    pub(crate) device_lost: AtomicBool,
+    /// Incremented by the audio output callback on every render burst to detect silent stalls.
+    pub(crate) cb_heartbeat: AtomicU64,
 }
 
 impl AudioTelemetry {
     pub fn snapshot(&self) -> TelemetrySnapshot {
+        // Acquire-load `track_finished_seq` FIRST so subsequent loads observe the metadata and
+        // `auto_transitioned` writes published before `track_finished_seq.fetch_add(1, AcqRel)`.
+        let track_finished_seq = self.track_finished_seq.load(Ordering::Acquire);
+        let auto_transitioned = self.auto_transitioned.load(Ordering::Acquire);
+        let is_playing = self.is_playing.load(Ordering::Acquire);
         let mut bins = [0_u32; 8];
         for (i, slot) in self.spectrum_bins.iter().enumerate() {
             bins[i] = slot.load(Ordering::Relaxed);
         }
         TelemetrySnapshot {
-            is_playing: self.is_playing.load(Ordering::Acquire),
+            is_playing,
             position_ms: self.position_ms.load(Ordering::Relaxed),
             duration_ms: self.duration_ms.load(Ordering::Relaxed),
             sample_rate: self.sample_rate.load(Ordering::Relaxed),
             output_rate: self.output_rate.load(Ordering::Relaxed),
-            track_finished_seq: self.track_finished_seq.load(Ordering::Acquire),
-            auto_transitioned: self.auto_transitioned.load(Ordering::Acquire),
+            track_finished_seq,
+            auto_transitioned,
             is_crossfading: self.is_crossfading.load(Ordering::Relaxed),
             spectrum_bins: bins,
         }
+    }
+
+    #[inline]
+    pub(crate) fn bump_epoch(&self) -> u32 {
+        self.active_epoch
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
     }
 
     fn store_spectrum(&self, bins: [u32; 8]) {
@@ -115,148 +133,180 @@ pub enum EngineCommand {
     SetEq(EqConfig),
     SetCrossfadeMs(u32),
     SetDspSettings(PlaybackDspSettings),
+    #[doc(hidden)]
+    ReplaceOutputRing {
+        producer: rtrb::Producer<(u32, [f32; 2])>,
+        out_rate: u32,
+    },
     Shutdown,
+}
+
+#[inline]
+fn pop_epoch_frame(
+    consumer: &mut rtrb::Consumer<(u32, [f32; 2])>,
+    active_epoch: u32,
+    max_skip: usize,
+) -> [f32; 2] {
+    for _ in 0..max_skip {
+        match consumer.pop() {
+            Ok((ep, frame)) if ep == active_epoch => return frame,
+            Ok(_) => continue,
+            Err(_) => return [0.0, 0.0],
+        }
+    }
+    [0.0, 0.0]
+}
+
+type RingFrame = (u32, [f32; 2]);
+type OutputStreamBundle = (cpal::Stream, rtrb::Producer<RingFrame>, u32);
+
+fn build_output_stream_and_producer(
+    telemetry: &Arc<AudioTelemetry>,
+) -> AudioResult<OutputStreamBundle> {
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or(AudioError::NoOutputDevice)?;
+    let default_cfg = device
+        .default_output_config()
+        .map_err(|e| AudioError::Device(e.to_string()))?;
+
+    let out_rate = default_cfg.sample_rate().max(8_000);
+    let out_channels = usize::from(default_cfg.channels()).max(1);
+    let sample_format = default_cfg.sample_format();
+    let stream_cfg: cpal::StreamConfig = default_cfg.into();
+
+    // ~260 ms wait-free SPSC ring buffer of epoch-tagged atomic stereo `[L, R]` frames.
+    let ring_frames = ((out_rate as usize * 260) / 1000).max(4096);
+    let (producer, mut consumer) = rtrb::RingBuffer::<(u32, [f32; 2])>::new(ring_frames);
+
+    telemetry.output_rate.store(out_rate, Ordering::Relaxed);
+    let cb_telemetry = Arc::clone(telemetry);
+    let err_telemetry = Arc::clone(telemetry);
+
+    let err_fn = move |_err| {
+        #[cfg(debug_assertions)]
+        eprintln!("ferric-audio stream error: {_err}");
+        err_telemetry.device_lost.store(true, Ordering::Release);
+    };
+
+    let max_skip = ring_frames.min(16_384);
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device.build_output_stream(
+            stream_cfg,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                cb_telemetry.cb_heartbeat.fetch_add(1, Ordering::Relaxed);
+                let cur_epoch = cb_telemetry.active_epoch.load(Ordering::Acquire);
+                for frame in data.chunks_exact_mut(out_channels) {
+                    let [l, r] = pop_epoch_frame(&mut consumer, cur_epoch, max_skip);
+                    if out_channels == 1 {
+                        frame[0] = 0.5 * (l + r);
+                    } else {
+                        frame[0] = l;
+                        frame[1] = r;
+                        for ch in frame.iter_mut().skip(2) {
+                            *ch = 0.0;
+                        }
+                    }
+                }
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I16 => device.build_output_stream(
+            stream_cfg,
+            move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                cb_telemetry.cb_heartbeat.fetch_add(1, Ordering::Relaxed);
+                let cur_epoch = cb_telemetry.active_epoch.load(Ordering::Acquire);
+                for frame in data.chunks_exact_mut(out_channels) {
+                    let [l, r] = pop_epoch_frame(&mut consumer, cur_epoch, max_skip);
+                    let to_i16 = |s: f32| (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+                    if out_channels == 1 {
+                        frame[0] = to_i16(0.5 * (l + r));
+                    } else {
+                        frame[0] = to_i16(l);
+                        frame[1] = to_i16(r);
+                        for ch in frame.iter_mut().skip(2) {
+                            *ch = 0;
+                        }
+                    }
+                }
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I32 => device.build_output_stream(
+            stream_cfg,
+            move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
+                cb_telemetry.cb_heartbeat.fetch_add(1, Ordering::Relaxed);
+                let cur_epoch = cb_telemetry.active_epoch.load(Ordering::Acquire);
+                for frame in data.chunks_exact_mut(out_channels) {
+                    let [l, r] = pop_epoch_frame(&mut consumer, cur_epoch, max_skip);
+                    let to_i32 =
+                        |s: f32| (f64::from(s.clamp(-1.0, 1.0)) * 2_147_483_647.0).round() as i32;
+                    if out_channels == 1 {
+                        frame[0] = to_i32(0.5 * (l + r));
+                    } else {
+                        frame[0] = to_i32(l);
+                        frame[1] = to_i32(r);
+                        for ch in frame.iter_mut().skip(2) {
+                            *ch = 0;
+                        }
+                    }
+                }
+            },
+            err_fn,
+            None,
+        ),
+        _ => device.build_output_stream(
+            stream_cfg,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                cb_telemetry.cb_heartbeat.fetch_add(1, Ordering::Relaxed);
+                let cur_epoch = cb_telemetry.active_epoch.load(Ordering::Acquire);
+                for frame in data.chunks_exact_mut(out_channels) {
+                    let [l, r] = pop_epoch_frame(&mut consumer, cur_epoch, max_skip);
+                    if out_channels == 1 {
+                        frame[0] = 0.5 * (l + r);
+                    } else {
+                        frame[0] = l;
+                        frame[1] = r;
+                        for ch in frame.iter_mut().skip(2) {
+                            *ch = 0.0;
+                        }
+                    }
+                }
+            },
+            err_fn,
+            None,
+        ),
+    }
+    .map_err(|e| AudioError::Device(e.to_string()))?;
+
+    stream
+        .play()
+        .map_err(|e| AudioError::Device(e.to_string()))?;
+
+    Ok((stream, producer, out_rate))
 }
 
 pub struct AudioEngine {
     cmd_tx: Sender<EngineCommand>,
     telemetry: Arc<AudioTelemetry>,
-    _output_stream: Option<cpal::Stream>,
+    output_stream: Option<cpal::Stream>,
+    decode_handle: Option<thread::JoinHandle<()>>,
+    headless: bool,
+    last_recovery_attempt: Option<std::time::Instant>,
 }
 
 impl AudioEngine {
     /// Start the real-time WASAPI/cpal output stream and dedicated dual-deck decode+DSP OS thread.
     pub fn start(initial_eq: EqConfig) -> AudioResult<Self> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or(AudioError::NoOutputDevice)?;
-        let default_cfg = device
-            .default_output_config()
-            .map_err(|e| AudioError::Device(e.to_string()))?;
-
-        let out_rate = default_cfg.sample_rate();
-        let out_channels = usize::from(default_cfg.channels()).max(1);
-        let sample_format = default_cfg.sample_format();
-        let stream_cfg: cpal::StreamConfig = default_cfg.into();
-
-        // ~260 ms wait-free SPSC ring buffer of atomic stereo `[L, R]` frames — eliminates
-        // L/R channel desync and absorbs disk/Deck-B pre-open jitter with zero underrun crackles.
-        let ring_frames = ((out_rate as usize * 260) / 1000).max(4096);
-        let (producer, mut consumer) = rtrb::RingBuffer::<[f32; 2]>::new(ring_frames);
-
         let telemetry = Arc::new(AudioTelemetry::default());
-        telemetry.output_rate.store(out_rate, Ordering::Relaxed);
-        let cb_telemetry = Arc::clone(&telemetry);
-
-        let err_fn = |_err| {
-            #[cfg(debug_assertions)]
-            eprintln!("ferric-audio stream error: {_err}");
-        };
-
-        let stream = match sample_format {
-            cpal::SampleFormat::F32 => device.build_output_stream(
-                stream_cfg,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
-                        while consumer.pop().is_ok() {}
-                    }
-                    for frame in data.chunks_exact_mut(out_channels) {
-                        let [l, r] = consumer.pop().unwrap_or([0.0, 0.0]);
-                        if out_channels == 1 {
-                            frame[0] = 0.5 * (l + r);
-                        } else {
-                            frame[0] = l;
-                            frame[1] = r;
-                            for ch in frame.iter_mut().skip(2) {
-                                *ch = 0.0;
-                            }
-                        }
-                    }
-                },
-                err_fn,
-                None,
-            ),
-            cpal::SampleFormat::I16 => device.build_output_stream(
-                stream_cfg,
-                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
-                        while consumer.pop().is_ok() {}
-                    }
-                    for frame in data.chunks_exact_mut(out_channels) {
-                        let [l, r] = consumer.pop().unwrap_or([0.0, 0.0]);
-                        let to_i16 = |s: f32| (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-                        if out_channels == 1 {
-                            frame[0] = to_i16(0.5 * (l + r));
-                        } else {
-                            frame[0] = to_i16(l);
-                            frame[1] = to_i16(r);
-                            for ch in frame.iter_mut().skip(2) {
-                                *ch = 0;
-                            }
-                        }
-                    }
-                },
-                err_fn,
-                None,
-            ),
-            cpal::SampleFormat::I32 => device.build_output_stream(
-                stream_cfg,
-                move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
-                    if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
-                        while consumer.pop().is_ok() {}
-                    }
-                    for frame in data.chunks_exact_mut(out_channels) {
-                        let [l, r] = consumer.pop().unwrap_or([0.0, 0.0]);
-                        let to_i32 = |s: f32| {
-                            (f64::from(s.clamp(-1.0, 1.0)) * 2_147_483_647.0).round() as i32
-                        };
-                        if out_channels == 1 {
-                            frame[0] = to_i32(0.5 * (l + r));
-                        } else {
-                            frame[0] = to_i32(l);
-                            frame[1] = to_i32(r);
-                            for ch in frame.iter_mut().skip(2) {
-                                *ch = 0;
-                            }
-                        }
-                    }
-                },
-                err_fn,
-                None,
-            ),
-            _ => device.build_output_stream(
-                stream_cfg,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if cb_telemetry.flush_ring.swap(false, Ordering::AcqRel) {
-                        while consumer.pop().is_ok() {}
-                    }
-                    for frame in data.chunks_exact_mut(out_channels) {
-                        let [l, r] = consumer.pop().unwrap_or([0.0, 0.0]);
-                        if out_channels == 1 {
-                            frame[0] = 0.5 * (l + r);
-                        } else {
-                            frame[0] = l;
-                            frame[1] = r;
-                            for ch in frame.iter_mut().skip(2) {
-                                *ch = 0.0;
-                            }
-                        }
-                    }
-                },
-                err_fn,
-                None,
-            ),
-        }
-        .map_err(|e| AudioError::Device(e.to_string()))?;
-
-        stream
-            .play()
-            .map_err(|e| AudioError::Device(e.to_string()))?;
+        let (stream, producer, out_rate) = build_output_stream_and_producer(&telemetry)?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let thread_telemetry = Arc::clone(&telemetry);
-        thread::Builder::new()
+        let handle = thread::Builder::new()
             .name("ferric-audio-dsp".to_string())
             .spawn(move || {
                 decode_loop(
@@ -272,7 +322,10 @@ impl AudioEngine {
         Ok(Self {
             cmd_tx,
             telemetry,
-            _output_stream: Some(stream),
+            output_stream: Some(stream),
+            decode_handle: Some(handle),
+            headless: false,
+            last_recovery_attempt: None,
         })
     }
 
@@ -282,16 +335,52 @@ impl AudioEngine {
         let telemetry = Arc::new(AudioTelemetry::default());
         telemetry.output_rate.store(48_000, Ordering::Relaxed);
         let thread_telemetry = Arc::clone(&telemetry);
-        let (producer, _consumer) = rtrb::RingBuffer::<[f32; 2]>::new(4096);
-        let _ = thread::Builder::new()
+        let (producer, _consumer) = rtrb::RingBuffer::<(u32, [f32; 2])>::new(4096);
+        let handle = thread::Builder::new()
             .name("ferric-audio-headless".to_string())
             .spawn(move || {
                 decode_loop(cmd_rx, producer, 48_000, initial_eq, thread_telemetry, true);
-            });
+            })
+            .ok();
         Self {
             cmd_tx,
             telemetry,
-            _output_stream: None,
+            output_stream: None,
+            decode_handle: handle,
+            headless: true,
+            last_recovery_attempt: None,
+        }
+    }
+
+    /// Detect WASAPI audio device disconnects/stalls (e.g., USB DAC or Bluetooth headset unplugged)
+    /// and rebuild the output stream on the active default device without wedging the decode thread.
+    pub fn poll_device_recovery(&mut self) -> bool {
+        if self.headless || !self.telemetry.device_lost.load(Ordering::Acquire) {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last_recovery_attempt
+            && now.duration_since(prev) < Duration::from_millis(1_500)
+        {
+            return false;
+        }
+        self.last_recovery_attempt = Some(now);
+        self.output_stream = None;
+        match build_output_stream_and_producer(&self.telemetry) {
+            Ok((new_stream, new_producer, new_rate)) => {
+                self.output_stream = Some(new_stream);
+                self.telemetry.device_lost.store(false, Ordering::Release);
+                let _ = self.cmd_tx.send(EngineCommand::ReplaceOutputRing {
+                    producer: new_producer,
+                    out_rate: new_rate,
+                });
+                true
+            }
+            Err(_) => {
+                // No output device currently available — pause playback cleanly so UI stays responsive.
+                self.telemetry.is_playing.store(false, Ordering::Release);
+                false
+            }
         }
     }
 
@@ -311,6 +400,10 @@ impl AudioEngine {
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         let _ = self.cmd_tx.send(EngineCommand::Shutdown);
+        self.output_stream = None;
+        if let Some(handle) = self.decode_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -420,11 +513,21 @@ struct ActiveDeck {
     pending_stereo: Vec<f32>,
     pending_offset: usize,
     pos_ms_f64: f64,
+    replay_gain_db: i32,
     replay_gain_linear: f32,
     last_chunk_rms: f32,
     quiet_outro_frames: usize,
     eof: bool,
     tail_flushed: bool,
+}
+
+#[inline]
+fn safe_speed(speed: f32) -> f32 {
+    if speed.is_finite() {
+        speed.clamp(0.5, 2.0)
+    } else {
+        1.0
+    }
 }
 
 impl ActiveDeck {
@@ -476,7 +579,9 @@ impl ActiveDeck {
                 .calc_duration(SymDuration::from(frames))
                 .map(|t| t.as_millis().max(0) as u64)
                 .unwrap_or(0),
-            (_, Some(frames)) if sample_rate > 0 => (frames * 1000) / u64::from(sample_rate),
+            (_, Some(frames)) if sample_rate > 0 => {
+                frames.saturating_mul(1_000) / u64::from(sample_rate)
+            }
             _ => 0,
         };
         let duration_ms = if probed_duration_ms > 0 {
@@ -489,7 +594,7 @@ impl ActiveDeck {
             .make_audio_decoder(&codec_params, &AudioDecoderOptions::default())
             .map_err(|e| AudioError::Decode(e.to_string()))?;
 
-        let clamped_speed = playback_speed.clamp(0.5, 2.0);
+        let clamped_speed = safe_speed(playback_speed);
         let needs_resampler = sample_rate != out_rate || (clamped_speed - 1.0).abs() > 1e-4;
         let resampler = if needs_resampler {
             StereoResampler::new(sample_rate, out_rate, clamped_speed).ok()
@@ -513,6 +618,7 @@ impl ActiveDeck {
             pending_stereo: Vec::with_capacity(8192),
             pending_offset: 0,
             pos_ms_f64: 0.0,
+            replay_gain_db: rg_clamped,
             replay_gain_linear,
             last_chunk_rms: 1.0,
             quiet_outro_frames: 0,
@@ -522,7 +628,7 @@ impl ActiveDeck {
     }
 
     fn set_playback_speed(&mut self, out_rate: u32, speed: f32) {
-        let clamped = speed.clamp(0.5, 2.0);
+        let clamped = safe_speed(speed);
         if let Some(res) = &mut self.resampler {
             res.set_speed(clamped);
         } else if (clamped - 1.0).abs() > 1e-4
@@ -530,6 +636,16 @@ impl ActiveDeck {
         {
             self.resampler = Some(res);
         }
+    }
+
+    fn update_output_rate(&mut self, out_rate: u32, speed: f32) {
+        let clamped = safe_speed(speed);
+        let needs_resampler = self.sample_rate != out_rate || (clamped - 1.0).abs() > 1e-4;
+        self.resampler = if needs_resampler {
+            StereoResampler::new(self.sample_rate, out_rate, clamped).ok()
+        } else {
+            None
+        };
     }
 
     fn seek_ms(&mut self, target_ms: u64) -> AudioResult<u64> {
@@ -564,7 +680,11 @@ impl ActiveDeck {
 
     #[inline]
     fn current_pos_ms(&self) -> u64 {
-        let raw = self.pos_ms_f64.max(0.0).round() as u64;
+        let raw = if self.pos_ms_f64.is_finite() {
+            self.pos_ms_f64.max(0.0).round() as u64
+        } else {
+            0
+        };
         if self.duration_ms > 0 {
             raw.min(self.duration_ms)
         } else {
@@ -596,7 +716,7 @@ impl ActiveDeck {
 
         let max_trim_frames = ((out_rate.max(8_000) as f32) * max_trim_secs).round() as usize;
         let step_ms =
-            (1_000.0 * f64::from(playback_speed.clamp(0.5, 2.0))) / f64::from(out_rate.max(8_000));
+            (1_000.0 * f64::from(safe_speed(playback_speed))) / f64::from(out_rate.max(8_000));
         let mut trimmed = 0usize;
 
         while trimmed < max_trim_frames {
@@ -642,7 +762,7 @@ impl ActiveDeck {
         self.pending_offset += 2;
 
         let step_ms =
-            (1_000.0 * f64::from(playback_speed.clamp(0.5, 2.0))) / f64::from(out_rate.max(8_000));
+            (1_000.0 * f64::from(safe_speed(playback_speed))) / f64::from(out_rate.max(8_000));
         self.pos_ms_f64 += step_ms;
 
         if self.last_chunk_rms < 0.003 && l.abs() < 0.004 && r.abs() < 0.004 {
@@ -677,6 +797,11 @@ impl ActiveDeck {
             return false;
         }
 
+        const MAX_CONSECUTIVE_DECODE_ERRORS: usize = 64;
+        const MAX_CONSECUTIVE_RESETS: usize = 8;
+        let mut consecutive_decode_errors = 0usize;
+        let mut consecutive_resets = 0usize;
+
         loop {
             let packet = match self.format.next_packet() {
                 Ok(Some(pkt)) => pkt,
@@ -691,6 +816,11 @@ impl ActiveDeck {
                     return self.decode_next_chunk(raw_buf);
                 }
                 Err(SymphoniaError::ResetRequired) => {
+                    consecutive_resets += 1;
+                    if consecutive_resets > MAX_CONSECUTIVE_RESETS {
+                        self.eof = true;
+                        return false;
+                    }
                     self.decoder.reset();
                     continue;
                 }
@@ -706,6 +836,8 @@ impl ActiveDeck {
 
             match self.decoder.decode(&packet) {
                 Ok(audio_slice) => {
+                    consecutive_decode_errors = 0;
+                    consecutive_resets = 0;
                     if audio_slice.frames() == 0 {
                         continue;
                     }
@@ -750,7 +882,14 @@ impl ActiveDeck {
                         return true;
                     }
                 }
-                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(SymphoniaError::DecodeError(_)) => {
+                    consecutive_decode_errors += 1;
+                    if consecutive_decode_errors > MAX_CONSECUTIVE_DECODE_ERRORS {
+                        self.eof = true;
+                        return false;
+                    }
+                    continue;
+                }
                 Err(_) => {
                     self.eof = true;
                     return false;
@@ -978,7 +1117,7 @@ impl DecodeRuntime {
                         self.dsp.playback_speed,
                     );
                 }
-                telemetry.flush_ring.store(true, Ordering::Release);
+                telemetry.bump_epoch();
                 telemetry.auto_transitioned.store(false, Ordering::Release);
                 telemetry.is_crossfading.store(false, Ordering::Relaxed);
                 telemetry
@@ -1105,9 +1244,27 @@ impl DecodeRuntime {
         same_album_consecutive: bool,
         replay_gain_db: i32,
         fallback_duration_ms: u64,
+        telemetry: &AudioTelemetry,
     ) {
+        let abort_pre_handoff_if_mismatched = |rt: &mut Self, incoming: Option<&PathBuf>| {
+            if let Some(xf) = rt.crossfade_state
+                && !xf.is_manual_switch
+                && !xf.ui_handed_off
+            {
+                let same_target = incoming
+                    .zip(rt.deck_b.as_ref())
+                    .is_some_and(|(p, db)| db.path == *p);
+                if !same_target {
+                    rt.crossfade_state = None;
+                    rt.deck_b = None;
+                    rt.bass_swap.reset();
+                    telemetry.is_crossfading.store(false, Ordering::Relaxed);
+                }
+            }
+        };
         match path {
             Some(p) => {
+                abort_pre_handoff_if_mismatched(self, Some(&p));
                 if self.crossfade_state.is_none()
                     && let Some(existing_b) = &self.deck_b
                     && existing_b.path == p
@@ -1127,6 +1284,7 @@ impl DecodeRuntime {
                 });
             }
             None => {
+                abort_pre_handoff_if_mismatched(self, None);
                 self.queued_next = None;
                 if self.crossfade_state.is_none() {
                     self.deck_b = None;
@@ -1150,8 +1308,8 @@ impl DecodeRuntime {
 
 fn decode_loop(
     cmd_rx: Receiver<EngineCommand>,
-    mut producer: rtrb::Producer<[f32; 2]>,
-    out_rate: u32,
+    mut producer: rtrb::Producer<(u32, [f32; 2])>,
+    mut out_rate: u32,
     mut eq_config: EqConfig,
     telemetry: Arc<AudioTelemetry>,
     headless: bool,
@@ -1162,6 +1320,8 @@ fn decode_loop(
     let mut dsp_scratch = Vec::with_capacity(2048);
 
     let mut pending_cmd: Option<EngineCommand> = None;
+    let mut last_hb = telemetry.cb_heartbeat.load(Ordering::Relaxed);
+    let mut stall_ticks = 0u32;
 
     loop {
         while let Some(cmd) = pending_cmd.take().or_else(|| cmd_rx.try_recv().ok()) {
@@ -1198,7 +1358,7 @@ fn decode_loop(
                     );
                 }
                 EngineCommand::QueueNext(path) => {
-                    rt.set_queued_next(path, false, 0, 0);
+                    rt.set_queued_next(path, false, 0, 0, &telemetry);
                 }
                 EngineCommand::QueueNextTrack {
                     path,
@@ -1211,6 +1371,7 @@ fn decode_loop(
                         same_album_consecutive,
                         replay_gain_db,
                         fallback_duration_ms,
+                        &telemetry,
                     );
                 }
                 EngineCommand::Play => {
@@ -1277,7 +1438,7 @@ fn decode_loop(
                     }
                 }
                 EngineCommand::Stop => {
-                    telemetry.flush_ring.store(true, Ordering::Release);
+                    telemetry.bump_epoch();
                     telemetry.is_playing.store(false, Ordering::Release);
                     telemetry.is_crossfading.store(false, Ordering::Relaxed);
                     telemetry.auto_transitioned.store(false, Ordering::Release);
@@ -1291,16 +1452,22 @@ fn decode_loop(
                     rt.bass_swap.reset();
                 }
                 EngineCommand::SeekMs(ms) => {
-                    if rt
+                    let seek_deck_b = rt
                         .crossfade_state
                         .is_some_and(|xf| xf.ui_handed_off || xf.is_manual_switch)
-                    {
-                        rt.promote_deck_b(&telemetry, false);
-                    }
-                    if let Some(deck) = &mut rt.deck_a
-                        && let Ok(actual) = deck.seek_ms(ms)
-                    {
-                        telemetry.flush_ring.store(true, Ordering::Release);
+                        && rt.deck_b.is_some();
+                    let seek_res = if seek_deck_b {
+                        rt.deck_b
+                            .as_mut()
+                            .and_then(|db| db.seek_ms(ms).ok())
+                            .inspect(|_| {
+                                rt.promote_deck_b(&telemetry, false);
+                            })
+                    } else {
+                        rt.deck_a.as_mut().and_then(|da| da.seek_ms(ms).ok())
+                    };
+                    if let Some(actual) = seek_res {
+                        telemetry.bump_epoch();
                         telemetry.position_ms.store(actual, Ordering::Relaxed);
                         rt.eq.reset();
                         if rt.crossfade_state.is_some() {
@@ -1311,7 +1478,7 @@ fn decode_loop(
                                 rt.queued_next = Some(QueuedTrackSpec {
                                     path: old_b.path,
                                     same_album_consecutive: rt.deck_b_same_album,
-                                    replay_gain_db: 0,
+                                    replay_gain_db: old_b.replay_gain_db,
                                     fallback_duration_ms: old_b.duration_ms,
                                 });
                             }
@@ -1331,10 +1498,12 @@ fn decode_loop(
                     }
                 }
                 EngineCommand::SetVolume(v) => {
-                    target_volume = v.clamp(0.0, 1.5);
+                    if v.is_finite() {
+                        target_volume = v.clamp(0.0, 1.5);
+                    }
                 }
                 EngineCommand::SetEq(cfg) => {
-                    eq_config = cfg;
+                    eq_config = cfg.sanitized();
                     rt.eq.apply_config(&eq_config);
                 }
                 EngineCommand::SetCrossfadeMs(ms) => {
@@ -1351,6 +1520,27 @@ fn decode_loop(
                         }
                         if let Some(db) = &mut rt.deck_b {
                             db.set_playback_speed(out_rate, rt.dsp.playback_speed);
+                        }
+                    }
+                }
+                EngineCommand::ReplaceOutputRing {
+                    producer: new_producer,
+                    out_rate: new_rate,
+                } => {
+                    producer = new_producer;
+                    stall_ticks = 0;
+                    last_hb = telemetry.cb_heartbeat.load(Ordering::Relaxed);
+                    telemetry.bump_epoch();
+                    if new_rate != out_rate {
+                        out_rate = new_rate.max(8_000);
+                        rt.eq.set_sample_rate(out_rate, &eq_config);
+                        rt.bass_swap.set_sample_rate(out_rate);
+                        rt.spectrum = SpectrumAnalyzer8::new(out_rate);
+                        if let Some(da) = &mut rt.deck_a {
+                            da.update_output_rate(out_rate, rt.dsp.playback_speed);
+                        }
+                        if let Some(db) = &mut rt.deck_b {
+                            db.update_output_rate(out_rate, rt.dsp.playback_speed);
                         }
                     }
                 }
@@ -1380,9 +1570,23 @@ fn decode_loop(
         } else {
             let slots = producer.slots();
             if slots < 256 {
+                let hb = telemetry.cb_heartbeat.load(Ordering::Relaxed);
+                if hb == last_hb {
+                    stall_ticks = stall_ticks.saturating_add(1);
+                    // ~450 ms with zero output callback progress => WASAPI stream silently died.
+                    if stall_ticks >= 150 {
+                        telemetry.device_lost.store(true, Ordering::Release);
+                        stall_ticks = 0;
+                    }
+                } else {
+                    last_hb = hb;
+                    stall_ticks = 0;
+                }
                 thread::sleep(Duration::from_millis(3));
                 continue;
             }
+            stall_ticks = 0;
+            last_hb = telemetry.cb_heartbeat.load(Ordering::Relaxed);
             slots.min(1024)
         };
 
@@ -1441,7 +1645,7 @@ fn decode_loop(
             let raw_xfade_ms = if album_locked { 0 } else { rt.dsp.crossfade_ms };
             // Cap overlap to at most 1/3 of track length so short tracks/intros never skip on frame 0.
             let eff_xfade_ms = if da.duration_ms > 0 {
-                raw_xfade_ms.min((da.duration_ms / 3) as u32)
+                raw_xfade_ms.min(u32::try_from(da.duration_ms / 3).unwrap_or(u32::MAX))
             } else {
                 raw_xfade_ms
             };
@@ -1643,8 +1847,9 @@ fn decode_loop(
             );
             telemetry.store_spectrum(rt.spectrum.analyze_interleaved(&dsp_scratch));
             if !headless {
+                let push_epoch = telemetry.active_epoch.load(Ordering::Acquire);
                 for &[l, r] in dsp_scratch.as_chunks::<2>().0 {
-                    if producer.push([l, r]).is_err() {
+                    if producer.push((push_epoch, [l, r])).is_err() {
                         break;
                     }
                 }
@@ -1756,7 +1961,7 @@ mod tests {
         let mut saw_auto_xfade = false;
         let mut handed_off_during_xfade = false;
         let mut promoted = false;
-        for _ in 0..450 {
+        for _ in 0..900 {
             let s = engine.telemetry();
             if s.is_crossfading {
                 saw_auto_xfade = true;

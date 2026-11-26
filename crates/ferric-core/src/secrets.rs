@@ -1,14 +1,35 @@
 //! OS-backed cryptographic randomness and Windows DPAPI secret protection at rest.
 //! Zero external crate dependencies: binds directly to `bcrypt.dll` and `crypt32.dll` on Windows.
 
+use crate::{CoreError, CoreResult};
+use std::sync::atomic::{Ordering, compiler_fence};
+
 pub const DPAPI_PREFIX: &str = "dpapi:v1:";
 #[cfg(target_os = "windows")]
 const DPAPI_ENTROPY: &[u8] = b"Ferric.Accounts.DPAPI.v1";
 
 const B64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// Best-effort volatile memory scrub with compiler barrier so dead-store elimination cannot strip it.
+pub fn zeroize_bytes(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        // SAFETY: `b` is a valid mutable reference to an element of `buf`.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
+/// Scrub the backing heap bytes of a `String` before clearing it.
+pub fn zeroize_string(s: &mut String) {
+    if !s.is_empty() {
+        // SAFETY: Writing all 0x00 bytes is valid UTF-8, and `clear()` immediately resets length to 0.
+        unsafe { zeroize_bytes(s.as_bytes_mut()) };
+        s.clear();
+    }
+}
+
 /// Fill `out` with cryptographically secure random bytes from the OS CSPRNG
-/// (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix).
+/// (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix). Fails closed on OS CSPRNG failure.
 pub fn csprng_fill(out: &mut [u8]) {
     if out.is_empty() {
         return;
@@ -26,44 +47,37 @@ pub fn csprng_fill(out: &mut [u8]) {
             ) -> i32;
         }
         const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
-        if let Ok(len) = u32::try_from(out.len()) {
-            // SAFETY: `out` is a valid mutable byte slice of `len` bytes.
+        for chunk in out.chunks_mut(u32::MAX as usize) {
+            let len = chunk.len() as u32;
+            // SAFETY: `chunk` is a valid mutable byte slice of `len` bytes.
             let status = unsafe {
                 BCryptGenRandom(
                     std::ptr::null_mut(),
-                    out.as_mut_ptr(),
+                    chunk.as_mut_ptr(),
                     len,
                     BCRYPT_USE_SYSTEM_PREFERRED_RNG,
                 )
             };
-            if status == 0 {
-                return;
-            }
+            assert!(
+                status == 0,
+                "OS CSPRNG (BCryptGenRandom) failed with NTSTATUS 0x{:08x}",
+                status as u32
+            );
         }
     }
 
     #[cfg(unix)]
     {
         use std::io::Read;
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom")
-            && f.read_exact(out).is_ok()
-        {
-            return;
-        }
+        let mut f =
+            std::fs::File::open("/dev/urandom").expect("OS CSPRNG (/dev/urandom) failed to open");
+        f.read_exact(out)
+            .expect("OS CSPRNG (/dev/urandom) failed to fill buffer");
     }
 
-    // Emergency fallback only if OS RNG call unexpectedly fails: mix RandomState (OS-seeded) per block.
-    use std::collections::hash_map::RandomState;
-    use std::hash::BuildHasher;
-    let mut written = 0usize;
-    let mut round = 0u64;
-    while written < out.len() {
-        let state = RandomState::new();
-        let block = state.hash_one(round).to_le_bytes();
-        let take = (out.len() - written).min(block.len());
-        out[written..written + take].copy_from_slice(&block[..take]);
-        written += take;
-        round = round.wrapping_add(1);
+    #[cfg(not(any(target_os = "windows", unix)))]
+    {
+        panic!("OS CSPRNG is unavailable on this platform");
     }
 }
 
@@ -77,6 +91,7 @@ pub fn csprng_hex(num_bytes: usize) -> String {
         out.push(char::from(HEX[usize::from(b >> 4)]));
         out.push(char::from(HEX[usize::from(b & 0x0F)]));
     }
+    zeroize_bytes(&mut raw);
     out
 }
 
@@ -225,10 +240,8 @@ mod win_dpapi {
                 &mut out_blob,
             )
         };
-        for b in &mut in_copy {
-            // SAFETY: Zeroize temporary plaintext buffer in place.
-            unsafe { ptr::write_volatile(b, 0) };
-        }
+        super::zeroize_bytes(&mut in_copy);
+        super::zeroize_bytes(&mut entropy);
         if ok == 0 || out_blob.pb_data.is_null() {
             return Err("DPAPI CryptProtectData failed".to_string());
         }
@@ -271,6 +284,7 @@ mod win_dpapi {
                 &mut out_blob,
             )
         };
+        super::zeroize_bytes(&mut entropy);
         if ok == 0 || out_blob.pb_data.is_null() {
             return Err("DPAPI CryptUnprotectData failed".to_string());
         }
@@ -278,9 +292,7 @@ mod win_dpapi {
         let plain = unsafe {
             let slice = std::slice::from_raw_parts_mut(out_blob.pb_data, out_blob.cb_data as usize);
             let out = slice.to_vec();
-            for b in slice {
-                ptr::write_volatile(b, 0);
-            }
+            super::zeroize_bytes(slice);
             let _ = LocalFree(out_blob.pb_data.cast());
             out
         };
@@ -288,23 +300,94 @@ mod win_dpapi {
     }
 }
 
+/// Outcome of decrypting a stored secret string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnprotectOutcome {
+    pub plaintext: String,
+    pub needs_migration: bool,
+    pub failed: bool,
+}
+
 /// Encrypt a non-empty secret string for storage at rest using per-user Windows DPAPI.
-/// On non-Windows targets, returns the string unchanged.
-pub fn protect_secret(plain: &str) -> String {
+/// Fails closed with `CoreError::SecretProtection` if DPAPI encryption fails so callers never
+/// silently overwrite stored credentials with an empty string.
+pub fn protect_secret(plain: &str) -> CoreResult<String> {
     if plain.is_empty() || plain.starts_with(DPAPI_PREFIX) {
-        return plain.to_string();
+        return Ok(plain.to_string());
     }
     #[cfg(target_os = "windows")]
     {
-        match win_dpapi::protect_bytes(plain.as_bytes()) {
-            Ok(cipher) => format!("{DPAPI_PREFIX}{}", b64_encode(&cipher)),
-            Err(_) => String::new(),
-        }
+        let cipher =
+            win_dpapi::protect_bytes(plain.as_bytes()).map_err(CoreError::SecretProtection)?;
+        Ok(format!("{DPAPI_PREFIX}{}", b64_encode(&cipher)))
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = b64_encode(&[]);
-        plain.to_string()
+        Ok(plain.to_string())
+    }
+}
+
+/// Decrypt a stored secret string and report whether decryption failed (e.g., transient DPAPI error
+/// or cross-user ciphertext) so callers avoid overwriting existing DB entries during auto-migration.
+pub fn unprotect_secret_checked(stored: &str) -> UnprotectOutcome {
+    if stored.is_empty() {
+        return UnprotectOutcome {
+            plaintext: String::new(),
+            needs_migration: false,
+            failed: false,
+        };
+    }
+    if let Some(b64_payload) = stored.strip_prefix(DPAPI_PREFIX) {
+        #[cfg(target_os = "windows")]
+        {
+            let Ok(cipher) = b64_decode(b64_payload) else {
+                return UnprotectOutcome {
+                    plaintext: String::new(),
+                    needs_migration: false,
+                    failed: true,
+                };
+            };
+            let Ok(plain_bytes) = win_dpapi::unprotect_bytes(&cipher) else {
+                return UnprotectOutcome {
+                    plaintext: String::new(),
+                    needs_migration: false,
+                    failed: true,
+                };
+            };
+            match String::from_utf8(plain_bytes) {
+                Ok(plain) => UnprotectOutcome {
+                    plaintext: plain,
+                    needs_migration: false,
+                    failed: false,
+                },
+                Err(err) => {
+                    let mut raw = err.into_bytes();
+                    zeroize_bytes(&mut raw);
+                    UnprotectOutcome {
+                        plaintext: String::new(),
+                        needs_migration: false,
+                        failed: true,
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = b64_decode(b64_payload);
+            UnprotectOutcome {
+                plaintext: String::new(),
+                needs_migration: false,
+                failed: true,
+            }
+        }
+    } else {
+        // Legacy plaintext entry — return in-memory value and flag for automatic DPAPI upgrade.
+        UnprotectOutcome {
+            plaintext: stored.to_string(),
+            needs_migration: cfg!(target_os = "windows"),
+            failed: false,
+        }
     }
 }
 
@@ -313,32 +396,8 @@ pub fn protect_secret(plain: &str) -> String {
 /// plaintext value that should be re-saved under DPAPI encryption immediately.
 /// Corrupted or cross-user DPAPI envelopes fail closed to `("", false)`.
 pub fn unprotect_secret(stored: &str) -> (String, bool) {
-    if stored.is_empty() {
-        return (String::new(), false);
-    }
-    if let Some(b64_payload) = stored.strip_prefix(DPAPI_PREFIX) {
-        #[cfg(target_os = "windows")]
-        {
-            let Ok(cipher) = b64_decode(b64_payload) else {
-                return (String::new(), false);
-            };
-            let Ok(plain_bytes) = win_dpapi::unprotect_bytes(&cipher) else {
-                return (String::new(), false);
-            };
-            match String::from_utf8(plain_bytes) {
-                Ok(plain) => (plain, false),
-                Err(_) => (String::new(), false),
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = b64_decode(b64_payload);
-            (String::new(), false)
-        }
-    } else {
-        // Legacy plaintext entry — return in-memory value and flag for automatic DPAPI upgrade.
-        (stored.to_string(), cfg!(target_os = "windows"))
-    }
+    let outcome = unprotect_secret_checked(stored);
+    (outcome.plaintext, outcome.needs_migration)
 }
 
 #[cfg(test)]
@@ -380,18 +439,20 @@ mod tests {
     #[test]
     fn dpapi_secret_roundtrip_and_tamper_fail_closed() {
         let secret = "SAPISID=super_secret_cookie_value_12345";
-        let protected = protect_secret(secret);
+        let protected = protect_secret(secret).expect("protect secret");
         if cfg!(target_os = "windows") {
             assert!(protected.starts_with(DPAPI_PREFIX));
             assert!(!protected.contains("super_secret"));
         }
-        let (restored, migrated) = unprotect_secret(&protected);
-        assert_eq!(restored, secret);
-        assert!(!migrated);
+        let outcome = unprotect_secret_checked(&protected);
+        assert_eq!(outcome.plaintext, secret);
+        assert!(!outcome.needs_migration);
+        assert!(!outcome.failed);
 
-        // Corrupted DPAPI blob fails closed to empty string (never returns raw ciphertext)
-        let (corrupt, _) = unprotect_secret("dpapi:v1:AAAA");
-        assert!(corrupt.is_empty());
+        // Corrupted DPAPI blob fails closed and flags failure so callers do not clobber stored secrets
+        let corrupt = unprotect_secret_checked("dpapi:v1:AAAA");
+        assert!(corrupt.plaintext.is_empty());
+        assert!(corrupt.failed);
 
         // Legacy plaintext is detected for transparent migration on Windows
         let (legacy_plain, needs_mig) = unprotect_secret("legacy_plain_token");

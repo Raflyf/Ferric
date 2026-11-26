@@ -11,11 +11,28 @@ const MAX_SUBSONIC_JSON_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SUBSONIC_PLAYLISTS: usize = 100;
 const MAX_SUBSONIC_PLAYLIST_TRACKS: usize = 5_000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubsonicCredentials {
     pub base_url: String,
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for SubsonicCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubsonicCredentials")
+            .field("base_url", &self.base_url)
+            .field("username", &self.username)
+            .field(
+                "password",
+                &if self.password.is_empty() {
+                    ""
+                } else {
+                    "[REDACTED]"
+                },
+            )
+            .finish()
+    }
 }
 
 /// Pure-Rust RFC 1321 MD5 hex digest used strictly for Subsonic v1.13+ salted token authentication.
@@ -105,50 +122,96 @@ pub fn encode_subsonic_password_hex(password: &str) -> String {
     out
 }
 
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let oct = v4.octets();
+            let is_cgnat = oct[0] == 100 && (oct[1] & 0b1100_0000) == 0b0100_0000;
+            v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || is_cgnat
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_blocked_ip(std::net::IpAddr::V4(mapped));
+            }
+            v6.is_unspecified() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return mapped.is_loopback() || mapped.is_private();
+            }
+            v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+fn is_shorthand_numeric_host(h: &str) -> bool {
+    if h.contains(':') {
+        return false;
+    }
+    let labels_numeric = h.split('.').all(|lbl| {
+        !lbl.is_empty() && (lbl.starts_with("0x") || lbl.bytes().all(|b| b.is_ascii_digit()))
+    });
+    labels_numeric && h.parse::<std::net::Ipv4Addr>().is_err()
+}
+
 fn is_private_or_local_host(host: &str) -> bool {
     let h = host
         .trim_matches(|c| c == '[' || c == ']')
+        .trim_end_matches('.')
         .to_ascii_lowercase();
+    if is_shorthand_numeric_host(&h) {
+        return false;
+    }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return is_private_ip(ip);
+    }
     if h == "localhost"
+        || h.ends_with(".localhost")
         || h.ends_with(".local")
         || h.ends_with(".lan")
         || h.ends_with(".internal")
-        || !h.contains('.')
     {
         return true;
     }
-    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
-        };
-    }
-    false
+    // Single-label LAN hostnames (e.g. `navidrome`) must contain at least one ASCII letter.
+    !h.contains('.') && h.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 fn is_blocked_metadata_host(host: &str) -> bool {
     let h = host
         .trim_matches(|c| c == '[' || c == ']')
+        .trim_end_matches('.')
         .to_ascii_lowercase();
+    if is_shorthand_numeric_host(&h) {
+        return true;
+    }
     if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified(),
-            std::net::IpAddr::V6(v6) => {
-                v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
-            }
-        };
+        return is_blocked_ip(ip);
     }
     false
 }
 
-fn normalized_base_url(raw: &str) -> ProviderResult<String> {
+fn parse_validated_host_port(raw: &str) -> ProviderResult<(String, bool, String, u16)> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err(ProviderError::Http(
             "Subsonic server URL cannot be empty".to_string(),
         ));
     }
-    if trimmed.bytes().any(|b| b.is_ascii_control() || b == b' ') {
+    if trimmed
+        .bytes()
+        .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\')
+    {
         return Err(ProviderError::Http(
             "Subsonic server URL contains invalid characters".to_string(),
         ));
@@ -168,18 +231,41 @@ fn normalized_base_url(raw: &str) -> ProviderResult<String> {
             "Subsonic server URL has an invalid host".to_string(),
         ));
     }
-    let host = if authority.starts_with('[') {
-        authority
-            .split(']')
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('[')
+    let default_port: u16 = if is_https { 443 } else { 80 };
+    let (host, port) = if let Some(inner) = authority.strip_prefix('[') {
+        let Some((v6_host, tail)) = inner.split_once(']') else {
+            return Err(ProviderError::Http(
+                "Subsonic server URL has a malformed IPv6 host".to_string(),
+            ));
+        };
+        let port = if tail.is_empty() {
+            default_port
+        } else if let Some(p_str) = tail.strip_prefix(':') {
+            p_str
+                .parse::<u16>()
+                .map_err(|_| ProviderError::Http("Invalid Subsonic server port".to_string()))?
+        } else {
+            return Err(ProviderError::Http(
+                "Subsonic server URL has an invalid host".to_string(),
+            ));
+        };
+        (v6_host, port)
+    } else if let Some((h, p_str)) = authority.split_once(':') {
+        let port = p_str
+            .parse::<u16>()
+            .map_err(|_| ProviderError::Http("Invalid Subsonic server port".to_string()))?;
+        (h, port)
     } else {
-        authority.split(':').next().unwrap_or("")
+        (authority, default_port)
     };
-    if host.is_empty() || is_blocked_metadata_host(host) {
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+        || is_blocked_metadata_host(host)
+    {
         return Err(ProviderError::Http(
-            "Refused to connect to link-local or unspecified Subsonic host".to_string(),
+            "Refused to connect to link-local, unspecified, or malformed Subsonic host".to_string(),
         ));
     }
     if !is_https && !is_private_or_local_host(host) {
@@ -188,7 +274,39 @@ fn normalized_base_url(raw: &str) -> ProviderResult<String> {
                 .to_string(),
         ));
     }
-    Ok(trimmed.to_string())
+    Ok((trimmed.to_string(), is_https, host.to_string(), port))
+}
+
+fn normalized_base_url(raw: &str) -> ProviderResult<String> {
+    parse_validated_host_port(raw).map(|(url, _, _, _)| url)
+}
+
+fn verify_resolved_subsonic_target(host: &str, port: u16, is_https: bool) -> ProviderResult<()> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| ProviderError::Http(format!("Could not resolve Subsonic host: {e}")))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(ProviderError::Http(
+            "Subsonic host resolved to no addresses".to_string(),
+        ));
+    }
+    for sock in addrs {
+        let ip = sock.ip();
+        if is_blocked_ip(ip) {
+            return Err(ProviderError::Http(
+                "Refused to connect to blocked link-local, metadata, or reserved Subsonic IP"
+                    .to_string(),
+            ));
+        }
+        if !is_https && !is_private_ip(ip) {
+            return Err(ProviderError::Http(
+                "Resolved public Subsonic host requires https://".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn build_auth_query_with_salt(creds: &SubsonicCredentials, salt: &str) -> String {
@@ -207,14 +325,14 @@ fn build_auth_query(creds: &SubsonicCredentials) -> String {
 }
 
 /// Construct direct OpenSubsonic/Navidrome audio stream URL for `song_id`.
-pub fn subsonic_stream_url(creds: &SubsonicCredentials, song_id: &str) -> String {
-    let base = creds.base_url.trim().trim_end_matches('/');
+pub fn subsonic_stream_url(creds: &SubsonicCredentials, song_id: &str) -> ProviderResult<String> {
+    let base = normalized_base_url(&creds.base_url)?;
     let raw_id = song_id.strip_prefix("subsonic:").unwrap_or(song_id);
-    format!(
+    Ok(format!(
         "{base}/rest/stream.view?id={}&{}",
         url_encode(raw_id),
         build_auth_query(creds)
-    )
+    ))
 }
 
 fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -447,8 +565,8 @@ fn fetch_subsonic_response(agent: &ureq::Agent, url: &str) -> ProviderResult<Sub
 pub fn sync_subsonic_catalog(
     creds: &SubsonicCredentials,
 ) -> ProviderResult<(Vec<Track>, Vec<SyncedPlaylistBundle>)> {
-    let base = normalized_base_url(&creds.base_url)?;
-    let auth = build_auth_query(creds);
+    let (base, is_https, host, port) = parse_validated_host_port(&creds.base_url)?;
+    verify_resolved_subsonic_target(&host, port, is_https)?;
 
     let cfg = ureq::Agent::config_builder()
         .max_redirects(0)
@@ -457,8 +575,10 @@ pub fn sync_subsonic_catalog(
         .build();
     let agent = ureq::Agent::new_with_config(cfg);
 
-    let search_url =
-        format!("{base}/rest/search3.view?query=&songCount=200&artistCount=0&albumCount=0&{auth}");
+    let search_url = format!(
+        "{base}/rest/search3.view?query=&songCount=200&artistCount=0&albumCount=0&{}",
+        build_auth_query(creds)
+    );
     let search_body = fetch_subsonic_response(&agent, &search_url)?;
     let mut catalog_tracks = Vec::new();
     if let Some(sr) = search_body.search_result3 {
@@ -469,7 +589,7 @@ pub fn sync_subsonic_catalog(
         }
     }
 
-    let playlists_url = format!("{base}/rest/getPlaylists.view?{auth}");
+    let playlists_url = format!("{base}/rest/getPlaylists.view?{}", build_auth_query(creds));
     let playlists_body = fetch_subsonic_response(&agent, &playlists_url)?;
     let summaries = playlists_body
         .playlists
@@ -482,8 +602,9 @@ pub fn sync_subsonic_catalog(
             continue;
         }
         let detail_url = format!(
-            "{base}/rest/getPlaylist.view?id={}&{auth}",
-            url_encode(&summary.id)
+            "{base}/rest/getPlaylist.view?id={}&{}",
+            url_encode(&summary.id),
+            build_auth_query(creds)
         );
         let detail_body = fetch_subsonic_response(&agent, &detail_url)?;
         let Some(detail) = detail_body.playlist else {
@@ -542,7 +663,7 @@ mod tests {
             username: "audiophile".to_string(),
             password: "secret".to_string(),
         };
-        let url = subsonic_stream_url(&creds, "subsonic:song_42");
+        let url = subsonic_stream_url(&creds, "subsonic:song_42").expect("valid stream url");
         assert!(url.starts_with(
             "https://music.example.lan/rest/stream.view?id=song_42&f=json&v=1.16.1&c=Ferric&u=audiophile&t="
         ));
@@ -551,6 +672,9 @@ mod tests {
         assert!(!url.contains("secret"));
 
         assert!(normalized_base_url("http://169.254.169.254").is_err());
+        assert!(normalized_base_url("http://2852039166").is_err());
+        assert!(normalized_base_url("http://0xa9fea9fe").is_err());
+        assert!(normalized_base_url("http://[::ffff:169.254.169.254]").is_err());
         assert!(normalized_base_url("http://public.example.com").is_err());
         assert!(normalized_base_url("https://public.example.com").is_ok());
         assert!(normalized_base_url("http://192.168.1.50:4533").is_ok());

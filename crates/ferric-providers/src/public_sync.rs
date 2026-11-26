@@ -12,32 +12,72 @@ const PUBLIC_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple
 
 fn build_http_agent() -> ureq::Agent {
     let cfg = ureq::Agent::config_builder()
-        .max_redirects(2)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
         .timeout_global(Some(Duration::from_secs(14)))
         .http_status_as_error(false)
         .build();
     ureq::Agent::new_with_config(cfg)
 }
 
+fn is_allowed_public_sync_url(url: &str) -> bool {
+    if url
+        .bytes()
+        .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\')
+    {
+        return false;
+    }
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains(':') {
+        return false;
+    }
+    let host = authority.to_ascii_lowercase();
+    matches!(
+        host.as_str(),
+        "open.spotify.com" | "www.youtube.com" | "youtube.com" | "m.youtube.com" | "youtu.be"
+    )
+}
+
 fn fetch_text(url: &str) -> ProviderResult<String> {
     let agent = build_http_agent();
-    let resp = agent
-        .get(url)
-        .header("User-Agent", PUBLIC_USER_AGENT)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .call()
-        .map_err(|e| ProviderError::Http(format!("Request failed: {e}")))?;
-    let status = resp.status().as_u16();
-    if !(200..300).contains(&status) {
-        return Err(ProviderError::Http(format!(
-            "Remote page returned HTTP {status}"
-        )));
+    let mut current = url.to_string();
+    for _hop in 0..=2 {
+        if !is_allowed_public_sync_url(&current) {
+            return Err(ProviderError::Http(
+                "Refused redirect to untrusted host".to_string(),
+            ));
+        }
+        let resp = agent
+            .get(&current)
+            .header("User-Agent", PUBLIC_USER_AGENT)
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .call()
+            .map_err(|e| ProviderError::Http(format!("Request failed: {e}")))?;
+        let status = resp.status().as_u16();
+        if matches!(status, 301 | 302 | 303 | 307 | 308)
+            && let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
+        {
+            current = loc.trim().to_string();
+            continue;
+        }
+        if !(200..300).contains(&status) {
+            return Err(ProviderError::Http(format!(
+                "Remote page returned HTTP {status}"
+            )));
+        }
+        return resp
+            .into_body()
+            .into_with_config()
+            .limit(8 * 1024 * 1024)
+            .read_to_string()
+            .map_err(|e| ProviderError::Http(format!("Failed to read response body: {e}")));
     }
-    resp.into_body()
-        .into_with_config()
-        .limit(8 * 1024 * 1024)
-        .read_to_string()
-        .map_err(|e| ProviderError::Http(format!("Failed to read response body: {e}")))
+    Err(ProviderError::Http(
+        "Too many redirects fetching remote page".to_string(),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,7 +592,7 @@ fn collect_youtube_renderers(
                         .get("lengthSeconds")
                         .and_then(Value::as_str)
                         .and_then(|s| s.parse::<u64>().ok())
-                        .map(|s| s * 1_000)
+                        .map(|s| s.saturating_mul(1_000))
                         .or_else(|| {
                             extract_yt_text(obj.get("lengthText")).and_then(|t| parse_clock_ms(&t))
                         })
@@ -623,8 +663,17 @@ fn parse_clock_ms(text: &str) -> Option<u64> {
         .filter_map(|p| p.trim().parse::<u64>().ok())
         .collect();
     match parts.as_slice() {
-        [m, s] => Some((m * 60 + s) * 1_000),
-        [h, m, s] => Some((h * 3600 + m * 60 + s) * 1_000),
+        [m, s] => Some(
+            m.saturating_mul(60)
+                .saturating_add(*s)
+                .saturating_mul(1_000),
+        ),
+        [h, m, s] => Some(
+            h.saturating_mul(3_600)
+                .saturating_add(m.saturating_mul(60))
+                .saturating_add(*s)
+                .saturating_mul(1_000),
+        ),
         _ => None,
     }
 }

@@ -150,18 +150,41 @@ fn parse_retry_after_secs(raw: Option<&str>) -> Option<u64> {
         .filter(|&s| s > 0)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PkcePair {
     pub verifier: String,
     pub challenge_s256: String,
     pub state: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for PkcePair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PkcePair")
+            .field("verifier", &"[REDACTED]")
+            .field("challenge_s256", &self.challenge_s256)
+            .field("state", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in_secs: u64,
+}
+
+impl std::fmt::Debug for OAuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokens")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_in_secs", &self.expires_in_secs)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,9 +257,9 @@ pub fn pkce_s256_challenge(verifier: &str) -> String {
     base64url_encode_nopad(&digest)
 }
 
-/// Generate a cryptographic 64-char URL-safe PKCE verifier, its `S256` challenge, and a 24-hex CSRF state.
+/// Generate a cryptographic 64-char URL-safe PKCE verifier, its `S256` challenge, and a 32-hex (128-bit) CSRF state.
 pub fn generate_pkce_pair() -> PkcePair {
-    let mut raw = [0u8; 76];
+    let mut raw = [0u8; 80];
     fill_entropy_bytes(&mut raw);
 
     let mut verifier = String::with_capacity(64);
@@ -244,11 +267,16 @@ pub fn generate_pkce_pair() -> PkcePair {
         verifier.push(char::from(BASE64URL_ALPHABET[usize::from(b & 0x3F)]));
     }
 
-    let mut state = String::with_capacity(24);
-    for &b in &raw[64..76] {
+    let mut state = String::with_capacity(32);
+    for &b in &raw[64..80] {
         state.push(char::from(HEX_LOWER[usize::from(b >> 4)]));
         state.push(char::from(HEX_LOWER[usize::from(b & 0x0F)]));
     }
+    for b in &mut raw {
+        // SAFETY: Zero stack entropy buffer after deriving PKCE material.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    std::sync::atomic::compiler_fence(Ordering::SeqCst);
 
     let challenge_s256 = pkce_s256_challenge(&verifier);
     PkcePair {
@@ -355,7 +383,8 @@ pub fn bind_loopback_callback(
         match bound {
             Some(sock) => sock,
             None => {
-                let err = last_err.expect("bind failed with error");
+                let err = last_err
+                    .unwrap_or_else(|| std::io::Error::other("could not bind loopback port"));
                 if preferred_port == SPOTIFY_DESKTOP_CALLBACK_PORT {
                     return Err(ProviderError::Http(format!(
                         "Could not bind http://127.0.0.1:{preferred_port}{normalized_path}: {err}"
@@ -422,12 +451,25 @@ p{{margin:0;font-size:14px;line-height:1.55;color:rgba(243,238,227,0.78);}}\
 
 fn write_http_html(stream: &mut std::net::TcpStream, status_line: &str, html: &str) {
     let response = format!(
-        "HTTP/1.1 {status_line}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{html}",
+        "HTTP/1.1 {status_line}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{html}",
         html.len()
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
     let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+fn ct_eq_str(a: &str, b: &str) -> bool {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    if ab.len() != bb.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in ab.iter().zip(bb.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 impl LoopbackListener {
@@ -465,12 +507,24 @@ impl LoopbackListener {
             let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
 
             let mut buf = [0u8; 8192];
-            let n = match stream.read(&mut buf) {
-                Ok(0) | Err(_) => continue,
-                Ok(n) => n,
-            };
+            let mut total_read = 0usize;
+            while total_read < buf.len() {
+                match stream.read(&mut buf[total_read..]) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        total_read += n;
+                        if buf[..total_read].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if total_read == 0 {
+                continue;
+            }
 
-            let raw_req = String::from_utf8_lossy(&buf[..n]);
+            let raw_req = String::from_utf8_lossy(&buf[..total_read]);
             let Some(request_line) = raw_req.lines().next() else {
                 continue;
             };
@@ -509,19 +563,20 @@ impl LoopbackListener {
             }
             let expected_host_ip = format!("127.0.0.1:{}", self.bound_port);
             let expected_host_lh = format!("localhost:{}", self.bound_port);
-            let host_ok = raw_req
+            let host_headers: Vec<&str> = raw_req
                 .lines()
                 .skip(1)
-                .find_map(|line| {
+                .take_while(|line| !line.is_empty())
+                .filter_map(|line| {
                     let (k, v) = line.split_once(':')?;
                     k.trim().eq_ignore_ascii_case("host").then(|| v.trim())
                 })
-                .is_some_and(|h| {
-                    h.eq_ignore_ascii_case(&expected_host_ip)
-                        || h.eq_ignore_ascii_case(&expected_host_lh)
-                        || h.eq_ignore_ascii_case("127.0.0.1")
-                        || h.eq_ignore_ascii_case("localhost")
-                });
+                .collect();
+            let host_ok = host_headers.len() == 1
+                && (host_headers[0].eq_ignore_ascii_case(&expected_host_ip)
+                    || host_headers[0].eq_ignore_ascii_case(&expected_host_lh)
+                    || host_headers[0].eq_ignore_ascii_case("127.0.0.1")
+                    || host_headers[0].eq_ignore_ascii_case("localhost"));
             if !host_ok {
                 let html = build_callback_html(
                     "Invalid Host Header",
@@ -533,7 +588,20 @@ impl LoopbackListener {
             }
 
             let params = parse_query_params(query_str);
+            let state_matches = params
+                .get("state")
+                .is_some_and(|s| ct_eq_str(s, &self.expected_state));
+
             if let Some(oauth_err) = params.get("error") {
+                if !state_matches {
+                    let html = build_callback_html(
+                        "Ferric Authorization Ignored",
+                        "Unverified callback request ignored.",
+                        true,
+                    );
+                    write_http_html(&mut stream, "400 Bad Request", &html);
+                    continue;
+                }
                 let html = build_callback_html(
                     "Ferric Authorization Failed",
                     "Authorization was declined or interrupted. You can close this browser tab and return to Ferric.",
@@ -545,7 +613,7 @@ impl LoopbackListener {
                 )));
             }
 
-            if params.get("state").map(String::as_str) != Some(self.expected_state.as_str()) {
+            if !state_matches {
                 let html = build_callback_html(
                     "Ferric Authorization Rejected",
                     "Security state verification failed. Please retry connecting from Ferric.",
@@ -800,7 +868,9 @@ fn get_spotify_bearer_json<T: for<'de> Deserialize<'de>>(
             )))
         });
     }
-    unreachable!("the retry loop always returns")
+    Err(SpotifyFetchError::RateLimited {
+        retry_after_secs: None,
+    })
 }
 
 // ============================================================================
@@ -815,7 +885,7 @@ pub fn spotify_authorize_url(client_id: &str, redirect_uri: &str, pkce: &PkcePai
         SPOTIFY_OAUTH_SCOPES
     };
     format!(
-        "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&state={}&scope={}&code_challenge_method=S256&code_challenge={}",
+        "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&state={}&scope={}&code_challenge_method=S256&code_challenge={}&show_dialog=true",
         url_encode(effective_id),
         url_encode(redirect_uri),
         url_encode(&pkce.state),
@@ -861,6 +931,21 @@ pub fn spotify_refresh_token(client_id: &str, refresh_token: &str) -> ProviderRe
 struct SpotifyProfile {
     id: String,
     display_name: Option<String>,
+    product: Option<String>,
+}
+
+pub(crate) fn fetch_spotify_profile_tier(
+    access_token: &str,
+) -> ProviderResult<(String, Option<String>)> {
+    let agent = http_agent();
+    let profile: SpotifyProfile =
+        get_bearer_json(&agent, "https://api.spotify.com/v1/me", access_token)?;
+    let display_name = profile
+        .display_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(profile.id);
+    Ok((display_name, profile.product))
 }
 
 #[derive(Debug, Deserialize)]
@@ -974,15 +1059,30 @@ pub fn sync_spotify_catalog(access_token: &str) -> ProviderResult<CloudSyncRepor
     sync_spotify_catalog_with_snapshots(access_token, &HashMap::new(), false)
 }
 
+#[cfg(test)]
 fn should_skip_spotify_playlist(
     playlist_id: &str,
     snapshot_id: Option<&str>,
     existing_snapshots: &HashMap<String, String>,
 ) -> bool {
+    should_skip_spotify_playlist_with_prefix(
+        playlist_id,
+        snapshot_id,
+        existing_snapshots,
+        "spotify:playlist:",
+    )
+}
+
+fn should_skip_spotify_playlist_with_prefix(
+    playlist_id: &str,
+    snapshot_id: Option<&str>,
+    existing_snapshots: &HashMap<String, String>,
+    playlist_id_prefix: &str,
+) -> bool {
     let Some(remote_snap) = snapshot_id.map(str::trim).filter(|s| !s.is_empty()) else {
         return false;
     };
-    let key = format!("spotify:playlist:{playlist_id}");
+    let key = format!("{playlist_id_prefix}{playlist_id}");
     existing_snapshots
         .get(&key)
         .is_some_and(|local_snap| local_snap.trim() == remote_snap)
@@ -996,18 +1096,31 @@ pub fn sync_spotify_catalog_with_snapshots(
     existing_snapshots: &HashMap<String, String>,
     web_session: bool,
 ) -> ProviderResult<CloudSyncReport> {
-    if web_session {
-        match crate::spotify_web::sync_spotify_web_catalog(access_token, existing_snapshots) {
-            Ok(report) => return Ok(report),
-            Err(crate::spotify_web::SpotifyWebSyncError::AuthExpired) => {
-                return Err(ProviderError::Http(
-                    "Spotify web session expired (1h token). Click 'Sign in via Web' to refresh."
-                        .to_string(),
-                ));
-            }
-            Err(crate::spotify_web::SpotifyWebSyncError::FallbackToRest(_)) => {
-                // Fall through to the paced Web API v1 path if Spotify rotates Pathfinder hashes.
-            }
+    let playlist_id_prefix = if web_session {
+        "spotify:playlist:"
+    } else {
+        "spotify:premium:playlist:"
+    };
+    // Prefer Spotify's Pathfinder GraphQL endpoint for both Direct OAuth and Web Sign-In
+    // (same transport used by desktop clients like Sonora) to avoid shared `api.spotify.com/v1`
+    // HTTP 429 buckets and fetch real cover art URLs directly.
+    match crate::spotify_web::sync_spotify_web_catalog_with_prefix(
+        access_token,
+        existing_snapshots,
+        playlist_id_prefix,
+    ) {
+        Ok(report) => return Ok(report),
+        Err(crate::spotify_web::SpotifyWebSyncError::AuthExpired) => {
+            return Err(ProviderError::Http(if web_session {
+                "Spotify web session expired (1h token). Click 'Sign in via Web' to refresh."
+                    .to_string()
+            } else {
+                "Spotify OAuth session expired (HTTP 401). Click 'Sign in with Spotify' to refresh."
+                    .to_string()
+            }));
+        }
+        Err(crate::spotify_web::SpotifyWebSyncError::FallbackToRest(_)) => {
+            // Fall through to the paced Web API v1 path if Pathfinder is temporarily unavailable.
         }
     }
 
@@ -1086,10 +1199,11 @@ pub fn sync_spotify_catalog_with_snapshots(
                 if pl.id.trim().is_empty() {
                     continue;
                 }
-                if should_skip_spotify_playlist(
+                if should_skip_spotify_playlist_with_prefix(
                     &pl.id,
                     pl.snapshot_id.as_deref(),
                     existing_snapshots,
+                    playlist_id_prefix,
                 ) {
                     etag_skipped += 1;
                     continue;
@@ -1122,7 +1236,7 @@ pub fn sync_spotify_catalog_with_snapshots(
                 }
 
                 let playlist = Playlist {
-                    id: format!("spotify:playlist:{}", pl.id),
+                    id: format!("{playlist_id_prefix}{}", pl.id),
                     name: if pl.name.trim().is_empty() {
                         "Spotify Playlist".to_string()
                     } else {
@@ -1691,7 +1805,7 @@ mod tests {
         let p2 = generate_pkce_pair();
         assert_eq!(p1.verifier.len(), 64);
         assert_eq!(p1.challenge_s256.len(), 43);
-        assert_eq!(p1.state.len(), 24);
+        assert_eq!(p1.state.len(), 32);
         assert!(p1.state.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_eq!(pkce_s256_challenge(&p1.verifier), p1.challenge_s256);
         assert_ne!(p1.verifier, p2.verifier);

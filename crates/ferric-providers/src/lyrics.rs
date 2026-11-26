@@ -80,6 +80,7 @@ impl SyncedLyrics {
     }
 
     pub fn parse_with_context(raw: &str, duration_ms: u64, source_name: impl Into<String>) -> Self {
+        let raw = raw.trim_start_matches('\u{feff}');
         let source = source_name.into();
         let mut lines = Vec::new();
 
@@ -185,7 +186,10 @@ pub fn read_local_sidecar_lrc(audio_path: &Path) -> Option<String> {
 
 /// Read embedded `USLT` / `LYRICS` / Vorbis `LYRICS` tag from a local audio file via `lofty`.
 pub fn read_embedded_lyrics(audio_path: &Path) -> Option<String> {
-    let tagged = Probe::open(audio_path).ok()?.read().ok()?;
+    let opts = lofty::config::ParseOptions::new()
+        .read_cover_art(false)
+        .read_properties(false);
+    let tagged = Probe::open(audio_path).ok()?.options(opts).read().ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     tag.get_string(ItemKey::Lyrics)
         .or_else(|| tag.get_string(ItemKey::UnsyncLyrics))

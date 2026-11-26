@@ -51,14 +51,33 @@ impl PlayQueue {
         self.order.push(idx);
     }
 
+    /// Resolve the `offset`-th upcoming slot in `self.order`, mirroring `peek_upcoming`
+    /// (wrapping modulo length under `RepeatMode::All` while never targeting the active cursor).
+    fn resolve_upcoming_slot(&self, offset: usize) -> Option<usize> {
+        let pos = self.cursor?;
+        let len = self.order.len();
+        if len <= 1 {
+            return None;
+        }
+        let raw = pos.checked_add(1)?.checked_add(offset)?;
+        if raw < len {
+            Some(raw)
+        } else if self.repeat == RepeatMode::All && offset < len - 1 {
+            let wrapped = raw % len;
+            (wrapped != pos).then_some(wrapped)
+        } else {
+            None
+        }
+    }
+
     /// Remove the `offset`-th upcoming track from Up Next (`0` = very next song).
     pub fn remove_upcoming(&mut self, offset: usize) -> Option<Track> {
         let pos = self.cursor?;
-        let target = pos + 1 + offset;
-        if target >= self.order.len() {
-            return None;
-        }
+        let target = self.resolve_upcoming_slot(offset)?;
         let track_idx = self.order.remove(target);
+        if target < pos {
+            self.cursor = Some(pos - 1);
+        }
         let removed = self.tracks.get(track_idx).cloned();
         self.compact_unreferenced_tracks();
         removed
@@ -66,17 +85,19 @@ impl PlayQueue {
 
     /// Move the `offset`-th upcoming track one slot higher in Up Next (`offset >= 1`).
     pub fn move_upcoming_up(&mut self, offset: usize) -> bool {
-        let Some(pos) = self.cursor else {
-            return false;
-        };
         if offset == 0 {
             return false;
         }
-        let target = pos + 1 + offset;
-        if target >= self.order.len() || target <= pos + 1 {
+        let Some(target) = self.resolve_upcoming_slot(offset) else {
+            return false;
+        };
+        let Some(prev) = self.resolve_upcoming_slot(offset - 1) else {
+            return false;
+        };
+        if target == prev {
             return false;
         }
-        self.order.swap(target - 1, target);
+        self.order.swap(prev, target);
         true
     }
 
@@ -87,14 +108,17 @@ impl PlayQueue {
         let orig_cp = self.cursor;
         let mut new_order = Vec::with_capacity(self.order.len());
         let mut removed_before_cursor = 0usize;
+        let mut removed_cursor = false;
         for (ord_pos, &track_idx) in self.order.iter().enumerate() {
             let matches = self.tracks.get(track_idx).is_some_and(|t| t.id == track_id);
             if matches {
                 removed_any = true;
-                if let Some(cp) = orig_cp
-                    && ord_pos < cp
-                {
-                    removed_before_cursor += 1;
+                if let Some(cp) = orig_cp {
+                    if ord_pos < cp {
+                        removed_before_cursor += 1;
+                    } else if ord_pos == cp {
+                        removed_cursor = true;
+                    }
                 }
             } else {
                 new_order.push(track_idx);
@@ -105,9 +129,19 @@ impl PlayQueue {
             self.cursor = if self.order.is_empty() {
                 None
             } else {
-                orig_cp.map(|cp| {
-                    cp.saturating_sub(removed_before_cursor)
-                        .min(self.order.len() - 1)
+                orig_cp.and_then(|cp| {
+                    let adjusted = cp.saturating_sub(removed_before_cursor);
+                    if removed_cursor {
+                        if adjusted < self.order.len() {
+                            Some(adjusted)
+                        } else if self.repeat == RepeatMode::All {
+                            Some(0)
+                        } else {
+                            None
+                        }
+                    } else {
+                        Some(adjusted.min(self.order.len() - 1))
+                    }
                 })
             };
             self.compact_unreferenced_tracks();
@@ -136,8 +170,11 @@ impl PlayQueue {
                 new_tracks.push(track);
             }
         }
+        self.order.retain(|&idx| idx < remap.len() && used[idx]);
         for idx in &mut self.order {
-            *idx = remap[*idx];
+            if let Some(&mapped) = remap.get(*idx) {
+                *idx = mapped;
+            }
         }
         self.tracks = new_tracks;
     }
@@ -146,7 +183,7 @@ impl PlayQueue {
     /// or slot `offset` from the start of the queue when playback has not started yet).
     pub fn jump_to_upcoming(&mut self, offset: usize) -> Option<&Track> {
         let target = match self.cursor {
-            Some(pos) => pos + 1 + offset,
+            Some(pos) => pos.checked_add(1)?.checked_add(offset)?,
             None => offset,
         };
         if target < self.order.len() {
@@ -242,6 +279,7 @@ impl PlayQueue {
         self.rebuild_order(current_track);
     }
 
+    /// Advance at natural end-of-track (honors `RepeatMode::One` by keeping the current cursor).
     pub fn next_track(&mut self) -> Option<&Track> {
         if self.order.is_empty() {
             return None;
@@ -261,6 +299,29 @@ impl PlayQueue {
                 }
             }
             (None, _) => {
+                self.cursor = Some(0);
+            }
+        }
+        self.current()
+    }
+
+    /// Explicit user skip or dead-stream fallback: always advances past the current track even
+    /// when `RepeatMode::One` is active (wrapping to index 0 when repeat is `All` or `One`).
+    pub fn next_track_manual(&mut self) -> Option<&Track> {
+        if self.order.is_empty() {
+            return None;
+        }
+        match self.cursor {
+            Some(pos) => {
+                if pos + 1 < self.order.len() {
+                    self.cursor = Some(pos + 1);
+                } else if self.repeat != RepeatMode::Off {
+                    self.cursor = Some(0);
+                } else {
+                    return None;
+                }
+            }
+            None => {
                 self.cursor = Some(0);
             }
         }
@@ -290,9 +351,12 @@ impl PlayQueue {
         let Some(pos) = self.cursor else {
             return Vec::new();
         };
-        let mut out = Vec::with_capacity(limit);
-        for offset in 1..=limit {
-            let next_pos = pos + offset;
+        let capped = limit.min(self.order.len());
+        let mut out = Vec::with_capacity(capped);
+        for offset in 1..=capped {
+            let Some(next_pos) = pos.checked_add(offset) else {
+                break;
+            };
             let idx = if next_pos < self.order.len() {
                 self.order[next_pos]
             } else if self.repeat == RepeatMode::All && !self.order.is_empty() {
@@ -322,7 +386,8 @@ impl PlayQueue {
 
         // Fisher-Yates shuffle keeping anchor_track at slot 0 when active.
         let mut pool: Vec<usize> = (0..n).collect();
-        if let Some(anchor) = anchor_track.filter(|&idx| idx < n) {
+        let valid_anchor = anchor_track.filter(|&idx| idx < n);
+        if let Some(anchor) = valid_anchor {
             pool.swap(0, anchor);
             fisher_yates(&mut pool[1..]);
         } else {
@@ -342,7 +407,7 @@ impl PlayQueue {
         }
 
         self.order = pool;
-        self.cursor = anchor_track.map(|_| 0);
+        self.cursor = valid_anchor.map(|_| 0);
     }
 }
 
@@ -433,5 +498,52 @@ mod tests {
         assert_eq!(q.current().map(|t| t.id.as_str()), Some("2"));
         assert_eq!(q.peek_upcoming(5).len(), 1);
         assert_eq!(q.peek_upcoming(5)[0].id, "1");
+    }
+
+    #[test]
+    fn repeat_one_allows_manual_skip_while_auto_advance_repeats() {
+        let mut q = PlayQueue::new();
+        q.set_tracks(vec![dummy_track("1", "A"), dummy_track("2", "B")], Some(0));
+        q.repeat = RepeatMode::One;
+
+        assert_eq!(q.next_track().map(|t| t.id.as_str()), Some("1"));
+        assert_eq!(q.next_track_manual().map(|t| t.id.as_str()), Some("2"));
+        assert_eq!(q.next_track_manual().map(|t| t.id.as_str()), Some("1"));
+    }
+
+    #[test]
+    fn remove_last_active_track_stops_when_repeat_off_and_wraps_when_repeat_all() {
+        let mut q = PlayQueue::new();
+        q.set_tracks(vec![dummy_track("1", "A"), dummy_track("2", "B")], Some(1));
+        q.repeat = RepeatMode::Off;
+        assert!(q.remove_track_by_id("2"));
+        assert!(q.current().is_none());
+
+        q.set_tracks(vec![dummy_track("1", "A"), dummy_track("2", "B")], Some(1));
+        q.repeat = RepeatMode::All;
+        assert!(q.remove_track_by_id("2"));
+        assert_eq!(q.current().map(|t| t.id.as_str()), Some("1"));
+    }
+
+    #[test]
+    fn wrapped_upcoming_remove_and_move_work_under_repeat_all() {
+        let mut q = PlayQueue::new();
+        q.set_tracks(
+            vec![
+                dummy_track("1", "A"),
+                dummy_track("2", "B"),
+                dummy_track("3", "C"),
+            ],
+            Some(2), // playing "3"; upcoming with RepeatAll = ["1", "2"]
+        );
+        q.repeat = RepeatMode::All;
+        assert!(q.move_upcoming_up(1)); // swap wrapped "2" above wrapped "1"
+        let up: Vec<&str> = q.peek_upcoming(2).iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(up, vec!["2", "1"]);
+        assert_eq!(q.current().map(|t| t.id.as_str()), Some("3"));
+
+        let removed = q.remove_upcoming(0);
+        assert_eq!(removed.as_ref().map(|t| t.id.as_str()), Some("2"));
+        assert_eq!(q.current().map(|t| t.id.as_str()), Some("3"));
     }
 }

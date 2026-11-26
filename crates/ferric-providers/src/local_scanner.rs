@@ -20,14 +20,21 @@ pub fn is_supported_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+const MAX_SCAN_DEPTH: usize = 16;
+const MAX_SCAN_FILES: usize = 50_000;
+
 /// Recursively scan a directory for supported local audio files and read tags via `lofty`.
 pub fn scan_local_folder(root: &Path) -> Vec<Track> {
     let mut tracks = Vec::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
+        .max_depth(MAX_SCAN_DEPTH)
         .into_iter()
         .filter_map(Result::ok)
     {
+        if tracks.len() >= MAX_SCAN_FILES {
+            break;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
@@ -57,7 +64,10 @@ pub fn read_track_metadata(path: &Path) -> Option<Track> {
 
     let canonical_id = format!("local:{}", path.to_string_lossy());
 
-    let probed = Probe::open(path).ok().and_then(|p| p.read().ok());
+    let parse_opts = lofty::config::ParseOptions::new().read_cover_art(false);
+    let probed = Probe::open(path)
+        .ok()
+        .and_then(|p| p.options(parse_opts).read().ok());
     if let Some(tagged) = probed {
         let props = tagged.properties();
         let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
@@ -87,7 +97,7 @@ pub fn read_track_metadata(path: &Path) -> Option<Track> {
             title,
             artist,
             album,
-            duration_ms: props.duration().as_millis() as u64,
+            duration_ms: u64::try_from(props.duration().as_millis()).unwrap_or(u64::MAX),
             path: Some(path.to_path_buf()),
             source: TrackSource::Local,
             codec: ext_codec,

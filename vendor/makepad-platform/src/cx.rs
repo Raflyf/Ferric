@@ -325,4 +325,11 @@ impl Cx {
             widget_query_invalidation_event: None,
         }
     }
+
+    pub fn set_win32_initial_acrylic(&self, enabled: bool) {
+        #[cfg(target_os = "windows")]
+        crate::os::windows::win32_window::set_initial_acrylic_backdrop(enabled);
+        #[cfg(not(target_os = "windows"))]
+        let _ = enabled;
+    }
 }

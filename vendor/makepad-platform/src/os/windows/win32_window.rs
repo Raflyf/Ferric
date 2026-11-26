@@ -301,6 +301,13 @@ where
 }
 */
 //#[derive(Clone)]
+static INITIAL_ACRYLIC_BACKDROP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_initial_acrylic_backdrop(enabled: bool) {
+    INITIAL_ACRYLIC_BACKDROP.store(enabled, std::sync::atomic::Ordering::Release);
+}
+
 pub struct Win32Window {
     pub window_id: WindowId,
     pub last_window_geom: WindowGeom,
@@ -385,9 +392,54 @@ impl Win32Window {
         with_win32_app(|app| app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd));
         with_win32_app(|app| app.all_windows.push(self.hwnd));
 
-        // Trigger immediate WM_NCCALCSIZE recalculation before first ShowWindow so DWM never
-        // paints ghost native caption buttons behind Ferric's custom titlebar controls.
+        // Apply Windows 11 DWM Dark Mode, rounded corners, full-frame glass, and initial
+        // System Backdrop (Acrylic/None) BEFORE DirectComposition CreateTargetForHwnd and
+        // BEFORE first ShowWindow(SW_SHOW) so cold launches never stall in solid fallback.
         unsafe {
+            #[link(name = "dwmapi")]
+            extern "system" {
+                fn DwmSetWindowAttribute(
+                    hwnd: HWND,
+                    dw_attribute: u32,
+                    pv_attribute: *const std::ffi::c_void,
+                    cb_attribute: u32,
+                ) -> i32;
+            }
+            let dark: i32 = 1;
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                20, // DWMWA_USE_IMMERSIVE_DARK_MODE
+                (&dark as *const i32).cast(),
+                mem::size_of::<i32>() as u32,
+            );
+            let corner: i32 = 2; // DWMWCP_ROUND
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                33, // DWMWA_WINDOW_CORNER_PREFERENCE
+                (&corner as *const i32).cast(),
+                mem::size_of::<i32>() as u32,
+            );
+            let margins = MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(self.hwnd, &margins);
+            let backdrop: i32 =
+                if INITIAL_ACRYLIC_BACKDROP.load(std::sync::atomic::Ordering::Acquire) {
+                    3 // DWMSBT_TRANSIENTWINDOW (Windows 11 Native Acrylic)
+                } else {
+                    1 // DWMSBT_NONE
+                };
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                38, // DWMWA_SYSTEMBACKDROP_TYPE
+                (&backdrop as *const i32).cast(),
+                mem::size_of::<i32>() as u32,
+            );
+            // Trigger immediate WM_NCCALCSIZE recalculation before first ShowWindow so DWM never
+            // paints ghost native caption buttons behind Ferric's custom titlebar controls.
             let _ = SetWindowPos(
                 self.hwnd,
                 HWND(0),
@@ -418,8 +470,10 @@ impl Win32Window {
             }
             WM_NCPAINT => return LRESULT(0),
             WM_NCACTIVATE => {
+                // Forward with lParam = -1 so DWM updates active/inactive Acrylic backdrop state
+                // without triggering classic non-client caption frame painting.
                 if IsIconic(hwnd).0 == 0 {
-                    return LRESULT(1);
+                    return DefWindowProcW(hwnd, msg, wparam, LPARAM(-1));
                 }
             }
             _ => {}
@@ -433,12 +487,14 @@ impl Win32Window {
         let window = &mut (*(user_data as *mut Win32Window));
         match msg {
             WM_ACTIVATE => {
-                if wparam.0 & 0xffff == WA_ACTIVE as usize {
+                let state = wparam.0 & 0xffff;
+                if state == WA_ACTIVE as usize || state == 2 {
                     window.do_callback(Win32Event::AppGotFocus);
                 }
                 else {
                     window.do_callback(Win32Event::AppLostFocus);
                 }
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
             },
             WM_NCCALCSIZE => {
                 // Keep frameless client geometry on both normal and maximized states;

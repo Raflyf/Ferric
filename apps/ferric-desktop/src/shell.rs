@@ -274,6 +274,7 @@ mod win_impl {
             cb_attribute: u32,
         ) -> i32;
         fn DwmExtendFrameIntoClientArea(hwnd: HWND, p_mar_inset: *const DwmMargins) -> i32;
+        fn DwmFlush() -> i32;
     }
 
     #[link(name = "comctl32")]
@@ -645,6 +646,18 @@ mod win_impl {
             if hr != 0 {
                 // Windows 10 / older builds fallback
                 apply_wca_acrylic_fallback(hwnd, enabled);
+            }
+            if IsWindowVisible(hwnd.0) != 0 {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let _ = DwmFlush();
             }
         }
     }
@@ -1455,9 +1468,10 @@ mod win_impl {
                     }
                 }
                 WM_NCACTIVATE => {
-                    // Never allow DefWindowProcW to paint classic titlebar/caption frames on focus/blur.
+                    // Forward with lParam = -1 so DWM updates active/inactive Acrylic/Mica state
+                    // without painting classic Win32 non-client caption frames on focus/blur.
                     if IsIconic(hwnd.0) == 0 {
-                        return LRESULT(1);
+                        return DefSubclassProc(hwnd, msg, wparam, LPARAM(-1));
                     }
                 }
                 WM_NCPAINT => {

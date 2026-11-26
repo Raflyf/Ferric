@@ -405,6 +405,9 @@ impl Cx {
         );
         d3d11_window.present(vsync);
         if d3d11_window.first_draw {
+            if let Some(dcomp_dev) = &d3d11_window.dcomp_device {
+                let _ = unsafe { dcomp_dev.Commit() };
+            }
             d3d11_window.win32_window.show();
             d3d11_window.first_draw = false;
         }

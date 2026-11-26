@@ -4585,8 +4585,9 @@ impl App {
             self.theme.acrylic_opacity = self.theme.acrylic_opacity.clamp(0.18, 0.94);
         }
 
-        // Seed DWM Acrylic state BEFORE installing Win32 window hooks so frame 0 renders
-        // with native blur immediately instead of flashing solid first.
+        // Seed DWM Acrylic state BEFORE window creation (`Win32Window::init`) and BEFORE installing
+        // Win32 window hooks so frame 0 renders with native blur immediately on cold launch.
+        cx.set_win32_initial_acrylic(self.theme.acrylic_enabled);
         win32_set_native_acrylic(
             self.theme.acrylic_enabled,
             self.theme.acrylic_opacity,
@@ -13307,6 +13308,7 @@ impl AppMain for App {
         self.ensure_initialized(cx);
 
         if matches!(event, Event::WindowGeomChange(_)) {
+            win32_install_window_hooks();
             self.hide_native_makepad_caption(cx);
             let is_max = win32_is_active_window_maximized();
             self.ui

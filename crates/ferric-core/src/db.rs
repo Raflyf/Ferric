@@ -669,6 +669,8 @@ impl LibraryDb {
             crate::secrets::protect_secret(&protected.spotify_access_token);
         protected.spotify_refresh_token =
             crate::secrets::protect_secret(&protected.spotify_refresh_token);
+        protected.spotify_web_cookie =
+            crate::secrets::protect_secret(&protected.spotify_web_cookie);
         protected.youtube_client_secret =
             crate::secrets::protect_secret(&protected.youtube_client_secret);
         protected.youtube_access_token =
@@ -691,6 +693,7 @@ impl LibraryDb {
         };
         dec(&mut loaded.spotify_access_token);
         dec(&mut loaded.spotify_refresh_token);
+        dec(&mut loaded.spotify_web_cookie);
         dec(&mut loaded.youtube_client_secret);
         dec(&mut loaded.youtube_access_token);
         dec(&mut loaded.youtube_refresh_token);
@@ -1075,6 +1078,7 @@ mod tests {
             youtube_connected: true,
             youtube_cookie: "SAPISID=secret_cookie_val".to_string(),
             youtube_sapisid: "secret_sapisid_val".to_string(),
+            spotify_web_cookie: "secret_sp_dc_cookie_val".to_string(),
             subsonic_password: "secret_subsonic_pw".to_string(),
             ..AccountSettings::default()
         };
@@ -1090,12 +1094,14 @@ mod tests {
         if cfg!(target_os = "windows") {
             assert!(!raw_json.contains("secret_cookie_val"));
             assert!(!raw_json.contains("secret_sapisid_val"));
+            assert!(!raw_json.contains("secret_sp_dc_cookie_val"));
             assert!(!raw_json.contains("secret_subsonic_pw"));
             assert!(raw_json.contains(crate::secrets::DPAPI_PREFIX));
         }
         let loaded = db.load_accounts().expect("load accounts");
         assert_eq!(loaded.youtube_cookie, "SAPISID=secret_cookie_val");
         assert_eq!(loaded.youtube_sapisid, "secret_sapisid_val");
+        assert_eq!(loaded.spotify_web_cookie, "secret_sp_dc_cookie_val");
         assert_eq!(loaded.subsonic_password, "secret_subsonic_pw");
     }
 }

@@ -212,7 +212,7 @@ impl Win32App {
             hInstance: unsafe {GetModuleHandleW(None).unwrap().into()},
             hIcon: unsafe {LoadIconW(None, IDI_WINLOGO).unwrap()}, //h_icon,
             lpszClassName: PCWSTR(window_class_name.as_ptr()),
-            hbrBackground: unsafe {CreateSolidBrush(COLORREF(0x3f3f3f3f))},
+            hbrBackground: Default::default(),
             ..Default::default()
             /*            
             cbClsExtra: 0,

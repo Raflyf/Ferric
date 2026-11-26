@@ -1992,30 +1992,56 @@ live_design! {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_acct_spotify = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account" }
+                                                lbl_t_acct_spotify = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account (OAuth · Client ID · Premium Only)" }
                                                 spotify_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Not Connected" }
                                             }
                                             lbl_m_acct_spotify = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
-                                                text: "Sign in with OAuth 2.0 PKCE to sync your Spotify Liked Songs and playlists. Tokens are stored encrypted with Windows DPAPI. Create an app at developer.spotify.com and add redirect URI http://127.0.0.1:43824/callback."
+                                                text: "Spotify Premium account required: Spotify Developer Dashboard restricts Client ID apps to active Spotify Premium accounts. Sign in with official OAuth 2.0 PKCE to sync Liked Songs and playlists (tokens stored encrypted with Windows DPAPI). Free accounts can use Instant Spotify Link Import below."
                                             }
                                             <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 6,
-                                                spotify_client_input = <FerricInput> { width: Fill, empty_text: "Spotify Client ID (optional)" }
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                spotify_client_input = <FerricInput> { width: Fill, empty_text: "Spotify Client ID (Premium account required)" }
                                                 spotify_login_btn = <FerricPrimaryBtn> { text: "Sign in with Spotify" }
                                                 spotify_sync_btn = <FerricBtn> { height: 28, text: "Sync Library" }
                                                 spotify_logout_btn = <FerricBtn> { height: 28, text: "Sign Out" }
                                             }
                                             <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 6,
-                                                lbl_m_spotify_web = <Label> {
-                                                    width: Fill,
-                                                    draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.4 } }
-                                                    text: "No Client ID and no developer app: sign in to Spotify's own web player and Ferric reads your library from that session."
-                                                }
-                                                spotify_web_login_btn = <FerricBtn> { height: 28, text: "Sign in without Client ID" }
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                spotify_dev_portal_btn = <FerricBtn> { height: 26, text: "Open Developer Dashboard" }
+                                                spotify_copy_portal_btn = <FerricBtn> { height: 26, text: "Copy Dashboard URL" }
+                                                spotify_copy_redirect_btn = <FerricBtn> { height: 26, text: "Copy Redirect URI" }
+                                            }
+                                            spotify_oauth_status_lbl = <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.5 } }
+                                                text: "Premium only  ·  Dashboard: https://developer.spotify.com/dashboard  ·  Redirect URI: http://127.0.0.1:43824/callback"
+                                            }
+                                        }
+
+                                        card_acct_spotify_web = <FerricCard> {
+                                            flow: Down, spacing: 8,
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                                lbl_t_acct_spotify_web = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Web Sign-In (Without Client ID)" }
+                                                spotify_web_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Not Connected" }
+                                            }
+                                            lbl_m_spotify_web = <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
+                                                text: "Sign in via Spotify's web player without a Developer Client ID. Cookies are stored encrypted with Windows DPAPI. Note: Spotify may restrict its internal web token endpoint; Instant Spotify Link Import below works for any public playlist or album."
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                spotify_web_login_btn = <FerricPrimaryBtn> { text: "Sign in via Web" }
                                                 spotify_web_sync_btn = <FerricBtn> { height: 28, text: "Sync Web Library" }
+                                                spotify_web_logout_btn = <FerricBtn> { height: 28, text: "Sign Out" }
+                                            }
+                                            spotify_web_status_lbl = <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.5 } }
+                                                text: "Web session not connected — sign in via browser or import public Spotify links below."
                                             }
                                         }
 
@@ -5655,6 +5681,7 @@ impl App {
         self.ui
             .ferric_lyrics_view(id!(fs_lyrics_scroll))
             .set_style(cx, raw_accent, z, false);
+        self.refresh_spotify_account_ui(cx);
         self.ui.redraw(cx);
     }
 
@@ -7232,6 +7259,8 @@ impl App {
         // Propagate clean Native Acrylic / AMOLED / Light surface polarity to all cards
         for card_id in [
             id!(card_acct_yt),
+            id!(card_acct_spotify),
+            id!(card_acct_spotify_web),
             id!(card_acct_import),
             id!(card_acct_sub),
             id!(card_pb_xfade),
@@ -7525,6 +7554,7 @@ impl App {
             id!(search_page_input),
             id!(pl_new_input),
             id!(detail_rename_input),
+            id!(spotify_client_input),
             id!(quick_sync_input),
             id!(sub_url_input),
             id!(sub_user_input),
@@ -7573,6 +7603,8 @@ impl App {
             id!(pl_empty_focus_btn),
             id!(detail_play_btn),
             id!(yt_login_btn),
+            id!(spotify_login_btn),
+            id!(spotify_web_login_btn),
             id!(discord_save_id_btn),
             id!(update_now_btn),
             id!(tm_play_btn),
@@ -7611,6 +7643,13 @@ impl App {
             id!(yt_sync_btn),
             id!(yt_logout_btn),
             id!(guest_refresh_btn),
+            id!(spotify_sync_btn),
+            id!(spotify_logout_btn),
+            id!(spotify_dev_portal_btn),
+            id!(spotify_copy_portal_btn),
+            id!(spotify_copy_redirect_btn),
+            id!(spotify_web_sync_btn),
+            id!(spotify_web_logout_btn),
             id!(quick_spotify_btn),
             id!(quick_youtube_btn),
             id!(match_local_btn),
@@ -8055,6 +8094,8 @@ impl App {
             id!(detail_title_lbl),
             id!(lbl_t_settings),
             id!(lbl_t_acct_yt),
+            id!(lbl_t_acct_spotify),
+            id!(lbl_t_acct_spotify_web),
             id!(lbl_t_acct_import),
             id!(lbl_t_acct_sub),
             id!(lbl_t_pb_xfade),
@@ -8125,6 +8166,10 @@ impl App {
             id!(detail_sub_lbl),
             id!(lbl_m_acct_desc),
             id!(oauth_status_lbl),
+            id!(lbl_m_acct_spotify),
+            id!(spotify_oauth_status_lbl),
+            id!(lbl_m_spotify_web),
+            id!(spotify_web_status_lbl),
             id!(lbl_m_pb_curve),
             id!(eq_status_lbl),
             id!(eq_f0),
@@ -9728,13 +9773,13 @@ impl App {
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
-        self.ui.label(id!(oauth_status_lbl)).set_text(
+        self.ui.label(id!(spotify_web_status_lbl)).set_text(
             cx,
             "Opening Spotify sign-in window... Sign in normally; no Client ID needed.",
         );
         let profile_dir = app_data_dir().join("spotify_web_profile");
-        // Keep the persisted Spotify session so a re-click silently re-authorises.
-        let clear_cookies = false;
+        // Clear cookies if signed out so account switching works cleanly; keep active session otherwise.
+        let clear_cookies = self.accounts.spotify_web_cookie.trim().is_empty();
         launch_spotify_login_window(profile_dir, clear_cookies, move |outcome| {
             let msg = match outcome {
                 SpotifyLoginOutcome::SignedIn { sp_dc, token_json } => {
@@ -9749,35 +9794,65 @@ impl App {
         });
     }
 
-    fn refresh_spotify_account_ui(&mut self, cx: &mut Cx) {
-        let (text, color) = if self.accounts.spotify_connected {
-            let name = self.accounts.spotify_user_name.trim();
-            if name.is_empty() {
-                ("Connected".to_string(), vec4(0.353, 0.820, 0.549, 1.0))
-            } else {
-                (
-                    format!("Connected · {name}"),
-                    vec4(0.353, 0.820, 0.549, 1.0),
-                )
-            }
+    fn is_spotify_web_session_active(&self) -> bool {
+        self.accounts.spotify_connected && !self.accounts.spotify_web_cookie.trim().is_empty()
+    }
+
+    fn refresh_spotify_account_ui(&self, cx: &mut Cx) {
+        let pal = self.adaptive_palette();
+        let connected_col = if pal.is_light {
+            vec4(0.075, 0.478, 0.282, 1.0)
         } else {
-            ("Not Connected".to_string(), vec4(0.910, 0.416, 0.173, 1.0))
+            vec4(0.353, 0.820, 0.549, 1.0)
         };
-        self.ui.label(id!(spotify_state_lbl)).set_text(cx, &text);
+        let idle_col = rgba_to_vec4(pal.brand_accent);
+
+        let web_active = self.is_spotify_web_session_active();
+        let oauth_active = self.accounts.spotify_connected && !web_active;
+        let name = self.accounts.spotify_user_name.trim();
+        let connected_lbl = if name.is_empty() {
+            "Connected".to_string()
+        } else {
+            format!("Connected · {name}")
+        };
+
+        let (oauth_text, oauth_col) = if oauth_active {
+            (connected_lbl.clone(), connected_col)
+        } else {
+            ("Not Connected".to_string(), idle_col)
+        };
         self.ui
             .label(id!(spotify_state_lbl))
-            .apply_over(cx, live! { draw_text: { color: (color) } });
+            .set_text(cx, &oauth_text);
         self.ui
-            .text_input(id!(spotify_client_input))
-            .set_text(cx, &self.accounts.spotify_client_id);
+            .label(id!(spotify_state_lbl))
+            .apply_over(cx, live! { draw_text: { color: (oauth_col) } });
+
+        let (web_text, web_col) = if web_active {
+            (connected_lbl, connected_col)
+        } else {
+            ("Not Connected".to_string(), idle_col)
+        };
+        self.ui
+            .label(id!(spotify_web_state_lbl))
+            .set_text(cx, &web_text);
+        self.ui
+            .label(id!(spotify_web_state_lbl))
+            .apply_over(cx, live! { draw_text: { color: (web_col) } });
+
+        if self.ui.text_input(id!(spotify_client_input)).text() != self.accounts.spotify_client_id {
+            self.ui
+                .text_input(id!(spotify_client_input))
+                .set_text(cx, &self.accounts.spotify_client_id);
+        }
     }
 
     fn start_spotify_login(&mut self, cx: &mut Cx) {
         let client_id = self.accounts.spotify_client_id.trim().to_string();
         if client_id.is_empty() {
-            self.ui.label(id!(oauth_status_lbl)).set_text(
+            self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
                 cx,
-                "Paste your Spotify Client ID first (developer.spotify.com, redirect URI http://127.0.0.1:43824/callback).",
+                "Paste your Spotify Client ID first (requires Spotify Premium at developer.spotify.com/dashboard; redirect URI http://127.0.0.1:43824/callback).",
             );
             return;
         }
@@ -9785,7 +9860,7 @@ impl App {
             return;
         };
         self.ui
-            .label(id!(oauth_status_lbl))
+            .label(id!(spotify_oauth_status_lbl))
             .set_text(cx, "Opening Spotify authorization in your browser...");
         thread::spawn(move || {
             let pkce = generate_pkce_pair();
@@ -9820,9 +9895,14 @@ impl App {
     }
 
     fn sync_spotify_library(&mut self, cx: &mut Cx) {
+        let status_lbl = if self.is_spotify_web_session_active() {
+            id!(spotify_web_status_lbl)
+        } else {
+            id!(spotify_oauth_status_lbl)
+        };
         let token = self.accounts.spotify_access_token.trim().to_string();
         if token.is_empty() {
-            self.ui.label(id!(oauth_status_lbl)).set_text(
+            self.ui.label(status_lbl).set_text(
                 cx,
                 "Sign in with Spotify first to sync your Liked Songs and playlists.",
             );
@@ -9832,7 +9912,7 @@ impl App {
             return;
         };
         self.ui
-            .label(id!(oauth_status_lbl))
+            .label(status_lbl)
             .set_text(cx, "Syncing your Spotify library...");
         thread::spawn(move || {
             let msg = match sync_spotify_catalog(&token) {
@@ -10520,6 +10600,7 @@ impl App {
                 BgMessage::SpotifyLoginResult { client_id, tokens } => {
                     self.accounts.spotify_client_id = client_id;
                     self.accounts.spotify_connected = true;
+                    self.accounts.spotify_web_cookie.clear();
                     self.accounts.spotify_access_token = tokens.access_token;
                     if let Some(refresh) = tokens.refresh_token {
                         self.accounts.spotify_refresh_token = refresh;
@@ -10533,7 +10614,7 @@ impl App {
                 }
                 BgMessage::SpotifyLoginFailed(err) => {
                     self.ui
-                        .label(id!(oauth_status_lbl))
+                        .label(id!(spotify_oauth_status_lbl))
                         .set_text(cx, &format!("Spotify sign-in failed: {err}"));
                 }
                 BgMessage::SpotifyCatalogSynced(report) => {
@@ -10557,7 +10638,12 @@ impl App {
                         self.all_tracks = db.list_tracks("").unwrap_or_default();
                         self.playlists = db.list_playlists().unwrap_or_default();
                     }
-                    self.ui.label(id!(oauth_status_lbl)).set_text(
+                    let status_lbl = if self.is_spotify_web_session_active() {
+                        id!(spotify_web_status_lbl)
+                    } else {
+                        id!(spotify_oauth_status_lbl)
+                    };
+                    self.ui.label(status_lbl).set_text(
                         cx,
                         &format!(
                             "Spotify: {} · {liked_n} liked songs & {pl_n} playlists synced.",
@@ -10572,8 +10658,13 @@ impl App {
                     );
                 }
                 BgMessage::SpotifySyncFailed(err) => {
+                    let status_lbl = if self.is_spotify_web_session_active() {
+                        id!(spotify_web_status_lbl)
+                    } else {
+                        id!(spotify_oauth_status_lbl)
+                    };
                     self.ui
-                        .label(id!(oauth_status_lbl))
+                        .label(status_lbl)
                         .set_text(cx, &format!("Spotify sync failed: {err}"));
                 }
                 BgMessage::SpotifyWebLoginResult { sp_dc, token_json } => {
@@ -10591,15 +10682,15 @@ impl App {
                         }
                         Err(err) => {
                             self.ui
-                                .label(id!(oauth_status_lbl))
-                                .set_text(cx, &format!("Spotify token error: {err}"));
+                                .label(id!(spotify_web_status_lbl))
+                                .set_text(cx, &format!("Spotify Web sign-in: {err}"));
                         }
                     }
                 }
                 BgMessage::SpotifyWebLoginFailed(err) => {
                     self.ui
-                        .label(id!(oauth_status_lbl))
-                        .set_text(cx, &format!("Spotify sign-in: {err}"));
+                        .label(id!(spotify_web_status_lbl))
+                        .set_text(cx, &format!("Spotify Web sign-in: {err}"));
                 }
                 BgMessage::StreamReady {
                     track_id,
@@ -12236,6 +12327,10 @@ impl App {
                     .is_some_and(|fe| is_desktop_click(&fe)))
                 && let Some(t) = hist_tracks.get(i).cloned()
             {
+                if self.queue.current().is_none() {
+                    self.queue_context = "History".to_string();
+                    self.queue.remove_track_by_id(&t.id);
+                }
                 self.queue.insert_play_next(t);
                 if let Some(next) = self.queue.jump_to_upcoming(0).cloned() {
                     self.play_track(cx, next);
@@ -12742,6 +12837,57 @@ impl App {
         if self.ui.button(id!(spotify_sync_btn)).clicked(actions) {
             self.sync_spotify_library(cx);
         }
+        if self.ui.button(id!(spotify_dev_portal_btn)).clicked(actions) {
+            const URL: &str = "https://developer.spotify.com/dashboard";
+            if let Err(err) = open_allowed_url(URL) {
+                self.ui
+                    .label(id!(spotify_oauth_status_lbl))
+                    .set_text(cx, &format!("Could not open browser: {err}"));
+            } else {
+                self.show_toast(cx, "Opened Spotify Developer Dashboard");
+            }
+        }
+        if self
+            .ui
+            .button(id!(spotify_copy_portal_btn))
+            .clicked(actions)
+        {
+            const URL: &str = "https://developer.spotify.com/dashboard";
+            match copy_text_to_clipboard(URL) {
+                Ok(()) => {
+                    self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
+                        cx,
+                        "Copied dashboard URL: https://developer.spotify.com/dashboard",
+                    );
+                    self.show_toast(cx, "Copied Spotify Developer Dashboard URL");
+                }
+                Err(err) => {
+                    self.ui
+                        .label(id!(spotify_oauth_status_lbl))
+                        .set_text(cx, &format!("Clipboard error: {err}"));
+                }
+            }
+        }
+        if self
+            .ui
+            .button(id!(spotify_copy_redirect_btn))
+            .clicked(actions)
+        {
+            const REDIRECT: &str = "http://127.0.0.1:43824/callback";
+            match copy_text_to_clipboard(REDIRECT) {
+                Ok(()) => {
+                    self.ui
+                        .label(id!(spotify_oauth_status_lbl))
+                        .set_text(cx, "Copied redirect URI: http://127.0.0.1:43824/callback");
+                    self.show_toast(cx, "Copied Redirect URI");
+                }
+                Err(err) => {
+                    self.ui
+                        .label(id!(spotify_oauth_status_lbl))
+                        .set_text(cx, &format!("Clipboard error: {err}"));
+                }
+            }
+        }
         if self.ui.button(id!(spotify_web_login_btn)).clicked(actions) {
             self.start_spotify_web_login(cx);
         }
@@ -12752,7 +12898,10 @@ impl App {
                 self.sync_spotify_library(cx);
             }
         }
-        if self.ui.button(id!(spotify_logout_btn)).clicked(actions) {
+        if self.ui.button(id!(spotify_logout_btn)).clicked(actions)
+            || self.ui.button(id!(spotify_web_logout_btn)).clicked(actions)
+        {
+            let from_web = self.ui.button(id!(spotify_web_logout_btn)).clicked(actions);
             self.accounts.spotify_connected = false;
             self.accounts.spotify_access_token.clear();
             self.accounts.spotify_refresh_token.clear();
@@ -12768,7 +12917,12 @@ impl App {
                 self.playlists
                     .retain(|pl| !pl.id.starts_with("spotify:playlist:"));
             }
-            self.ui.label(id!(oauth_status_lbl)).set_text(
+            let status_lbl = if from_web {
+                id!(spotify_web_status_lbl)
+            } else {
+                id!(spotify_oauth_status_lbl)
+            };
+            self.ui.label(status_lbl).set_text(
                 cx,
                 "Spotify signed out. Synced Spotify playlists removed; liked tracks kept.",
             );

@@ -409,6 +409,10 @@ impl Cx {
                 let _ = unsafe { dcomp_dev.Commit() };
             }
             d3d11_window.win32_window.show();
+            d3d11_window.win32_window.refresh_visible_acrylic_backdrop();
+            if let Some(dcomp_dev) = &d3d11_window.dcomp_device {
+                let _ = unsafe { dcomp_dev.Commit() };
+            }
             d3d11_window.first_draw = false;
         }
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);

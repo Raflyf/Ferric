@@ -1219,6 +1219,24 @@ mod win_impl {
         }
     }
 
+    pub fn style_dialog_window(hwnd_raw: isize) {
+        if hwnd_raw == 0 {
+            return;
+        }
+        let hwnd = HWND(hwnd_raw as *mut c_void);
+        apply_window_icon(hwnd);
+        // SAFETY: Valid top-level dialog HWND owned by this process; apply Windows 11 dark titlebar.
+        unsafe {
+            let dark: i32 = 1;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                (&raw const dark).cast(),
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+
     pub fn set_close_to_tray(enabled: bool) {
         CLOSE_TO_TRAY.store(enabled, Ordering::Release);
         if let Some(hwnd) = active_process_hwnd() {
@@ -1468,11 +1486,19 @@ mod win_impl {
                     }
                 }
                 WM_NCACTIVATE => {
-                    // Forward with lParam = -1 so DWM updates active/inactive Acrylic/Mica state
-                    // without painting classic Win32 non-client caption frames on focus/blur.
-                    if IsIconic(hwnd.0) == 0 {
-                        return DefSubclassProc(hwnd, msg, wparam, LPARAM(-1));
+                    // Preserve real lParam for DefSubclassProc so Windows 11 DWM activates the
+                    // Acrylic/SystemBackdrop frame on startup and focus transitions without
+                    // stalling in solid fallback (WS_EX_NOREDIRECTIONBITMAP prevents GDI chrome).
+                    if ACRYLIC_ENABLED.load(Ordering::Acquire) {
+                        let margins = DwmMargins {
+                            cx_left_width: -1,
+                            cx_right_width: -1,
+                            cy_top_height: -1,
+                            cy_bottom_height: -1,
+                        };
+                        let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
                     }
+                    return DefSubclassProc(hwnd, msg, wparam, lparam);
                 }
                 WM_NCPAINT => {
                     return LRESULT(0);
@@ -1524,13 +1550,64 @@ mod win_impl {
                             trim_working_set();
                             push_event(TrayEvent::HiddenToTray);
                         }
-                    } else if WINDOW_HIDDEN_OR_MIN.swap(false, Ordering::AcqRel) {
-                        push_event(TrayEvent::ShowWindow);
                     } else {
-                        push_event(TrayEvent::WindowMovedOrResized);
+                        if ACRYLIC_ENABLED.load(Ordering::Acquire) {
+                            let margins = DwmMargins {
+                                cx_left_width: -1,
+                                cx_right_width: -1,
+                                cy_top_height: -1,
+                                cy_bottom_height: -1,
+                            };
+                            let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+                        }
+                        if WINDOW_HIDDEN_OR_MIN.swap(false, Ordering::AcqRel) {
+                            push_event(TrayEvent::ShowWindow);
+                        } else {
+                            push_event(TrayEvent::WindowMovedOrResized);
+                        }
                     }
                 }
-                WM_MOVE | WM_WINDOWPOSCHANGED | WM_SHOWWINDOW => {
+                WM_SHOWWINDOW => {
+                    if wparam.0 != 0 && ACRYLIC_ENABLED.load(Ordering::Acquire) {
+                        let margins = DwmMargins {
+                            cx_left_width: -1,
+                            cx_right_width: -1,
+                            cy_top_height: -1,
+                            cy_bottom_height: -1,
+                        };
+                        let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+                        let none_b: i32 = DWMSBT_NONE;
+                        let acr_b: i32 = DWMSBT_TRANSIENTWINDOW;
+                        let _ = DwmSetWindowAttribute(
+                            hwnd,
+                            DWMWA_SYSTEMBACKDROP_TYPE,
+                            (&raw const none_b).cast(),
+                            std::mem::size_of::<i32>() as u32,
+                        );
+                        let _ = DwmSetWindowAttribute(
+                            hwnd,
+                            DWMWA_SYSTEMBACKDROP_TYPE,
+                            (&raw const acr_b).cast(),
+                            std::mem::size_of::<i32>() as u32,
+                        );
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_FRAMECHANGED
+                                | SWP_NOMOVE
+                                | SWP_NOSIZE
+                                | SWP_NOZORDER
+                                | SWP_NOACTIVATE,
+                        );
+                        let _ = DwmFlush();
+                    }
+                    push_event(TrayEvent::WindowMovedOrResized);
+                }
+                WM_MOVE | WM_WINDOWPOSCHANGED => {
                     push_event(TrayEvent::WindowMovedOrResized);
                 }
                 WM_CLOSE => {
@@ -1861,6 +1938,17 @@ pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     {
         let _ = text;
         Ok(())
+    }
+}
+
+pub fn win32_style_dialog_window(hwnd_raw: isize) {
+    #[cfg(target_os = "windows")]
+    {
+        win_impl::style_dialog_window(hwnd_raw);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd_raw;
     }
 }
 

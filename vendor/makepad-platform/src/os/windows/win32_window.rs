@@ -458,6 +458,7 @@ impl Win32Window {
         // Suppress native OS non-client chrome from the very first CreateWindowExW message
         // (even while GWLP_USERDATA is still 0) so DWM never creates ghost caption glyphs at startup.
         match msg {
+            WM_ERASEBKGND => return LRESULT(1),
             WM_NCCALCSIZE if wparam == WPARAM(1) => {
                 let margins = MARGINS {
                     cxLeftWidth: -1,
@@ -470,11 +471,19 @@ impl Win32Window {
             }
             WM_NCPAINT => return LRESULT(0),
             WM_NCACTIVATE => {
-                // Forward with lParam = -1 so DWM updates active/inactive Acrylic backdrop state
-                // without triggering classic non-client caption frame painting.
-                if IsIconic(hwnd).0 == 0 {
-                    return DefWindowProcW(hwnd, msg, wparam, LPARAM(-1));
+                // With WS_EX_NOREDIRECTIONBITMAP + frameless WM_NCCALCSIZE, forwarding the real
+                // lParam to DefWindowProcW never paints a classic GDI caption frame, while ensuring
+                // Windows 11 DWM activates the Acrylic/SystemBackdrop host immediately on cold start.
+                if INITIAL_ACRYLIC_BACKDROP.load(std::sync::atomic::Ordering::Acquire) {
+                    let margins = MARGINS {
+                        cxLeftWidth: -1,
+                        cxRightWidth: -1,
+                        cyTopHeight: -1,
+                        cyBottomHeight: -1,
+                    };
+                    let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
                 }
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
             }
             _ => {}
         }
@@ -921,6 +930,57 @@ impl Win32Window {
     pub fn show(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
+        }
+    }
+
+    /// Re-bind Windows 11 DWM Acrylic after first `ShowWindow(SW_SHOW)` so DWM constructs the live
+    /// visible backdrop material instead of holding a solid hidden-window fallback until minimize/restore.
+    pub fn refresh_visible_acrylic_backdrop(&self) {
+        if !INITIAL_ACRYLIC_BACKDROP.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        unsafe {
+            #[link(name = "dwmapi")]
+            extern "system" {
+                fn DwmSetWindowAttribute(
+                    hwnd: HWND,
+                    dw_attribute: u32,
+                    pv_attribute: *const std::ffi::c_void,
+                    cb_attribute: u32,
+                ) -> i32;
+                fn DwmFlush() -> i32;
+            }
+            let margins = MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(self.hwnd, &margins);
+            let none_backdrop: i32 = 1; // DWMSBT_NONE
+            let acrylic_backdrop: i32 = 3; // DWMSBT_TRANSIENTWINDOW
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                38,
+                (&none_backdrop as *const i32).cast(),
+                mem::size_of::<i32>() as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                38,
+                (&acrylic_backdrop as *const i32).cast(),
+                mem::size_of::<i32>() as u32,
+            );
+            let _ = SetWindowPos(
+                self.hwnd,
+                HWND(0),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = DwmFlush();
         }
     }
     

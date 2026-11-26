@@ -142,10 +142,13 @@ impl PlayQueue {
         self.tracks = new_tracks;
     }
 
-    /// Jump directly to the `offset`-th upcoming track (0 = very next song in Up Next).
+    /// Jump directly to the `offset`-th upcoming track (0 = very next song in Up Next,
+    /// or slot `offset` from the start of the queue when playback has not started yet).
     pub fn jump_to_upcoming(&mut self, offset: usize) -> Option<&Track> {
-        let pos = self.cursor?;
-        let target = pos + 1 + offset;
+        let target = match self.cursor {
+            Some(pos) => pos + 1 + offset,
+            None => offset,
+        };
         if target < self.order.len() {
             self.cursor = Some(target);
             self.current()
@@ -415,5 +418,20 @@ mod tests {
         assert_eq!(q.len(), 2);
         assert_eq!(q.tracks().len(), 2);
         assert!(q.tracks().iter().all(|t| t.id != "1" && t.id != "2"));
+    }
+
+    #[test]
+    fn insert_play_next_and_jump_to_upcoming_work_before_first_playback() {
+        let mut q = PlayQueue::new();
+        q.set_tracks(vec![dummy_track("1", "A"), dummy_track("2", "B")], None);
+        assert!(q.current().is_none());
+
+        q.remove_track_by_id("2");
+        q.insert_play_next(dummy_track("2", "B"));
+        let played = q.jump_to_upcoming(0).cloned();
+        assert_eq!(played.as_ref().map(|t| t.id.as_str()), Some("2"));
+        assert_eq!(q.current().map(|t| t.id.as_str()), Some("2"));
+        assert_eq!(q.peek_upcoming(5).len(), 1);
+        assert_eq!(q.peek_upcoming(5)[0].id, "1");
     }
 }

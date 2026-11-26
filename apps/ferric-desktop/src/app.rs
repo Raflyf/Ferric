@@ -3481,6 +3481,8 @@ pub struct App {
     #[rust]
     fs_reveal_t: f32,
     #[rust]
+    fs_reveal_target: f32,
+    #[rust]
     fs_video_morph_t: f32,
     #[rust]
     fs_video_morph_target: f32,
@@ -3633,22 +3635,35 @@ impl App {
             );
         }
 
-        if self.fullscreen_open && self.fs_reveal_t < 0.995 {
-            self.fs_reveal_t = (self.fs_reveal_t + (1.0 - self.fs_reveal_t) * k).min(1.0);
-            if 1.0 - self.fs_reveal_t < 0.01 {
-                self.fs_reveal_t = 1.0;
-                if self.video_open && self.fs_video_morph_t >= 0.99 {
-                    self.fs_video_bounds_sync_pending = true;
-                    active = true;
+        if (self.fs_reveal_target - self.fs_reveal_t).abs() > 0.004 {
+            // Graceful ~280ms ease-out rise on Open, brisk ~220ms glide-down on Close
+            let rate = if self.fs_reveal_target > self.fs_reveal_t {
+                13.5
+            } else {
+                15.5
+            };
+            let k_fs = (1.0 - (-rate * dt).exp()) as f32;
+            self.fs_reveal_t = (self.fs_reveal_t
+                + (self.fs_reveal_target - self.fs_reveal_t) * k_fs)
+                .clamp(0.0, 1.0);
+            if (self.fs_reveal_target - self.fs_reveal_t).abs() <= 0.006 {
+                self.fs_reveal_t = self.fs_reveal_target;
+                self.apply_fullscreen_reveal(cx);
+                if self.fs_reveal_t >= 0.995 {
+                    // Fully covered by Fullscreen Lyrics stage -> hide background shell to save GPU
+                    self.ui.view(id!(shell_col)).set_visible(cx, false);
+                    if self.video_open && self.fs_video_morph_t >= 0.99 {
+                        self.fs_video_bounds_sync_pending = true;
+                        active = true;
+                    }
+                } else {
+                    // Close transition finished -> tear down Fullscreen overlay cleanly (0% idle GPU)
+                    self.finish_fullscreen_close(cx);
                 }
             } else {
+                self.apply_fullscreen_reveal(cx);
                 active = true;
             }
-            let top_pad = 14.0 + 18.0 * (1.0 - f64::from(self.fs_reveal_t));
-            self.ui.view(id!(fs_stage_content)).apply_over(
-                cx,
-                live! { padding: { left: 48.0, right: 38.0, top: (top_pad), bottom: 18.0 } },
-            );
         }
 
         if self.fullscreen_open
@@ -4341,12 +4356,14 @@ impl App {
         let box_h = cover_box + (video_box_h - cover_box) * tf;
         let cur_frame_h = (box_w * 9.0 / 16.0).round().max(110.0);
 
-        let art_sz = (304.0 - 28.0 * tf) * z;
-        let art_alpha = Self::smoothstep01(1.0 - t / 0.62);
+        let reveal_content = Self::smoothstep01((self.fs_reveal_t - 0.18) / 0.82);
+        let reveal_scale = 0.90 + 0.10 * f64::from(reveal_content);
+        let art_sz = (304.0 - 28.0 * tf) * z * reveal_scale;
+        let art_alpha = Self::smoothstep01(1.0 - t / 0.62) * reveal_content;
         let art_radius = 28.0 - 8.0 * t;
-        let vid_alpha = Self::smoothstep01((t - 0.14) / 0.86);
-        let hint_alpha = Self::smoothstep01((t - 0.30) / 0.70);
-        let ctrl_alpha = Self::smoothstep01((t - 0.48) / 0.52);
+        let vid_alpha = Self::smoothstep01((t - 0.14) / 0.86) * reveal_content;
+        let hint_alpha = Self::smoothstep01((t - 0.30) / 0.70) * reveal_content;
+        let ctrl_alpha = Self::smoothstep01((t - 0.48) / 0.52) * reveal_content;
 
         self.ui
             .view(id!(fs_left_card))
@@ -4540,7 +4557,8 @@ impl App {
         self.right_sidebar_open = true;
         self.right_lyrics_tab = false;
         self.page_reveal_t = 1.0;
-        self.fs_reveal_t = 1.0;
+        self.fs_reveal_t = 0.0;
+        self.fs_reveal_target = 0.0;
         self.fs_video_morph_t = 0.0;
         self.fs_video_morph_target = 0.0;
         self.fs_video_bounds_sync_pending = false;
@@ -4994,6 +5012,85 @@ impl App {
         self.ui.redraw(cx);
     }
 
+    fn apply_fullscreen_reveal(&self, cx: &mut Cx) {
+        let t = self.fs_reveal_t.clamp(0.0, 1.0);
+        let bg_alpha = Self::smoothstep01(t / 0.85);
+        let content_alpha = Self::smoothstep01((t - 0.18) / 0.82);
+        let slide_y = (1.0 - f64::from(t)) * 64.0;
+        let top_pad = 14.0 + slide_y;
+        let bottom_pad = (18.0 - slide_y * 0.25).max(0.0);
+
+        self.ui
+            .ferric_ambient_stage(id!(fs_backdrop))
+            .set_opacity(cx, bg_alpha);
+
+        let show_stage = t > 0.18;
+        self.ui
+            .view(id!(fs_stage_content))
+            .set_visible(cx, show_stage);
+        if show_stage {
+            self.ui.view(id!(fs_stage_content)).apply_over(
+                cx,
+                live! { padding: { left: 48.0, right: 38.0, top: (top_pad), bottom: (bottom_pad) } },
+            );
+            self.ui
+                .ferric_lyrics_view(id!(fs_lyrics_scroll))
+                .set_reveal_alpha(cx, content_alpha);
+            self.ui.label(id!(fs_title_lbl)).apply_over(
+                cx,
+                live! { draw_text: { color: (vec4(1.0, 1.0, 1.0, content_alpha)) } },
+            );
+            self.ui.label(id!(fs_artist_lbl)).apply_over(
+                cx,
+                live! { draw_text: { color: (vec4(1.0, 1.0, 1.0, 0.55 * content_alpha)) } },
+            );
+            self.ui.label(id!(signal_path_lbl)).apply_over(
+                cx,
+                live! { draw_text: { color: (vec4(1.0, 1.0, 1.0, 0.30 * content_alpha)) } },
+            );
+            self.ui.label(id!(fs_lyr_source)).apply_over(
+                cx,
+                live! { draw_text: { color: (vec4(1.0, 1.0, 1.0, 0.27 * content_alpha)) } },
+            );
+            self.sync_fullscreen_media_layout(cx);
+        }
+    }
+
+    fn finish_fullscreen_close(&mut self, cx: &mut Cx) {
+        self.fs_reveal_t = 0.0;
+        self.fs_reveal_target = 0.0;
+        self.fs_video_morph_t = 0.0;
+        self.fs_video_morph_target = 0.0;
+        self.fs_video_bounds_sync_pending = false;
+        self.ui.view(id!(fullscreen_overlay)).set_visible(cx, false);
+        self.ui.view(id!(fs_stage_content)).set_visible(cx, true);
+        self.ui.view(id!(shell_col)).set_visible(cx, true);
+        let accent = self.current_accent();
+        let acr = if self.theme.acrylic_enabled {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        let pos_ms = self.audio.as_ref().map_or(0, |a| a.telemetry().position_ms);
+        self.ui
+            .ferric_ambient_stage(id!(fs_backdrop))
+            .set_state(cx, false, false, accent, acr);
+        self.ui
+            .ferric_ambient_stage(id!(fs_backdrop))
+            .set_opacity(cx, 0.0);
+        self.ui
+            .ferric_lyrics_view(id!(fs_lyrics_scroll))
+            .set_playback_state(cx, pos_ms, false);
+        self.ui
+            .ferric_lyrics_view(id!(fs_lyrics_scroll))
+            .set_reveal_alpha(cx, 1.0);
+        self.sync_fullscreen_media_layout(cx);
+        if let Some(db) = &self.db {
+            db.shrink_memory();
+        }
+        win32_trim_working_set();
+    }
+
     fn set_fullscreen(&mut self, cx: &mut Cx, open: bool) {
         if !open && self.video_open {
             self.close_native_video_stage_inner(cx, false);
@@ -5001,8 +5098,10 @@ impl App {
         self.fullscreen_open = open;
         self.last_pos_txt.clear();
         self.last_dur_txt.clear();
-        self.ui.view(id!(shell_col)).set_visible(cx, !open);
-        self.ui.view(id!(fullscreen_overlay)).set_visible(cx, open);
+        // Keep `shell_col` visible underneath during both Open & Close transitions so the
+        // Fullscreen ambient sheet glides and dissolves smoothly over the main player shell.
+        self.ui.view(id!(shell_col)).set_visible(cx, true);
+        self.ui.view(id!(fullscreen_overlay)).set_visible(cx, true);
         let accent = self.current_accent();
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
@@ -5013,36 +5112,33 @@ impl App {
             let t = a.telemetry();
             (t.is_playing, t.position_ms)
         });
-        self.ui.ferric_ambient_stage(id!(fs_backdrop)).set_state(
-            cx,
-            open,
-            open && is_playing,
-            accent,
-            acr,
-        );
         if open {
             let t0 = if self.video_open { 1.0 } else { 0.0 };
             self.fs_video_morph_t = t0;
             self.fs_video_morph_target = t0;
             self.fs_video_bounds_sync_pending = self.video_open;
-            self.sync_fullscreen_media_layout(cx);
+            self.fs_reveal_target = 1.0;
+            self.ui
+                .ferric_ambient_stage(id!(fs_backdrop))
+                .set_state(cx, true, is_playing, accent, acr);
             self.sync_fullscreen_backdrop_artwork(cx);
-            self.fs_reveal_t = 0.0;
             self.style_chip_btn(cx, id!(fs_mode_art_btn), !self.video_open);
             self.style_chip_btn(cx, id!(fs_mode_video_btn), self.video_open);
+            self.apply_fullscreen_reveal(cx);
             self.start_motion(cx);
         } else {
-            self.fs_video_morph_t = 0.0;
-            self.fs_video_morph_target = 0.0;
             self.fs_video_bounds_sync_pending = false;
-            self.sync_fullscreen_media_layout(cx);
-            self.ui
-                .ferric_lyrics_view(id!(fs_lyrics_scroll))
-                .set_playback_state(cx, pos_ms, false);
-            if let Some(db) = &self.db {
-                db.shrink_memory();
+            self.fs_reveal_target = 0.0;
+            if self.fs_reveal_t <= 0.01 {
+                self.finish_fullscreen_close(cx);
+            } else {
+                // Keep backdrop alive for the ~220ms exit dissolve, then stop cleanly in `finish_fullscreen_close`
+                self.ui
+                    .ferric_ambient_stage(id!(fs_backdrop))
+                    .set_state(cx, true, false, accent, acr);
+                self.apply_fullscreen_reveal(cx);
+                self.start_motion(cx);
             }
-            win32_trim_working_set();
         }
         self.update_lyrics_display(cx, pos_ms);
         self.sync_video_bounds(cx);
@@ -9788,7 +9884,10 @@ impl App {
                 TrayEvent::HiddenToTray => {
                     self.window_hidden_or_minimized = true;
                     if self.video_open {
-                        self.close_native_video_stage(cx);
+                        self.close_native_video_stage_inner(cx, false);
+                    }
+                    if !self.fullscreen_open && self.fs_reveal_t > 0.004 {
+                        self.finish_fullscreen_close(cx);
                     }
                     // Immediately halt hidden 60 FPS lyrics/ambient GPU frames so DX11 stays completely asleep in tray
                     let accent = self.current_accent();

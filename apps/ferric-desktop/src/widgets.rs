@@ -30,6 +30,7 @@ live_design! {
             mouse_y: 0.5
             hover_amt: 0.0
             acrylic_on: 0.0
+            opacity: 1.0
 
             fn sample_zone(self, center: vec2) -> vec3 {
                 let r = 0.14;
@@ -132,7 +133,9 @@ live_design! {
                 let dither = (raw_h - floor(raw_h) - 0.5) * (1.5 / 255.0);
                 col += vec3(dither, dither, dither);
 
-                return vec4(clamp(col, 0.0, 1.0), 1.0);
+                let a = clamp(self.opacity, 0.0, 1.0);
+                let rgb = clamp(col, 0.0, 1.0);
+                return vec4(rgb * a, a);
             }
         }
     }
@@ -2323,6 +2326,8 @@ pub struct DrawAmbientStage {
     hover_amt: f32,
     #[live(0.0_f32)]
     acrylic_on: f32,
+    #[live(1.0_f32)]
+    opacity: f32,
 }
 
 /// Full-bleed blurred album artwork ambient stage with smooth slow drift
@@ -2443,6 +2448,17 @@ impl FerricAmbientStageRef {
             inner.draw_bg.redraw(cx);
         }
     }
+
+    pub fn set_opacity(&self, cx: &mut Cx, opacity: f32) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let next = opacity.clamp(0.0, 1.0);
+            if (inner.draw_bg.opacity - next).abs() < 0.004 {
+                return;
+            }
+            inner.draw_bg.opacity = next;
+            inner.draw_bg.redraw(cx);
+        }
+    }
 }
 
 #[derive(Clone, Debug, DefaultNone)]
@@ -2529,6 +2545,10 @@ pub struct FerricLyricsView {
     ui_zoom: f32,
     #[rust]
     light_mode: bool,
+    #[rust]
+    reveal_alpha_set: bool,
+    #[rust]
+    reveal_alpha: f32,
     #[rust]
     anim_frame: NextFrame,
     #[rust]
@@ -2772,6 +2792,16 @@ impl Widget for FerricLyricsView {
             vec4(0.910, 0.416, 0.173, 1.0)
         };
 
+        let reveal_mul = if self.reveal_alpha_set {
+            self.reveal_alpha.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if reveal_mul <= 0.005 {
+            cx.end_turtle_with_area(&mut self.area);
+            return DrawStep::done();
+        }
+
         if self.lines.is_empty() {
             let msg = if self.empty_msg.is_empty() {
                 "Play a song to view synced lyrics"
@@ -2784,9 +2814,9 @@ impl Widget for FerricLyricsView {
             self.draw_line.blur_amt = 0.0;
             self.draw_line.glow_amt = 0.0;
             self.draw_line.color = if self.compact && self.light_mode {
-                vec4(0.14, 0.17, 0.24, 0.78)
+                vec4(0.14, 0.17, 0.24, 0.78 * reveal_mul)
             } else {
-                vec4(0.72, 0.74, 0.80, 0.65)
+                vec4(0.72, 0.74, 0.80, 0.65 * reveal_mul)
             };
             let max_w = (rect.size.x - 24.0).max(80.0) as f32;
             let laid =
@@ -2914,7 +2944,7 @@ impl Widget for FerricLyricsView {
             let target_alpha = base_alpha
                 + (1.0 - base_alpha) * focus
                 + (0.90 - base_alpha).max(0.0) * hover_v * (1.0 - focus);
-            let alpha = target_alpha.clamp(0.0, 1.0) * edge_fade;
+            let alpha = target_alpha.clamp(0.0, 1.0) * edge_fade * reveal_mul;
 
             let x_shift = if self.compact {
                 (focus as f64) * 5.0 + (hover_v as f64) * 2.5
@@ -2978,13 +3008,13 @@ impl Widget for FerricLyricsView {
                 self.draw_pill.accent = accent;
                 self.draw_pill.hover_mode = 1.0;
                 self.draw_pill.mouse_x = mx_norm;
-                self.draw_pill.alpha = hover_v * edge_fade;
+                self.draw_pill.alpha = hover_v * edge_fade * reveal_mul;
                 self.draw_pill.draw_abs(cx, pill_rect);
             } else if self.compact && (focus > 0.03 || hover_v > 0.03) {
                 self.draw_pill.accent = accent;
                 self.draw_pill.hover_mode = if focus > 0.25 { 0.0 } else { 1.0 };
                 self.draw_pill.mouse_x = 0.5;
-                self.draw_pill.alpha = focus.max(hover_v * 0.7) * edge_fade;
+                self.draw_pill.alpha = focus.max(hover_v * 0.7) * edge_fade * reveal_mul;
                 self.draw_pill.draw_abs(cx, pill_rect);
             }
 
@@ -3154,6 +3184,18 @@ impl FerricLyricsViewRef {
                 inner.heights_measured_fs = 0.0;
                 inner.area.redraw(cx);
             }
+        }
+    }
+
+    pub fn set_reveal_alpha(&self, cx: &mut Cx, alpha: f32) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let next = alpha.clamp(0.0, 1.0);
+            if inner.reveal_alpha_set && (inner.reveal_alpha - next).abs() < 0.004 {
+                return;
+            }
+            inner.reveal_alpha_set = true;
+            inner.reveal_alpha = next;
+            inner.area.redraw(cx);
         }
     }
 }

@@ -7,6 +7,8 @@ mod google_login;
 mod icons;
 mod shell;
 mod smtc;
+#[cfg(target_os = "windows")]
+mod spotify_browser_login;
 mod state;
 mod theme;
 mod track_list;

@@ -22,6 +22,24 @@ const BASE64URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
+/// The web-player token shares a rolling rate limit with the player. Without a gap between
+/// calls, a library sync (profile + pages + playlists) trips HTTP 429 almost immediately.
+static SPOTIFY_PACER: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+fn pace_spotify_api() {
+    const MIN_GAP: Duration = Duration::from_millis(200);
+    let mut last = SPOTIFY_PACER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(previous) = *last {
+        let elapsed = previous.elapsed();
+        if elapsed < MIN_GAP {
+            std::thread::sleep(MIN_GAP - elapsed);
+        }
+    }
+    *last = Some(Instant::now());
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkcePair {
     pub verifier: String,
@@ -508,32 +526,56 @@ fn get_bearer_json<T: for<'de> Deserialize<'de>>(
     url: &str,
     access_token: &str,
 ) -> ProviderResult<T> {
-    let resp = agent
-        .get(url)
-        .header("Authorization", format!("Bearer {access_token}"))
-        .header("Accept", "application/json")
-        .header("User-Agent", "Ferric/0.1.0")
-        .call()
-        .map_err(|e| ProviderError::Http(format!("API request failed: {e}")))?;
+    const MAX_ATTEMPTS: usize = 3;
+    for attempt in 0..MAX_ATTEMPTS {
+        pace_spotify_api();
+        let resp = agent
+            .get(url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Accept", "application/json")
+            .header("User-Agent", "Ferric/0.1.0")
+            .call()
+            .map_err(|e| ProviderError::Http(format!("API request failed: {e}")))?;
 
-    let status = resp.status().as_u16();
-    let bytes = resp
-        .into_body()
-        .into_with_config()
-        .limit(MAX_JSON_BYTES)
-        .read_to_vec()
-        .map_err(|e| ProviderError::Http(format!("Could not read API body: {e}")))?;
+        let status = resp.status().as_u16();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        let bytes = resp
+            .into_body()
+            .into_with_config()
+            .limit(MAX_JSON_BYTES)
+            .read_to_vec()
+            .map_err(|e| ProviderError::Http(format!("Could not read API body: {e}")))?;
 
-    if status != 200 {
-        let snippet = String::from_utf8_lossy(&bytes);
-        let short: String = snippet.chars().take(180).collect();
-        return Err(ProviderError::Http(format!(
-            "API returned HTTP {status}: {short}"
-        )));
+        if status == 429 {
+            if attempt + 1 == MAX_ATTEMPTS {
+                return Err(ProviderError::Http(
+                    "Spotify is rate-limiting this session (HTTP 429). Wait a minute, then press Sync Web Library again."
+                        .to_string(),
+                ));
+            }
+            let wait_secs = retry_after
+                .unwrap_or(3 * (attempt as u64 + 1))
+                .clamp(1, 20);
+            std::thread::sleep(Duration::from_secs(wait_secs));
+            continue;
+        }
+
+        if status != 200 {
+            let snippet = String::from_utf8_lossy(&bytes);
+            let short: String = snippet.chars().take(180).collect();
+            return Err(ProviderError::Http(format!(
+                "API returned HTTP {status}: {short}"
+            )));
+        }
+
+        return serde_json::from_slice(&bytes)
+            .map_err(|e| ProviderError::Http(format!("Failed to decode API JSON: {e}")));
     }
-
-    serde_json::from_slice(&bytes)
-        .map_err(|e| ProviderError::Http(format!("Failed to decode API JSON: {e}")))
+    unreachable!("the retry loop always returns")
 }
 
 // ============================================================================

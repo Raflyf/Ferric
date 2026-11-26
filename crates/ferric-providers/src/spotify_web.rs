@@ -59,6 +59,12 @@ pub fn parse_web_token_json(raw: &str) -> ProviderResult<String> {
             "Spotify token capture failed inside the page: {err}"
         )));
     }
+    if text.starts_with('<') {
+        return Err(ProviderError::Http(
+            "Spotify restricted its web-player token endpoint (returned HTML). Use Instant Spotify Link Import below for public playlists/albums, or sign in with an official Spotify Client ID above."
+                .to_string(),
+        ));
+    }
     let parsed: WebTokenResponse = serde_json::from_str(text)
         .map_err(|e| ProviderError::Http(format!("Invalid Spotify token JSON: {e}")))?;
     if parsed.is_anonymous {
@@ -105,6 +111,7 @@ mod tests {
         let anon = r#"{"accessToken":"x","isAnonymous":true}"#;
         assert!(parse_web_token_json(anon).is_err());
         assert!(parse_web_token_json("ERR:boom").is_err());
+        assert!(parse_web_token_json("<!DOCTYPE html><html></html>").is_err());
         assert!(parse_web_token_json("").is_err());
     }
 }

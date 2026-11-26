@@ -55,10 +55,10 @@ pub fn launch_google_ytm_login_window<F>(
     imp::launch(profile_dir, clear_existing_cookies, on_done);
 }
 
-/// Launch the Spotify web-player sign-in window and capture the signed-in session token.
+/// Launch the Spotify web-player sign-in window and capture the `sp_dc` session cookie.
 ///
 /// This path needs no Client ID and no developer app: the user signs in to Spotify's own web
-/// player, and the access token that the player fetches for itself is captured from the page.
+/// player, and the resulting session cookie is exchanged for a token in `ferric_providers`.
 pub fn launch_spotify_login_window<F>(
     profile_dir: PathBuf,
     clear_existing_cookies: bool,
@@ -66,6 +66,13 @@ pub fn launch_spotify_login_window<F>(
 ) where
     F: FnOnce(SpotifyLoginOutcome) + Send + 'static,
 {
+    #[cfg(target_os = "windows")]
+    {
+        if crate::spotify_browser_login::browser_available() {
+            crate::spotify_browser_login::launch(profile_dir, clear_existing_cookies, on_done);
+            return;
+        }
+    }
     imp::launch_spotify(profile_dir, clear_existing_cookies, on_done);
 }
 
@@ -120,15 +127,18 @@ mod imp {
     /// its own per-session token challenge inside obfuscated JS; re-issuing the endpoint call from
     /// outside that code path returns HTML. Hooking the player's own `fetch`/XHR responses keeps
     /// the challenge where Spotify expects it in the request and only records the resulting JSON.
-    const SPOTIFY_TOKEN_HOOK_JS: &str = r#"
+    pub(crate) const SPOTIFY_TOKEN_HOOK_JS: &str = r#"
 (() => {
   if (window.__ferricTokenHook) return;
   window.__ferricTokenHook = true;
   window.__ferricToken = null;
   const isTokenUrl = (u) => {
-    try { return /(\/api\/token|get_access_token)/.test(String(u)); } catch (e) { return false; }
+    try { return /(\/api\/token|get_access_token|\/token)/.test(String(u)); } catch (e) { return false; }
   };
-  const remember = (text) => {
+  const onPlayer = () => {
+    try { return location.hostname === 'open.spotify.com'; } catch (e) { return false; }
+  };
+  const setToken = (text) => {
     if (typeof text !== 'string' || text.length > 65536) return;
     if (text.indexOf('accessToken') === -1) return;
     try {
@@ -137,22 +147,56 @@ mod imp {
       window.__ferricToken = text;
     } catch (e) {}
   };
+  const setBearer = (value) => {
+    if (!onPlayer() || typeof value !== 'string') return;
+    const match = /^Bearer\s+(.+)$/i.exec(value.trim());
+    if (!match) return;
+    const token = match[1].trim();
+    if (token.length < 20) return;
+    if (!window.__ferricToken) {
+      window.__ferricToken = JSON.stringify({ accessToken: token, isAnonymous: false, source: 'bearer' });
+    }
+  };
+  const readHeaders = (headers) => {
+    try {
+      if (!headers) return;
+      if (typeof headers.get === 'function') { setBearer(headers.get('authorization')); return; }
+      if (Array.isArray(headers)) {
+        headers.forEach((pair) => {
+          if (pair && String(pair[0]).toLowerCase() === 'authorization') setBearer(pair[1]);
+        });
+        return;
+      }
+      Object.keys(headers).forEach((k) => {
+        if (k.toLowerCase() === 'authorization') setBearer(headers[k]);
+      });
+    } catch (e) {}
+  };
   const originalFetch = window.fetch;
   if (originalFetch) {
     window.fetch = function (input, init) {
+      try {
+        if (input && typeof input === 'object' && input.headers) readHeaders(input.headers);
+        if (init && init.headers) readHeaders(init.headers);
+      } catch (e) {}
       const url = (input && input.url) || input;
       const pending = originalFetch.apply(this, arguments);
       if (isTokenUrl(url)) {
-        pending.then((res) => res.clone().text()).then(remember).catch(() => {});
+        pending.then((res) => res.clone().text()).then(setToken).catch(() => {});
       }
       return pending;
     };
   }
+  const originalSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    if (String(name).toLowerCase() === 'authorization') setBearer(value);
+    return originalSetHeader.apply(this, arguments);
+  };
   const originalOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url) {
     if (isTokenUrl(url)) {
       this.addEventListener('load', () => {
-        try { remember(this.responseText); } catch (e) {}
+        try { setToken(this.responseText); } catch (e) {}
       });
     }
     return originalOpen.apply(this, arguments);
@@ -160,8 +204,8 @@ mod imp {
 })();
 "#;
 
-    /// Reads the token the player fetched for itself. The direct `get_access_token` call is kept
-    /// only as a fallback for builds where the player has not issued the request within 10 s.
+    /// Reads the token the player fetched for itself. Keeps a short diagnostic payload when the
+    /// capture is empty so the failure can be inspected from the status label and the temp dump.
     const SPOTIFY_TOKEN_READ_JS: &str = r#"
 (async () => {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -169,21 +213,43 @@ mod imp {
     if (window.__ferricToken) return window.__ferricToken;
     await wait(500);
   }
+  const info = { hook: Boolean(window.__ferricTokenHook), href: String(location.href) };
+  try {
+    info.resources = performance.getEntriesByType('resource')
+      .map((e) => e.name)
+      .filter((u) => /token|access/i.test(u))
+      .slice(0, 6);
+  } catch (e) {}
+  try {
+    info.storage = Object.keys(localStorage)
+      .filter((k) => /token|cred|session|auth/i.test(k))
+      .slice(0, 8);
+  } catch (e) {}
+  let body = '';
   try {
     const res = await fetch('/get_access_token?reason=transport&productType=web_player', {
       credentials: 'include',
       headers: { 'app-platform': 'WebPlayer' },
     });
-    const text = await res.text();
-    if (text && text.indexOf('accessToken') !== -1) return text;
+    info.status = res.status;
+    info.contentType = res.headers.get('content-type');
+    body = await res.text();
+    if (body && body.indexOf('accessToken') !== -1) {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && parsed.accessToken && parsed.isAnonymous !== true) return body;
+      } catch (e) {}
+    }
   } catch (e) {
-    if (window.__ferricToken) return window.__ferricToken;
+    info.fetchError = String(e);
   }
   for (let i = 0; i < 20; i += 1) {
     if (window.__ferricToken) return window.__ferricToken;
     await wait(500);
   }
-  return window.__ferricToken || 'ERR:no token captured from the web player';
+  if (window.__ferricToken) return window.__ferricToken;
+  info.bodyHead = String(body).slice(0, 500);
+  return 'ERR:' + JSON.stringify(info);
 })()
 "#;
 
@@ -213,6 +279,13 @@ mod imp {
             match self {
                 Self::GoogleYtm => "ferric-google-login",
                 Self::Spotify => "ferric-spotify-login",
+            }
+        }
+
+        const fn window_title(self) -> PCWSTR {
+            match self {
+                Self::GoogleYtm => w!("Sign in to YouTube Music — Ferric"),
+                Self::Spotify => w!("Sign in to Spotify — Ferric"),
             }
         }
     }
@@ -483,8 +556,12 @@ mod imp {
             let _ = RegisterClassW(&wnd_class);
         }
 
-        let win_w = 540_i32;
-        let win_h = 740_i32;
+        // Provider OAuth dialogs are cramped at popup size; use most of the screen.
+        let (win_w, win_h) = unsafe {
+            let sw = GetSystemMetrics(SM_CXSCREEN).max(960);
+            let sh = GetSystemMetrics(SM_CYSCREEN).max(720);
+            ((sw * 3 / 4).max(900), (sh * 3 / 4).max(680))
+        };
         // SAFETY: Read primary screen dimensions to center the sign-in dialog.
         let (x, y) = unsafe {
             let sw = GetSystemMetrics(SM_CXSCREEN).max(win_w);
@@ -497,7 +574,7 @@ mod imp {
             CreateWindowExW(
                 Default::default(),
                 class_name,
-                w!("Sign in to YouTube Music — Ferric"),
+                target.window_title(),
                 WS_OVERLAPPEDWINDOW,
                 x,
                 y,
@@ -510,6 +587,8 @@ mod imp {
             )
         }
         .map_err(|e| format!("Failed to create sign-in window: {e}"))?;
+
+        crate::shell::win32_style_dialog_window(hwnd.0 as isize);
 
         // SAFETY: Present sign-in window immediately before WebView2 finishes loading.
         unsafe {
@@ -810,6 +889,11 @@ mod imp {
                                 if status.is_err() || dead_inner.get() {
                                     return Ok(());
                                 }
+                                // Debug: keep the raw capture where it can be checked without DevTools.
+                                let _ = std::fs::write(
+                                    std::env::temp_dir().join("ferric_spotify_capture.txt"),
+                                    format!("url={current_url}\nraw={result}\n"),
+                                );
                                 emit_once(
                                     &done_inner,
                                     LoginPayload::SpotifySession {
@@ -923,6 +1007,9 @@ mod imp {
         }
     }
 }
+
+#[cfg(target_os = "windows")]
+pub(crate) use imp::SPOTIFY_TOKEN_HOOK_JS;
 
 #[cfg(not(target_os = "windows"))]
 mod imp {

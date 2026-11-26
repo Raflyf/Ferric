@@ -407,6 +407,19 @@ impl LibraryDb {
         Ok(removed)
     }
 
+    pub fn delete_spotify_synced_playlists(&mut self) -> CoreResult<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id LIKE 'spotify:playlist:%'",
+            [],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM playlists WHERE id LIKE 'spotify:playlist:%'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
     pub fn list_playlists(&self) -> CoreResult<Vec<Playlist>> {
         let mut stmt = self.conn.prepare(
             r#"

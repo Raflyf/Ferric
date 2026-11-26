@@ -41,6 +41,10 @@ use ferric_providers::local_scanner::scan_local_folder;
 use ferric_providers::lyrics::{
     SyncedLyrics, fetch_best_free_lyrics, is_polluted_multilingual_lrc,
 };
+use ferric_providers::oauth::{
+    DEFAULT_OAUTH_CALLBACK_PATH, DEFAULT_OAUTH_CALLBACK_PORT, bind_loopback_callback,
+    generate_pkce_pair, spotify_authorize_url, spotify_exchange_code, sync_spotify_catalog,
+};
 use ferric_providers::public_sync::{
     import_spotify_public_url, import_youtube_public_url, parse_spotify_target,
     parse_youtube_target,
@@ -1978,6 +1982,27 @@ live_design! {
                                                 width: Fill,
                                                 draw_text: { color: #F5A473, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }
                                                 text: "Guest Mode active — YouTube Music streaming ready."
+                                            }
+                                        }
+
+                                        card_acct_spotify = <FerricCard> {
+                                            flow: Down, spacing: 8,
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                                lbl_t_acct_spotify = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account" }
+                                                spotify_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Not Connected" }
+                                            }
+                                            lbl_m_acct_spotify = <Label> {
+                                                width: Fill,
+                                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
+                                                text: "Sign in with OAuth 2.0 PKCE to sync your Spotify Liked Songs and playlists. Tokens are stored encrypted with Windows DPAPI. Create an app at developer.spotify.com and add redirect URI http://127.0.0.1:43824/callback."
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                                spotify_client_input = <FerricInput> { width: Fill, empty_text: "Spotify Client ID" }
+                                                spotify_login_btn = <FerricPrimaryBtn> { text: "Sign in with Spotify" }
+                                                spotify_sync_btn = <FerricBtn> { height: 28, text: "Sync Library" }
+                                                spotify_logout_btn = <FerricBtn> { height: 28, text: "Sign Out" }
                                             }
                                         }
 
@@ -4629,6 +4654,11 @@ impl App {
             if !yt_signed_in {
                 let _ = store.delete_account_synced_playlists();
             }
+            if !self.accounts.spotify_connected
+                || self.accounts.spotify_access_token.trim().is_empty()
+            {
+                let _ = store.delete_spotify_synced_playlists();
+            }
             self.update_settings = store.load_update_settings().unwrap_or_default();
             self.session_state = store.load_session_state().unwrap_or_default();
             let _ = store.prune_ephemeral_discovery_bloat(&self.session_state.recent_track_ids);
@@ -4670,6 +4700,7 @@ impl App {
 
         self.regenerate_pairing_qr(cx);
         self.rebuild_library_views(cx);
+        self.refresh_spotify_account_ui(cx);
         if !self.all_tracks.is_empty() {
             self.queue.set_tracks(self.all_tracks.clone(), None);
         }
@@ -9680,6 +9711,100 @@ impl App {
         });
     }
 
+    fn refresh_spotify_account_ui(&mut self, cx: &mut Cx) {
+        let (text, color) = if self.accounts.spotify_connected {
+            let name = self.accounts.spotify_user_name.trim();
+            if name.is_empty() {
+                ("Connected".to_string(), vec4(0.353, 0.820, 0.549, 1.0))
+            } else {
+                (
+                    format!("Connected · {name}"),
+                    vec4(0.353, 0.820, 0.549, 1.0),
+                )
+            }
+        } else {
+            ("Not Connected".to_string(), vec4(0.910, 0.416, 0.173, 1.0))
+        };
+        self.ui.label(id!(spotify_state_lbl)).set_text(cx, &text);
+        self.ui
+            .label(id!(spotify_state_lbl))
+            .apply_over(cx, live! { draw_text: { color: (color) } });
+        self.ui
+            .text_input(id!(spotify_client_input))
+            .set_text(cx, &self.accounts.spotify_client_id);
+    }
+
+    fn start_spotify_login(&mut self, cx: &mut Cx) {
+        let client_id = self.accounts.spotify_client_id.trim().to_string();
+        if client_id.is_empty() {
+            self.ui.label(id!(oauth_status_lbl)).set_text(
+                cx,
+                "Paste your Spotify Client ID first (developer.spotify.com, redirect URI http://127.0.0.1:43824/callback).",
+            );
+            return;
+        }
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.ui
+            .label(id!(oauth_status_lbl))
+            .set_text(cx, "Opening Spotify authorization in your browser...");
+        thread::spawn(move || {
+            let pkce = generate_pkce_pair();
+            let listener = match bind_loopback_callback(
+                DEFAULT_OAUTH_CALLBACK_PORT,
+                DEFAULT_OAUTH_CALLBACK_PATH,
+                &pkce.state,
+            ) {
+                Ok(listener) => listener,
+                Err(err) => {
+                    let _ = tx.send(BgMessage::SpotifyLoginFailed(err.to_string()));
+                    return;
+                }
+            };
+            let redirect_uri = listener.redirect_uri.clone();
+            let authorize_url = spotify_authorize_url(&client_id, &redirect_uri, &pkce);
+            if let Err(err) = open_allowed_url(&authorize_url) {
+                let _ = tx.send(BgMessage::SpotifyLoginFailed(err));
+                return;
+            }
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let outcome = listener
+                .wait_for_auth_code(&cancel, std::time::Duration::from_secs(240))
+                .and_then(|code| {
+                    spotify_exchange_code(&client_id, &code, &redirect_uri, &pkce.verifier)
+                });
+            let _ = match outcome {
+                Ok(tokens) => tx.send(BgMessage::SpotifyLoginResult { client_id, tokens }),
+                Err(err) => tx.send(BgMessage::SpotifyLoginFailed(err.to_string())),
+            };
+        });
+    }
+
+    fn sync_spotify_library(&mut self, cx: &mut Cx) {
+        let token = self.accounts.spotify_access_token.trim().to_string();
+        if token.is_empty() {
+            self.ui.label(id!(oauth_status_lbl)).set_text(
+                cx,
+                "Sign in with Spotify first to sync your Liked Songs and playlists.",
+            );
+            return;
+        }
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.ui
+            .label(id!(oauth_status_lbl))
+            .set_text(cx, "Syncing your Spotify library...");
+        thread::spawn(move || {
+            let msg = match sync_spotify_catalog(&token) {
+                Ok(report) => BgMessage::SpotifyCatalogSynced(Box::new(report)),
+                Err(err) => BgMessage::SpotifySyncFailed(err.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
     fn start_public_sync(&mut self, cx: &mut Cx, mode: &'static str, raw_input: String) {
         let trimmed = raw_input.trim().to_string();
         if trimmed.is_empty() {
@@ -10353,6 +10478,65 @@ impl App {
                     self.ui
                         .label(id!(oauth_status_lbl))
                         .set_text(cx, &format!("YouTube Music sync failed: {err}"));
+                }
+                BgMessage::SpotifyLoginResult { client_id, tokens } => {
+                    self.accounts.spotify_client_id = client_id;
+                    self.accounts.spotify_connected = true;
+                    self.accounts.spotify_access_token = tokens.access_token.clone();
+                    if let Some(refresh) = tokens.refresh_token.clone() {
+                        self.accounts.spotify_refresh_token = refresh;
+                    }
+                    if let Some(db) = &self.db {
+                        let _ = db.save_accounts(&self.accounts);
+                    }
+                    self.refresh_spotify_account_ui(cx);
+                    self.show_toast(cx, "Signed in with Spotify! Syncing library...");
+                    self.sync_spotify_library(cx);
+                }
+                BgMessage::SpotifyLoginFailed(err) => {
+                    self.ui
+                        .label(id!(oauth_status_lbl))
+                        .set_text(cx, &format!("Spotify sign-in failed: {err}"));
+                }
+                BgMessage::SpotifyCatalogSynced(report) => {
+                    let report = *report;
+                    self.accounts.spotify_connected = true;
+                    self.accounts.spotify_user_name = report.display_name.clone();
+                    self.accounts.spotify_liked_count = report.liked_tracks.len();
+                    self.accounts.spotify_playlist_count = report.playlists.len();
+                    let liked_n = report.liked_tracks.len();
+                    let pl_n = report.playlists.len();
+                    if let Some(db) = &mut self.db {
+                        let _ = db.save_accounts(&self.accounts);
+                        let _ = db.upsert_tracks(&report.liked_tracks);
+                        for bundle in &report.playlists {
+                            let _ = db.upsert_tracks(&bundle.tracks);
+                            let ids: Vec<String> =
+                                bundle.tracks.iter().map(|t| t.id.clone()).collect();
+                            let _ = db.upsert_playlist(&bundle.playlist, &ids);
+                        }
+                        let _ = db.match_cloud_tracks_to_local();
+                        self.all_tracks = db.list_tracks("").unwrap_or_default();
+                        self.playlists = db.list_playlists().unwrap_or_default();
+                    }
+                    self.ui.label(id!(oauth_status_lbl)).set_text(
+                        cx,
+                        &format!(
+                            "Spotify: {} · {liked_n} liked songs & {pl_n} playlists synced.",
+                            report.display_name
+                        ),
+                    );
+                    self.refresh_spotify_account_ui(cx);
+                    self.rebuild_library_views(cx);
+                    self.show_toast(
+                        cx,
+                        &format!("Spotify library synced · {liked_n} liked, {pl_n} playlists"),
+                    );
+                }
+                BgMessage::SpotifySyncFailed(err) => {
+                    self.ui
+                        .label(id!(oauth_status_lbl))
+                        .set_text(cx, &format!("Spotify sync failed: {err}"));
                 }
                 BgMessage::StreamReady {
                     track_id,
@@ -12475,6 +12659,49 @@ impl App {
             self.refresh_playlists_grid(cx);
             self.spawn_ytm_rich_home(cx, 0, None, true);
             self.show_toast(cx, "Signed out — Guest Mode active");
+        }
+        if let Some(typed) = self
+            .ui
+            .text_input(id!(spotify_client_input))
+            .changed(actions)
+        {
+            let trimmed = typed.trim().to_string();
+            if trimmed != self.accounts.spotify_client_id {
+                self.accounts.spotify_client_id = trimmed;
+                if let Some(db) = &self.db {
+                    let _ = db.save_accounts(&self.accounts);
+                }
+            }
+        }
+        if self.ui.button(id!(spotify_login_btn)).clicked(actions) {
+            self.start_spotify_login(cx);
+        }
+        if self.ui.button(id!(spotify_sync_btn)).clicked(actions) {
+            self.sync_spotify_library(cx);
+        }
+        if self.ui.button(id!(spotify_logout_btn)).clicked(actions) {
+            self.accounts.spotify_connected = false;
+            self.accounts.spotify_access_token.clear();
+            self.accounts.spotify_refresh_token.clear();
+            self.accounts.spotify_user_name.clear();
+            self.accounts.spotify_playlist_count = 0;
+            self.accounts.spotify_liked_count = 0;
+            if let Some(db) = &mut self.db {
+                let _ = db.save_accounts(&self.accounts);
+                let _ = db.delete_spotify_synced_playlists();
+                self.playlists = db.list_playlists().unwrap_or_default();
+            } else {
+                self.playlists
+                    .retain(|pl| !pl.id.starts_with("spotify:playlist:"));
+            }
+            self.ui.label(id!(oauth_status_lbl)).set_text(
+                cx,
+                "Spotify signed out. Synced Spotify playlists removed; liked tracks kept.",
+            );
+            self.refresh_spotify_account_ui(cx);
+            self.rebuild_library_views(cx);
+            self.refresh_playlists_grid(cx);
+            self.show_toast(cx, "Spotify signed out");
         }
         if self.ui.button(id!(quick_spotify_btn)).clicked(actions) {
             let input = self.ui.text_input(id!(quick_sync_input)).text();

@@ -312,6 +312,13 @@ pub enum BgMessage {
         result: Result<Option<ReleaseInfo>, String>,
     },
     UpdateDownload(DownloadEvent),
+    SpotifyLoginResult {
+        client_id: String,
+        tokens: ferric_providers::oauth::OAuthTokens,
+    },
+    SpotifyLoginFailed(String),
+    SpotifyCatalogSynced(Box<ferric_providers::oauth::CloudSyncReport>),
+    SpotifySyncFailed(String),
 }
 
 fn resolved_track_thumb(track: &Track) -> Option<String> {

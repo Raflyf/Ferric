@@ -2,7 +2,10 @@ use crate::artwork::{ArtworkCache, CachedArtwork};
 use crate::discord_rpc::{
     DiscordRpcBridge, DiscordTrackSnapshot, effective_client_id, is_valid_client_id,
 };
-use crate::google_login::{GoogleLoginOutcome, launch_google_ytm_login_window};
+use crate::google_login::{
+    GoogleLoginOutcome, SpotifyLoginOutcome, launch_google_ytm_login_window,
+    launch_spotify_login_window,
+};
 use crate::shell::{
     TrayEvent, copy_text_to_clipboard, launch_verified_installer, open_allowed_url,
     open_github_url, win32_client_rect_screen, win32_close_active_window, win32_force_quit,
@@ -1999,10 +2002,20 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, spacing: 6,
-                                                spotify_client_input = <FerricInput> { width: Fill, empty_text: "Spotify Client ID" }
+                                                spotify_client_input = <FerricInput> { width: Fill, empty_text: "Spotify Client ID (optional)" }
                                                 spotify_login_btn = <FerricPrimaryBtn> { text: "Sign in with Spotify" }
                                                 spotify_sync_btn = <FerricBtn> { height: 28, text: "Sync Library" }
                                                 spotify_logout_btn = <FerricBtn> { height: 28, text: "Sign Out" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                                lbl_m_spotify_web = <Label> {
+                                                    width: Fill,
+                                                    draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.4 } }
+                                                    text: "No Client ID and no developer app: sign in to Spotify's own web player and Ferric reads your library from that session."
+                                                }
+                                                spotify_web_login_btn = <FerricBtn> { height: 28, text: "Sign in without Client ID" }
+                                                spotify_web_sync_btn = <FerricBtn> { height: 28, text: "Sync Web Library" }
                                             }
                                         }
 
@@ -9711,6 +9724,52 @@ impl App {
         });
     }
 
+    fn start_spotify_web_login(&mut self, cx: &mut Cx) {
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.ui.label(id!(oauth_status_lbl)).set_text(
+            cx,
+            "Opening Spotify sign-in window... Sign in normally; no Client ID needed.",
+        );
+        let profile_dir = app_data_dir().join("spotify_web_profile");
+        let clear_cookies = !self.accounts.spotify_web_cookie.trim().is_empty();
+        launch_spotify_login_window(profile_dir, clear_cookies, move |outcome| {
+            let msg = match outcome {
+                SpotifyLoginOutcome::SignedIn { sp_dc } => BgMessage::SpotifyWebLoginResult(sp_dc),
+                SpotifyLoginOutcome::Cancelled => {
+                    BgMessage::SpotifyWebLoginFailed("Sign-in window closed".to_string())
+                }
+                SpotifyLoginOutcome::Failed(err) => BgMessage::SpotifyWebLoginFailed(err),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
+    fn sync_spotify_web_library(&mut self, cx: &mut Cx) {
+        let cookie = self.accounts.spotify_web_cookie.trim().to_string();
+        if cookie.is_empty() {
+            self.ui.label(id!(oauth_status_lbl)).set_text(
+                cx,
+                "Connect your Spotify web session first (no Client ID needed).",
+            );
+            return;
+        }
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.ui
+            .label(id!(oauth_status_lbl))
+            .set_text(cx, "Reading your Spotify library...");
+        thread::spawn(move || {
+            let msg = match ferric_providers::spotify_web::sync_catalog_via_sp_dc(&cookie) {
+                Ok(report) => BgMessage::SpotifyCatalogSynced(Box::new(report)),
+                Err(err) => BgMessage::SpotifySyncFailed(err.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
     fn refresh_spotify_account_ui(&mut self, cx: &mut Cx) {
         let (text, color) = if self.accounts.spotify_connected {
             let name = self.accounts.spotify_user_name.trim();
@@ -10537,6 +10596,21 @@ impl App {
                     self.ui
                         .label(id!(oauth_status_lbl))
                         .set_text(cx, &format!("Spotify sync failed: {err}"));
+                }
+                BgMessage::SpotifyWebLoginResult(sp_dc) => {
+                    self.accounts.spotify_web_cookie = sp_dc;
+                    self.accounts.spotify_connected = true;
+                    if let Some(db) = &self.db {
+                        let _ = db.save_accounts(&self.accounts);
+                    }
+                    self.refresh_spotify_account_ui(cx);
+                    self.show_toast(cx, "Spotify session connected! Reading library...");
+                    self.sync_spotify_web_library(cx);
+                }
+                BgMessage::SpotifyWebLoginFailed(err) => {
+                    self.ui
+                        .label(id!(oauth_status_lbl))
+                        .set_text(cx, &format!("Spotify sign-in: {err}"));
                 }
                 BgMessage::StreamReady {
                     track_id,
@@ -12679,6 +12753,12 @@ impl App {
         if self.ui.button(id!(spotify_sync_btn)).clicked(actions) {
             self.sync_spotify_library(cx);
         }
+        if self.ui.button(id!(spotify_web_login_btn)).clicked(actions) {
+            self.start_spotify_web_login(cx);
+        }
+        if self.ui.button(id!(spotify_web_sync_btn)).clicked(actions) {
+            self.sync_spotify_web_library(cx);
+        }
         if self.ui.button(id!(spotify_logout_btn)).clicked(actions) {
             self.accounts.spotify_connected = false;
             self.accounts.spotify_access_token.clear();
@@ -12686,6 +12766,7 @@ impl App {
             self.accounts.spotify_user_name.clear();
             self.accounts.spotify_playlist_count = 0;
             self.accounts.spotify_liked_count = 0;
+            self.accounts.spotify_web_cookie.clear();
             if let Some(db) = &mut self.db {
                 let _ = db.save_accounts(&self.accounts);
                 let _ = db.delete_spotify_synced_playlists();

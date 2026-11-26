@@ -12,6 +12,31 @@ pub enum GoogleLoginOutcome {
     Failed(String),
 }
 
+/// Result of the Spotify web-session sign-in window.
+#[derive(Debug, Clone)]
+pub enum SpotifyLoginOutcome {
+    /// `sp_dc` session cookie captured from a signed-in open.spotify.com session.
+    SignedIn {
+        sp_dc: String,
+    },
+    Cancelled,
+    Failed(String),
+}
+
+/// Which service the shared WebView2 login window is driving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoginTarget {
+    GoogleYtm,
+    Spotify,
+}
+
+/// Internal payload handed from the login window thread back to the caller.
+pub(crate) enum LoginPayload {
+    Cookie(String),
+    Cancelled,
+    Failed(String),
+}
+
 /// Launch the interactive Google sign-in window on a dedicated STA thread so the main UI stays fluid.
 pub fn launch_google_ytm_login_window<F>(
     profile_dir: PathBuf,
@@ -23,9 +48,24 @@ pub fn launch_google_ytm_login_window<F>(
     imp::launch(profile_dir, clear_existing_cookies, on_done);
 }
 
+/// Launch the Spotify web-player sign-in window and capture the `sp_dc` session cookie.
+///
+/// This path needs no Client ID and no developer app: the user signs in to Spotify's own web
+/// player, and the resulting session cookie is exchanged for a token in `ferric_providers`.
+pub fn launch_spotify_login_window<F>(
+    profile_dir: PathBuf,
+    clear_existing_cookies: bool,
+    on_done: F,
+) where
+    F: FnOnce(SpotifyLoginOutcome) + Send + 'static,
+{
+    imp::launch_spotify(profile_dir, clear_existing_cookies, on_done);
+}
+
 #[cfg(target_os = "windows")]
 mod imp {
-    use super::GoogleLoginOutcome;
+    use super::{LoginPayload, LoginTarget, SpotifyLoginOutcome};
+    use ferric_providers::spotify_web::extract_sp_dc;
     use ferric_providers::ytmusic::extract_sapisid_from_cookie;
     use std::cell::{Cell, RefCell};
     use std::path::{Path, PathBuf};
@@ -61,11 +101,46 @@ mod imp {
 
     const GOOGLE_YTM_LOGIN_URL: &str = "https://accounts.google.com/ServiceLogin?ltmpl=music&service=youtube&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3Dhttps%253A%252F%252Fmusic.youtube.com%252F";
     const YTM_COOKIE_URI: &str = "https://music.youtube.com";
+    const YTM_COOKIE_HOST: &str = "music.youtube.com";
+    const SPOTIFY_LOGIN_URL: &str =
+        "https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F";
+    const SPOTIFY_COOKIE_URI: &str = "https://open.spotify.com";
+    const SPOTIFY_COOKIE_HOST: &str = "open.spotify.com";
     const COOKIE_POLL_TIMER_ID: usize = 1001;
+
+    impl LoginTarget {
+        const fn login_url(self) -> &'static str {
+            match self {
+                Self::GoogleYtm => GOOGLE_YTM_LOGIN_URL,
+                Self::Spotify => SPOTIFY_LOGIN_URL,
+            }
+        }
+
+        const fn cookie_uri(self) -> &'static str {
+            match self {
+                Self::GoogleYtm => YTM_COOKIE_URI,
+                Self::Spotify => SPOTIFY_COOKIE_URI,
+            }
+        }
+
+        const fn cookie_host(self) -> &'static str {
+            match self {
+                Self::GoogleYtm => YTM_COOKIE_HOST,
+                Self::Spotify => SPOTIFY_COOKIE_HOST,
+            }
+        }
+
+        const fn thread_name(self) -> &'static str {
+            match self {
+                Self::GoogleYtm => "ferric-google-login",
+                Self::Spotify => "ferric-spotify-login",
+            }
+        }
+    }
 
     static LOGIN_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
 
-    type DoneSlot = Rc<RefCell<Option<Box<dyn FnOnce(GoogleLoginOutcome) + Send>>>>;
+    type DoneSlot = Rc<RefCell<Option<Box<dyn FnOnce(LoginPayload) + Send>>>>;
 
     struct OpenFlagGuard;
     impl Drop for OpenFlagGuard {
@@ -88,9 +163,10 @@ mod imp {
         done_cb: DoneSlot,
         capture_in_flight: Rc<Cell<bool>>,
         destroyed: Rc<Cell<bool>>,
+        target: LoginTarget,
     }
 
-    fn emit_once(slot: &DoneSlot, outcome: GoogleLoginOutcome) {
+    fn emit_once(slot: &DoneSlot, outcome: LoginPayload) {
         if let Some(cb) = slot.borrow_mut().take() {
             cb(outcome);
         }
@@ -151,29 +227,82 @@ mod imp {
 
     pub fn launch<F>(profile_dir: PathBuf, clear_existing_cookies: bool, on_done: F)
     where
-        F: FnOnce(GoogleLoginOutcome) + Send + 'static,
+        F: FnOnce(super::GoogleLoginOutcome) + Send + 'static,
     {
+        launch_for(
+            LoginTarget::GoogleYtm,
+            profile_dir,
+            clear_existing_cookies,
+            Box::new(move |payload| {
+                let outcome = match payload {
+                    LoginPayload::Cookie(cookie) => match extract_sapisid_from_cookie(&cookie) {
+                        Some(sapisid) => super::GoogleLoginOutcome::SignedIn { cookie, sapisid },
+                        None => super::GoogleLoginOutcome::Failed(
+                            "Google cookies captured but SAPISID was missing".to_string(),
+                        ),
+                    },
+                    LoginPayload::Cancelled => super::GoogleLoginOutcome::Cancelled,
+                    LoginPayload::Failed(err) => super::GoogleLoginOutcome::Failed(err),
+                };
+                on_done(outcome);
+            }),
+        );
+    }
+
+    pub fn launch_spotify<F>(profile_dir: PathBuf, clear_existing_cookies: bool, on_done: F)
+    where
+        F: FnOnce(SpotifyLoginOutcome) + Send + 'static,
+    {
+        launch_for(
+            LoginTarget::Spotify,
+            profile_dir,
+            clear_existing_cookies,
+            Box::new(move |payload| {
+                let outcome = match payload {
+                    LoginPayload::Cookie(cookie) => match extract_sp_dc(&cookie) {
+                        Some(sp_dc) => SpotifyLoginOutcome::SignedIn { sp_dc },
+                        None => SpotifyLoginOutcome::Failed(
+                            "Spotify cookies captured but sp_dc was missing".to_string(),
+                        ),
+                    },
+                    LoginPayload::Cancelled => SpotifyLoginOutcome::Cancelled,
+                    LoginPayload::Failed(err) => SpotifyLoginOutcome::Failed(err),
+                };
+                on_done(outcome);
+            }),
+        );
+    }
+
+    fn launch_for(
+        target: LoginTarget,
+        profile_dir: PathBuf,
+        clear_existing_cookies: bool,
+        on_done: Box<dyn FnOnce(LoginPayload) + Send>,
+    ) {
         if LOGIN_WINDOW_OPEN
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            on_done(GoogleLoginOutcome::Failed(
-                "Google sign-in window is already open.".to_string(),
+            on_done(LoginPayload::Failed(
+                "A sign-in window is already open.".to_string(),
             ));
             return;
         }
 
         let spawn_res = thread::Builder::new()
-            .name("ferric-google-login".to_string())
+            .name(target.thread_name().to_string())
             .spawn(move || {
                 let _open_guard = OpenFlagGuard;
-                let done_cb: DoneSlot = Rc::new(RefCell::new(Some(Box::new(on_done))));
-                if let Err(err) =
-                    run_login_window(&profile_dir, clear_existing_cookies, Rc::clone(&done_cb))
-                {
-                    emit_once(&done_cb, GoogleLoginOutcome::Failed(err));
+                let done_cb: DoneSlot = Rc::new(RefCell::new(Some(on_done)));
+                if let Err(err) = run_login_window(
+                    &profile_dir,
+                    clear_existing_cookies,
+                    target,
+                    Rc::clone(&done_cb),
+                ) {
+                    emit_once(&done_cb, LoginPayload::Failed(err));
                 } else {
-                    emit_once(&done_cb, GoogleLoginOutcome::Cancelled);
+                    emit_once(&done_cb, LoginPayload::Cancelled);
                 }
             });
 
@@ -242,6 +371,7 @@ mod imp {
     fn run_login_window(
         profile_dir: &Path,
         clear_existing_cookies: bool,
+        target: LoginTarget,
         done_cb: DoneSlot,
     ) -> Result<(), String> {
         let _ = std::fs::create_dir_all(profile_dir);
@@ -419,7 +549,7 @@ mod imp {
                 if !nav_dead.get()
                     && let Some(wv) = sender
                 {
-                    try_capture_ytm_cookies(hwnd, &wv, &nav_done, &nav_flag, &nav_dead);
+                    try_capture_ytm_cookies(hwnd, &wv, &nav_done, &nav_flag, &nav_dead, target);
                 }
                 Ok(())
             }));
@@ -431,7 +561,7 @@ mod imp {
             if !src_dead.get()
                 && let Some(wv) = sender
             {
-                try_capture_ytm_cookies(hwnd, &wv, &src_done, &src_flag, &src_dead);
+                try_capture_ytm_cookies(hwnd, &wv, &src_done, &src_flag, &src_dead, target);
             }
             Ok(())
         }));
@@ -449,11 +579,12 @@ mod imp {
                 done_cb,
                 capture_in_flight,
                 destroyed,
+                target,
             });
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::into_raw(state) as isize);
             let _ = SetTimer(Some(hwnd), COOKIE_POLL_TIMER_ID, 900, None);
 
-            let login_url = CoTaskMemPWSTR::from(GOOGLE_YTM_LOGIN_URL);
+            let login_url = CoTaskMemPWSTR::from(target.login_url());
             let _ = webview.Navigate(*login_url.as_ref().as_pcwstr());
         }
 
@@ -481,6 +612,7 @@ mod imp {
         done_cb: &DoneSlot,
         capture_in_flight: &Rc<Cell<bool>>,
         destroyed: &Rc<Cell<bool>>,
+        target: LoginTarget,
     ) {
         if destroyed.get() || capture_in_flight.get() || done_cb.borrow().is_none() {
             return;
@@ -493,7 +625,7 @@ mod imp {
             }
             take_pwstr(src_pwstr)
         };
-        if !is_exact_https_host(&current_url, "music.youtube.com") {
+        if !is_exact_https_host(&current_url, target.cookie_host()) {
             return;
         }
 
@@ -550,14 +682,12 @@ mod imp {
             }
 
             let cookie_header = pairs.join("; ");
-            if let Some(sapisid) = extract_sapisid_from_cookie(&cookie_header) {
-                emit_once(
-                    &done_slot,
-                    GoogleLoginOutcome::SignedIn {
-                        cookie: cookie_header,
-                        sapisid,
-                    },
-                );
+            let captured = match target {
+                LoginTarget::GoogleYtm => extract_sapisid_from_cookie(&cookie_header).is_some(),
+                LoginTarget::Spotify => extract_sp_dc(&cookie_header).is_some(),
+            };
+            if captured {
+                emit_once(&done_slot, LoginPayload::Cookie(cookie_header));
                 if !dead_slot.get() {
                     // SAFETY: Auto-close login window once authenticated cookies are captured.
                     unsafe {
@@ -568,8 +698,8 @@ mod imp {
             Ok(())
         }));
 
-        let uri = CoTaskMemPWSTR::from(YTM_COOKIE_URI);
-        // SAFETY: Async cookie query for `https://music.youtube.com` on STA thread.
+        let uri = CoTaskMemPWSTR::from(target.cookie_uri());
+        // SAFETY: Async cookie query for the target host on STA thread.
         unsafe {
             if cookie_manager
                 .GetCookies(*uri.as_ref().as_pcwstr(), &handler)
@@ -619,6 +749,7 @@ mod imp {
                             &state.done_cb,
                             &state.capture_in_flight,
                             &state.destroyed,
+                            state.target,
                         );
                     }
                     LRESULT(0)
@@ -648,7 +779,7 @@ mod imp {
 
 #[cfg(not(target_os = "windows"))]
 mod imp {
-    use super::GoogleLoginOutcome;
+    use super::{GoogleLoginOutcome, SpotifyLoginOutcome};
     use std::path::PathBuf;
 
     pub fn launch<F>(_profile_dir: PathBuf, _clear_existing_cookies: bool, on_done: F)
@@ -657,6 +788,15 @@ mod imp {
     {
         on_done(GoogleLoginOutcome::Failed(
             "Native Google WebView2 sign-in is only supported on Windows.".to_string(),
+        ));
+    }
+
+    pub fn launch_spotify<F>(_profile_dir: PathBuf, _clear_existing_cookies: bool, on_done: F)
+    where
+        F: FnOnce(SpotifyLoginOutcome) + Send + 'static,
+    {
+        on_done(SpotifyLoginOutcome::Failed(
+            "Native Spotify WebView2 sign-in is only supported on Windows.".to_string(),
         ));
     }
 }

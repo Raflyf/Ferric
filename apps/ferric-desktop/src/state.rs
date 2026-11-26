@@ -319,6 +319,8 @@ pub enum BgMessage {
     SpotifyLoginFailed(String),
     SpotifyCatalogSynced(Box<ferric_providers::oauth::CloudSyncReport>),
     SpotifySyncFailed(String),
+    SpotifyWebLoginResult(String),
+    SpotifyWebLoginFailed(String),
 }
 
 fn resolved_track_thumb(track: &Track) -> Option<String> {

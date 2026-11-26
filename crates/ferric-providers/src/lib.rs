@@ -4,6 +4,7 @@ pub mod lyrics;
 pub mod oauth;
 pub mod public_sync;
 pub mod resolver;
+pub mod spotify_web;
 pub mod subsonic;
 pub mod updater;
 pub mod yt_cleaner;

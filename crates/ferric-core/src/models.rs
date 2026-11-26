@@ -353,6 +353,8 @@ pub struct AccountSettings {
     #[serde(default)]
     pub spotify_liked_count: usize,
     #[serde(default)]
+    pub spotify_web_cookie: String,
+    #[serde(default)]
     pub youtube_client_id: String,
     #[serde(default)]
     pub youtube_client_secret: String,
@@ -398,6 +400,7 @@ impl std::fmt::Debug for AccountSettings {
             )
             .field("spotify_playlist_count", &self.spotify_playlist_count)
             .field("spotify_liked_count", &self.spotify_liked_count)
+            .field("spotify_web_cookie", &redact(&self.spotify_web_cookie))
             .field("youtube_client_id", &self.youtube_client_id)
             .field(
                 "youtube_client_secret",
@@ -436,6 +439,7 @@ impl Default for AccountSettings {
             spotify_refresh_token: String::new(),
             spotify_playlist_count: 0,
             spotify_liked_count: 0,
+            spotify_web_cookie: String::new(),
             youtube_client_id: String::new(),
             youtube_client_secret: String::new(),
             youtube_connected: false,

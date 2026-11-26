@@ -7,14 +7,65 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 43824;
 pub const DEFAULT_OAUTH_CALLBACK_PATH: &str = "/callback";
 
+pub const SPOTIFY_DESKTOP_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
+pub const SPOTIFY_DESKTOP_CALLBACK_PORT: u16 = 8989;
+pub const SPOTIFY_DESKTOP_CALLBACK_PATH: &str = "/login";
+pub const SPOTIFY_DESKTOP_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
+pub const SPOTIFY_DESKTOP_SCOPES: &str = "playlist-read-collaborative playlist-read-private streaming user-follow-read user-library-read user-read-email user-read-playback-state user-read-private user-read-recently-played user-top-read";
+
 pub const SPOTIFY_OAUTH_SCOPES: &str =
     "user-read-private playlist-read-private playlist-read-collaborative user-library-read";
 pub const GOOGLE_YOUTUBE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/youtube.readonly";
+
+static ACTIVE_OAUTH_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+
+pub fn effective_spotify_client_id(custom_client_id: &str) -> &str {
+    let trimmed = custom_client_id.trim();
+    if trimmed.is_empty() {
+        SPOTIFY_DESKTOP_CLIENT_ID
+    } else {
+        trimmed
+    }
+}
+
+pub fn is_builtin_spotify_desktop_client(client_id: &str) -> bool {
+    let trimmed = client_id.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case(SPOTIFY_DESKTOP_CLIENT_ID)
+}
+
+pub fn spotify_oauth_endpoint_config(custom_client_id: &str) -> (&str, u16, &'static str) {
+    if is_builtin_spotify_desktop_client(custom_client_id) {
+        (
+            SPOTIFY_DESKTOP_CLIENT_ID,
+            SPOTIFY_DESKTOP_CALLBACK_PORT,
+            SPOTIFY_DESKTOP_CALLBACK_PATH,
+        )
+    } else {
+        (
+            custom_client_id.trim(),
+            DEFAULT_OAUTH_CALLBACK_PORT,
+            DEFAULT_OAUTH_CALLBACK_PATH,
+        )
+    }
+}
+
+/// Cancel any previously active OAuth loopback listener and return a fresh token for the new attempt.
+pub fn activate_oauth_cancel_token() -> Arc<AtomicBool> {
+    let next = Arc::new(AtomicBool::new(false));
+    let mut guard = ACTIVE_OAUTH_CANCEL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(prev) = guard.replace(Arc::clone(&next)) {
+        prev.store(true, Ordering::SeqCst);
+    }
+    next
+}
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
@@ -206,7 +257,8 @@ pub fn parse_query_params(query: &str) -> HashMap<String, String> {
     map
 }
 
-/// Bind a loopback HTTP listener on `127.0.0.1:{preferred_port}` first, falling back to `127.0.0.1:0` if busy.
+/// Bind a loopback HTTP listener on `127.0.0.1:{preferred_port}` first, falling back to `127.0.0.1:0`
+/// only when a non-fixed port is requested.
 pub fn bind_loopback_callback(
     preferred_port: u16,
     path: &str,
@@ -220,10 +272,37 @@ pub fn bind_loopback_callback(
         format!("/{path}")
     };
 
-    let listener = match TcpListener::bind(("127.0.0.1", preferred_port)) {
-        Ok(sock) => sock,
-        Err(_) if preferred_port != 0 => TcpListener::bind(("127.0.0.1", 0))?,
-        Err(err) => return Err(ProviderError::Io(err)),
+    let listener = if preferred_port == 0 {
+        TcpListener::bind(("127.0.0.1", 0))?
+    } else {
+        let mut bound = None;
+        let mut last_err = None;
+        for attempt in 0..15 {
+            match TcpListener::bind(("127.0.0.1", preferred_port)) {
+                Ok(sock) => {
+                    bound = Some(sock);
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt + 1 < 15 {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+            }
+        }
+        match bound {
+            Some(sock) => sock,
+            None => {
+                let err = last_err.expect("bind failed with error");
+                if preferred_port == SPOTIFY_DESKTOP_CALLBACK_PORT {
+                    return Err(ProviderError::Http(format!(
+                        "Could not bind http://127.0.0.1:{preferred_port}{normalized_path}: {err}"
+                    )));
+                }
+                TcpListener::bind(("127.0.0.1", 0))?
+            }
+        }
     };
     listener.set_nonblocking(true)?;
 
@@ -557,9 +636,7 @@ fn get_bearer_json<T: for<'de> Deserialize<'de>>(
                         .to_string(),
                 ));
             }
-            let wait_secs = retry_after
-                .unwrap_or(3 * (attempt as u64 + 1))
-                .clamp(1, 20);
+            let wait_secs = retry_after.unwrap_or(3 * (attempt as u64 + 1)).clamp(1, 20);
             std::thread::sleep(Duration::from_secs(wait_secs));
             continue;
         }
@@ -583,12 +660,18 @@ fn get_bearer_json<T: for<'de> Deserialize<'de>>(
 // ============================================================================
 
 pub fn spotify_authorize_url(client_id: &str, redirect_uri: &str, pkce: &PkcePair) -> String {
+    let effective_id = effective_spotify_client_id(client_id);
+    let scopes = if is_builtin_spotify_desktop_client(client_id) {
+        SPOTIFY_DESKTOP_SCOPES
+    } else {
+        SPOTIFY_OAUTH_SCOPES
+    };
     format!(
         "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&state={}&scope={}&code_challenge_method=S256&code_challenge={}",
-        url_encode(client_id.trim()),
+        url_encode(effective_id),
         url_encode(redirect_uri),
         url_encode(&pkce.state),
-        url_encode(SPOTIFY_OAUTH_SCOPES),
+        url_encode(scopes),
         url_encode(&pkce.challenge_s256),
     )
 }
@@ -599,11 +682,12 @@ pub fn spotify_exchange_code(
     redirect_uri: &str,
     verifier: &str,
 ) -> ProviderResult<OAuthTokens> {
+    let effective_id = effective_spotify_client_id(client_id);
     post_token_form(
         "https://accounts.spotify.com/api/token",
         &[
             ("grant_type", "authorization_code"),
-            ("client_id", client_id.trim()),
+            ("client_id", effective_id),
             ("code", code),
             ("redirect_uri", redirect_uri),
             ("code_verifier", verifier),
@@ -613,11 +697,12 @@ pub fn spotify_exchange_code(
 }
 
 pub fn spotify_refresh_token(client_id: &str, refresh_token: &str) -> ProviderResult<OAuthTokens> {
+    let effective_id = effective_spotify_client_id(client_id);
     post_token_form(
         "https://accounts.spotify.com/api/token",
         &[
             ("grant_type", "refresh_token"),
-            ("client_id", client_id.trim()),
+            ("client_id", effective_id),
             ("refresh_token", refresh_token),
         ],
         Some(refresh_token),
@@ -1479,5 +1564,34 @@ mod tests {
         assert!(yt.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
         assert!(yt.contains("youtube.readonly"));
         assert!(yt.contains("code_challenge_method=S256"));
+    }
+
+    #[test]
+    fn builtin_spotify_desktop_oauth_resolves_without_manual_client_id() {
+        let (cid, port, path) = spotify_oauth_endpoint_config("");
+        assert_eq!(cid, SPOTIFY_DESKTOP_CLIENT_ID);
+        assert_eq!(port, 8989);
+        assert_eq!(path, "/login");
+
+        let pkce = generate_pkce_pair();
+        let url = spotify_authorize_url("", SPOTIFY_DESKTOP_REDIRECT_URI, &pkce);
+        assert!(url.contains(&format!("client_id={SPOTIFY_DESKTOP_CLIENT_ID}")));
+        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8989%2Flogin"));
+        assert!(url.contains("user-read-playback-state"));
+        assert!(url.contains("streaming"));
+
+        let (custom_cid, custom_port, custom_path) = spotify_oauth_endpoint_config("custom_id_123");
+        assert_eq!(custom_cid, "custom_id_123");
+        assert_eq!(custom_port, DEFAULT_OAUTH_CALLBACK_PORT);
+        assert_eq!(custom_path, DEFAULT_OAUTH_CALLBACK_PATH);
+    }
+
+    #[test]
+    fn activate_oauth_cancel_token_cancels_previous_listener() {
+        let first = activate_oauth_cancel_token();
+        assert!(!first.load(Ordering::SeqCst));
+        let second = activate_oauth_cancel_token();
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
     }
 }

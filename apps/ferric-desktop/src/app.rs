@@ -45,8 +45,9 @@ use ferric_providers::lyrics::{
     SyncedLyrics, fetch_best_free_lyrics, is_polluted_multilingual_lrc,
 };
 use ferric_providers::oauth::{
-    DEFAULT_OAUTH_CALLBACK_PATH, DEFAULT_OAUTH_CALLBACK_PORT, bind_loopback_callback,
-    generate_pkce_pair, spotify_authorize_url, spotify_exchange_code, sync_spotify_catalog,
+    SPOTIFY_DESKTOP_REDIRECT_URI, activate_oauth_cancel_token, bind_loopback_callback,
+    generate_pkce_pair, is_builtin_spotify_desktop_client, spotify_authorize_url,
+    spotify_exchange_code, spotify_oauth_endpoint_config, sync_spotify_catalog,
 };
 use ferric_providers::public_sync::{
     import_spotify_public_url, import_youtube_public_url, parse_spotify_target,
@@ -1992,17 +1993,17 @@ live_design! {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_acct_spotify = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account (OAuth · Client ID · Premium Only)" }
+                                                lbl_t_acct_spotify = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account (Direct OAuth 2.0 PKCE)" }
                                                 spotify_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Not Connected" }
                                             }
                                             lbl_m_acct_spotify = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
-                                                text: "Spotify Premium account required: Spotify Developer Dashboard restricts Client ID apps to active Spotify Premium accounts. Sign in with official OAuth 2.0 PKCE to sync Liked Songs and playlists (tokens stored encrypted with Windows DPAPI). Free accounts can use Instant Spotify Link Import below."
+                                                text: "Sign in directly with Spotify in one click — no manual Client ID required (built-in desktop OAuth 2.0 PKCE on 127.0.0.1:8989/login, tokens encrypted with Windows DPAPI). You can also enter an optional custom Client ID."
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                spotify_client_input = <FerricInput> { width: Fill, empty_text: "Spotify Client ID (Premium account required)" }
+                                                spotify_client_input = <FerricInput> { width: Fill, empty_text: "Optional custom Client ID (leave blank for direct built-in login)" }
                                                 spotify_login_btn = <FerricPrimaryBtn> { text: "Sign in with Spotify" }
                                                 spotify_sync_btn = <FerricBtn> { height: 28, text: "Sync Library" }
                                                 spotify_logout_btn = <FerricBtn> { height: 28, text: "Sign Out" }
@@ -2016,7 +2017,7 @@ live_design! {
                                             spotify_oauth_status_lbl = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.5 } }
-                                                text: "Premium only  ·  Dashboard: https://developer.spotify.com/dashboard  ·  Redirect URI: http://127.0.0.1:43824/callback"
+                                                text: "Direct sign-in ready  ·  Built-in OAuth Redirect URI: http://127.0.0.1:8989/login"
                                             }
                                         }
 
@@ -9848,27 +9849,21 @@ impl App {
     }
 
     fn start_spotify_login(&mut self, cx: &mut Cx) {
-        let client_id = self.accounts.spotify_client_id.trim().to_string();
-        if client_id.is_empty() {
-            self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
-                cx,
-                "Paste your Spotify Client ID first (requires Spotify Premium at developer.spotify.com/dashboard; redirect URI http://127.0.0.1:43824/callback).",
-            );
-            return;
-        }
+        let custom_client_id = self.accounts.spotify_client_id.trim().to_string();
+        let (effective_client_id, callback_port, callback_path) = {
+            let (cid, port, path) = spotify_oauth_endpoint_config(&custom_client_id);
+            (cid.to_string(), port, path)
+        };
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
+        let cancel = activate_oauth_cancel_token();
         self.ui
             .label(id!(spotify_oauth_status_lbl))
             .set_text(cx, "Opening Spotify authorization in your browser...");
         thread::spawn(move || {
             let pkce = generate_pkce_pair();
-            let listener = match bind_loopback_callback(
-                DEFAULT_OAUTH_CALLBACK_PORT,
-                DEFAULT_OAUTH_CALLBACK_PATH,
-                &pkce.state,
-            ) {
+            let listener = match bind_loopback_callback(callback_port, callback_path, &pkce.state) {
                 Ok(listener) => listener,
                 Err(err) => {
                     let _ = tx.send(BgMessage::SpotifyLoginFailed(err.to_string()));
@@ -9876,19 +9871,26 @@ impl App {
                 }
             };
             let redirect_uri = listener.redirect_uri.clone();
-            let authorize_url = spotify_authorize_url(&client_id, &redirect_uri, &pkce);
+            let authorize_url = spotify_authorize_url(&effective_client_id, &redirect_uri, &pkce);
             if let Err(err) = open_allowed_url(&authorize_url) {
                 let _ = tx.send(BgMessage::SpotifyLoginFailed(err));
                 return;
             }
-            let cancel = std::sync::atomic::AtomicBool::new(false);
             let outcome = listener
                 .wait_for_auth_code(&cancel, std::time::Duration::from_secs(240))
                 .and_then(|code| {
-                    spotify_exchange_code(&client_id, &code, &redirect_uri, &pkce.verifier)
+                    spotify_exchange_code(
+                        &effective_client_id,
+                        &code,
+                        &redirect_uri,
+                        &pkce.verifier,
+                    )
                 });
             let _ = match outcome {
-                Ok(tokens) => tx.send(BgMessage::SpotifyLoginResult { client_id, tokens }),
+                Ok(tokens) => tx.send(BgMessage::SpotifyLoginResult {
+                    client_id: custom_client_id,
+                    tokens,
+                }),
                 Err(err) => tx.send(BgMessage::SpotifyLoginFailed(err.to_string())),
             };
         });
@@ -12873,12 +12875,16 @@ impl App {
             .button(id!(spotify_copy_redirect_btn))
             .clicked(actions)
         {
-            const REDIRECT: &str = "http://127.0.0.1:43824/callback";
-            match copy_text_to_clipboard(REDIRECT) {
+            let redirect = if is_builtin_spotify_desktop_client(&self.accounts.spotify_client_id) {
+                SPOTIFY_DESKTOP_REDIRECT_URI
+            } else {
+                "http://127.0.0.1:43824/callback"
+            };
+            match copy_text_to_clipboard(redirect) {
                 Ok(()) => {
                     self.ui
                         .label(id!(spotify_oauth_status_lbl))
-                        .set_text(cx, "Copied redirect URI: http://127.0.0.1:43824/callback");
+                        .set_text(cx, &format!("Copied redirect URI: {redirect}"));
                     self.show_toast(cx, "Copied Redirect URI");
                 }
                 Err(err) => {

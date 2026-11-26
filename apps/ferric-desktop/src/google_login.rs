@@ -250,6 +250,9 @@ mod imp {
                     },
                     LoginPayload::Cancelled => super::GoogleLoginOutcome::Cancelled,
                     LoginPayload::Failed(err) => super::GoogleLoginOutcome::Failed(err),
+                    LoginPayload::SpotifySession { .. } => super::GoogleLoginOutcome::Failed(
+                        "Unexpected Spotify session payload in the Google flow".to_string(),
+                    ),
                 };
                 on_done(outcome);
             }),
@@ -714,12 +717,11 @@ mod imp {
                                 if status.is_err() || dead_inner.get() {
                                     return Ok(());
                                 }
-                                let token_json = take_pwstr(result);
                                 emit_once(
                                     &done_inner,
                                     LoginPayload::SpotifySession {
                                         cookie: header.clone(),
-                                        token_json,
+                                        token_json: result,
                                     },
                                 );
                                 // SAFETY: Close the login window once the session payload is out.

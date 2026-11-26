@@ -471,16 +471,11 @@ impl Win32Window {
             }
             WM_NCPAINT => return LRESULT(0),
             WM_NCACTIVATE => {
-                // Keep Native Acrylic active across focus changes without flashing opaque fallback
-                // or triggering classic Win32 non-client caption redraws.
+                // Forward real activation wparam with lParam = -1 so GDI never paints classic
+                // caption chrome while DWM receives authentic activate/deactivate transitions
+                // (prevents Windows 11 DWMSBT_TRANSIENTWINDOW from getting stuck in solid fallback).
                 if IsIconic(hwnd).0 == 0 {
-                    let active_wparam =
-                        if INITIAL_ACRYLIC_BACKDROP.load(std::sync::atomic::Ordering::Acquire) {
-                            WPARAM(1)
-                        } else {
-                            wparam
-                        };
-                    return DefWindowProcW(hwnd, msg, active_wparam, LPARAM(-1));
+                    return DefWindowProcW(hwnd, msg, wparam, LPARAM(-1));
                 }
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             }
@@ -503,21 +498,6 @@ impl Win32Window {
                     window.do_callback(Win32Event::AppLostFocus);
                 }
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
-            },
-            WM_NCCALCSIZE => {
-                // Keep frameless client geometry on both normal and maximized states;
-                // falling through to DefWindowProcW when maximized triggers native DWM
-                // titlebar caption glyphs over Native Acrylic windows.
-                if wparam == WPARAM(1) {
-                    let margins = MARGINS {
-                        cxLeftWidth: -1,
-                        cxRightWidth: -1,
-                        cyTopHeight: -1,
-                        cyBottomHeight: -1
-                    };
-                    let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-                    return LRESULT(0)
-                }
             },
             WM_NCHITTEST => {
                 //let ycoord = (lparam.0 >> 16) as u16 as i16 as i32;

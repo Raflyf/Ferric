@@ -57,6 +57,12 @@ impl CxTexturePool {
 
         Texture(Rc::new(new_id))
     }
+
+    /// Immediately release OS GPU handles and CPU pixel buffers held by dropped texture pool slots
+    /// instead of waiting for future allocations to reuse those slots.
+    pub fn free_unused_textures(&mut self) {
+        self.0.reset_free_items();
+    }
 }
 
 impl std::ops::Index<TextureId> for CxTexturePool {
@@ -550,6 +556,12 @@ impl Texture {
         &mut cx.textures[self.texture_id()].format
     }
 
+    /// Opt this texture into `D3D11_USAGE_IMMUTABLE` + dropping its CPU `Vec<u32>` pixel buffer
+    /// immediately after GPU upload (safe for write-once cover artwork, never for mutable font atlases).
+    pub fn set_release_cpu_after_upload(&self, cx: &mut Cx, release: bool) {
+        cx.textures[self.texture_id()].release_cpu_after_upload = release;
+    }
+
     pub fn take_vec_u32(&self, cx: &mut Cx) -> Vec<u32> {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let data = match &mut cx_texture.format {
@@ -637,4 +649,5 @@ pub struct CxTexture {
     pub (crate) animation: Option<TextureAnimation>,
     pub os: CxOsTexture,
     pub previous_platform_resource: Option<CxOsTexture>,
+    pub release_cpu_after_upload: bool,
 }

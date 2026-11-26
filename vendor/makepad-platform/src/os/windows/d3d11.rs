@@ -30,6 +30,12 @@ use crate::{
                 HANDLE,
                 S_FALSE,
             },
+            UI::WindowsAndMessaging::{
+                GetWindowLongPtrW,
+                SetWindowLongPtrW,
+                GWL_EXSTYLE,
+                WS_EX_NOREDIRECTIONBITMAP,
+            },
             Graphics::{
                 Direct3D11::{
                     D3D11_BIND_INDEX_BUFFER,
@@ -66,6 +72,11 @@ use crate::{
                     D3D11_RASTERIZER_DESC,
                     D3D11_CULL_NONE,
                     D3D11_FILL_SOLID,
+                    D3D11_SAMPLER_DESC,
+                    D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                    D3D11_TEXTURE_ADDRESS_WRAP,
+                    D3D11_COMPARISON_NEVER,
+                    D3D11_USAGE_IMMUTABLE,
                     D3D11_INPUT_ELEMENT_DESC,
                     D3D11_INPUT_PER_VERTEX_DATA,
                     D3D11_INPUT_PER_INSTANCE_DATA,
@@ -84,6 +95,7 @@ use crate::{
                     ID3D11BlendState,
                     ID3D11RasterizerState,
                     ID3D11DepthStencilState,
+                    ID3D11SamplerState,
                     ID3D11PixelShader,
                     ID3D11VertexShader,
                     ID3D11InputLayout,
@@ -97,7 +109,10 @@ use crate::{
                     ID3DBlob,
                     D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                     D3D_DRIVER_TYPE_UNKNOWN,
+                    D3D_DRIVER_TYPE_WARP,
                     D3D_FEATURE_LEVEL_11_0,
+                    D3D_FEATURE_LEVEL_10_1,
+                    D3D_FEATURE_LEVEL_10_0,
                 },
                 DirectComposition::{
                     DCompositionCreateDevice,
@@ -106,11 +121,14 @@ use crate::{
                     IDCompositionVisual,
                 },
                 Dxgi::{
+                    IDXGIAdapter1,
                     IDXGIDevice,
                     IDXGIFactory2,
                     IDXGIResource,
                     IDXGISwapChain1,
                     CreateDXGIFactory2,
+                    DXGI_ADAPTER_DESC1,
+                    DXGI_ADAPTER_FLAG_SOFTWARE,
                     DXGI_SWAP_CHAIN_DESC1,
                     DXGI_USAGE_RENDER_TARGET_OUTPUT,
                     DXGI_SCALING_NONE,
@@ -388,6 +406,9 @@ impl Cx {
     }
     
     pub fn draw_pass_to_window(&mut self, pass_id: PassId, vsync: bool, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
+        if d3d11_window.render_target_view.is_none() {
+            return;
+        }
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -576,6 +597,15 @@ impl D3d11Window {
                 dcomp_visual_opt = Some(visual);
                 sc
             } else {
+                // Fallback to HWND swapchain: strip WS_EX_NOREDIRECTIONBITMAP so DXGI can present cleanly.
+                let ex_style = GetWindowLongPtrW(win32_window.hwnd, GWL_EXSTYLE);
+                if (ex_style & (WS_EX_NOREDIRECTIONBITMAP.0 as isize)) != 0 {
+                    SetWindowLongPtrW(
+                        win32_window.hwnd,
+                        GWL_EXSTYLE,
+                        ex_style & !(WS_EX_NOREDIRECTIONBITMAP.0 as isize),
+                    );
+                }
                 let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
                     AlphaMode: DXGI_ALPHA_MODE_IGNORE,
                     BufferCount: 2,
@@ -637,10 +667,21 @@ impl D3d11Window {
     
     
     pub fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
-        if self.alloc_size == self.window_geom.inner_size {
-            return
+        if self.window_geom.inner_size.x <= 0.0 || self.window_geom.inner_size.y <= 0.0 {
+            // Window minimized (0x0 client rect): keep existing swapchain intact so taskbar restore
+            // presents immediately without reallocating or flashing the DWM Acrylic surface.
+            return;
+        }
+        if self.alloc_size == self.window_geom.inner_size && self.render_target_view.is_some() {
+            return;
         }
         self.alloc_size = self.window_geom.inner_size;
+        unsafe {
+            // DXGI requires all backbuffer references to be unbound from the immediate context
+            // before ResizeBuffers is invoked, otherwise ResizeBuffers can fail with INVALID_CALL.
+            d3d11_cx.context.OMSetRenderTargets(None, None);
+            d3d11_cx.context.Flush();
+        }
         self.swap_texture = None;
         self.render_target_view = None;
         
@@ -648,18 +689,30 @@ impl D3d11Window {
             let wg = &self.window_geom;
             let sc_w = ((wg.inner_size.x * wg.dpi_factor).round() as u32).max(1);
             let sc_h = ((wg.inner_size.y * wg.dpi_factor).round() as u32).max(1);
-            self.swap_chain.ResizeBuffers(
-                2,
-                sc_w,
-                sc_h,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                0
-            ).unwrap();
-            
-            let swap_texture = self.swap_chain.GetBuffer(0).unwrap();
+            if self
+                .swap_chain
+                .ResizeBuffers(2, sc_w, sc_h, DXGI_FORMAT_B8G8R8A8_UNORM, 0)
+                .is_err()
+            {
+                // Device reset / TDR / monitor hotplug: avoid aborting the process; retry next resize.
+                self.alloc_size = DVec2::default();
+                return;
+            }
+
+            let Ok(swap_texture) = self.swap_chain.GetBuffer(0) else {
+                self.alloc_size = DVec2::default();
+                return;
+            };
             let mut render_target_view = None;
-            d3d11_cx.device.CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view)).unwrap();
-            
+            if d3d11_cx
+                .device
+                .CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view))
+                .is_err()
+            {
+                self.alloc_size = DVec2::default();
+                return;
+            }
+
             self.swap_texture = Some(swap_texture);
             self.render_target_view = render_target_view;
             if let Some(dcomp_dev) = &self.dcomp_device {
@@ -669,7 +722,9 @@ impl D3d11Window {
     }
     
     pub fn present(&mut self, vsync: bool) {
-        unsafe {self.swap_chain.Present(if vsync {1}else {0}, 0).unwrap()};
+        unsafe {
+            let _ = self.swap_chain.Present(if vsync { 1 } else { 0 }, 0);
+        }
     }
     
 }
@@ -683,33 +738,112 @@ pub struct D3d11Cx {
 }
 
 impl D3d11Cx {
-    
     pub fn new() -> D3d11Cx {
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(0).unwrap();
-            let adapter = factory.EnumAdapters(0).unwrap();
-            let mut device: Option<ID3D11Device> = None;
-            let mut context: Option<ID3D11DeviceContext> = None;
+            let feature_levels = [
+                D3D_FEATURE_LEVEL_11_0,
+                D3D_FEATURE_LEVEL_10_1,
+                D3D_FEATURE_LEVEL_10_0,
+            ];
+
+            // Strict minimum-RAM/power hardware policy: NEVER wake a discrete Dedicated GPU when
+            // an Integrated GPU is present (avoids +200 MB discrete driver commit and battery draw).
+            // 1. Check Adapter[0] first; if it is already an Integrated GPU (<1 GiB dedicated VRAM),
+            //    stop immediately without even enumerating secondary discrete adapters.
+            // 2. If Adapter[0] is a discrete GPU (>=1 GiB), check if a low-power Integrated GPU
+            //    exists on another slot and prefer it; otherwise use Adapter[0] (dGPU-only desktop).
+            // 3. Fall back cleanly to CPU WARP only if no hardware D3D11 adapter succeeds.
+            const IGPU_VRAM_CEILING: usize = 1024 * 1024 * 1024;
+            let mut candidates: Vec<IDXGIAdapter1> = Vec::new();
+            if let Ok(first) = factory.EnumAdapters1(0) {
+                let mut desc0 = DXGI_ADAPTER_DESC1::default();
+                let first_is_sw = first.GetDesc1(&mut desc0).is_ok()
+                    && (desc0.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
+                if !first_is_sw && desc0.DedicatedVideoMemory < IGPU_VRAM_CEILING {
+                    candidates.push(first);
+                } else {
+                    let mut igpus: Vec<IDXGIAdapter1> = Vec::new();
+                    let mut others: Vec<IDXGIAdapter1> = Vec::new();
+                    if !first_is_sw {
+                        others.push(first);
+                    }
+                    for idx in 1..8u32 {
+                        let Ok(adp) = factory.EnumAdapters1(idx) else {
+                            break;
+                        };
+                        let mut d = DXGI_ADAPTER_DESC1::default();
+                        if adp.GetDesc1(&mut d).is_err() {
+                            continue;
+                        }
+                        if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                            continue;
+                        }
+                        if d.DedicatedVideoMemory < IGPU_VRAM_CEILING {
+                            igpus.push(adp);
+                        } else {
+                            others.push(adp);
+                        }
+                    }
+                    candidates.extend(igpus);
+                    candidates.extend(others);
+                }
+            }
+
+            let mut selected: Option<(ID3D11Device, ID3D11DeviceContext)> = None;
+            for adapter in &candidates {
+                let mut device: Option<ID3D11Device> = None;
+                let mut context: Option<ID3D11DeviceContext> = None;
+                if D3D11CreateDevice(
+                    adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HINSTANCE(0),
+                    D3D11_CREATE_DEVICE_FLAG(0),
+                    Some(&feature_levels),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+                .is_ok()
+                {
+                    if let (Some(dev), Some(ctx)) = (device, context) {
+                        selected = Some((dev, ctx));
+                        break;
+                    }
+                }
+            }
+
+            let (device, context) = if let Some(ok) = selected {
+                ok
+            } else {
+                let mut device: Option<ID3D11Device> = None;
+                let mut context: Option<ID3D11DeviceContext> = None;
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_WARP,
+                    HINSTANCE(0),
+                    D3D11_CREATE_DEVICE_FLAG(0),
+                    Some(&feature_levels),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+                .unwrap();
+                (device.unwrap(), context.unwrap())
+            };
+
             let mut query: Option<ID3D11Query> = None;
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HINSTANCE(0),
-                D3D11_CREATE_DEVICE_FLAG(0),
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context)
-            ).unwrap();
-
-            let device = device.unwrap();
-            let context = context.unwrap();
-
-            device.CreateQuery(&D3D11_QUERY_DESC {
-                Query: D3D11_QUERY_EVENT,
-                MiscFlags: 0,
-            },Some(&mut query)).unwrap();
+            device
+                .CreateQuery(
+                    &D3D11_QUERY_DESC {
+                        Query: D3D11_QUERY_EVENT,
+                        MiscFlags: 0,
+                    },
+                    Some(&mut query),
+                )
+                .unwrap();
 
             let query = query.unwrap();
 
@@ -749,31 +883,119 @@ pub struct CxOsDrawCall {
 #[derive(Default, Clone)]
 pub struct D3d11Buffer {
     pub last_size: usize,
+    pub cap_slots: usize,
+    pub last_cb_u32: Vec<u32>,
     pub buffer: Option<ID3D11Buffer>
 }
 
 impl D3d11Buffer {
-    fn create_buffer_or_update(&mut self, d3d11_cx: &D3d11Cx, buffer_desc: &D3D11_BUFFER_DESC, sub_data: &D3D11_SUBRESOURCE_DATA, len_slots: usize, data: *const std::ffi::c_void) {
-        if self.last_size == len_slots {
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            let p_mapped : *mut _ = &mut mapped;
-            unsafe {
-                d3d11_cx.context.Map(self.buffer.as_ref().unwrap(),
-                        0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped)).unwrap();
-
-                std::ptr::copy_nonoverlapping(data, mapped.pData, len_slots * 4);
-                d3d11_cx.context.Unmap(self.buffer.as_ref().unwrap(), 0);
+    fn upload_mapped(&self, d3d11_cx: &D3d11Cx, len_slots: usize, data: *const std::ffi::c_void) -> bool {
+        let Some(buf) = self.buffer.as_ref() else {
+            return false;
+        };
+        let Some(byte_len) = len_slots.checked_mul(4) else {
+            return false;
+        };
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        let p_mapped: *mut _ = &mut mapped;
+        unsafe {
+            if d3d11_cx
+                .context
+                .Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
+                .is_err()
+            {
+                return false;
             }
+            if !mapped.pData.is_null() {
+                std::ptr::copy_nonoverlapping(data, mapped.pData, byte_len);
+            }
+            d3d11_cx.context.Unmap(buf, 0);
+            !mapped.pData.is_null()
+        }
+    }
+
+    fn create_buffer_or_update(&mut self, d3d11_cx: &D3d11Cx, buffer_desc: &D3D11_BUFFER_DESC, sub_data: &D3D11_SUBRESOURCE_DATA, len_slots: usize, data: *const std::ffi::c_void) -> bool {
+        if len_slots == 0 {
+            return true;
+        }
+        let is_cb = (buffer_desc.BindFlags & (D3D11_BIND_CONSTANT_BUFFER.0 as u32)) != 0;
+        if is_cb {
+            if self.buffer.is_some() && self.last_size == len_slots {
+                return self.upload_mapped(d3d11_cx, len_slots, data);
+            } else {
+                let mut new_buf: Option<ID3D11Buffer> = None;
+                let ok = unsafe {
+                    d3d11_cx
+                        .device
+                        .CreateBuffer(buffer_desc, Some(sub_data), Some(&mut new_buf))
+                        .is_ok()
+                };
+                if ok && new_buf.is_some() {
+                    self.buffer = new_buf;
+                    self.last_size = len_slots;
+                    self.cap_slots = len_slots;
+                    return true;
+                }
+                return false;
+            }
+        }
+        // Vertex/index buffers: reuse existing dynamic ID3D11Buffer across small length changes
+        // (e.g. text/lyrics glyph counts) to avoid Intel D3D11 driver CreateBuffer/GC RAM spikes.
+        if self.buffer.is_some()
+            && len_slots <= self.cap_slots
+            && self.cap_slots <= len_slots.saturating_mul(4).max(256)
+        {
+            if self.upload_mapped(d3d11_cx, len_slots, data) {
+                self.last_size = len_slots;
+                return true;
+            }
+            return false;
         } else {
-            self.last_size = len_slots;
-            unsafe { d3d11_cx.device.CreateBuffer(buffer_desc, Some(sub_data), Some(&mut self.buffer)).unwrap() }
+            let Some(cap_slots) = len_slots.checked_next_power_of_two().map(|c| c.max(64)) else {
+                return false;
+            };
+            let Some(byte_width) = cap_slots
+                .checked_mul(4)
+                .and_then(|b| u32::try_from(b).ok())
+            else {
+                return false;
+            };
+            let mut alloc_desc = *buffer_desc;
+            alloc_desc.ByteWidth = byte_width;
+            let mut new_buf: Option<ID3D11Buffer> = None;
+            let ok = unsafe {
+                d3d11_cx
+                    .device
+                    .CreateBuffer(&alloc_desc, None, Some(&mut new_buf))
+                    .is_ok()
+            };
+            if ok && new_buf.is_some() {
+                // Assigning replaces and Release()s the previous ID3D11Buffer COM object cleanly.
+                self.buffer = new_buf;
+                self.cap_slots = cap_slots;
+                if self.upload_mapped(d3d11_cx, len_slots, data) {
+                    self.last_size = len_slots;
+                    return true;
+                }
+                self.last_size = 0;
+            }
+            return false;
         }
     }
 
     pub fn update_with_data(&mut self, d3d11_cx: &D3d11Cx, bind_flags: D3D11_BIND_FLAG, len_slots: usize, data: *const std::ffi::c_void) {
+        if len_slots == 0 {
+            return;
+        }
+        let Some(byte_width) = len_slots
+            .checked_mul(4)
+            .and_then(|b| u32::try_from(b).ok())
+        else {
+            return;
+        };
         let buffer_desc = D3D11_BUFFER_DESC {
             Usage: D3D11_USAGE_DYNAMIC,
-            ByteWidth: (len_slots * 4) as u32,
+            ByteWidth: byte_width,
             BindFlags: bind_flags.0 as u32,
             CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
             MiscFlags: 0,
@@ -785,7 +1007,7 @@ impl D3d11Buffer {
             SysMemPitch: 0,
             SysMemSlicePitch: 0
         };
-        self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data);
+        let _ = self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data);
     }
     
     pub fn update_with_u32_index_data(&mut self, d3d11_cx: &D3d11Cx, data: &[u32]) {
@@ -797,34 +1019,65 @@ impl D3d11Buffer {
     }
     
     pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
-        if data.len() == 0 {
-            return
+        if data.is_empty() {
+            return;
         }
-        if (data.len() & 3) != 0 { // we have to align the data at the end
-            let mut new_data = data.to_vec();
-            let steps = 4 - (data.len() & 3);
-            for _ in 0..steps {
-                new_data.push(0.0);
-            };
-            return self.update_with_f32_constant_data(d3d11_cx, &new_data);
+        let pad = (4 - (data.len() & 3)) & 3;
+        let Some(len_slots) = data.len().checked_add(pad) else {
+            return;
+        };
+        let Some(byte_width) = len_slots
+            .checked_mul(4)
+            .and_then(|b| u32::try_from(b).ok())
+        else {
+            return;
+        };
+
+        // Skip redundant Map(D3D11_MAP_WRITE_DISCARD) when constant buffer bytes are bit-identical
+        // to the previous upload. Eliminates ~95% of per-frame Intel dynamic-buffer renamings.
+        if self.buffer.is_some()
+            && self.last_size == len_slots
+            && self.last_cb_u32.len() == len_slots
+            && self.last_cb_u32[data.len()..].iter().all(|&p| p == 0)
+        {
+            let mut unchanged = true;
+            for (i, &v) in data.iter().enumerate() {
+                if self.last_cb_u32[i] != v.to_bits() {
+                    unchanged = false;
+                    break;
+                }
+            }
+            if unchanged {
+                return;
+            }
         }
+
+        self.last_cb_u32.clear();
+        self.last_cb_u32.reserve(len_slots);
+        for &v in data {
+            self.last_cb_u32.push(v.to_bits());
+        }
+        for _ in 0..pad {
+            self.last_cb_u32.push(0);
+        }
+
+        let ptr = self.last_cb_u32.as_ptr() as *const std::ffi::c_void;
         let sub_data = D3D11_SUBRESOURCE_DATA {
-            pSysMem: data.as_ptr() as *const _,
+            pSysMem: ptr,
             SysMemPitch: 0,
             SysMemSlicePitch: 0
         };
-        let len_slots = data.len();
-        
         let buffer_desc = D3D11_BUFFER_DESC {
             Usage: D3D11_USAGE_DYNAMIC,
-            ByteWidth: (len_slots * 4) as u32,
+            ByteWidth: byte_width,
             BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
             CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
             MiscFlags: 0,
             StructureByteStride: 0
         };
-        let data = unsafe { core::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of::<f32>() * data.len()).as_ptr() as *const _ };
-        self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data);
+        if !self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, ptr) {
+            self.last_cb_u32.clear();
+        }
     }
 }
 
@@ -844,6 +1097,7 @@ impl CxTexture {
         &mut self,
         d3d11_cx: &D3d11Cx,
     ) {
+        self.previous_platform_resource = None;
         // TODO maybe we can update the data instead of making a new texture?
         if self.alloc_vec(){}
         if !self.take_updated().is_empty() {
@@ -872,32 +1126,62 @@ impl CxTexture {
                 (sub_data,texture_desc)
             }
             
-            let (sub_data, texture_desc) = match &self.format{
+            let release_cpu = self.release_cpu_after_upload;
+            let (sub_data, mut texture_desc, is_immutable_cover) = match &self.format{
                 TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4, data.as_ref().unwrap().as_ptr() as *const _)
+                    let Some(buf) = data.as_ref() else { return; };
+                    let (sd, td) = get_descs(DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4, buf.as_ptr() as *const _);
+                    (sd, td, release_cpu)
                 }
                 TextureFormat::VecRGBAf32{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, data.as_ref().unwrap().as_ptr() as *const _)
+                    let Some(buf) = data.as_ref() else { return; };
+                    let (sd, td) = get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, buf.as_ptr() as *const _);
+                    (sd, td, false)
                 }
                 TextureFormat::VecRu8{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, data.as_ref().unwrap().as_ptr() as *const _)
+                    let Some(buf) = data.as_ref() else { return; };
+                    let (sd, td) = get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, buf.as_ptr() as *const _);
+                    (sd, td, false)
                 }
                 TextureFormat::VecRGu8{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 1, data.as_ref().unwrap().as_ptr() as *const _)
+                    let Some(buf) = data.as_ref() else { return; };
+                    let (sd, td) = get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 1, buf.as_ptr() as *const _);
+                    (sd, td, false)
                 }
                 TextureFormat::VecRf32{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, data.as_ref().unwrap().as_ptr() as *const _)
+                    let Some(buf) = data.as_ref() else { return; };
+                    let (sd, td) = get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, buf.as_ptr() as *const _);
+                    (sd, td, false)
                 }
-                _=>panic!()
+                _=>return
             };
-                                        
+            if is_immutable_cover {
+                // Static cover artwork never mutates on GPU: IMMUTABLE eliminates driver staging/shadow copies.
+                texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
+            }
             let mut texture = None;
-            unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture)).unwrap()};
-            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
-            unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
+            if unsafe { d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture)) }.is_err() {
+                return;
+            }
+            let Some(tex_ref) = texture.as_ref() else {
+                return;
+            };
+            let Ok(resource): crate::windows::core::Result<ID3D11Resource> = tex_ref.cast() else {
+                return;
+            };
+            if unsafe { d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)) }.is_err() {
+                return;
+            }
             self.os.texture = texture;
             self.os.shader_resource_view = shader_resource_view;
+            // Release CPU backing Vec<u32> ONLY for write-once cover textures that explicitly opted in
+            // (never for mutable Makepad font/color glyph atlases that later call take_vec_u32).
+            if is_immutable_cover {
+                if let TextureFormat::VecBGRAu8_32 { data, .. } = &mut self.format {
+                    *data = None;
+                }
+            }
         }
     }
     
@@ -907,6 +1191,7 @@ impl CxTexture {
         width: usize,
         height: usize
     ) {
+        self.previous_platform_resource = None;
         if self.alloc_render(width, height){
             let alloc = self.alloc.as_ref().unwrap();
             let misc_flags = D3D11_RESOURCE_MISC_FLAG(0);
@@ -945,6 +1230,7 @@ impl CxTexture {
         width: usize,
         height: usize
     ) {
+        self.previous_platform_resource = None;
         if self.alloc_depth(width, height){
             let alloc = self.alloc.as_ref().unwrap();
             let format;
@@ -994,6 +1280,7 @@ impl CxTexture {
         &mut self,
         d3d11_device: &ID3D11Device,
     ) {
+        self.previous_platform_resource = None;
         if self.alloc_shared(){
             let alloc = self.alloc.as_ref().unwrap();
 
@@ -1116,11 +1403,33 @@ impl CxOsPass {
             unsafe {d3d11_cx.device.CreateDepthStencilState(&ds_desc, Some(&mut self.depth_stencil_state)).unwrap()}
         }
         
+        if self.sampler_state.is_none() {
+            let samp_desc = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_WRAP,
+                AddressV: D3D11_TEXTURE_ADDRESS_WRAP,
+                AddressW: D3D11_TEXTURE_ADDRESS_WRAP,
+                MipLODBias: 0.0,
+                MaxAnisotropy: 1,
+                ComparisonFunc: D3D11_COMPARISON_NEVER,
+                BorderColor: [0.0, 0.0, 0.0, 0.0],
+                MinLOD: 0.0,
+                MaxLOD: f32::MAX,
+            };
+            unsafe {
+                let _ = d3d11_cx.device.CreateSamplerState(&samp_desc, Some(&mut self.sampler_state));
+            }
+        }
+        
         unsafe {
             d3d11_cx.context.RSSetState(self.raster_state.as_ref().unwrap());
             let blend_factor = [0., 0., 0., 0.];
             d3d11_cx.context.OMSetBlendState(self.blend_state.as_ref().unwrap(), Some(&blend_factor), 0xffffffff);
             d3d11_cx.context.OMSetDepthStencilState(self.depth_stencil_state.as_ref().unwrap(), 0);
+            if let Some(sampler) = &self.sampler_state {
+                let samplers = [Some(sampler.clone())];
+                d3d11_cx.context.PSSetSamplers(0, Some(&samplers));
+            }
         }
     }
 }
@@ -1130,7 +1439,8 @@ pub struct CxOsPass {
     pass_uniforms: D3d11Buffer,
     blend_state: Option<ID3D11BlendState >,
     raster_state: Option<ID3D11RasterizerState >,
-    depth_stencil_state: Option<ID3D11DepthStencilState >
+    depth_stencil_state: Option<ID3D11DepthStencilState >,
+    sampler_state: Option<ID3D11SamplerState >,
 }
 
 #[derive(Default, Clone)]
@@ -1146,8 +1456,6 @@ pub struct CxOsDrawShader {
     pub live_uniforms: D3d11Buffer,
     pub pixel_shader: ID3D11PixelShader,
     pub vertex_shader: ID3D11VertexShader,
-    pub pixel_shader_blob: ID3DBlob,
-    pub vertex_shader_blob: ID3DBlob,
     pub input_layout: ID3D11InputLayout
 }
 
@@ -1319,14 +1627,15 @@ impl CxOsDrawShader {
         let mut const_table_uniforms = D3d11Buffer::default();
         const_table_uniforms.update_with_f32_constant_data(d3d11_cx, mapping.const_table.table.as_ref());
         
+        // Drop compiled DXBC blobs right after creating shader & input layout to free startup RAM.
+        drop(ps_blob);
+        drop(vs_blob);
         Some(Self {
             hlsl,
             const_table_uniforms,
             live_uniforms,
             pixel_shader: ps.unwrap(),
             vertex_shader: vs.unwrap(),
-            pixel_shader_blob: ps_blob,
-            vertex_shader_blob: vs_blob,
             input_layout: input_layout.unwrap()
         })
     }

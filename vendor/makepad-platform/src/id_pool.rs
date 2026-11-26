@@ -112,4 +112,13 @@ impl<T> IdPool<T> where T: Default {
             (self.alloc_new(Some(item)), None)
         }
     }
+
+    pub fn reset_free_items(&mut self) {
+        let free_ids: Vec<usize> = self.free.0.borrow().clone();
+        for id in free_ids {
+            if let Some(slot) = self.pool.get_mut(id) {
+                slot.item = T::default();
+            }
+        }
+    }
 }

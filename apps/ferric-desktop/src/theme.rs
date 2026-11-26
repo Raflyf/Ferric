@@ -314,7 +314,8 @@ live_design! {
     pub THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
 
     // TYPOGRAPHY — bundled official Inter v4.1 static TTFs (Regular / Medium / SemiBold / Bold)
-    // Purpose-built neo-grotesque screen typeface with crisp optical legibility at compact desktop sizes.
+    // paired with zero-bloat runtime OS font fallbacks (Japanese Yu Gothic, Korean Malgun Gothic,
+    // Chinese Microsoft YaHei, Thai Leelawadee UI) resolved once and shared via Rc<Font>.
     pub THEME_FONT_SIZE_CODE = 8.5
     pub THEME_FONT_WDGT_LINE_SPACING = 1.05
     pub THEME_FONT_HL_LINE_SPACING = 1.02
@@ -329,42 +330,70 @@ live_design! {
     pub THEME_FONT_LABEL = {
         font_family: {
             latin = font("crate://self/resources/fonts/Inter-Medium.ttf", 0.0, 0.0),
+            cjk_jp = font("crate://self/resources/fonts/__sys_cjk_jp.ttf", 0.0, 0.0),
+            cjk_kr = font("crate://self/resources/fonts/__sys_cjk_kr.ttf", 0.0, 0.0),
+            cjk_cn = font("crate://self/resources/fonts/__sys_cjk_cn.ttf", 0.0, 0.0),
+            thai = font("crate://self/resources/fonts/__sys_thai.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_REGULAR = {
         font_family: {
             latin = font("crate://self/resources/fonts/Inter-Regular.ttf", 0.0, 0.0),
+            cjk_jp = font("crate://self/resources/fonts/__sys_cjk_jp.ttf", 0.0, 0.0),
+            cjk_kr = font("crate://self/resources/fonts/__sys_cjk_kr.ttf", 0.0, 0.0),
+            cjk_cn = font("crate://self/resources/fonts/__sys_cjk_cn.ttf", 0.0, 0.0),
+            thai = font("crate://self/resources/fonts/__sys_thai.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_MEDIUM = {
         font_family: {
             latin = font("crate://self/resources/fonts/Inter-Medium.ttf", 0.0, 0.0),
+            cjk_jp = font("crate://self/resources/fonts/__sys_cjk_jp.ttf", 0.0, 0.0),
+            cjk_kr = font("crate://self/resources/fonts/__sys_cjk_kr.ttf", 0.0, 0.0),
+            cjk_cn = font("crate://self/resources/fonts/__sys_cjk_cn.ttf", 0.0, 0.0),
+            thai = font("crate://self/resources/fonts/__sys_thai.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_BOLD = {
         font_family: {
             latin = font("crate://self/resources/fonts/Inter-SemiBold.ttf", 0.0, 0.0),
+            cjk_jp = font("crate://self/resources/fonts/__sys_cjk_jp.ttf", 0.0, 0.0),
+            cjk_kr = font("crate://self/resources/fonts/__sys_cjk_kr.ttf", 0.0, 0.0),
+            cjk_cn = font("crate://self/resources/fonts/__sys_cjk_cn.ttf", 0.0, 0.0),
+            thai = font("crate://self/resources/fonts/__sys_thai.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_DISPLAY = {
         font_family: {
             latin = font("crate://self/resources/fonts/Inter-Bold.ttf", 0.0, 0.0),
+            cjk_jp = font("crate://self/resources/fonts/__sys_cjk_jp.ttf", 0.0, 0.0),
+            cjk_kr = font("crate://self/resources/fonts/__sys_cjk_kr.ttf", 0.0, 0.0),
+            cjk_cn = font("crate://self/resources/fonts/__sys_cjk_cn.ttf", 0.0, 0.0),
+            thai = font("crate://self/resources/fonts/__sys_thai.ttf", 0.0, 0.0),
         },
         line_spacing: 1.02
     }
     pub THEME_FONT_ITALIC = {
         font_family: {
             latin = font("crate://self/resources/fonts/Inter-Regular.ttf", 0.0, 0.0),
+            cjk_jp = font("crate://self/resources/fonts/__sys_cjk_jp.ttf", 0.0, 0.0),
+            cjk_kr = font("crate://self/resources/fonts/__sys_cjk_kr.ttf", 0.0, 0.0),
+            cjk_cn = font("crate://self/resources/fonts/__sys_cjk_cn.ttf", 0.0, 0.0),
+            thai = font("crate://self/resources/fonts/__sys_thai.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }
     pub THEME_FONT_BOLD_ITALIC = {
         font_family: {
             latin = font("crate://self/resources/fonts/Inter-Bold.ttf", 0.0, 0.0),
+            cjk_jp = font("crate://self/resources/fonts/__sys_cjk_jp.ttf", 0.0, 0.0),
+            cjk_kr = font("crate://self/resources/fonts/__sys_cjk_kr.ttf", 0.0, 0.0),
+            cjk_cn = font("crate://self/resources/fonts/__sys_cjk_cn.ttf", 0.0, 0.0),
+            thai = font("crate://self/resources/fonts/__sys_thai.ttf", 0.0, 0.0),
         },
         line_spacing: 1.05
     }

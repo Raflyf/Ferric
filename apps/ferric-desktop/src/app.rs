@@ -38,7 +38,9 @@ use ferric_core::secrets::csprng_hex;
 use ferric_core::theme::{AdaptivePalette, ThemeConfig, hex_to_rgba_f32, parse_hex_rgb};
 use ferric_providers::autoeq::search_autoeq_profiles;
 use ferric_providers::local_scanner::scan_local_folder;
-use ferric_providers::lyrics::{SyncedLyrics, fetch_best_free_lyrics};
+use ferric_providers::lyrics::{
+    SyncedLyrics, fetch_best_free_lyrics, is_polluted_multilingual_lrc,
+};
 use ferric_providers::public_sync::{
     import_spotify_public_url, import_youtube_public_url, parse_spotify_target,
     parse_youtube_target,
@@ -9036,6 +9038,7 @@ impl App {
 
         if let Some(db) = &self.db
             && let Ok(Some(cached)) = db.get_cached_lyrics(&track.id)
+            && (track.source == TrackSource::Local || !is_polluted_multilingual_lrc(&cached))
         {
             self.synced_lyrics =
                 SyncedLyrics::parse_with_context(&cached, track.duration_ms, "Cached");

@@ -268,16 +268,157 @@ pub fn fetch_lrclib_synced(
         .or_else(|| body.plain_lyrics.filter(|s| !s.trim().is_empty())))
 }
 
+fn is_jp_kana(c: char) -> bool {
+    matches!(c, '\u{3040}'..='\u{30FF}' | '\u{FF66}'..='\u{FF9F}')
+}
+
+fn is_kr_hangul(c: char) -> bool {
+    matches!(c, '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}')
+}
+
+fn is_cjk_or_kana_or_hangul(c: char) -> bool {
+    is_jp_kana(c)
+        || is_kr_hangul(c)
+        || matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
+}
+
+fn strip_lrc_timestamps(line: &str) -> &str {
+    let mut rest = line.trim();
+    while let Some(after_open) = rest.strip_prefix('[') {
+        let Some((tag, remainder)) = after_open.split_once(']') else {
+            break;
+        };
+        if parse_lrc_timestamp_ms(tag).is_some() {
+            rest = remainder.trim_start();
+        } else {
+            break;
+        }
+    }
+    rest.trim()
+}
+
+/// Score content-level pollution in community LRCLIB uploads (e.g. triple-column fan-subs
+/// mixing Japanese + Korean pronunciation + Korean translation with `" / "`, or CP949/Shift-JIS
+/// `?` mojibake) while leaving legitimate bilingual songs (English + Japanese / English + Korean)
+/// completely untouched (`0` penalty).
+fn lyrics_content_penalty(raw: &str) -> i64 {
+    let mut total_lines = 0usize;
+    let mut mixed_jp_kr = 0usize;
+    let mut double_slash = 0usize;
+    let mut single_slash = 0usize;
+    let mut mojibake_lines = 0usize;
+    let mut replacement_chars = 0usize;
+    let mut heavy_furigana = 0usize;
+
+    for raw_line in raw.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || is_lrc_metadata_header(trimmed) {
+            continue;
+        }
+        let text = strip_lrc_timestamps(trimmed);
+        if text.is_empty() {
+            continue;
+        }
+        total_lines += 1;
+
+        let mut has_jp = false;
+        let mut has_kr = false;
+        let mut prev_q = false;
+        let mut has_mojibake_q = false;
+        let mut kana_paren_groups = 0usize;
+        let mut in_paren = false;
+        let mut paren_has_kana = false;
+
+        for ch in text.chars() {
+            if ch == '\u{FFFD}' {
+                replacement_chars += 1;
+            }
+            if prev_q && is_cjk_or_kana_or_hangul(ch) {
+                has_mojibake_q = true;
+            }
+            prev_q = ch == '?';
+
+            if is_jp_kana(ch) {
+                has_jp = true;
+                if in_paren {
+                    paren_has_kana = true;
+                }
+            } else if is_kr_hangul(ch) {
+                has_kr = true;
+            }
+
+            if ch == '(' || ch == '\u{FF08}' {
+                in_paren = true;
+                paren_has_kana = false;
+            } else if ch == ')' || ch == '\u{FF09}' {
+                if in_paren && paren_has_kana {
+                    kana_paren_groups += 1;
+                }
+                in_paren = false;
+                paren_has_kana = false;
+            }
+        }
+
+        if has_jp && has_kr {
+            mixed_jp_kr += 1;
+        }
+        if has_mojibake_q {
+            mojibake_lines += 1;
+        }
+        if kana_paren_groups >= 3 {
+            heavy_furigana += 1;
+        }
+        let slash_count = text.matches(" / ").count();
+        if slash_count >= 2 {
+            double_slash += 1;
+        } else if slash_count == 1 {
+            single_slash += 1;
+        }
+    }
+
+    if total_lines < 3 {
+        return ((replacement_chars as i64) * 600).min(4_000);
+    }
+
+    let mut penalty = 0_i64;
+    if mixed_jp_kr * 4 >= total_lines {
+        penalty += 4_500;
+    }
+    if double_slash * 5 >= total_lines {
+        penalty += 4_000;
+    } else if (single_slash + double_slash) * 3 >= total_lines {
+        penalty += 3_000;
+    }
+    if mojibake_lines >= 2 || replacement_chars > 0 {
+        penalty += 3_500;
+    }
+    if heavy_furigana * 3 >= total_lines {
+        penalty += 400;
+    }
+    penalty
+}
+
+/// Returns `true` when cached/fetched lyrics show strong multi-language fan-sub pollution
+/// (e.g. Japanese + Korean translation columns or mojibake `?`) so Ferric can prefer clean originals.
+pub fn is_polluted_multilingual_lrc(raw: &str) -> bool {
+    lyrics_content_penalty(raw) >= 2_500
+}
+
 fn score_lrclib_candidate(
     cand: &LrcLibResponse,
     target_artist: &str,
     target_title: &str,
     duration_ms: u64,
 ) -> i64 {
-    let has_synced = cand
+    let synced_text = cand
         .synced_lyrics
         .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
+        .filter(|s| !s.trim().is_empty());
+    let plain_text = cand
+        .plain_lyrics
+        .as_deref()
+        .filter(|s| !s.trim().is_empty());
+    let has_synced = synced_text.is_some();
     let mut score = if has_synced { 10_000_i64 } else { 2_000_i64 };
 
     if let Some(name) = cand.track_name.as_deref() {
@@ -311,6 +452,17 @@ fn score_lrclib_candidate(
         let diff_secs = (cand_secs - target_secs).abs();
         let penalty = (diff_secs * 40.0).min(2_500.0) as i64;
         score -= penalty;
+    }
+
+    if let Some(body_text) = synced_text.or(plain_text) {
+        score -= lyrics_content_penalty(body_text);
+        let non_empty_lines = body_text
+            .lines()
+            .filter(|l| !strip_lrc_timestamps(l).is_empty())
+            .count();
+        if non_empty_lines >= 8 {
+            score += 150;
+        }
     }
 
     score
@@ -362,6 +514,10 @@ pub fn fetch_best_free_lyrics(
     let mut any_http_reached = false;
 
     // Step B: LRCLIB Exact (/api/get)
+    // Return immediately only when exact match is a clean synced lyric; if it is plain-only
+    // or a polluted multi-language fan-sub (e.g. JP/KR slash columns or mojibake `?`), keep it
+    // as a fallback candidate and evaluate `/api/search` for a clean original version.
+    let mut exact_fallback: Option<LrcLibResponse> = None;
     if !clean_album.is_empty() && clean_album != "Unknown Album" && duration_ms > 0 {
         let dur_secs = (duration_ms / 1000).max(1);
         match agent
@@ -384,20 +540,19 @@ pub fn fetch_best_free_lyrics(
                         .read_to_vec()
                     && let Ok(item) = serde_json::from_slice::<LrcLibResponse>(&bytes)
                 {
-                    if let Some(synced) = item.synced_lyrics.filter(|s| !s.trim().is_empty()) {
+                    if let Some(synced) = item
+                        .synced_lyrics
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                        && !is_polluted_multilingual_lrc(synced)
+                    {
                         let parsed =
-                            SyncedLyrics::parse_with_context(&synced, duration_ms, "LRCLIB");
+                            SyncedLyrics::parse_with_context(synced, duration_ms, "LRCLIB");
                         if !parsed.lines.is_empty() {
-                            return Ok(Some((parsed, synced)));
+                            return Ok(Some((parsed, synced.to_string())));
                         }
                     }
-                    if let Some(plain) = item.plain_lyrics.filter(|s| !s.trim().is_empty()) {
-                        let norm = normalize_plain_text(&plain);
-                        let parsed = SyncedLyrics::from_plain_text(&norm, duration_ms, "LRCLIB");
-                        if !parsed.lines.is_empty() {
-                            return Ok(Some((parsed, norm)));
-                        }
-                    }
+                    exact_fallback = Some(item);
                 }
             }
             Err(err) => {
@@ -414,6 +569,7 @@ pub fn fetch_best_free_lyrics(
         format!("{clean_artist} {clean_title}")
     };
 
+    let mut search_candidates: Vec<LrcLibResponse> = Vec::new();
     match agent
         .get("https://lrclib.net/api/search")
         .header("User-Agent", FERRIC_LYRICS_USER_AGENT)
@@ -431,53 +587,58 @@ pub fn fetch_best_free_lyrics(
                     .read_to_vec()
                 && let Ok(candidates) = serde_json::from_slice::<Vec<LrcLibResponse>>(&bytes)
             {
-                let has_vocal_candidate = candidates.iter().any(|c| {
-                    !c.instrumental
-                        && (c
-                            .synced_lyrics
-                            .as_deref()
-                            .is_some_and(|s| !s.trim().is_empty())
-                            || c.plain_lyrics
-                                .as_deref()
-                                .is_some_and(|s| !s.trim().is_empty()))
-                });
-
-                let best = candidates
-                    .into_iter()
-                    .filter(|c| {
-                        let has_text = c
-                            .synced_lyrics
-                            .as_deref()
-                            .is_some_and(|s| !s.trim().is_empty())
-                            || c.plain_lyrics
-                                .as_deref()
-                                .is_some_and(|s| !s.trim().is_empty());
-                        has_text && (!has_vocal_candidate || !c.instrumental)
-                    })
-                    .max_by_key(|c| {
-                        score_lrclib_candidate(c, clean_artist, clean_title, duration_ms)
-                    });
-
-                if let Some(winner) = best {
-                    if let Some(synced) = winner.synced_lyrics.filter(|s| !s.trim().is_empty()) {
-                        let parsed =
-                            SyncedLyrics::parse_with_context(&synced, duration_ms, "LRCLIB");
-                        if !parsed.lines.is_empty() {
-                            return Ok(Some((parsed, synced)));
-                        }
-                    }
-                    if let Some(plain) = winner.plain_lyrics.filter(|s| !s.trim().is_empty()) {
-                        let norm = normalize_plain_text(&plain);
-                        let parsed = SyncedLyrics::from_plain_text(&norm, duration_ms, "LRCLIB");
-                        if !parsed.lines.is_empty() {
-                            return Ok(Some((parsed, norm)));
-                        }
-                    }
-                }
+                search_candidates = candidates;
             }
         }
         Err(err) => {
             last_network_err = Some(ProviderError::Http(err.to_string()));
+        }
+    }
+
+    if let Some(exact) = exact_fallback {
+        search_candidates.push(exact);
+    }
+
+    if !search_candidates.is_empty() {
+        let has_vocal_candidate = search_candidates.iter().any(|c| {
+            !c.instrumental
+                && (c
+                    .synced_lyrics
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                    || c.plain_lyrics
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty()))
+        });
+
+        let best = search_candidates
+            .into_iter()
+            .filter(|c| {
+                let has_text = c
+                    .synced_lyrics
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                    || c.plain_lyrics
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty());
+                has_text && (!has_vocal_candidate || !c.instrumental)
+            })
+            .max_by_key(|c| score_lrclib_candidate(c, clean_artist, clean_title, duration_ms));
+
+        if let Some(winner) = best {
+            if let Some(synced) = winner.synced_lyrics.filter(|s| !s.trim().is_empty()) {
+                let parsed = SyncedLyrics::parse_with_context(&synced, duration_ms, "LRCLIB");
+                if !parsed.lines.is_empty() {
+                    return Ok(Some((parsed, synced)));
+                }
+            }
+            if let Some(plain) = winner.plain_lyrics.filter(|s| !s.trim().is_empty()) {
+                let norm = normalize_plain_text(&plain);
+                let parsed = SyncedLyrics::from_plain_text(&norm, duration_ms, "LRCLIB");
+                if !parsed.lines.is_empty() {
+                    return Ok(Some((parsed, norm)));
+                }
+            }
         }
     }
 
@@ -588,5 +749,52 @@ mod tests {
         assert_eq!(parse_lrc_timestamp_ms("00:12.😀"), None);
         assert_eq!(parse_lrc_timestamp_ms("9999999999999999:00.00"), None);
         assert_eq!(parse_lrc_timestamp_ms("01:02.3456"), Some(62_345));
+    }
+
+    #[test]
+    fn clean_japanese_beats_polluted_jp_kr_fansub_and_preserves_bilingual_songs() {
+        let polluted = concat!(
+            "[00:18.29]?\u{76ee}(\u{3060}\u{3081})?\u{76ee}(\u{3060}\u{3081}) / \u{b2e4}\u{ba54} / \u{c548} \u{b3fc}\n",
+            "[00:20.00]?\u{5473}?(\u{306e}\u{3046}\u{307f}\u{305d}) / \u{b178}\u{bbf8}\u{c18c} / \u{ba38}\u{b9bf}\u{c18d}\n",
+            "[00:25.00]\u{30c0}?\u{30ea}\u{30f3} / \u{b2e4}\u{b9b0} / \u{b2ec}\u{b9c1}\n",
+            "[00:30.00]\u{534a}\u{7aef}\u{306a}\u{304f}\u{30e9}\u{30d6} / \u{d55c}\u{d30c}\u{b098}\u{cfe0} / \u{c5c4}\u{ccad}\u{b098}\u{ac8c}\n",
+        );
+        let clean_jp = concat!(
+            "[00:18.39]\u{99c4}\u{76ee}\u{99c4}\u{76ee}\u{99c4}\u{76ee}\n",
+            "[00:20.00]\u{8133}\u{5473}\u{564c}\u{306e}\u{4e2d}\u{304b}\u{3089}\n",
+            "[00:25.00]\u{30c0}\u{30fc}\u{30ea}\u{30f3}\u{30d9}\u{30a4}\u{30d3}\u{30fc}\n",
+            "[00:30.00]\u{534a}\u{7aef}\u{306a}\u{304f}\u{30e9}\u{30d6}\n",
+        );
+        let clean_kpop = concat!(
+            "[00:10.00]How you like that\n",
+            "[00:14.00]\u{bcf4}\u{b780} \u{b4ef}\u{c774} \u{bb34}\u{b108}\u{c84c}\u{c5b4}\n",
+            "[00:18.00]Look up in the sky it's a bird it's a plane\n",
+            "[00:22.00]\u{c544}\u{b984}\u{b2e4}\u{c6b4} \u{bc24}\u{c774}\u{c57c}\n",
+        );
+
+        assert!(is_polluted_multilingual_lrc(polluted));
+        assert!(!is_polluted_multilingual_lrc(clean_jp));
+        assert!(!is_polluted_multilingual_lrc(clean_kpop));
+
+        let cand_polluted = LrcLibResponse {
+            instrumental: false,
+            duration: Some(151.0),
+            track_name: Some("IRIS OUT".to_string()),
+            artist_name: Some("Kenshi Yonezu".to_string()),
+            synced_lyrics: Some(polluted.to_string()),
+            plain_lyrics: None,
+        };
+        let cand_clean = LrcLibResponse {
+            instrumental: false,
+            duration: Some(151.0),
+            track_name: Some("IRIS OUT".to_string()),
+            artist_name: Some("Kenshi Yonezu".to_string()),
+            synced_lyrics: Some(clean_jp.to_string()),
+            plain_lyrics: None,
+        };
+        assert!(
+            score_lrclib_candidate(&cand_clean, "Kenshi Yonezu", "IRIS OUT", 151_000)
+                > score_lrclib_candidate(&cand_polluted, "Kenshi Yonezu", "IRIS OUT", 151_000)
+        );
     }
 }

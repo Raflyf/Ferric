@@ -19,6 +19,7 @@ const ALLOWED_HTTPS_EXACT: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayEvent {
     ShowWindow,
+    Minimized,
     HiddenToTray,
     TogglePlayPause,
     NextTrack,
@@ -102,8 +103,23 @@ pub fn launch_verified_installer(
         return Err("Refused to launch installer outside verified updates directory".to_string());
     }
 
-    // Re-hash immediately before execution to eliminate TOCTOU tampering on disk.
-    let actual_sha = ferric_providers::updater::sha256_file(&canonical_msi)?;
+    // Open with FILE_SHARE_READ only (denying concurrent write/delete) BEFORE hashing, and keep
+    // the read-locked handle open across CreateProcessW / msiexec execution to eliminate TOCTOU.
+    #[cfg(target_os = "windows")]
+    let mut locked_file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&canonical_msi)
+            .map_err(|_| "Could not lock verified installer file for integrity check".to_string())?
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut locked_file = std::fs::File::open(&canonical_msi)
+        .map_err(|_| "Could not open verified installer file".to_string())?;
+
+    let actual_sha = ferric_providers::updater::sha256_reader(&mut locked_file)?;
     if actual_sha != *expected_sha256 {
         return Err("Installer integrity check failed before launch".to_string());
     }
@@ -123,11 +139,11 @@ pub fn launch_verified_installer(
 
     #[cfg(target_os = "windows")]
     {
-        win_impl::launch_msiexec(clean_target)
+        win_impl::launch_msiexec(clean_target, locked_file)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = clean_target;
+        let _ = (clean_target, locked_file);
         Ok(())
     }
 }
@@ -158,22 +174,29 @@ mod win_impl {
         THBN_CLICKED, THUMBBUTTON, TaskbarList,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetClientRect,
-        GetCursorPos, HICON, ICONINFO, IDI_APPLICATION, LoadIconW, MF_SEPARATOR, MF_STRING,
-        MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN,
-        TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE,
-        WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOVE,
-        WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_RBUTTONUP, WM_SHOWWINDOW,
-        WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-        WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DestroyIcon,
+        DestroyMenu, DestroyWindow, GetClientRect, GetCursorPos, HICON, ICONINFO, IDI_APPLICATION,
+        LoadIconW, MF_SEPARATOR, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, SW_HIDE,
+        SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow,
+        TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+        WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+        WM_MOVE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_NULL, WM_RBUTTONUP,
+        WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGED, WS_CAPTION, WS_EX_TOOLWINDOW,
+        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
-    use windows::core::{PCWSTR, s, w};
+    use windows::core::{PCSTR, PCWSTR, s, w};
 
     const SUBCLASS_ID: usize = 0xFE11_C001;
     const TRAY_ICON_ID: u32 = 1;
     const WM_TRAYICON: u32 = WM_APP + 42;
+    const WM_ACTIVATE_MSG: u32 = 0x0006;
+    const WM_SETTINGCHANGE_MSG: u32 = 0x001A;
+    const WM_THEMECHANGED_MSG: u32 = 0x031A;
+    const WM_DWMCOMPOSITIONCHANGED_MSG: u32 = 0x031E;
+    const LOAD_LIBRARY_SEARCH_SYSTEM32_FLAG: u32 = 0x0000_0800;
+    const HKEY_CURRENT_USER_RAW: isize = -2147483647_isize; // 0x80000001
+    const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
     const ERROR_ALREADY_EXISTS: u32 = 183;
     const HTCLIENT: isize = 1;
     const HTSYSMENU: isize = 3;
@@ -228,11 +251,14 @@ mod win_impl {
 
     thread_local! {
         static TASKBAR_STATE: RefCell<Option<TaskbarThumbState>> = const { RefCell::new(None) };
+        static COM_INITIALIZED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
     static ACRYLIC_ENABLED: AtomicBool = AtomicBool::new(false);
+    static ACRYLIC_LIGHT: AtomicBool = AtomicBool::new(false);
     static ACRYLIC_TINT_RGB: AtomicU32 = AtomicU32::new(0x000B_0D14);
     static APPLIED_ACRYLIC_HWND: AtomicIsize = AtomicIsize::new(0);
     static APPLIED_ACRYLIC_ON: AtomicBool = AtomicBool::new(false);
+    static APPLIED_ACRYLIC_LIGHT: AtomicBool = AtomicBool::new(false);
     static APPLIED_WCA_FALLBACK: AtomicBool = AtomicBool::new(false);
     static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
@@ -240,6 +266,7 @@ mod win_impl {
     static TRAY_ADDED: AtomicBool = AtomicBool::new(false);
     static MINI_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static WINDOW_HIDDEN_OR_MIN: AtomicBool = AtomicBool::new(false);
+    static HIDDEN_IN_TRAY: AtomicBool = AtomicBool::new(false);
     static TRAY_EVENTS: OnceLock<Mutex<Vec<TrayEvent>>> = OnceLock::new();
 
     #[repr(C)]
@@ -312,6 +339,7 @@ mod win_impl {
         fn RegisterWindowMessageW(lp_string: *const u16) -> u32;
         fn FindWindowW(lp_class_name: *const u16, lp_window_name: *const u16) -> *mut c_void;
         fn AllowSetForegroundWindow(dw_process_id: u32) -> i32;
+        fn WaitForInputIdle(h_process: *mut c_void, dw_milliseconds: u32) -> u32;
     }
 
     #[repr(C)]
@@ -344,8 +372,46 @@ mod win_impl {
         dw_thread_id: u32,
     }
 
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn RegGetValueW(
+            hkey: isize,
+            lp_sub_key: *const u16,
+            lp_value: *const u16,
+            dw_flags: u32,
+            pdw_type: *mut u32,
+            pv_data: *mut c_void,
+            pcb_data: *mut u32,
+        ) -> i32;
+        fn RegCreateKeyExW(
+            hkey: isize,
+            lp_sub_key: *const u16,
+            reserved: u32,
+            lp_class: *const u16,
+            dw_options: u32,
+            sam_desired: u32,
+            lp_security_attributes: *const c_void,
+            phk_result: *mut isize,
+            lpdw_disposition: *mut u32,
+        ) -> i32;
+        fn RegSetValueExW(
+            hkey: isize,
+            lp_value_name: *const u16,
+            reserved: u32,
+            dw_type: u32,
+            lp_data: *const u8,
+            cb_data: u32,
+        ) -> i32;
+        fn RegCloseKey(hkey: isize) -> i32;
+    }
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
+        fn LoadLibraryExW(
+            lp_lib_file_name: *const u16,
+            h_file: *mut c_void,
+            dw_flags: u32,
+        ) -> *mut c_void;
         fn CreateMutexW(
             lp_mutex_attributes: *mut c_void,
             b_initial_owner: i32,
@@ -353,6 +419,7 @@ mod win_impl {
         ) -> *mut c_void;
         fn GetLastError() -> u32;
         fn CloseHandle(h_object: *mut c_void) -> i32;
+        fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
         fn SetDllDirectoryW(lp_path_name: *const u16) -> i32;
         fn SetDefaultDllDirectories(directory_flags: u32) -> i32;
         fn HeapSetInformation(
@@ -421,16 +488,74 @@ mod win_impl {
         }
     }
 
-    /// Set a deterministic AppUserModelID so Windows Taskbar, SMTC, and Task Manager bind consistently.
+    /// Set a deterministic AppUserModelID and ensure HKCU AUMID metadata (`DisplayName`, `IconUri`)
+    /// is registered so Windows 11 Taskbar, Quick Settings, and third-party SMTC overlays (Nusa Pro,
+    /// NotchPixel, ModernFlyouts) consistently identify Ferric with its icon.
     pub fn set_app_user_model_id() {
+        const KEY_SET_VALUE: u32 = 0x0002;
+        const REG_SZ: u32 = 1;
         let app_id: Vec<u16> = "Raflyf.Ferric\0".encode_utf16().collect();
         // SAFETY: Null-terminated UTF-16 AppUserModelID passed once at process startup.
         unsafe {
             let _ = SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
         }
+
+        let subkey: Vec<u16> = "Software\\Classes\\AppUserModelId\\Raflyf.Ferric\0"
+            .encode_utf16()
+            .collect();
+        let mut hkey: isize = 0;
+        // SAFETY: Creates/opens current-user AUMID registry key and sets DisplayName & IconUri.
+        unsafe {
+            if RegCreateKeyExW(
+                HKEY_CURRENT_USER_RAW,
+                subkey.as_ptr(),
+                0,
+                ptr::null(),
+                0,
+                KEY_SET_VALUE,
+                ptr::null(),
+                &raw mut hkey,
+                ptr::null_mut(),
+            ) == 0
+                && hkey != 0
+            {
+                let name_k: Vec<u16> = "DisplayName\0".encode_utf16().collect();
+                let name_v: Vec<u16> = "Ferric\0".encode_utf16().collect();
+                let _ = RegSetValueExW(
+                    hkey,
+                    name_k.as_ptr(),
+                    0,
+                    REG_SZ,
+                    name_v.as_ptr().cast(),
+                    (name_v.len() * 2) as u32,
+                );
+                if let Ok(exe_path) = std::env::current_exe() {
+                    let ico_candidate = exe_path
+                        .parent()
+                        .map(|d| d.join("ferric.ico"))
+                        .filter(|p| p.is_file())
+                        .unwrap_or(exe_path);
+                    let icon_k: Vec<u16> = "IconUri\0".encode_utf16().collect();
+                    let icon_v: Vec<u16> = ico_candidate
+                        .to_string_lossy()
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .collect();
+                    let _ = RegSetValueExW(
+                        hkey,
+                        icon_k.as_ptr(),
+                        0,
+                        REG_SZ,
+                        icon_v.as_ptr().cast(),
+                        (icon_v.len() * 2) as u32,
+                    );
+                }
+                let _ = RegCloseKey(hkey);
+            }
+        }
     }
 
-    pub fn launch_msiexec(msi_path: &str) -> Result<(), String> {
+    pub fn launch_msiexec(msi_path: &str, locked_file: std::fs::File) -> Result<(), String> {
         let mut sys_buf = [0u16; 512];
         // SAFETY: Queries `%SystemRoot%\System32` into a bounded UTF-16 stack buffer.
         let sys_len = unsafe { GetSystemDirectoryW(sys_buf.as_mut_ptr(), sys_buf.len() as u32) };
@@ -474,8 +599,34 @@ mod win_impl {
             if !pi.h_thread.is_null() {
                 let _ = CloseHandle(pi.h_thread);
             }
-            if !pi.h_process.is_null() {
-                let _ = CloseHandle(pi.h_process);
+        }
+        let proc_raw = pi.h_process as usize;
+        if proc_raw != 0 {
+            // Wait up to 3 seconds for msiexec.exe to finish initializing and open the MSI package
+            // while Ferric still holds the FILE_SHARE_READ lock prior to exiting.
+            // SAFETY: `proc_raw` is a valid process handle from CreateProcessW.
+            unsafe {
+                let _ = WaitForInputIdle(proc_raw as *mut c_void, 3_000);
+            }
+        }
+        // Keep the FILE_SHARE_READ handle open in a waiter thread until either msiexec exits
+        // or Ferric completes graceful shutdown; per-user ACLs guard `%LOCALAPPDATA%\LivelyDesk\Ferric\updates`.
+        let spawned = std::thread::Builder::new()
+            .name("ferric-msi-lock".to_string())
+            .spawn(move || {
+                let _keep_locked = locked_file;
+                if proc_raw != 0 {
+                    // SAFETY: `proc_raw` is the owned process handle from CreateProcessW.
+                    unsafe {
+                        let _ = WaitForSingleObject(proc_raw as *mut c_void, 0xFFFF_FFFF);
+                        let _ = CloseHandle(proc_raw as *mut c_void);
+                    }
+                }
+            });
+        if spawned.is_err() && proc_raw != 0 {
+            // SAFETY: Clean up handle if waiter thread could not spawn.
+            unsafe {
+                let _ = CloseHandle(proc_raw as *mut c_void);
             }
         }
         Ok(())
@@ -608,8 +759,162 @@ mod win_impl {
         }
     }
 
-    pub fn set_native_acrylic(enabled: bool, _opacity: f32, tint_rgb: (u8, u8, u8)) {
+    /// Query Windows 10/11 system/taskbar theme (`SystemUsesLightTheme` -> `AppsUseLightTheme`).
+    /// Returns `true` when device system theme is Light Mode, `false` when Dark Mode (default).
+    fn windows_device_uses_light_theme() -> bool {
+        let subkey: Vec<u16> =
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\0"
+                .encode_utf16()
+                .collect();
+        for val_name in ["SystemUsesLightTheme\0", "AppsUseLightTheme\0"] {
+            let val_w: Vec<u16> = val_name.encode_utf16().collect();
+            let mut dword: u32 = 0;
+            let mut size = std::mem::size_of::<u32>() as u32;
+            // SAFETY: Read-only registry query into stack `u32` buffer.
+            let status = unsafe {
+                RegGetValueW(
+                    HKEY_CURRENT_USER_RAW,
+                    subkey.as_ptr(),
+                    val_w.as_ptr(),
+                    RRF_RT_REG_DWORD,
+                    ptr::null_mut(),
+                    (&raw mut dword).cast(),
+                    &raw mut size,
+                )
+            };
+            if status == 0 {
+                return dword != 0;
+            }
+        }
+        false
+    }
+
+    /// Synchronize native Win32 popup/context menu styling (e.g. `TrackPopupMenu` on tray right-click)
+    /// with the Windows device dark/light theme via `uxtheme.dll` ordinals #135 & #136.
+    fn sync_win32_popup_menu_theme() {
+        let mode: i32 = if windows_device_uses_light_theme() {
+            3 // ForceLight — matches Windows Light Taskbar/System theme
+        } else {
+            2 // ForceDark — native Windows 11 Dark Mode menu matching dark taskbar
+        };
+        // SAFETY: Loads system `uxtheme.dll` strictly from System32 and invokes well-known
+        // `SetPreferredAppMode` (#135) and `FlushMenuThemes` (#136) if exported.
+        unsafe {
+            let hmod = match GetModuleHandleW(w!("uxtheme.dll")) {
+                Ok(m) => m,
+                Err(_) => {
+                    let lib_w: Vec<u16> = "uxtheme.dll\0".encode_utf16().collect();
+                    let raw = LoadLibraryExW(
+                        lib_w.as_ptr(),
+                        ptr::null_mut(),
+                        LOAD_LIBRARY_SEARCH_SYSTEM32_FLAG,
+                    );
+                    if raw.is_null() {
+                        return;
+                    }
+                    windows::Win32::Foundation::HMODULE(raw)
+                }
+            };
+            if let Some(p_set) = GetProcAddress(hmod, PCSTR(std::ptr::without_provenance(135usize)))
+            {
+                type SetPreferredAppModeFn = unsafe extern "system" fn(i32) -> i32;
+                let set_mode: SetPreferredAppModeFn = std::mem::transmute(p_set);
+                let _ = set_mode(mode);
+            }
+            if let Some(p_flush) =
+                GetProcAddress(hmod, PCSTR(std::ptr::without_provenance(136usize)))
+            {
+                type FlushMenuThemesFn = unsafe extern "system" fn();
+                let flush: FlushMenuThemesFn = std::mem::transmute(p_flush);
+                flush();
+            }
+        }
+    }
+
+    /// Lightweight DWM extended-frame keepalive that preserves Native Acrylic across taskbar
+    /// minimize/restore and focus changes WITHOUT resetting the backdrop brush or triggering
+    /// `SWP_FRAMECHANGED` (eliminating the rare single-frame solid flash on restore).
+    unsafe fn keep_acrylic_frame_alive(hwnd: HWND, flush_dwm: bool) {
+        if !ACRYLIC_ENABLED.load(Ordering::Acquire) {
+            return;
+        }
+        // SAFETY: Valid HWND on UI thread with DWM frame-margin keepalive.
+        unsafe {
+            let margins = DwmMargins {
+                cx_left_width: -1,
+                cx_right_width: -1,
+                cy_top_height: -1,
+                cy_bottom_height: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+            if APPLIED_WCA_FALLBACK.load(Ordering::Acquire) {
+                apply_wca_acrylic_fallback(hwnd, true);
+            }
+            if flush_dwm {
+                let _ = DwmFlush();
+            }
+        }
+    }
+
+    /// Synchronously re-assert full DWM extended frame + Native Acrylic backdrop after
+    /// `SW_HIDE` (System Tray restore) or OS theme/composition resets.
+    unsafe fn reassert_acrylic_backdrop_now(hwnd: HWND, flush_frame: bool) {
+        if !ACRYLIC_ENABLED.load(Ordering::Acquire) {
+            return;
+        }
+        // SAFETY: Valid HWND on UI thread with DWM/user32 calls.
+        unsafe {
+            let dark: i32 = if ACRYLIC_LIGHT.load(Ordering::Acquire) {
+                0
+            } else {
+                1
+            };
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                (&raw const dark).cast(),
+                std::mem::size_of::<i32>() as u32,
+            );
+            let margins = DwmMargins {
+                cx_left_width: -1,
+                cx_right_width: -1,
+                cy_top_height: -1,
+                cy_bottom_height: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+            let backdrop: i32 = DWMSBT_TRANSIENTWINDOW;
+            let hr = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                (&raw const backdrop).cast(),
+                std::mem::size_of::<i32>() as u32,
+            );
+            if hr != 0 {
+                apply_wca_acrylic_fallback(hwnd, true);
+            }
+            if flush_frame && IsWindowVisible(hwnd.0) != 0 {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let _ = DwmFlush();
+            }
+        }
+    }
+
+    pub fn set_native_acrylic(
+        enabled: bool,
+        _opacity: f32,
+        tint_rgb: (u8, u8, u8),
+        is_light: bool,
+    ) {
         ACRYLIC_ENABLED.store(enabled, Ordering::Release);
+        ACRYLIC_LIGHT.store(is_light, Ordering::Release);
         let packed = ((tint_rgb.0 as u32) << 16) | ((tint_rgb.1 as u32) << 8) | (tint_rgb.2 as u32);
         ACRYLIC_TINT_RGB.store(packed, Ordering::Release);
         let Some(hwnd) = active_process_hwnd() else {
@@ -619,6 +924,7 @@ mod win_impl {
         if !APPLIED_WCA_FALLBACK.load(Ordering::Acquire)
             && APPLIED_ACRYLIC_HWND.load(Ordering::Acquire) == hwnd_raw
             && APPLIED_ACRYLIC_ON.load(Ordering::Acquire) == enabled
+            && APPLIED_ACRYLIC_LIGHT.load(Ordering::Acquire) == is_light
         {
             // Windows 11 Native Acrylic backdrop is already applied in this state on this HWND;
             // skip redundant DwmSetWindowAttribute + SWP_FRAMECHANGED calls so adaptive accent
@@ -628,7 +934,7 @@ mod win_impl {
         // SAFETY: Enables true per-pixel Windows 11 DWM Acrylic directly behind Ferric's
         // premultiplied DirectComposition swapchain — zero WS_EX_LAYERED text dimming.
         unsafe {
-            let dark: i32 = 1;
+            let dark: i32 = if is_light { 0 } else { 1 };
             let _ = DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -664,6 +970,7 @@ mod win_impl {
                 APPLIED_WCA_FALLBACK.store(false, Ordering::Release);
             }
             APPLIED_ACRYLIC_ON.store(enabled, Ordering::Release);
+            APPLIED_ACRYLIC_LIGHT.store(is_light, Ordering::Release);
             APPLIED_ACRYLIC_HWND.store(hwnd_raw, Ordering::Release);
             if IsWindowVisible(hwnd.0) != 0 {
                 let _ = SetWindowPos(
@@ -827,15 +1134,17 @@ mod win_impl {
                 ensure_tray_icon(hwnd, "Ferric — Music Player");
             }
             apply_window_icon(hwnd);
+            sync_win32_popup_menu_theme();
             init_taskbar_thumbbar(hwnd);
             let acr_on = ACRYLIC_ENABLED.load(Ordering::Acquire);
+            let is_light = ACRYLIC_LIGHT.load(Ordering::Acquire);
             let packed = ACRYLIC_TINT_RGB.load(Ordering::Acquire);
             let tint = (
                 ((packed >> 16) & 0xFF) as u8,
                 ((packed >> 8) & 0xFF) as u8,
                 (packed & 0xFF) as u8,
             );
-            set_native_acrylic(acr_on, 0.72, tint);
+            set_native_acrylic(acr_on, 0.72, tint, is_light);
         }
     }
 
@@ -986,9 +1295,14 @@ mod win_impl {
 
     fn init_taskbar_thumbbar(hwnd: HWND) {
         let _ = taskbar_created_message_id();
-        // SAFETY: STA COM creation of Shell ITaskbarList3 on Ferric's UI thread.
+        // SAFETY: STA COM creation of Shell ITaskbarList3 on Ferric's UI thread (initialized once).
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            COM_INITIALIZED.with(|init| {
+                if !init.get() {
+                    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                    init.set(true);
+                }
+            });
             let Ok(tb) =
                 CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
             else {
@@ -1373,8 +1687,11 @@ mod win_impl {
     }
 
     fn show_tray_context_menu(hwnd: HWND) {
-        // SAFETY: Standard synchronous Win32 popup menu owned by our window on UI thread.
+        // SAFETY: Standard synchronous Win32 popup menu owned by an invisible helper HWND so
+        // right-clicking the tray icon dismisses cleanly on outside clicks WITHOUT raising or
+        // stealing Z-order/focus for Ferric's main window.
         unsafe {
+            sync_win32_popup_menu_theme();
             let Ok(hmenu) = CreatePopupMenu() else {
                 return;
             };
@@ -1392,23 +1709,58 @@ mod win_impl {
 
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
-            let _ = SetForegroundWindow(hwnd);
+
+            let hinst = GetModuleHandleW(None).ok().map(Into::into);
+            let helper_hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                hinst,
+                None,
+            )
+            .ok();
+            let menu_owner = helper_hwnd.unwrap_or(hwnd);
+            let _ = SetForegroundWindow(menu_owner);
             let cmd = TrackPopupMenu(
                 hmenu,
                 TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
                 pt.x,
                 pt.y,
                 Some(0),
-                hwnd,
+                menu_owner,
                 None,
             );
+            let _ = PostMessageW(Some(menu_owner), WM_NULL, WPARAM(0), LPARAM(0));
+            if let Some(h) = helper_hwnd {
+                let _ = DestroyWindow(h);
+            }
             let _ = DestroyMenu(hmenu);
 
             match cmd.0 as u32 {
                 CMD_SHOW => {
+                    let from_tray = HIDDEN_IN_TRAY.swap(false, Ordering::AcqRel);
+                    WINDOW_HIDDEN_OR_MIN.store(false, Ordering::Release);
+                    if from_tray {
+                        reassert_acrylic_backdrop_now(hwnd, false);
+                    } else {
+                        keep_acrylic_frame_alive(hwnd, false);
+                    }
                     let _ = ShowWindow(hwnd, SW_SHOW);
-                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                    if IsIconic(hwnd.0) != 0 {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                    }
                     let _ = SetForegroundWindow(hwnd);
+                    apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);
+                    if from_tray {
+                        let _ = DwmFlush();
+                    }
                     push_event(TrayEvent::ShowWindow);
                 }
                 CMD_PLAY_PAUSE => push_event(TrayEvent::TogglePlayPause),
@@ -1437,13 +1789,22 @@ mod win_impl {
         unsafe {
             let act_msg = ACTIVATE_MSG.load(Ordering::Acquire);
             if act_msg != 0 && msg == act_msg {
+                let from_tray = HIDDEN_IN_TRAY.swap(false, Ordering::AcqRel);
+                WINDOW_HIDDEN_OR_MIN.store(false, Ordering::Release);
+                if from_tray {
+                    reassert_acrylic_backdrop_now(hwnd, false);
+                } else {
+                    keep_acrylic_frame_alive(hwnd, false);
+                }
                 let _ = ShowWindow(hwnd, SW_SHOW);
                 if IsIconic(hwnd.0) != 0 {
                     let _ = ShowWindow(hwnd, SW_RESTORE);
                 }
                 let _ = SetForegroundWindow(hwnd);
-                WINDOW_HIDDEN_OR_MIN.store(false, Ordering::Release);
                 apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);
+                if from_tray {
+                    let _ = DwmFlush();
+                }
                 push_event(TrayEvent::ShowWindow);
                 return LRESULT(0);
             }
@@ -1493,30 +1854,60 @@ mod win_impl {
                             (*mmi).ptMaxTrackSize.y =
                                 (mi.rcMonitor.bottom - mi.rcMonitor.top).max(1080);
                         }
+                        let dpi = GetDpiForWindow(hwnd.0).max(96) as i32;
                         if MINI_MODE_ACTIVE.load(Ordering::Relaxed) {
-                            (*mmi).ptMinTrackSize.x = 460;
-                            (*mmi).ptMinTrackSize.y = 110;
+                            (*mmi).ptMinTrackSize.x = (460 * dpi) / 96;
+                            (*mmi).ptMinTrackSize.y = (110 * dpi) / 96;
                         } else {
-                            (*mmi).ptMinTrackSize.x = 920;
-                            (*mmi).ptMinTrackSize.y = 580;
+                            (*mmi).ptMinTrackSize.x = (960 * dpi) / 96;
+                            (*mmi).ptMinTrackSize.y = (620 * dpi) / 96;
                         }
                         return LRESULT(0);
                     }
                 }
+                WM_SYSCOMMAND => {
+                    const SC_RESTORE_MASKED: usize = 0xF120;
+                    if (wparam.0 & 0xFFF0) == SC_RESTORE_MASKED
+                        && IsIconic(hwnd.0) != 0
+                        && ACRYLIC_ENABLED.load(Ordering::Acquire)
+                    {
+                        // Pre-arm DWM extended frame + Native Acrylic attribute BEFORE Windows
+                        // starts the taskbar unminimize animation (without SWP_FRAMECHANGED).
+                        reassert_acrylic_backdrop_now(hwnd, false);
+                    }
+                }
                 WM_NCACTIVATE => {
-                    // Keep Windows 11 Native Acrylic (`DWMSBT_TRANSIENTWINDOW`) live across
-                    // focus/unfocus transitions without flashing to opaque solid fallback or
-                    // painting classic GDI caption chrome. Forward real params when minimized so
-                    // taskbar restore state remains intact.
+                    // Forward real activation `wparam` with `lParam = -1` so classic GDI caption
+                    // chrome is suppressed while DWM receives authentic activate/deactivate state
+                    // transitions without resetting the Acrylic backdrop brush.
                     if IsIconic(hwnd.0) == 0 {
-                        let active_wparam = if ACRYLIC_ENABLED.load(Ordering::Acquire) {
-                            WPARAM(1)
-                        } else {
-                            wparam
-                        };
-                        return DefSubclassProc(hwnd, msg, active_wparam, LPARAM(-1));
+                        let res = DefSubclassProc(hwnd, msg, wparam, LPARAM(-1));
+                        if wparam.0 != 0 && ACRYLIC_ENABLED.load(Ordering::Acquire) {
+                            keep_acrylic_frame_alive(hwnd, false);
+                        }
+                        return res;
                     }
                     return DefSubclassProc(hwnd, msg, wparam, lparam);
+                }
+                WM_ACTIVATE_MSG => {
+                    let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                    let active_state = wparam.0 & 0xFFFF;
+                    if active_state != 0
+                        && IsIconic(hwnd.0) == 0
+                        && ACRYLIC_ENABLED.load(Ordering::Acquire)
+                    {
+                        keep_acrylic_frame_alive(hwnd, false);
+                    }
+                    return res;
+                }
+                WM_SETTINGCHANGE_MSG => {
+                    sync_win32_popup_menu_theme();
+                }
+                WM_THEMECHANGED_MSG | WM_DWMCOMPOSITIONCHANGED_MSG => {
+                    sync_win32_popup_menu_theme();
+                    if ACRYLIC_ENABLED.load(Ordering::Acquire) {
+                        reassert_acrylic_backdrop_now(hwnd, true);
+                    }
                 }
                 WM_NCPAINT => {
                     return LRESULT(0);
@@ -1563,12 +1954,19 @@ mod win_impl {
                 WM_SIZE => {
                     apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);
                     if wparam.0 == 1 {
-                        // SIZE_MINIMIZED -> release GPU/UI artwork buffers & trim working set
+                        // SIZE_MINIMIZED -> pause 60 FPS hidden animations without nuking VRAM cover cache
+                        // or paging out DirectComposition so taskbar restore is instant with zero solid-blur flash.
                         if !WINDOW_HIDDEN_OR_MIN.swap(true, Ordering::AcqRel) {
-                            trim_working_set();
-                            push_event(TrayEvent::HiddenToTray);
+                            push_event(TrayEvent::Minimized);
                         }
                     } else if WINDOW_HIDDEN_OR_MIN.swap(false, Ordering::AcqRel) {
+                        let _from_tray = HIDDEN_IN_TRAY.swap(false, Ordering::AcqRel);
+                        // Re-assert DWM Acrylic attribute without SWP_FRAMECHANGED and flush DWM
+                        // so Windows 11 Build 26200 never lingers in solid fallback after unminimize.
+                        reassert_acrylic_backdrop_now(hwnd, false);
+                        if ACRYLIC_ENABLED.load(Ordering::Acquire) {
+                            let _ = DwmFlush();
+                        }
                         push_event(TrayEvent::ShowWindow);
                     } else {
                         push_event(TrayEvent::WindowMovedOrResized);
@@ -1583,6 +1981,7 @@ mod win_impl {
                         ensure_tray_icon(hwnd, "Ferric — Playing in background");
                         let _ = ShowWindow(hwnd, SW_HIDE);
                         WINDOW_HIDDEN_OR_MIN.store(true, Ordering::Release);
+                        HIDDEN_IN_TRAY.store(true, Ordering::Release);
                         trim_working_set();
                         push_event(TrayEvent::HiddenToTray);
                         return LRESULT(0);
@@ -1592,11 +1991,22 @@ mod win_impl {
                 WM_TRAYICON => {
                     let ev = (lparam.0 & 0xFFFF) as u32;
                     if ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK {
-                        let _ = ShowWindow(hwnd, SW_SHOW);
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
-                        let _ = SetForegroundWindow(hwnd);
+                        let from_tray = HIDDEN_IN_TRAY.swap(false, Ordering::AcqRel);
                         WINDOW_HIDDEN_OR_MIN.store(false, Ordering::Release);
+                        if from_tray {
+                            reassert_acrylic_backdrop_now(hwnd, false);
+                        } else {
+                            keep_acrylic_frame_alive(hwnd, false);
+                        }
+                        let _ = ShowWindow(hwnd, SW_SHOW);
+                        if IsIconic(hwnd.0) != 0 {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                        }
+                        let _ = SetForegroundWindow(hwnd);
                         apply_dwm_corner_pref(hwnd, IsZoomed(hwnd.0) != 0);
+                        if from_tray {
+                            let _ = DwmFlush();
+                        }
                         push_event(TrayEvent::ShowWindow);
                         return LRESULT(0);
                     }
@@ -1772,12 +2182,17 @@ pub fn win32_install_window_hooks() {
     win_impl::install_window_hooks();
 }
 
-pub fn win32_set_native_acrylic(enabled: bool, opacity: f32, tint_rgb: (u8, u8, u8)) {
+pub fn win32_set_native_acrylic(
+    enabled: bool,
+    opacity: f32,
+    tint_rgb: (u8, u8, u8),
+    is_light: bool,
+) {
     #[cfg(target_os = "windows")]
-    win_impl::set_native_acrylic(enabled, opacity, tint_rgb);
+    win_impl::set_native_acrylic(enabled, opacity, tint_rgb, is_light);
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (enabled, opacity, tint_rgb);
+        let _ = (enabled, opacity, tint_rgb, is_light);
     }
 }
 

@@ -5,15 +5,28 @@
 
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum GoogleLoginOutcome {
     SignedIn { cookie: String, sapisid: String },
     Cancelled,
     Failed(String),
 }
 
+impl std::fmt::Debug for GoogleLoginOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignedIn { .. } => f.write_str("GoogleLoginOutcome::SignedIn([REDACTED])"),
+            Self::Cancelled => f.write_str("GoogleLoginOutcome::Cancelled"),
+            Self::Failed(err) => f
+                .debug_tuple("GoogleLoginOutcome::Failed")
+                .field(err)
+                .finish(),
+        }
+    }
+}
+
 /// Result of the Spotify web-session sign-in window.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SpotifyLoginOutcome {
     /// `sp_dc` session cookie plus the access-token JSON fetched inside the signed-in page.
     SignedIn {
@@ -22,6 +35,19 @@ pub enum SpotifyLoginOutcome {
     },
     Cancelled,
     Failed(String),
+}
+
+impl std::fmt::Debug for SpotifyLoginOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignedIn { .. } => f.write_str("SpotifyLoginOutcome::SignedIn([REDACTED])"),
+            Self::Cancelled => f.write_str("SpotifyLoginOutcome::Cancelled"),
+            Self::Failed(err) => f
+                .debug_tuple("SpotifyLoginOutcome::Failed")
+                .field(err)
+                .finish(),
+        }
+    }
 }
 
 /// Which service the shared WebView2 login window is driving.
@@ -107,7 +133,7 @@ mod imp {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-        GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, KillTimer, MSG,
+        GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, IsWindow, KillTimer, MSG,
         PostMessageW, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SetTimer,
         SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_DESTROY, WM_SIZE, WM_TIMER,
         WNDCLASSW, WS_OVERLAPPEDWINDOW,
@@ -139,7 +165,7 @@ mod imp {
     try { return location.hostname === 'open.spotify.com'; } catch (e) { return false; }
   };
   const setToken = (text) => {
-    if (typeof text !== 'string' || text.length > 65536) return;
+    if (!onPlayer() || typeof text !== 'string' || text.length > 65536) return;
     if (text.indexOf('accessToken') === -1) return;
     try {
       const parsed = JSON.parse(text);
@@ -325,7 +351,10 @@ mod imp {
     }
 
     fn is_exact_https_host(url: &str, expected_host: &str) -> bool {
-        if url.bytes().any(|b| b.is_ascii_control() || b == b' ') {
+        if url
+            .bytes()
+            .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\')
+        {
             return false;
         }
         let Some(rest) = url.strip_prefix("https://") else {
@@ -335,46 +364,141 @@ mod imp {
         authority.eq_ignore_ascii_case(expected_host)
     }
 
-    fn is_safe_login_navigation_url(url: &str) -> bool {
+    fn host_matches_domain(host: &str, domain: &str) -> bool {
+        host == domain
+            || (host.len() > domain.len()
+                && host.ends_with(domain)
+                && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
+    }
+
+    fn is_public_https_url_common(url: &str) -> Option<String> {
+        if url
+            .bytes()
+            .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\')
+        {
+            return None;
+        }
+        let rest = url.strip_prefix("https://")?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if authority.is_empty() || authority.contains('@') {
+            return None;
+        }
+        let host = if let Some(inner) = authority.strip_prefix('[') {
+            let (v6_host, tail) = inner.split_once(']')?;
+            if !tail.is_empty() && !tail.starts_with(':') {
+                return None;
+            }
+            v6_host.to_ascii_lowercase()
+        } else {
+            authority
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+        };
+        if host.is_empty()
+            || host == "localhost"
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".internal")
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+        {
+            return None;
+        }
+        // Reject decimal/hex/octal shorthand IPs (e.g. 2130706433, 0x7f000001) that Windows/Chromium resolve.
+        if !host.contains(':')
+            && host.split('.').all(|lbl| {
+                !lbl.is_empty()
+                    && (lbl.starts_with("0x") || lbl.bytes().all(|b| b.is_ascii_digit()))
+            })
+            && host.parse::<std::net::Ipv4Addr>().is_err()
+        {
+            return None;
+        }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            let is_public_v4 = |v4: std::net::Ipv4Addr| {
+                let o = v4.octets();
+                let is_cgnat = o[0] == 100 && (o[1] & 0xC0) == 64;
+                !v4.is_loopback()
+                    && !v4.is_private()
+                    && !v4.is_link_local()
+                    && !v4.is_unspecified()
+                    && !v4.is_multicast()
+                    && !v4.is_broadcast()
+                    && !is_cgnat
+            };
+            let ok = match ip {
+                std::net::IpAddr::V4(v4) => is_public_v4(v4),
+                std::net::IpAddr::V6(v6) => {
+                    if let Some(mapped) = v6.to_ipv4_mapped() {
+                        is_public_v4(mapped)
+                    } else if let Some(compat) = v6.to_ipv4() {
+                        is_public_v4(compat)
+                    } else {
+                        !v6.is_loopback()
+                            && !v6.is_unspecified()
+                            && !v6.is_multicast()
+                            && (v6.segments()[0] & 0xffc0) != 0xfe80
+                            && (v6.segments()[0] & 0xfe00) != 0xfc00
+                    }
+                }
+            };
+            if !ok {
+                return None;
+            }
+        }
+        Some(host)
+    }
+
+    fn is_safe_login_navigation_url(target: LoginTarget, url: &str) -> bool {
         if url.eq_ignore_ascii_case("about:blank") {
             return true;
         }
-        if url.bytes().any(|b| b.is_ascii_control() || b == b' ') {
-            return false;
-        }
-        let Some(rest) = url.strip_prefix("https://") else {
+        let Some(host) = is_public_https_url_common(url) else {
             return false;
         };
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-        if authority.is_empty() || authority.contains('@') {
+        // Reject raw IP literals for OAuth/Web login top-level navigation.
+        if host.parse::<std::net::IpAddr>().is_ok() {
             return false;
         }
-        let host = authority
-            .split(':')
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c| c == '[' || c == ']')
-            .to_ascii_lowercase();
-        if host.is_empty() || host == "localhost" || host.ends_with(".local") {
-            return false;
+        match target {
+            LoginTarget::GoogleYtm => [
+                "google.com",
+                "youtube.com",
+                "gstatic.com",
+                "googleapis.com",
+                "googleusercontent.com",
+                "recaptcha.net",
+            ]
+            .iter()
+            .any(|d| host_matches_domain(&host, d)),
+            LoginTarget::Spotify => [
+                "spotify.com",
+                "spotifycdn.com",
+                "scdn.co",
+                "google.com",
+                "gstatic.com",
+                "googleapis.com",
+                "apple.com",
+                "facebook.com",
+                "fbcdn.net",
+                "recaptcha.net",
+                "hcaptcha.com",
+                "arkoselabs.com",
+            ]
+            .iter()
+            .any(|d| host_matches_domain(&host, d)),
         }
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            return match ip {
-                std::net::IpAddr::V4(v4) => {
-                    !v4.is_loopback()
-                        && !v4.is_private()
-                        && !v4.is_link_local()
-                        && !v4.is_unspecified()
-                }
-                std::net::IpAddr::V6(v6) => {
-                    !v6.is_loopback()
-                        && !v6.is_unspecified()
-                        && (v6.segments()[0] & 0xffc0) != 0xfe80
-                        && (v6.segments()[0] & 0xfe00) != 0xfc00
-                }
-            };
+    }
+
+    fn is_safe_login_frame_url(url: &str) -> bool {
+        if url.eq_ignore_ascii_case("about:blank") || url.eq_ignore_ascii_case("about:srcdoc") {
+            return true;
         }
-        true
+        is_public_https_url_common(url).is_some()
     }
 
     pub fn launch<F>(profile_dir: PathBuf, clear_existing_cookies: bool, on_done: F)
@@ -472,7 +596,7 @@ mod imp {
         }
     }
 
-    unsafe fn harden_login_webview(wv: &ICoreWebView2) {
+    unsafe fn harden_login_webview(wv: &ICoreWebView2, target: LoginTarget) {
         // SAFETY: STA-thread COM settings & handlers on our login WebView2 instance.
         unsafe {
             if let Ok(settings) = wv.Settings() {
@@ -508,12 +632,31 @@ mod imp {
             let mut perm_tok = 0_i64;
             let _ = wv.add_PermissionRequested(&perm_handler, &mut perm_tok);
 
-            let nav_start_handler = NavigationStartingEventHandler::create(Box::new(|_, args| {
+            let nav_start_handler =
+                NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                    if let Some(a) = args {
+                        let mut uri_raw = PWSTR(ptr::null_mut());
+                        let allowed = if a.Uri(&mut uri_raw).is_ok() {
+                            let uri = take_pwstr(uri_raw);
+                            is_safe_login_navigation_url(target, &uri)
+                        } else {
+                            false
+                        };
+                        if !allowed {
+                            let _ = a.SetCancel(true);
+                        }
+                    }
+                    Ok(())
+                }));
+            let mut ns_tok = 0_i64;
+            let _ = wv.add_NavigationStarting(&nav_start_handler, &mut ns_tok);
+
+            let frame_nav_handler = NavigationStartingEventHandler::create(Box::new(|_, args| {
                 if let Some(a) = args {
                     let mut uri_raw = PWSTR(ptr::null_mut());
                     let allowed = if a.Uri(&mut uri_raw).is_ok() {
                         let uri = take_pwstr(uri_raw);
-                        is_safe_login_navigation_url(&uri)
+                        is_safe_login_frame_url(&uri)
                     } else {
                         false
                     };
@@ -523,8 +666,8 @@ mod imp {
                 }
                 Ok(())
             }));
-            let mut ns_tok = 0_i64;
-            let _ = wv.add_NavigationStarting(&nav_start_handler, &mut ns_tok);
+            let mut fns_tok = 0_i64;
+            let _ = wv.add_FrameNavigationStarting(&frame_nav_handler, &mut fns_tok);
         }
     }
 
@@ -691,7 +834,7 @@ mod imp {
                     return Err(format!("CoreWebView2 unavailable: {e}"));
                 }
             };
-            harden_login_webview(&wv);
+            harden_login_webview(&wv, target);
             wv
         };
 
@@ -750,6 +893,15 @@ mod imp {
             }
             Ok(())
         }));
+
+        // Guard against user closing the window while WebView2 environment/controller initialized.
+        // SAFETY: Query window validity on STA thread before attaching `Rc::into_raw` userdata.
+        if !unsafe { IsWindow(Some(hwnd)).as_bool() } {
+            unsafe {
+                let _ = controller.Close();
+            }
+            return Ok(());
+        }
 
         // SAFETY: Register event listeners, store Rc state pointer, start fallback timer, navigate.
         unsafe {
@@ -886,11 +1038,6 @@ mod imp {
                                 if status.is_err() || dead_inner.get() {
                                     return Ok(());
                                 }
-                                // Debug: keep the raw capture where it can be checked without DevTools.
-                                let _ = std::fs::write(
-                                    std::env::temp_dir().join("ferric_spotify_capture.txt"),
-                                    format!("url={current_url}\nraw={result}\n"),
-                                );
                                 emit_once(
                                     &done_inner,
                                     LoginPayload::SpotifySession {

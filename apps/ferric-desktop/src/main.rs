@@ -17,10 +17,13 @@ mod widgets;
 
 use std::sync::OnceLock;
 
+#[cfg(debug_assertions)]
 static STARTUP_PAGE_OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
 static STARTUP_LOAD_DEMO: OnceLock<bool> = OnceLock::new();
+#[cfg(debug_assertions)]
 static STARTUP_PLAY_FIRST: OnceLock<bool> = OnceLock::new();
 
+#[cfg(debug_assertions)]
 pub fn startup_page_override() -> Option<&'static str> {
     STARTUP_PAGE_OVERRIDE
         .get_or_init(|| {
@@ -38,12 +41,23 @@ pub fn startup_page_override() -> Option<&'static str> {
         .as_deref()
 }
 
+#[cfg(not(debug_assertions))]
+pub fn startup_page_override() -> Option<&'static str> {
+    None
+}
+
 pub fn startup_load_demo() -> bool {
     *STARTUP_LOAD_DEMO.get_or_init(|| std::env::args().skip(1).any(|a| a == "--demo"))
 }
 
+#[cfg(debug_assertions)]
 pub fn startup_play_first() -> bool {
     *STARTUP_PLAY_FIRST.get_or_init(|| std::env::args().skip(1).any(|a| a == "--play-first"))
+}
+
+#[cfg(not(debug_assertions))]
+pub fn startup_play_first() -> bool {
+    false
 }
 
 fn main() {

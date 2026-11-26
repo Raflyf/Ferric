@@ -66,22 +66,22 @@ live_design! {
                 );
                 let wuv = uv + warp;
 
-                // Extract 4 harmonious liquid palette pigments from the cover art (or accent fallback)
+                // Extract 4 harmonious liquid palette pigments directly from the cover art (faithful on B&W too!)
                 let acc_pigment = self.enrich_tone(self.accent.xyz);
                 let mut c0 = acc_pigment;
-                let mut c1 = clamp(acc_pigment * 0.74 + vec3(0.08, 0.06, 0.14), 0.0, 1.0);
-                let mut c2 = clamp(acc_pigment * 0.58 + vec3(0.04, 0.09, 0.16), 0.0, 1.0);
-                let mut c3 = clamp(acc_pigment * 0.86 + vec3(0.06, 0.04, 0.08), 0.0, 1.0);
+                let mut c1 = clamp(acc_pigment * 0.76 + vec3(0.05, 0.05, 0.07), 0.0, 1.0);
+                let mut c2 = clamp(acc_pigment * 0.60 + vec3(0.04, 0.05, 0.07), 0.0, 1.0);
+                let mut c3 = clamp(acc_pigment * 0.86 + vec3(0.04, 0.04, 0.05), 0.0, 1.0);
 
                 if (self.has_image > 0.5) {
                     let s0 = self.enrich_tone(self.sample_zone(vec2(0.24, 0.24)));
                     let s1 = self.enrich_tone(self.sample_zone(vec2(0.76, 0.26)));
                     let s2 = self.enrich_tone(self.sample_zone(vec2(0.26, 0.76)));
                     let s3 = self.enrich_tone(self.sample_zone(vec2(0.76, 0.74)));
-                    c0 = mix(s0, acc_pigment, 0.26);
-                    c1 = mix(s1, acc_pigment * 0.82, 0.22);
-                    c2 = mix(s2, acc_pigment * 0.72, 0.24);
-                    c3 = mix(s3, acc_pigment * 0.88, 0.22);
+                    c0 = mix(s0, acc_pigment, 0.22);
+                    c1 = mix(s1, acc_pigment * 0.84, 0.18);
+                    c2 = mix(s2, acc_pigment * 0.74, 0.20);
+                    c3 = mix(s3, acc_pigment * 0.88, 0.18);
                 }
 
                 // 4 orbiting Gaussian liquid-mesh color orbs (Apple Music / studio concert-hall atmosphere)
@@ -149,23 +149,30 @@ live_design! {
             alpha: 0.0
             hover_mode: 0.0
             mouse_x: 0.5
+            light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 if self.hover_mode > 0.5 {
                     // Frosted interactive hover glass container with subtle pointer sheen
-                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 13.0);
+                    let w = max(self.rect_size.x - 1.0, 2.0);
+                    let h = max(self.rect_size.y - 1.0, 2.0);
+                    let hr = min(13.0, min(w, h) * 0.24);
+                    sdf.box(0.5, 0.5, w, h, hr);
                     let dx = self.pos.x - self.mouse_x;
                     let sheen = exp(-dx * dx * 7.5) * 0.048;
-                    let fill_a = (0.072 + sheen) * self.alpha;
-                    sdf.fill_keep(vec4(1.0, 1.0, 1.0, fill_a));
-                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.115 * self.alpha), 1.0);
+                    let fill_a = (0.072 + sheen + 0.03 * self.light_mode) * self.alpha;
+                    sdf.fill_keep(vec4(ink, fill_a));
+                    sdf.stroke(vec4(ink, (0.115 + 0.06 * self.light_mode) * self.alpha), 1.0);
                     return sdf.result;
                 }
-                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 8.0);
+                let r = min(8.0, min(self.rect_size.x, self.rect_size.y) * 0.24);
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, r);
                 let fill_col = vec4(self.accent.xyz, 0.13 * self.alpha);
                 sdf.fill_keep(fill_col);
                 sdf.stroke(vec4(self.accent.xyz, 0.24 * self.alpha), 1.0);
-                sdf.box(4.0, 6.0, 3.0, max(self.rect_size.y - 12.0, 4.0), 1.5);
+                let bar_h = max(self.rect_size.y - 12.0, 4.0);
+                sdf.box(4.0, 6.0, 3.0, bar_h, 0.72);
                 sdf.fill(vec4(self.accent.xyz, 0.92 * self.alpha));
                 return sdf.result;
             }
@@ -332,11 +339,14 @@ live_design! {
                     let h2 = min_dim * (0.36 + 0.22 * (1.0 - self.level * 0.45));
                     let h3 = min_dim * (0.26 + 0.30 * self.level);
 
-                    sdf.box(c.x - bw * 1.5 - gap, base_y - h1, bw, h1, 1.2);
+                    let br1 = min(1.2, min(bw, h1) * 0.24);
+                    let br2 = min(1.2, min(bw, h2) * 0.24);
+                    let br3 = min(1.2, min(bw, h3) * 0.24);
+                    sdf.box(c.x - bw * 1.5 - gap, base_y - h1, bw, h1, br1);
                     sdf.fill(self.accent);
-                    sdf.box(c.x - bw * 0.5, base_y - h2, bw, h2, 1.2);
+                    sdf.box(c.x - bw * 0.5, base_y - h2, bw, h2, br2);
                     sdf.fill(#FFFFFF);
-                    sdf.box(c.x + bw * 0.5 + gap, base_y - h3, bw, h3, 1.2);
+                    sdf.box(c.x + bw * 0.5 + gap, base_y - h3, bw, h3, br3);
                     sdf.fill(self.accent);
                 }
 
@@ -352,6 +362,8 @@ live_design! {
         draw_bg: {
             uniform accent_col: #F4F4F7
             uniform accent_hover: #FFFFFF
+            uniform accent_down: #D8DAE4
+            uniform aura_col: #FFFFFF
             uniform glyph_col: #0E0F13
 
             fn pixel(self) -> vec4 {
@@ -360,42 +372,45 @@ live_design! {
                 let c = self.rect_size * 0.5;
                 let base_r = min(c.x, c.y) - 2.0;
 
-                // Soft expanding outer aura on hover & play/pause transition
+                let h = self.hover * self.hover * (3.0 - 2.0 * self.hover);
+                let d = self.down * self.down * (3.0 - 2.0 * self.down);
                 let p_t = clamp(self.playing, 0.0, 1.0);
-                let morph_pop = sin(p_t * 3.14159265);
-                let aura_a = max(0.14 * self.hover, 0.22 * morph_pop);
+
+                // Subtle calm outer glow strictly on hover (zero ballooning pop on click)
+                let aura_a = 0.11 * h;
                 if (aura_a > 0.005) {
-                    sdf.circle(c.x, c.y, base_r + 1.8 * self.hover + 2.4 * morph_pop);
-                    sdf.fill(vec4(1.0, 1.0, 1.0, aura_a));
+                    sdf.circle(c.x, c.y, base_r + 1.4 * h);
+                    sdf.fill(vec4(self.aura_col.xyz, aura_a));
                 }
 
-                // Tactile spring scale: gentle lift on hover, crisp press compression on down, joyful morph pop
-                let r = base_r + 0.9 * self.hover - 1.4 * self.down + 0.95 * morph_pop;
+                // Calm monotonic scale: gentle lift on hover, subtle press settle on down
+                let r = base_r + 0.55 * h - 0.65 * d;
                 sdf.circle(c.x, c.y, r);
-                sdf.fill(mix(mix(self.accent_col, self.accent_hover, self.hover), #D8DAE4, self.down));
+                sdf.fill(mix(mix(self.accent_col, self.accent_hover, h), self.accent_down, d));
 
-                let gs = 1.0 + 0.04 * self.hover - 0.06 * self.down;
+                let gs = 1.0 + 0.025 * h - 0.035 * d;
                 if (p_t >= 0.5) {
                     let s_in = clamp((p_t - 0.5) * 2.0, 0.0, 1.0);
-                    let ease = 1.0 - pow(1.0 - s_in, 2.5);
-                    let bw = mix(1.4, 3.3, ease) * gs;
-                    let bh = mix(6.8, 11.6, ease) * gs;
-                    let sep = mix(0.9, 1.5, ease) * gs;
+                    let ease = 1.0 - pow(1.0 - s_in, 3.0);
+                    let bw = mix(2.2, 3.3, ease) * gs;
+                    let bh = mix(8.6, 11.6, ease) * gs;
+                    let sep = mix(1.1, 1.5, ease) * gs;
                     let lx = c.x - sep - bw;
                     let rx = c.x + sep;
                     let ty = c.y - bh * 0.5;
-                    sdf.box(lx, ty, bw, bh, 0.85);
-                    sdf.box(rx, ty, bw, bh, 0.85);
-                    sdf.fill(vec4(self.glyph_col.xyz, self.glyph_col.w * clamp(0.35 + 0.65 * ease, 0.0, 1.0)));
+                    let bar_r = min(0.8, bw * 0.24);
+                    sdf.box(lx, ty, bw, bh, bar_r);
+                    sdf.box(rx, ty, bw, bh, bar_r);
+                    sdf.fill(vec4(self.glyph_col.xyz, self.glyph_col.w * clamp(0.25 + 0.75 * ease, 0.0, 1.0)));
                 } else {
                     let s_out = clamp(1.0 - p_t * 2.0, 0.0, 1.0);
-                    let ease = 1.0 - pow(1.0 - s_out, 2.2);
-                    let tri_s = mix(0.42, 1.0, ease) * gs;
+                    let ease = 1.0 - pow(1.0 - s_out, 3.0);
+                    let tri_s = mix(0.68, 1.0, ease) * gs;
                     sdf.move_to(c.x - 3.6 * tri_s, c.y - 6.0 * tri_s);
                     sdf.line_to(c.x + 6.0 * tri_s, c.y);
                     sdf.line_to(c.x - 3.6 * tri_s, c.y + 6.0 * tri_s);
                     sdf.close_path();
-                    sdf.fill(vec4(self.glyph_col.xyz, self.glyph_col.w * clamp(0.35 + 0.65 * ease, 0.0, 1.0)));
+                    sdf.fill(vec4(self.glyph_col.xyz, self.glyph_col.w * clamp(0.25 + 0.75 * ease, 0.0, 1.0)));
                 }
                 return sdf.result;
             }
@@ -414,34 +429,29 @@ live_design! {
                 let c = self.rect_size * 0.5;
                 let u = min(self.rect_size.x, self.rect_size.y) / 28.0;
 
-                // Button pill & ripple ring (matches FerricIconBtn chrome)
+                // Button pill (smooth hover/active surface, zero bouncy ring flash)
                 let sdf_bg = Sdf2d::viewport(p);
-                let inset = 1.0 + self.down * 0.85;
+                let inset = 1.0 + self.down * 0.25;
                 sdf_bg.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0 * u);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 let hov = mix(mix(#212432, vec4(0.05, 0.06, 0.10, 0.09), self.light_mode), vec4(ink, 0.13), self.acrylic_on);
                 let act = mix(mix(#321E14, vec4(0.05, 0.06, 0.10, 0.14), self.light_mode), vec4(ink, 0.18), self.acrylic_on);
                 let is_act = step(0.5, self.mode);
                 let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, is_act);
-                sdf_bg.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.25));
+                let pt = clamp(self.pulse, 0.0, 1.0);
+                let mut soft_glow = 0.0;
+                if (pt > 0.001 && pt < 0.999) {
+                    soft_glow = (1.0 - pt) * (1.0 - pt) * 0.10;
+                }
+                sdf_bg.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.20 + soft_glow));
                 let rim = vec4(ink, 0.12 * self.hover + 0.16 * is_act);
                 sdf_bg.stroke(rim, 1.0);
 
-                let pt = clamp(self.pulse, 0.0, 1.0);
-                if (pt > 0.001 && pt < 0.999) {
-                    let max_r = min(c.x, c.y) - 1.2;
-                    let ring_r = mix(max_r * 0.42, max_r, 1.0 - pow(1.0 - pt, 2.5));
-                    sdf_bg.circle(c.x, c.y, ring_r);
-                    sdf_bg.stroke(vec4(ink, 0.34 * (1.0 - pt)), 1.25);
-                }
-
-                // Crisp 180-deg spring spin settle on mode switch
-                let mut scale = 1.0 - 0.07 * self.down;
+                // Smooth monotonic 180-deg cubic ease-out rotation on mode switch (constant scale, zero bounce)
+                let scale = 1.0 - 0.03 * self.down;
                 let mut ang = 0.0;
                 if (pt > 0.001 && pt < 0.999) {
-                    let env = sin(pt * 3.14159265);
                     let ease = 1.0 - pow(1.0 - pt, 3.0);
-                    scale = 1.0 + 0.16 * env;
                     ang = (1.0 - ease) * 3.14159265;
                 }
                 let d = (p - c) / max(scale, 0.45);
@@ -506,35 +516,26 @@ live_design! {
                 let c = self.rect_size * 0.5;
                 let u = min(self.rect_size.x, self.rect_size.y) / 28.0;
 
-                // Button pill & ripple ring (matches FerricIconBtn chrome)
+                // Button pill (calm smooth mute/unmute transition — zero shake or bounce)
                 let sdf_bg = Sdf2d::viewport(p);
-                let inset = 1.0 + self.down * 0.85;
+                let inset = 1.0 + self.down * 0.25;
                 sdf_bg.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0 * u);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 let hov = mix(mix(#212432, vec4(0.05, 0.06, 0.10, 0.09), self.light_mode), vec4(ink, 0.13), self.acrylic_on);
                 let act = mix(mix(#321E14, vec4(0.05, 0.06, 0.10, 0.14), self.light_mode), vec4(ink, 0.18), self.acrylic_on);
                 let is_muted = 1.0 - step(0.5, self.level_mode);
                 let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, is_muted);
-                sdf_bg.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.25));
+                let pt = clamp(self.pulse, 0.0, 1.0);
+                let mut soft_glow = 0.0;
+                if (pt > 0.001 && pt < 0.999) {
+                    soft_glow = (1.0 - pt) * (1.0 - pt) * 0.10;
+                }
+                sdf_bg.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.20 + soft_glow));
                 let rim = vec4(ink, 0.12 * self.hover + 0.16 * is_muted);
                 sdf_bg.stroke(rim, 1.0);
 
-                let pt = clamp(self.pulse, 0.0, 1.0);
-                if (pt > 0.001 && pt < 0.999) {
-                    let max_r = min(c.x, c.y) - 1.2;
-                    let ring_r = mix(max_r * 0.42, max_r, 1.0 - pow(1.0 - pt, 2.5));
-                    sdf_bg.circle(c.x, c.y, ring_r);
-                    sdf_bg.stroke(vec4(ink, 0.34 * (1.0 - pt)), 1.25);
-                }
-
-                // Tactile mute/unmute shake + elastic pop
-                let mut scale = 1.0 - 0.07 * self.down;
-                let mut ang = 0.0;
-                if (pt > 0.001 && pt < 0.999) {
-                    let env = sin(pt * 3.14159265);
-                    scale = 1.0 + 0.16 * env;
-                    ang = sin(pt * 15.707963) * 0.24 * (1.0 - pt);
-                }
+                let scale = 1.0 - 0.03 * self.down;
+                let ang = 0.0;
                 let d = (p - c) / max(scale, 0.45);
                 let ca = cos(ang);
                 let sa = sin(ang);
@@ -603,13 +604,15 @@ live_design! {
                 let tx = pad + usable * t;
                 let active_amt = max(self.hover, self.drag);
                 let track_h = mix(3.0, 4.4, active_amt);
-                let track_r = track_h * 0.5;
+                let track_r = track_h * 0.25;
 
                 sdf.box(pad, cy - track_h * 0.5, usable, track_h, track_r);
                 sdf.fill(self.track_col);
 
-                if (tx > pad + 0.5) {
-                    sdf.box(pad, cy - track_h * 0.5, tx - pad, track_h, track_r);
+                let fill_w = tx - pad;
+                if (fill_w > 0.5) {
+                    let fill_r = min(track_h, fill_w) * 0.25;
+                    sdf.box(pad, cy - track_h * 0.5, fill_w, track_h, fill_r);
                     sdf.fill(self.fill_col);
                 }
 
@@ -637,6 +640,7 @@ live_design! {
             uniform track_col: #262834
             uniform fill_col: #E86A2C
             uniform thumb_col: #F4F4F7
+            uniform tick_col: #323544
 
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
@@ -649,13 +653,14 @@ live_design! {
                 let mid_y = self.rect_size.y * 0.5;
 
                 sdf.rect(cx - 6.0, mid_y - 0.5, 12.0, 1.0);
-                sdf.fill(#323544);
+                sdf.fill(self.tick_col);
 
                 sdf.box(cx - 1.75, pad, 3.5, usable, 0.85);
                 sdf.fill(self.track_col);
 
                 let bar_h = max((self.rect_size.y - pad) - ty, 1.0);
-                sdf.box(cx - 1.75, ty, 3.5, bar_h, 0.85);
+                let bar_r = min(0.85, min(3.5, bar_h) * 0.24);
+                sdf.box(cx - 1.75, ty, 3.5, bar_h, bar_r);
                 sdf.fill(self.fill_col);
 
                 let active_amt = max(self.hover, self.drag);
@@ -688,13 +693,14 @@ live_design! {
                 let h = self.rect_size.y;
                 let box_r = (h - 2.0) * 0.25;
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, h - 2.0, box_r);
-                let bg = mix(self.off_col, self.on_col, self.active);
+                let t_a = self.active * self.active * (3.0 - 2.0 * self.active);
+                let bg = mix(self.off_col, self.on_col, t_a);
                 sdf.fill_keep(bg);
-                let bcol = mix(self.border_col, self.on_col, self.active);
+                let bcol = mix(self.border_col, self.on_col, t_a);
                 sdf.stroke(bcol, 1.0);
 
-                let kx = mix(h * 0.5, self.rect_size.x - h * 0.5, self.active);
-                let kr = (h - 2.0) * 0.5 - 3.0 + self.hover * 0.5;
+                let kx = mix(h * 0.5, self.rect_size.x - h * 0.5, t_a);
+                let kr = (h - 2.0) * 0.5 - 3.0 + self.hover * 0.35;
                 sdf.circle(kx, h * 0.5, kr);
                 sdf.fill(self.knob_col);
                 return sdf.result;
@@ -762,81 +768,6 @@ live_design! {
         }
     }
 
-    pub FerricArtTile = <View> {
-        width: 44,
-        height: 44,
-        show_bg: true,
-        draw_bg: {
-            instance variant: 0.0
-            instance playing: 0.0
-            instance level: 0.55
-            uniform radius: 8.0
-            uniform accent: #D9541E
-
-            fn pixel(self) -> vec4 {
-                let p = self.pos * self.rect_size;
-                let sdf = Sdf2d::viewport(p);
-                let r = min(self.radius * 0.5, min(self.rect_size.x, self.rect_size.y) * 0.14);
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
-
-                let uv = self.pos;
-                let c = self.rect_size * 0.5;
-                let min_dim = min(self.rect_size.x, self.rect_size.y);
-
-                if self.playing > 0.5 {
-                    // Active track equalizer bars on warm dark copper surface (matching FigCraft D1)
-                    let bg = mix(vec3(0.11, 0.05, 0.03), vec3(0.05, 0.03, 0.02), uv.y);
-                    sdf.fill_keep(vec4(bg, 1.0));
-                    sdf.stroke(vec4(self.accent.xyz, 0.55), 1.0);
-
-                    let bw = min_dim * 0.11;
-                    let gap = min_dim * 0.06;
-                    let base_y = self.rect_size.y * 0.78;
-                    let h1 = min_dim * (0.24 + 0.30 * self.level);
-                    let h2 = min_dim * (0.42 + 0.22 * (1.0 - self.level * 0.5));
-                    let h3 = min_dim * (0.30 + 0.34 * self.level);
-
-                    sdf.box(c.x - bw * 1.5 - gap, base_y - h1, bw, h1, 1.5);
-                    sdf.fill(self.accent);
-                    sdf.box(c.x - bw * 0.5, base_y - h2, bw, h2, 1.5);
-                    sdf.fill(self.accent);
-                    sdf.box(c.x + bw * 0.5 + gap, base_y - h3, bw, h3, 1.5);
-                    sdf.fill(#F3EEE3);
-                    return sdf.result;
-                }
-
-                if self.variant < 0.5 {
-                    // Sunset Horizon Disc (matching FigCraft LG1 & LG2)
-                    let sky = mix(vec3(0.92, 0.44, 0.14), vec3(0.58, 0.16, 0.09), clamp(uv.y * 1.25, 0.0, 1.0));
-                    let sea = mix(vec3(0.22, 0.06, 0.06), vec3(0.08, 0.03, 0.04), clamp((uv.y - 0.58) * 2.4, 0.0, 1.0));
-                    let mut col = mix(sky, sea, step(0.60, uv.y));
-                    if uv.y > 0.62 && uv.y < 0.66 { col = vec3(0.75, 0.25, 0.14); }
-                    if uv.y > 0.70 && uv.y < 0.73 { col = vec3(0.55, 0.17, 0.11); }
-                    if uv.y > 0.78 && uv.y < 0.805 { col = vec3(0.36, 0.11, 0.09); }
-                    let sun_d = length(p - vec2(c.x, self.rect_size.y * 0.56));
-                    let sun_r = min_dim * 0.21;
-                    let sun_mask = clamp(sun_r - sun_d + 0.8, 0.0, 1.0);
-                    let sun_col = mix(vec3(0.98, 0.95, 0.88), vec3(0.95, 0.76, 0.62), step(0.60, uv.y));
-                    col = mix(col, sun_col, sun_mask);
-                    sdf.fill_keep(vec4(col, 1.0));
-                    sdf.stroke(#2A1A12, 1.0);
-                    return sdf.result;
-                } else {
-                    // Oxide Vinyl Ring (matching FigCraft D1 Hero & Track Thumbnails)
-                    let bg = mix(vec3(0.11, 0.05, 0.025), vec3(0.06, 0.03, 0.02), uv.y);
-                    sdf.fill_keep(vec4(bg, 1.0));
-                    sdf.stroke(#241812, 1.0);
-
-                    sdf.circle(c.x, c.y, min_dim * 0.34);
-                    sdf.stroke(self.accent, max(min_dim * 0.032, 1.3));
-                    sdf.circle(c.x, c.y, min_dim * 0.12);
-                    sdf.fill(self.accent);
-                    return sdf.result;
-                }
-            }
-        }
-    }
-
     pub FerricEqGraph = {{FerricEqGraph}} {
         width: Fill,
         height: 176,
@@ -844,6 +775,7 @@ live_design! {
             uniform accent: #E86A2C
             uniform bg_col: #12131A
             uniform border_col: #232530
+            uniform light_mode: 0.0
 
             fn eval_band_y(self, idx: float) -> float {
                 if idx < 0.5 { return self.g0; }
@@ -885,14 +817,16 @@ live_design! {
                 let mid_y = (top + bot) * 0.5;
 
                 // Horizontal dB gridlines (+12, +6, 0, -6, -12 dB)
+                let grid_zero = mix(vec3(0.20, 0.20, 0.20), vec3(0.68, 0.63, 0.55), self.light_mode);
+                let grid_sub = mix(vec3(0.11, 0.11, 0.11), vec3(0.78, 0.74, 0.67), self.light_mode);
                 for i in 0..5 {
                     let fi = float(i);
                     let gy = top + h * (fi / 4.0);
                     if (p.x >= left && p.x <= right && abs(p.y - gy) < 0.6) {
                         if (fi > 1.5 && fi < 2.5) {
-                            return vec4(0.20, 0.20, 0.20, 1.0);
+                            return vec4(grid_zero, 1.0);
                         } else {
-                            return vec4(0.11, 0.11, 0.11, 1.0);
+                            return vec4(grid_sub, 1.0);
                         }
                     }
                 }
@@ -903,11 +837,12 @@ live_design! {
                     let cy = mid_y - (db / 14.0) * (h * 0.5);
                     let dist = abs(p.y - cy);
 
-                    // Subtle warm copper fill between curve and 0 dB axis
+                    // Subtle accent tint fill between curve and 0 dB axis (blends cleanly on both dark & light themes)
                     let mut rgb = self.bg_col.xyz;
                     if (p.y >= min(cy, mid_y) && p.y <= max(cy, mid_y)) {
                         let fade = 1.0 - clamp(abs(p.y - cy) / (h * 0.55), 0.0, 1.0);
-                        rgb += self.accent.xyz * (0.13 * fade * max(self.enabled, 0.25));
+                        let fill_a = (0.14 + 0.05 * self.light_mode) * fade * max(self.enabled, 0.25);
+                        rgb = mix(rgb, self.accent.xyz, fill_a);
                     }
 
                     // Smooth anti-aliased 2.2px response curve
@@ -923,7 +858,7 @@ live_design! {
                         let nd = length(p - vec2(bx, by));
                         if nd < 4.5 {
                             if nd < 2.3 {
-                                rgb = vec3(0.05, 0.05, 0.05);
+                                rgb = self.bg_col.xyz;
                             } else {
                                 rgb = line_col;
                             }
@@ -1072,7 +1007,7 @@ live_design! {
                 sdf.stroke(#FFFFFF, 1.6);
 
                 // 2. Full 360-degree Rainbow Hue Spectrum bar
-                sdf.box(0.5, hue_y0 + 0.5, w - 1.0, hue_h - 1.0, hue_h * 0.5);
+                sdf.box(0.5, hue_y0 + 0.5, w - 1.0, hue_h - 1.0, (hue_h - 1.0) * 0.25);
                 let u_h = clamp(p.x / w, 0.0, 1.0);
                 let hue_rgb = self.hsv_to_rgb(u_h, 1.0, 1.0);
                 sdf.fill_keep(vec4(hue_rgb, 1.0));
@@ -1138,6 +1073,8 @@ pub struct FerricBarSlider {
     #[rust]
     drag_target: f32,
     #[rust]
+    last_anim_t: f64,
+    #[rust]
     anim_frame: NextFrame,
 }
 
@@ -1156,14 +1093,23 @@ impl FerricBarSlider {
 
 impl Widget for FerricBarSlider {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.anim_frame.is_event(event).is_some() {
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
-            self.draw_bg.drag += (self.drag_target - self.draw_bg.drag) * 0.30;
-            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
-                && (self.drag_target - self.draw_bg.drag).abs() < 0.008;
+        if let Some(nf) = self.anim_frame.is_event(event) {
+            let dt = if self.last_anim_t > 0.0 {
+                (nf.time - self.last_anim_t).clamp(0.004, 0.045)
+            } else {
+                0.016
+            };
+            self.last_anim_t = nf.time;
+            let kh = (1.0 - (-15.0 * dt).exp()) as f32;
+            let kd = (1.0 - (-18.0 * dt).exp()) as f32;
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * kh;
+            self.draw_bg.drag += (self.drag_target - self.draw_bg.drag) * kd;
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.006
+                && (self.drag_target - self.draw_bg.drag).abs() < 0.006;
             if done {
                 self.draw_bg.hover = self.hover_target;
                 self.draw_bg.drag = self.drag_target;
+                self.last_anim_t = 0.0;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
@@ -1233,7 +1179,7 @@ impl FerricBarSliderRef {
             && !inner.dragging
         {
             let clamped = val.clamp(inner.min, inner.max);
-            if (inner.value - clamped).abs() > 1.2e-3 {
+            if (inner.value - clamped).abs() > 2.5e-3 {
                 inner.value = clamped;
                 inner.draw_bg.redraw(cx);
             }
@@ -1241,17 +1187,23 @@ impl FerricBarSliderRef {
     }
 
     pub fn changed(&self, actions: &Actions) -> Option<f64> {
-        match actions.find_widget_action(self.widget_uid()).cast() {
-            FerricSliderAction::Changed(v) => Some(v),
-            _ => None,
+        let mut last = None;
+        for action in actions.filter_widget_actions(self.widget_uid()) {
+            if let FerricSliderAction::Changed(v) = action.cast() {
+                last = Some(v);
+            }
         }
+        last
     }
 
     pub fn released(&self, actions: &Actions) -> Option<f64> {
-        match actions.find_widget_action(self.widget_uid()).cast() {
-            FerricSliderAction::Released(v) => Some(v),
-            _ => None,
+        let mut last = None;
+        for action in actions.filter_widget_actions(self.widget_uid()) {
+            if let FerricSliderAction::Released(v) = action.cast() {
+                last = Some(v);
+            }
         }
+        last
     }
 }
 
@@ -1339,7 +1291,7 @@ impl FerricVertSliderRef {
             && !inner.dragging
         {
             let clamped = val.clamp(inner.min, inner.max);
-            if (inner.value - clamped).abs() > 1.2e-3 {
+            if (inner.value - clamped).abs() > 2.5e-3 {
                 inner.value = clamped;
                 inner.draw_bg.redraw(cx);
             }
@@ -1347,17 +1299,23 @@ impl FerricVertSliderRef {
     }
 
     pub fn changed(&self, actions: &Actions) -> Option<f64> {
-        match actions.find_widget_action(self.widget_uid()).cast() {
-            FerricSliderAction::Changed(v) => Some(v),
-            _ => None,
+        let mut last = None;
+        for action in actions.filter_widget_actions(self.widget_uid()) {
+            if let FerricSliderAction::Changed(v) = action.cast() {
+                last = Some(v);
+            }
         }
+        last
     }
 
     pub fn released(&self, actions: &Actions) -> Option<f64> {
-        match actions.find_widget_action(self.widget_uid()).cast() {
-            FerricSliderAction::Released(v) => Some(v),
-            _ => None,
+        let mut last = None;
+        for action in actions.filter_widget_actions(self.widget_uid()) {
+            if let FerricSliderAction::Released(v) = action.cast() {
+                last = Some(v);
+            }
         }
+        last
     }
 }
 
@@ -1396,16 +1354,25 @@ pub struct FerricToggle {
     #[rust]
     visual_synced: bool,
     #[rust]
+    last_anim_t: f64,
+    #[rust]
     anim_frame: NextFrame,
 }
 
 impl Widget for FerricToggle {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.anim_frame.is_event(event).is_some() {
+        if let Some(nf) = self.anim_frame.is_event(event) {
+            let dt = if self.last_anim_t > 0.0 {
+                (nf.time - self.last_anim_t).clamp(0.004, 0.045)
+            } else {
+                0.016
+            };
+            self.last_anim_t = nf.time;
+            let k = (1.0 - (-15.0 * dt).exp()) as f32;
             let target_a = if self.is_on { 1.0_f32 } else { 0.0_f32 };
             let target_h = self.hover_target;
-            self.visual_active += (target_a - self.visual_active) * 0.28;
-            self.visual_hover += (target_h - self.visual_hover) * 0.28;
+            self.visual_active += (target_a - self.visual_active) * k;
+            self.visual_hover += (target_h - self.visual_hover) * k;
             if (target_a - self.visual_active).abs() < 0.005 {
                 self.visual_active = target_a;
             }
@@ -1419,6 +1386,8 @@ impl Widget for FerricToggle {
                 || (target_h - self.visual_hover).abs() > 0.005
             {
                 self.anim_frame = cx.new_next_frame();
+            } else {
+                self.last_anim_t = 0.0;
             }
         }
         let uid = self.widget_uid();
@@ -1511,19 +1480,30 @@ pub struct FerricWinBtn {
     #[rust]
     down_target: f32,
     #[rust]
+    last_anim_t: f64,
+    #[rust]
     anim_frame: NextFrame,
 }
 
 impl Widget for FerricWinBtn {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.anim_frame.is_event(event).is_some() {
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
-            self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
-            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
-                && (self.down_target - self.draw_bg.down).abs() < 0.008;
+        if let Some(nf) = self.anim_frame.is_event(event) {
+            let dt = if self.last_anim_t > 0.0 {
+                (nf.time - self.last_anim_t).clamp(0.004, 0.045)
+            } else {
+                0.016
+            };
+            self.last_anim_t = nf.time;
+            let kh = (1.0 - (-15.0 * dt).exp()) as f32;
+            let kd = (1.0 - (-19.0 * dt).exp()) as f32;
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * kh;
+            self.draw_bg.down += (self.down_target - self.draw_bg.down) * kd;
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.006
+                && (self.down_target - self.draw_bg.down).abs() < 0.006;
             if done {
                 self.draw_bg.hover = self.hover_target;
                 self.draw_bg.down = self.down_target;
+                self.last_anim_t = 0.0;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
@@ -1621,22 +1601,34 @@ pub struct FerricPlayBtn {
     #[rust]
     playing_synced: bool,
     #[rust]
+    last_anim_t: f64,
+    #[rust]
     anim_frame: NextFrame,
 }
 
 impl Widget for FerricPlayBtn {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.anim_frame.is_event(event).is_some() {
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.26;
-            self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
-            self.draw_bg.playing += (self.playing_target - self.draw_bg.playing) * 0.24;
-            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
-                && (self.down_target - self.draw_bg.down).abs() < 0.008
-                && (self.playing_target - self.draw_bg.playing).abs() < 0.006;
+        if let Some(nf) = self.anim_frame.is_event(event) {
+            let dt = if self.last_anim_t > 0.0 {
+                (nf.time - self.last_anim_t).clamp(0.004, 0.045)
+            } else {
+                0.016
+            };
+            self.last_anim_t = nf.time;
+            let kh = (1.0 - (-15.0 * dt).exp()) as f32;
+            let kd = (1.0 - (-19.0 * dt).exp()) as f32;
+            let kp = (1.0 - (-13.5 * dt).exp()) as f32;
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * kh;
+            self.draw_bg.down += (self.down_target - self.draw_bg.down) * kd;
+            self.draw_bg.playing += (self.playing_target - self.draw_bg.playing) * kp;
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.006
+                && (self.down_target - self.draw_bg.down).abs() < 0.006
+                && (self.playing_target - self.draw_bg.playing).abs() < 0.005;
             if done {
                 self.draw_bg.hover = self.hover_target;
                 self.draw_bg.down = self.down_target;
                 self.draw_bg.playing = self.playing_target;
+                self.last_anim_t = 0.0;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
@@ -1756,10 +1748,12 @@ impl Widget for FerricRepeatBtn {
                 0.016
             };
             self.pulse_last_t = nf.time;
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
-            self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
+            let kh = (1.0 - (-15.0 * f64::from(dt)).exp()) as f32;
+            let kd = (1.0 - (-19.0 * f64::from(dt)).exp()) as f32;
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * kh;
+            self.draw_bg.down += (self.down_target - self.draw_bg.down) * kd;
             if self.pulse_active {
-                self.draw_bg.pulse += dt / 0.26_f32;
+                self.draw_bg.pulse += dt / 0.32_f32;
                 if self.draw_bg.pulse >= 1.0 {
                     self.draw_bg.pulse = 0.0;
                     self.pulse_active = false;
@@ -1906,10 +1900,12 @@ impl Widget for FerricVolumeBtn {
                 0.016
             };
             self.pulse_last_t = nf.time;
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.28;
-            self.draw_bg.down += (self.down_target - self.draw_bg.down) * 0.36;
+            let kh = (1.0 - (-15.0 * f64::from(dt)).exp()) as f32;
+            let kd = (1.0 - (-19.0 * f64::from(dt)).exp()) as f32;
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * kh;
+            self.draw_bg.down += (self.down_target - self.draw_bg.down) * kd;
             if self.pulse_active {
-                self.draw_bg.pulse += dt / 0.26_f32;
+                self.draw_bg.pulse += dt / 0.32_f32;
                 if self.draw_bg.pulse >= 1.0 {
                     self.draw_bg.pulse = 0.0;
                     self.pulse_active = false;
@@ -2189,22 +2185,32 @@ pub struct FerricCoverArt {
     #[rust]
     hover_ty: f32,
     #[rust]
+    last_anim_t: f64,
+    #[rust]
     anim_frame: NextFrame,
 }
 
 impl Widget for FerricCoverArt {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.anim_frame.is_event(event).is_some() {
-            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * 0.22;
-            self.draw_bg.hover_x += (self.hover_tx - self.draw_bg.hover_x) * 0.22;
-            self.draw_bg.hover_y += (self.hover_ty - self.draw_bg.hover_y) * 0.22;
-            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.008
-                && (self.hover_tx - self.draw_bg.hover_x).abs() < 0.008
-                && (self.hover_ty - self.draw_bg.hover_y).abs() < 0.008;
+        if let Some(nf) = self.anim_frame.is_event(event) {
+            let dt = if self.last_anim_t > 0.0 {
+                (nf.time - self.last_anim_t).clamp(0.004, 0.045)
+            } else {
+                0.016
+            };
+            self.last_anim_t = nf.time;
+            let k = (1.0 - (-12.5 * dt).exp()) as f32;
+            self.draw_bg.hover += (self.hover_target - self.draw_bg.hover) * k;
+            self.draw_bg.hover_x += (self.hover_tx - self.draw_bg.hover_x) * k;
+            self.draw_bg.hover_y += (self.hover_ty - self.draw_bg.hover_y) * k;
+            let done = (self.hover_target - self.draw_bg.hover).abs() < 0.006
+                && (self.hover_tx - self.draw_bg.hover_x).abs() < 0.006
+                && (self.hover_ty - self.draw_bg.hover_y).abs() < 0.006;
             if done {
                 self.draw_bg.hover = self.hover_target;
                 self.draw_bg.hover_x = self.hover_tx;
                 self.draw_bg.hover_y = self.hover_ty;
+                self.last_anim_t = 0.0;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
@@ -2354,9 +2360,21 @@ pub struct FerricAmbientStage {
     #[rust]
     last_time: f64,
     #[rust]
-    last_draw_time: f64,
-    #[rust]
     anim_frame: NextFrame,
+    #[rust]
+    drift_timer: Timer,
+}
+
+impl FerricAmbientStage {
+    fn sync_drift_timer(&mut self, cx: &mut Cx) {
+        let want = self.active && self.playing;
+        if want && self.drift_timer.is_empty() {
+            self.drift_timer = cx.start_interval(0.033);
+        } else if !want && !self.drift_timer.is_empty() {
+            cx.stop_timer(self.drift_timer);
+            self.drift_timer = Timer::empty();
+        }
+    }
 }
 
 impl Widget for FerricAmbientStage {
@@ -2375,41 +2393,38 @@ impl Widget for FerricAmbientStage {
                 self.anim_frame = cx.new_next_frame();
             }
         }
+        if self.drift_timer.is_event(event).is_some() {
+            if !self.active || !self.playing {
+                self.sync_drift_timer(cx);
+                return;
+            }
+            self.draw_bg.phase = (self.draw_bg.phase + 0.033 * 0.65) % 628.3;
+            self.draw_bg.redraw(cx);
+            return;
+        }
         if let Some(nf) = self.anim_frame.is_event(event) {
             if !self.active {
                 return;
             }
-            let moving = (self.target_mx - self.draw_bg.mouse_x).abs() > 0.003
-                || (self.target_my - self.draw_bg.mouse_y).abs() > 0.003
-                || (self.target_hover - self.draw_bg.hover_amt).abs() > 0.005;
-            // Pace ambient aurora smoothly (~30 FPS steady drift, ~60 FPS on hover) so 144 Hz panels
-            // do not run redundant full-screen fragment shader passes.
-            let min_interval = if moving { 0.016 } else { 0.033 };
-            if self.last_draw_time > 0.0 && (nf.time - self.last_draw_time) < min_interval {
-                if self.playing || moving {
-                    self.anim_frame = cx.new_next_frame();
-                }
-                return;
-            }
             let dt = if self.last_time > 0.0 {
-                (nf.time - self.last_time).clamp(0.004, 0.065) as f32
+                (nf.time - self.last_time).clamp(0.004, 0.05) as f32
             } else {
-                0.033
+                0.016
             };
             self.last_time = nf.time;
-            self.last_draw_time = nf.time;
             let k = 1.0 - (-8.0 * dt).exp();
             self.draw_bg.mouse_x += (self.target_mx - self.draw_bg.mouse_x) * k;
             self.draw_bg.mouse_y += (self.target_my - self.draw_bg.mouse_y) * k;
             self.draw_bg.hover_amt += (self.target_hover - self.draw_bg.hover_amt) * k;
-            if self.playing {
-                self.draw_bg.phase = (self.draw_bg.phase + dt * 0.65) % 628.3;
-            }
             let still_moving = (self.target_mx - self.draw_bg.mouse_x).abs() > 0.003
                 || (self.target_my - self.draw_bg.mouse_y).abs() > 0.003
                 || (self.target_hover - self.draw_bg.hover_amt).abs() > 0.005;
-            if self.playing || still_moving {
+            if still_moving {
                 self.anim_frame = cx.new_next_frame();
+            } else {
+                self.draw_bg.mouse_x = self.target_mx;
+                self.draw_bg.mouse_y = self.target_my;
+                self.draw_bg.hover_amt = self.target_hover;
             }
             self.draw_bg.redraw(cx);
         }
@@ -2438,14 +2453,23 @@ impl FerricAmbientStageRef {
 
     pub fn set_state(&self, cx: &mut Cx, active: bool, playing: bool, accent: Vec4, acrylic: f32) {
         if let Some(mut inner) = self.borrow_mut() {
+            let changed = inner.active != active
+                || inner.playing != playing
+                || (inner.draw_bg.accent.x - accent.x).abs() > 0.004
+                || (inner.draw_bg.accent.y - accent.y).abs() > 0.004
+                || (inner.draw_bg.accent.z - accent.z).abs() > 0.004
+                || (inner.draw_bg.acrylic_on - acrylic).abs() > 0.01;
             inner.active = active;
             inner.playing = playing;
             inner.draw_bg.accent = accent;
             inner.draw_bg.acrylic_on = acrylic;
-            if active && playing {
-                inner.anim_frame = cx.new_next_frame();
+            inner.sync_drift_timer(cx);
+            if !active {
+                inner.anim_frame = NextFrame::default();
             }
-            inner.draw_bg.redraw(cx);
+            if changed {
+                inner.draw_bg.redraw(cx);
+            }
         }
     }
 
@@ -2480,6 +2504,8 @@ pub struct DrawLyricsPill {
     hover_mode: f32,
     #[live(0.5_f32)]
     mouse_x: f32,
+    #[live(0.0_f32)]
+    light_mode: f32,
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -2551,6 +2577,10 @@ pub struct FerricLyricsView {
     reveal_alpha: f32,
     #[rust]
     anim_frame: NextFrame,
+    #[rust]
+    manual_timer: Timer,
+    #[rust]
+    is_playing: bool,
     #[rust]
     last_time: f64,
     #[rust]
@@ -2633,6 +2663,13 @@ fn format_lyric_ts(ms: u64) -> String {
 
 impl Widget for FerricLyricsView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.manual_timer.is_event(event).is_some() {
+            self.manual_timer = Timer::empty();
+            self.manual_scroll_until = 0.0;
+            self.recompute_target_scroll();
+            self.wake_anim(cx);
+            return;
+        }
         if let Some(nf) = self.anim_frame.is_event(event) {
             let dt = if self.last_time > 0.0 {
                 (nf.time - self.last_time).clamp(0.002, 0.033)
@@ -2640,12 +2677,6 @@ impl Widget for FerricLyricsView {
                 0.016
             };
             self.last_time = nf.time;
-
-            // Auto-resume synced scroll smoothly after manual mouse-wheel exploration expires
-            if self.manual_scroll_until > 0.0 && nf.time >= self.manual_scroll_until {
-                self.manual_scroll_until = 0.0;
-                self.recompute_target_scroll();
-            }
 
             // Pure analytical critically-damped glide (C1-continuous, monotonic, zero overshoot/bounce)
             let omega = if self.compact { 8.8_f64 } else { 6.4_f64 };
@@ -2688,17 +2719,15 @@ impl Widget for FerricLyricsView {
             }
 
             let scroll_err = (self.target_scroll_y - self.scroll_y).abs();
-            let waiting_manual = self.manual_scroll_until > nf.time;
             let in_transition =
                 scroll_err >= 0.12 || self.scroll_vel.abs() >= 0.4 || max_err >= 0.003;
-            let keep_alive = waiting_manual || in_transition;
-            if !keep_alive {
+            if !in_transition {
                 self.scroll_y = self.target_scroll_y;
                 self.scroll_vel = 0.0;
             } else {
                 self.anim_frame = cx.new_next_frame();
             }
-            // Native VSync redraw during active transitions; drops to 0 FPS once settled.
+            // Native VSync redraw during active transitions; drops immediately to 0 FPS once settled.
             self.area.redraw(cx);
         }
 
@@ -2709,9 +2738,14 @@ impl Widget for FerricLyricsView {
                 self.target_scroll_y =
                     (self.target_scroll_y + fs.scroll.y * 1.15).clamp(0.0, max_s);
                 self.manual_scroll_until = fs.time + 3.6;
+                if !self.manual_timer.is_empty() {
+                    cx.stop_timer(self.manual_timer);
+                }
+                self.manual_timer = cx.start_timeout(3.6);
                 self.wake_anim(cx);
             }
             Hit::FingerHoverIn(fh) | Hit::FingerHoverOver(fh) => {
+                let moved_x = (self.mouse_abs.x - fh.abs.x).abs() > 1.0;
                 self.mouse_abs = fh.abs;
                 let hit_i = self
                     .line_rects
@@ -2723,10 +2757,14 @@ impl Widget for FerricLyricsView {
                 } else {
                     cx.set_cursor(MouseCursor::Default);
                 }
-                if hit_i != self.hovered_idx {
+                let hover_changed = hit_i != self.hovered_idx;
+                if hover_changed {
                     self.hovered_idx = hit_i;
+                    self.wake_anim(cx);
+                } else if !self.compact && hit_i.is_some() && moved_x {
+                    // Only repaint pointer sheen in fullscreen while actively moving over a lyric pill.
+                    self.area.redraw(cx);
                 }
-                self.wake_anim(cx);
             }
             Hit::FingerHoverOut(_) => {
                 self.pressed_idx = None;
@@ -3002,18 +3040,25 @@ impl Widget for FerricLyricsView {
             };
 
             // 1. Frosted interactive glass hover pill (fullscreen) OR subtle active accent pill (compact)
+            let pill_lm = if self.compact && self.light_mode {
+                1.0_f32
+            } else {
+                0.0_f32
+            };
             if !self.compact && hover_v > 0.015 {
                 let mx_norm = ((self.mouse_abs.x - pill_rect.pos.x) / pill_rect.size.x.max(1.0))
                     .clamp(0.0, 1.0) as f32;
                 self.draw_pill.accent = accent;
                 self.draw_pill.hover_mode = 1.0;
                 self.draw_pill.mouse_x = mx_norm;
+                self.draw_pill.light_mode = 0.0;
                 self.draw_pill.alpha = hover_v * edge_fade * reveal_mul;
                 self.draw_pill.draw_abs(cx, pill_rect);
             } else if self.compact && (focus > 0.03 || hover_v > 0.03) {
                 self.draw_pill.accent = accent;
                 self.draw_pill.hover_mode = if focus > 0.25 { 0.0 } else { 1.0 };
                 self.draw_pill.mouse_x = 0.5;
+                self.draw_pill.light_mode = pill_lm;
                 self.draw_pill.alpha = focus.max(hover_v * 0.7) * edge_fade * reveal_mul;
                 self.draw_pill.draw_abs(cx, pill_rect);
             }
@@ -3168,7 +3213,22 @@ impl FerricLyricsViewRef {
         }
     }
 
-    pub fn set_playback_state(&self, _cx: &mut Cx, _pos_ms: u64, _is_playing: bool) {}
+    pub fn set_playback_state(&self, cx: &mut Cx, _pos_ms: u64, is_playing: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let was_playing = inner.is_playing;
+            inner.is_playing = is_playing;
+            if was_playing && !is_playing {
+                if !inner.manual_timer.is_empty() {
+                    cx.stop_timer(inner.manual_timer);
+                    inner.manual_timer = Timer::empty();
+                    inner.manual_scroll_until = 0.0;
+                }
+                if (inner.target_scroll_y - inner.scroll_y).abs() < 0.25 {
+                    inner.anim_frame = NextFrame::default();
+                }
+            }
+        }
+    }
 
     pub fn set_style(&self, cx: &mut Cx, accent: Vec4, ui_zoom: f32, light_mode: bool) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -3404,21 +3464,23 @@ impl FerricColorPickerRef {
     }
 
     pub fn changed(&self, actions: &Actions) -> Option<String> {
-        if let FerricColorPickerAction::Changed(hex) =
-            actions.find_widget_action(self.widget_uid()).cast()
-        {
-            return Some(hex);
+        let mut last = None;
+        for action in actions.filter_widget_actions(self.widget_uid()) {
+            if let FerricColorPickerAction::Changed(hex) = action.cast() {
+                last = Some(hex);
+            }
         }
-        None
+        last
     }
 
     pub fn committed(&self, actions: &Actions) -> Option<String> {
-        if let FerricColorPickerAction::Committed(hex) =
-            actions.find_widget_action(self.widget_uid()).cast()
-        {
-            return Some(hex);
+        let mut last = None;
+        for action in actions.filter_widget_actions(self.widget_uid()) {
+            if let FerricColorPickerAction::Committed(hex) = action.cast() {
+                last = Some(hex);
+            }
         }
-        None
+        last
     }
 }
 

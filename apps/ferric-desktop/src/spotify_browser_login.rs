@@ -64,15 +64,7 @@ where
 
 fn find_browsers() -> Vec<PathBuf> {
     let mut candidates = Vec::with_capacity(5);
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        candidates.push(
-            Path::new(&local)
-                .join("Google")
-                .join("Chrome")
-                .join("Application")
-                .join("chrome.exe"),
-        );
-    }
+    // Prefer admin-protected system installation paths ahead of user-writable %LOCALAPPDATA%.
     for key in ["ProgramFiles", "ProgramFiles(x86)"] {
         let Ok(base) = std::env::var(key) else {
             continue;
@@ -95,6 +87,15 @@ fn find_browsers() -> Vec<PathBuf> {
                 .join("Edge")
                 .join("Application")
                 .join("msedge.exe"),
+        );
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(
+            Path::new(&local)
+                .join("Google")
+                .join("Chrome")
+                .join("Application")
+                .join("chrome.exe"),
         );
     }
     candidates.retain(|path| path.is_file());
@@ -168,9 +169,15 @@ fn run(profile_dir: PathBuf, clear_existing_cookies: bool) -> SpotifyLoginOutcom
         port
     };
 
-    // Chrome 158 does not always write DevToolsActivePort, so keep our own marker for the
-    // next click while the browser is still alive.
-    let _ = std::fs::write(user_data.join("ferric-debug-port"), port.to_string());
+    let port_marker = user_data.join("ferric-debug-port");
+    struct PortMarkerCleanup(PathBuf);
+    impl Drop for PortMarkerCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _ = std::fs::write(&port_marker, port.to_string());
+    let _marker_guard = PortMarkerCleanup(port_marker);
 
     let outcome = drive(&mut child, port, clear_existing_cookies);
     if let Some(mut spawned) = child {
@@ -184,7 +191,7 @@ fn spawn_browser(exe: &Path, user_data: &Path, port: u16) -> std::io::Result<Chi
     Command::new(exe)
         .arg(format!("--user-data-dir={}", user_data.display()))
         .arg(format!("--remote-debugging-port={port}"))
-        .arg("--remote-allow-origins=*")
+        .arg(format!("--remote-allow-origins=http://127.0.0.1:{port}"))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--disable-sync")
@@ -231,7 +238,7 @@ fn drive(
         Err(err) => return SpotifyLoginOutcome::Failed(err),
     };
 
-    let mut cdp = match Cdp::connect(&ws_url) {
+    let mut cdp = match Cdp::connect(&ws_url, port) {
         Ok(cdp) => cdp,
         Err(err) => return SpotifyLoginOutcome::Failed(err),
     };
@@ -287,7 +294,7 @@ fn drive(
         if let Ok(result) = cdp.call(
             "Runtime.evaluate",
             json!({
-                "expression": "window.__ferricToken || null",
+                "expression": "(location.origin === 'https://open.spotify.com' && window.__ferricToken) || null",
                 "returnByValue": true,
             }),
         ) {
@@ -313,16 +320,38 @@ fn drive(
 }
 
 fn read_sp_dc(cdp: &mut Cdp) -> Option<String> {
-    let result = cdp.call("Network.getAllCookies", json!({})).ok()?;
+    let result = cdp
+        .call(
+            "Network.getCookies",
+            json!({ "urls": ["https://open.spotify.com"] }),
+        )
+        .ok()?;
     result
         .get("cookies")?
         .as_array()?
         .iter()
         .find_map(|cookie| {
-            (cookie.get("name")?.as_str()? == "sp_dc")
+            let name = cookie.get("name")?.as_str()?;
+            let domain = cookie.get("domain")?.as_str()?.to_ascii_lowercase();
+            let secure = cookie
+                .get("secure")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let domain_ok =
+                domain == ".spotify.com" || domain == "spotify.com" || domain == "open.spotify.com";
+            (name == "sp_dc" && domain_ok && secure)
                 .then(|| cookie.get("value")?.as_str().map(str::to_owned))
                 .flatten()
         })
+}
+
+fn is_valid_loopback_cdp_ws_url(ws: &str, port: u16) -> bool {
+    let prefix = format!("ws://127.0.0.1:{port}/devtools/page/");
+    ws.starts_with(&prefix)
+        && ws.len() <= 256
+        && ws
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'/' | b'.' | b'-' | b'_'))
 }
 
 fn wait_for_page(
@@ -353,6 +382,7 @@ fn wait_for_page(
                 for item in items {
                     if item.get("type").and_then(Value::as_str) == Some("page")
                         && let Some(ws) = item.get("webSocketDebuggerUrl").and_then(Value::as_str)
+                        && is_valid_loopback_cdp_ws_url(ws, port)
                     {
                         return Ok(ws.to_string());
                     }
@@ -370,6 +400,9 @@ fn http_get(port: u16, path: &str) -> Option<String> {
     let url = format!("http://127.0.0.1:{port}{path}");
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(3)))
             .build(),
     );
@@ -377,7 +410,12 @@ fn http_get(port: u16, path: &str) -> Option<String> {
     if response.status().as_u16() != 200 {
         return None;
     }
-    let bytes = response.into_body().read_to_vec().ok()?;
+    let bytes = response
+        .into_body()
+        .into_with_config()
+        .limit(512 * 1024)
+        .read_to_vec()
+        .ok()?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -387,8 +425,16 @@ struct Cdp {
 }
 
 impl Cdp {
-    fn connect(url: &str) -> Result<Self, String> {
-        let (socket, _) = connect(url).map_err(|err| format!("DevTools connect failed: {err}"))?;
+    fn connect(url: &str, port: u16) -> Result<Self, String> {
+        if !is_valid_loopback_cdp_ws_url(url, port) {
+            return Err("Refused non-loopback DevTools WebSocket URL".to_string());
+        }
+        let uri: tungstenite::http::Uri = url
+            .parse()
+            .map_err(|err| format!("Invalid DevTools URI: {err}"))?;
+        let req = tungstenite::ClientRequestBuilder::new(uri)
+            .with_header("Origin", format!("http://127.0.0.1:{port}"));
+        let (socket, _) = connect(req).map_err(|err| format!("DevTools connect failed: {err}"))?;
         if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
             let _ = stream.set_read_timeout(Some(COMMAND_TIMEOUT));
         }
@@ -450,7 +496,7 @@ mod tests {
         let mut child = Some(spawned);
         let ws =
             wait_for_page(port, Instant::now() + START_TIMEOUT, &mut child).expect("devtools page");
-        let mut cdp = Cdp::connect(&ws).expect("cdp connect");
+        let mut cdp = Cdp::connect(&ws, port).expect("cdp connect");
         cdp.call("Page.enable", json!({})).unwrap();
         let result = cdp
             .call(

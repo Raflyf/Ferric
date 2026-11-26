@@ -3,8 +3,8 @@ use ferric_core::models::{Playlist, Track};
 use ferric_providers::lyrics::SyncedLyrics;
 use ferric_providers::updater::{DownloadEvent, ReleaseInfo};
 use ferric_providers::ytmusic::{
-    CachedAudioStream, VideoStreamOption, YtmAccountLibrary, YtmBrowseDetail, YtmCardKind,
-    YtmRichHome, YtmRichSearch,
+    CachedAudioStream, RecommendedStation, VideoStreamOption, YtmAccountLibrary, YtmBrowseDetail,
+    YtmCardKind, YtmRichHome, YtmRichSearch,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -44,6 +44,86 @@ pub enum LibraryFilter {
     Local,
     Spotify,
     YouTube,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlaylistSortOrder {
+    #[default]
+    Newest,
+    Oldest,
+    NameAZ,
+}
+
+impl PlaylistSortOrder {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Newest => "Newest",
+            Self::Oldest => "Oldest",
+            Self::NameAZ => "A-Z",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Newest => Self::Oldest,
+            Self::Oldest => Self::NameAZ,
+            Self::NameAZ => Self::Newest,
+        }
+    }
+
+    /// Order playlists that come from SQLite (`list_playlists`, already sorted Newest -> Oldest).
+    pub fn apply(self, playlists: &mut [Playlist]) {
+        match self {
+            Self::Newest => {}
+            Self::Oldest => playlists.reverse(),
+            Self::NameAZ => {
+                playlists.sort_by(|a, b| {
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase())
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlaylistSourceFilter {
+    #[default]
+    All,
+    YouTube,
+    Spotify,
+    SpotifyPremium,
+    Local,
+}
+
+impl PlaylistSourceFilter {
+    pub fn matches_playlist(self, pl: &Playlist) -> bool {
+        use ferric_core::models::TrackSource;
+        match self {
+            Self::All => true,
+            Self::YouTube => pl.source == TrackSource::YouTubeMusic,
+            Self::Spotify => {
+                pl.source == TrackSource::Spotify && !pl.id.starts_with("spotify:premium:")
+            }
+            Self::SpotifyPremium => pl.id.starts_with("spotify:premium:"),
+            Self::Local => matches!(
+                pl.source,
+                TrackSource::Local | TrackSource::Subsonic | TrackSource::P2pHome
+            ),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::YouTube => "YouTube",
+            Self::Spotify => "Spotify",
+            Self::SpotifyPremium => "Spotify Premium",
+            Self::Local => "Local",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -114,6 +194,7 @@ pub struct DetailViewState {
     pub subtitle: String,
     pub description: String,
     pub kind: YtmCardKind,
+    pub is_radio_station: bool,
     pub thumbnail_url: Option<String>,
     pub loading: bool,
     pub tracks: Vec<Track>,
@@ -127,6 +208,7 @@ impl Default for DetailViewState {
             subtitle: String::new(),
             description: String::new(),
             kind: YtmCardKind::Playlist,
+            is_radio_station: false,
             thumbnail_url: None,
             loading: false,
             tracks: Vec::new(),
@@ -319,19 +401,44 @@ pub enum BgMessage {
         manual: bool,
         result: Result<Option<ReleaseInfo>, String>,
     },
-    UpdateDownload(DownloadEvent),
+    UpdateDownload {
+        gen_id: u64,
+        event: DownloadEvent,
+    },
     SpotifyLoginResult {
-        client_id: String,
+        display_name: String,
         tokens: ferric_providers::oauth::OAuthTokens,
     },
     SpotifyLoginFailed(String),
-    SpotifyCatalogSynced(Box<ferric_providers::oauth::CloudSyncReport>),
-    SpotifySyncFailed(String),
+    SpotifyCatalogSynced {
+        web_session: bool,
+        report: Box<ferric_providers::oauth::CloudSyncReport>,
+    },
+    SpotifySyncFailed {
+        web_session: bool,
+        error: String,
+    },
     SpotifyWebLoginResult {
         sp_dc: String,
         token_json: String,
     },
     SpotifyWebLoginFailed(String),
+    RecommendedStationsLoaded {
+        seq: u64,
+        stations: Vec<RecommendedStation>,
+    },
+    StationTracksLoaded {
+        station_id: String,
+        tracks: Vec<Track>,
+        subtitle: String,
+        thumbnail_url: Option<String>,
+        left_art: Option<String>,
+        right_art: Option<String>,
+    },
+    StationTracksFailed {
+        station_id: String,
+        error: String,
+    },
 }
 
 fn resolved_track_thumb(track: &Track) -> Option<String> {
@@ -482,9 +589,9 @@ pub fn build_artist_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
     out
 }
 
-/// Truncate text cleanly at UTF-8 char boundaries while retaining all scripts supported by
-/// bundled Inter v4.1 (Latin, Latin Extended / Vietnamese, Greek, Cyrillic, and standard symbols)
-/// and filtering unsupported emoji/private-use blocks so cards stay single-line with zero tofu boxes.
+/// Truncate text cleanly at UTF-8 char boundaries while retaining international scripts
+/// (Latin, Cyrillic, Greek, Japanese/Korean/Chinese, Thai, Arabic, Hebrew, etc.) and
+/// stripping control chars, BiDi spoofing overrides, and color-emoji/private-use codepoints.
 pub fn clip_text(raw: &str, max_chars: usize) -> String {
     let cleaned: String = raw
         .chars()
@@ -497,17 +604,24 @@ pub fn clip_text(raw: &str, max_chars: usize) -> String {
         })
         .filter(|&c| {
             let cp = c as u32;
-            (0x0020..=0x052F).contains(&cp) || (0x1E00..=0x25FF).contains(&cp)
+            !c.is_control()
+                && !matches!(
+                    cp,
+                    0x061C
+                        | 0x200D..=0x200F
+                        | 0x202A..=0x202E
+                        | 0x2066..=0x2069
+                        | 0xE000..=0xF8FF
+                        | 0xFE00..=0xFE0F
+                        | 0xFEFF
+                        | 0x2600..=0x27BF
+                        | 0x1F000..=0x1FFFF
+                )
         })
         .collect();
     let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let final_str = if trimmed.is_empty() {
-        let raw_single = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-        if raw_single.is_empty() {
-            "Unknown".to_string()
-        } else {
-            raw_single
-        }
+        "Unknown".to_string()
     } else {
         trimmed
     };
@@ -541,5 +655,79 @@ pub fn format_bytes_mb(bytes: u64) -> String {
         format!("{:.0} KB", bytes as f64 / 1024.0)
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlaylistSortOrder, PlaylistSourceFilter};
+    use ferric_core::models::{Playlist, TrackSource};
+
+    fn make_pl(id: &str, source: TrackSource) -> Playlist {
+        Playlist {
+            id: id.to_string(),
+            name: id.to_string(),
+            source,
+            etag: None,
+            track_count: 5,
+            description: String::new(),
+            thumbnail_url: None,
+        }
+    }
+
+    #[test]
+    fn playlist_source_filter_separates_youtube_spotify_web_spotify_premium_and_local() {
+        let yt = make_pl("ytm:pl:VL1", TrackSource::YouTubeMusic);
+        let sp_web = make_pl("spotify:playlist:abc123", TrackSource::Spotify);
+        let sp_prem = make_pl("spotify:premium:playlist:xyz789", TrackSource::Spotify);
+        let local = make_pl("local:pl:1", TrackSource::Local);
+        let sub = make_pl("sub:pl:1", TrackSource::Subsonic);
+
+        assert!(PlaylistSourceFilter::All.matches_playlist(&yt));
+        assert!(PlaylistSourceFilter::All.matches_playlist(&sp_web));
+        assert!(PlaylistSourceFilter::All.matches_playlist(&sp_prem));
+        assert!(PlaylistSourceFilter::All.matches_playlist(&local));
+
+        assert!(PlaylistSourceFilter::YouTube.matches_playlist(&yt));
+        assert!(!PlaylistSourceFilter::YouTube.matches_playlist(&sp_web));
+        assert!(!PlaylistSourceFilter::YouTube.matches_playlist(&sp_prem));
+
+        assert!(PlaylistSourceFilter::Spotify.matches_playlist(&sp_web));
+        assert!(!PlaylistSourceFilter::Spotify.matches_playlist(&sp_prem));
+        assert!(!PlaylistSourceFilter::Spotify.matches_playlist(&yt));
+
+        assert!(PlaylistSourceFilter::SpotifyPremium.matches_playlist(&sp_prem));
+        assert!(!PlaylistSourceFilter::SpotifyPremium.matches_playlist(&sp_web));
+        assert!(!PlaylistSourceFilter::SpotifyPremium.matches_playlist(&yt));
+
+        assert!(PlaylistSourceFilter::Local.matches_playlist(&local));
+        assert!(PlaylistSourceFilter::Local.matches_playlist(&sub));
+        assert!(!PlaylistSourceFilter::Local.matches_playlist(&sp_web));
+    }
+
+    #[test]
+    fn playlist_sort_order_supports_newest_oldest_and_az() {
+        // Input mirrors DB `list_playlists()` order: newest first -> oldest last.
+        let base = vec![
+            make_pl("YOASOBI Radio", TrackSource::Local),
+            make_pl("Bruno Mars", TrackSource::Spotify),
+            make_pl("AURORA Radio", TrackSource::Spotify),
+        ];
+
+        let mut newest = base.clone();
+        PlaylistSortOrder::Newest.apply(&mut newest);
+        assert_eq!(newest[0].name, "YOASOBI Radio");
+        assert_eq!(newest[2].name, "AURORA Radio");
+
+        let mut oldest = base.clone();
+        PlaylistSortOrder::Oldest.apply(&mut oldest);
+        assert_eq!(oldest[0].name, "AURORA Radio");
+        assert_eq!(oldest[2].name, "YOASOBI Radio");
+
+        let mut az = base;
+        PlaylistSortOrder::NameAZ.apply(&mut az);
+        assert_eq!(az[0].name, "AURORA Radio");
+        assert_eq!(az[1].name, "Bruno Mars");
+        assert_eq!(az[2].name, "YOASOBI Radio");
     }
 }

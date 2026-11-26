@@ -18,8 +18,8 @@ use crate::shell::{
 use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::state::{
     BgMessage, CollectionGroup, DetailViewState, LibraryFilter, MainPage, NavEntry, NavHistory,
-    SearchFilter, SettingsTab, SleepTimerMode, SortField, build_album_groups, build_artist_groups,
-    clip_text, dir_size_bytes, format_bytes_mb,
+    PlaylistSortOrder, PlaylistSourceFilter, SearchFilter, SettingsTab, SleepTimerMode, SortField,
+    build_album_groups, build_artist_groups, clip_text, dir_size_bytes, format_bytes_mb,
 };
 use crate::track_list::{TrackListAction, TrackListScope};
 use crate::video_player::{NativeVideoPlayer, VideoViewportRect};
@@ -38,20 +38,25 @@ use ferric_core::models::{
 };
 use ferric_core::queue::PlayQueue;
 use ferric_core::secrets::csprng_hex;
-use ferric_core::theme::{AdaptivePalette, ThemeConfig, hex_to_rgba_f32, parse_hex_rgb};
+use ferric_core::theme::{
+    AdaptivePalette, ThemeConfig, derive_acrylic_tint_from_accent, hex_to_rgba_f32, parse_hex_rgb,
+};
 use ferric_providers::autoeq::search_autoeq_profiles;
 use ferric_providers::local_scanner::scan_local_folder;
 use ferric_providers::lyrics::{
     SyncedLyrics, fetch_best_free_lyrics, is_polluted_multilingual_lrc,
 };
 use ferric_providers::oauth::{
-    SPOTIFY_DESKTOP_REDIRECT_URI, activate_oauth_cancel_token, bind_loopback_callback,
-    generate_pkce_pair, is_builtin_spotify_desktop_client, spotify_authorize_url,
+    activate_oauth_cancel_token, bind_loopback_callback, generate_pkce_pair, spotify_authorize_url,
     spotify_exchange_code, spotify_oauth_endpoint_config, sync_spotify_catalog_with_snapshots,
 };
 use ferric_providers::public_sync::{
     import_spotify_public_url, import_youtube_public_url, parse_spotify_target,
     parse_youtube_target,
+};
+use ferric_providers::spotify_web::{
+    fetch_spotify_playlist_by_id, fetch_spotify_recommended_stations,
+    verify_spotify_premium_account,
 };
 use ferric_providers::subsonic::{SubsonicCredentials, sync_subsonic_catalog};
 use ferric_providers::updater::{
@@ -59,11 +64,12 @@ use ferric_providers::updater::{
     format_check_status, release_page_url,
 };
 use ferric_providers::ytmusic::{
-    VideoStreamOption, YtmCardKind, YtmHomeTasteProfile, YtmRichHome, YtmRichSearch, YtmSession,
-    YtmShelfCard, fetch_account_library, fetch_browse_detail, fetch_home_continuation,
-    fetch_radio_up_next_for_track, fetch_rich_home, fetch_rich_search, normalize_ytm_thumbnail_url,
-    resolve_and_cache_audio_stream_with_quality, resolve_best_video_id_for_track,
-    resolve_music_video_streams,
+    RecommendedStation, VideoStreamOption, YtmCardKind, YtmHomeTasteProfile, YtmRichHome,
+    YtmRichSearch, YtmSession, YtmShelfCard, build_algorithmic_recommended_stations_rotated,
+    expand_recommended_station_tracks, fetch_account_library, fetch_browse_detail,
+    fetch_home_continuation, fetch_radio_up_next_for_track, fetch_rich_home, fetch_rich_search,
+    normalize_ytm_thumbnail_url, resolve_and_cache_audio_stream_with_quality,
+    resolve_best_video_id_for_track, resolve_music_video_streams,
 };
 use ferric_sync::{
     ActiveSpeakerLease, LanDiscoveryBeacon, PairingPayload, QrMatrix, detect_local_lan_ip,
@@ -245,7 +251,7 @@ live_design! {
                 let act_rim = vec4(self.accent_col.xyz, 0.42);
                 sdf.stroke(mix(idle_rim, act_rim, self.active), 1.0);
                 if (self.active > 0.5) {
-                    sdf.box(2.5, 6.0, 2.5, max(self.rect_size.y - 12.0, 6.0), 1.25);
+                    sdf.box(2.5, 6.0, 2.5, max(self.rect_size.y - 12.0, 6.0), 0.60);
                     sdf.fill(vec4(self.accent_col.xyz, self.active));
                 }
                 return sdf.result;
@@ -282,55 +288,6 @@ live_design! {
         }
     }
 
-    FerricPinBtn = <Button> {
-        width: Fill,
-        height: 25,
-        padding: { left: 9, right: 8 }
-        spacing: 6,
-        align: { x: 0.0, y: 0.5 }
-        draw_text: {
-            color: #9A9CA8,
-            color_hover: #F4F4F7,
-            color_focus: #F4F4F7,
-            color_down: #FFFFFF,
-            text_style: <THEME_FONT_REGULAR> { font_size: 8.6 }
-        }
-        draw_bg: {
-            instance active: 0.0
-            instance hover: 0.0
-            instance down: 0.0
-            uniform acrylic_on: 0.0
-            uniform light_mode: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
-                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
-                let hov = mix(mix(#161822, vec4(0.05, 0.06, 0.10, 0.07), self.light_mode), vec4(ink, 0.085), self.acrylic_on);
-                let act = mix(mix(#1E202F, vec4(0.05, 0.06, 0.10, 0.14), self.light_mode), vec4(ink, 0.145), self.acrylic_on);
-                let col = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
-                sdf.fill(col);
-                return sdf.result;
-            }
-        }
-        animator: {
-            hover = {
-                default: off,
-                off = {
-                    from: { all: Forward { duration: 0.15 } }
-                    apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
-                }
-                on = {
-                    from: { all: Forward { duration: 0.12 } }
-                    apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
-                }
-                down = {
-                    from: { all: Forward { duration: 0.06 } }
-                    apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
-                }
-            }
-        }
-    }
-
     FerricPrimaryBtn = <Button> {
         width: Fit,
         height: 28,
@@ -360,8 +317,8 @@ live_design! {
             uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let inset = 0.5 + self.down * 0.65;
-                let r = (self.rect_size.y - inset * 2.0) * 0.28;
+                let inset = 0.5;
+                let r = (self.rect_size.y - inset * 2.0) * 0.25;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
                 let c_dark = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D6D8E4, self.down);
                 let c_light = mix(mix(#12151F, #232838, self.hover), #090B10, self.down);
@@ -373,15 +330,15 @@ live_design! {
             hover = {
                 default: off,
                 off = {
-                    from: { all: Forward { duration: 0.14 } }
+                    from: { all: Forward { duration: 0.18 } }
                     apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_icon: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
                 }
                 on = {
-                    from: { all: Forward { duration: 0.11 } }
+                    from: { all: Forward { duration: 0.14 } }
                     apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_icon: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
                 }
                 down = {
-                    from: { all: Forward { duration: 0.05 } }
+                    from: { all: Forward { duration: 0.08 } }
                     apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_icon: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
                 }
             }
@@ -420,15 +377,18 @@ live_design! {
             uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let inset = 0.5 + self.down * 0.65;
-                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
+                let inset = 0.5;
+                let bw = self.rect_size.x - inset * 2.0;
+                let bh = self.rect_size.y - inset * 2.0;
+                let br = min(6.0, min(bw, bh) * 0.24);
+                sdf.box(inset, inset, bw, bh, br);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 let solid_idle = mix(mix(#14151D, #232737, self.hover), mix(#E4DDD0, #D9D0C0, self.hover), self.light_mode);
                 let solid_act = mix(mix(#2E1B11, vec4(self.accent_col.xyz, 0.16), self.light_mode), vec4(self.accent_col.xyz, 0.28), 0.36);
                 let acrylic_idle = mix(vec4(ink, 0.065 + 0.025 * self.light_mode), vec4(ink, 0.16), self.hover);
                 let acrylic_act = vec4(self.accent_col.xyz, 0.26);
                 let bg = mix(mix(solid_idle, solid_act, self.active), mix(acrylic_idle, acrylic_act, self.active), self.acrylic_on);
-                let pressed = mix(bg, vec4(ink, 0.20), self.down * 0.24);
+                let pressed = mix(bg, vec4(ink, 0.20), self.down * 0.20);
                 sdf.fill_keep(pressed);
                 let solid_b = mix(mix(mix(#252734, #484E68, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(self.accent_col.xyz, 0.88), self.active);
                 let acrylic_b = mix(vec4(ink, 0.11 + 0.07 * self.light_mode + 0.12 * self.hover), vec4(self.accent_col.xyz, 0.90), self.active);
@@ -440,15 +400,15 @@ live_design! {
             hover = {
                 default: off,
                 off = {
-                    from: { all: Forward { duration: 0.15 } }
+                    from: { all: Forward { duration: 0.18 } }
                     apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_icon: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
                 }
                 on = {
-                    from: { all: Forward { duration: 0.12 } }
+                    from: { all: Forward { duration: 0.14 } }
                     apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_icon: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
                 }
                 down = {
-                    from: { all: Forward { duration: 0.05 } }
+                    from: { all: Forward { duration: 0.08 } }
                     apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_icon: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
                 }
             }
@@ -484,8 +444,8 @@ live_design! {
             uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let inset = 0.5 + self.down * 0.65;
-                let r = (self.rect_size.y - inset * 2.0) * 0.28;
+                let inset = 0.5;
+                let r = (self.rect_size.y - inset * 2.0) * 0.25;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 let solid_idle = mix(mix(#14151D, #25293A, self.hover), mix(#E4DDD0, #D8CFC0, self.hover), self.light_mode);
@@ -505,15 +465,15 @@ live_design! {
             hover = {
                 default: off,
                 off = {
-                    from: { all: Forward { duration: 0.15 } }
+                    from: { all: Forward { duration: 0.18 } }
                     apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_text: { down: 0.0, hover: 0.0 } }
                 }
                 on = {
-                    from: { all: Forward { duration: 0.12 } }
+                    from: { all: Forward { duration: 0.14 } }
                     apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_text: { down: 0.0, hover: 1.0 } }
                 }
                 down = {
-                    from: { all: Forward { duration: 0.05 } }
+                    from: { all: Forward { duration: 0.08 } }
                     apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_text: { down: 1.0, hover: 1.0 } }
                 }
             }
@@ -541,26 +501,12 @@ live_design! {
             color_down: #E86A2C
             fn pixel(self) -> vec4 {
                 let t = clamp(self.pulse, 0.0, 1.0);
-                let mut scale = 1.0 - 0.07 * self.down;
+                let scale = 1.0 - 0.03 * self.down;
                 let mut ang = 0.0;
-                if (t > 0.001 && t < 0.999) {
-                    let env = sin(t * 3.14159265);
-                    if (self.pulse_kind > 2.5) {
-                        // Heartbeat elastic pop
-                        scale = 1.0 + 0.28 * env - 0.09 * sin(t * 6.2831853) * (1.0 - t);
-                    } else if (self.pulse_kind > 1.5) {
-                        // Tactile mute/unmute shake + pop
-                        scale = 1.0 + 0.16 * env;
-                        ang = sin(t * 15.707963) * 0.24 * (1.0 - t);
-                    } else if (self.pulse_kind > 0.5) {
-                        // Repeat / refresh crisp 180-deg spring spin settle
-                        let ease = 1.0 - pow(1.0 - t, 3.0);
-                        scale = 1.0 + 0.16 * env;
-                        ang = (1.0 - ease) * 3.14159265;
-                    } else {
-                        // Crisp spring bounce
-                        scale = 1.0 + 0.20 * env;
-                    }
+                if (t > 0.001 && t < 0.999 && self.pulse_kind > 0.5 && self.pulse_kind < 1.5) {
+                    // Refresh: silky monotonic 180-deg cubic ease-out spin (constant scale, zero bounce)
+                    let ease = 1.0 - pow(1.0 - t, 3.0);
+                    ang = (1.0 - ease) * 3.14159265;
                 }
                 let uv_c = (self.pos - vec2(0.5, 0.5)) / max(scale, 0.45);
                 let ca = cos(ang);
@@ -585,23 +531,23 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
                 let sdf = Sdf2d::viewport(p);
-                let inset = 1.0 + self.down * 0.85;
-                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
+                let inset = 1.0 + self.down * 0.25;
+                let bw = self.rect_size.x - inset * 2.0;
+                let bh = self.rect_size.y - inset * 2.0;
+                let br = min(6.0, min(bw, bh) * 0.24);
+                sdf.box(inset, inset, bw, bh, br);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 let hov = mix(mix(#212432, vec4(0.05, 0.06, 0.10, 0.09), self.light_mode), vec4(ink, 0.13), self.acrylic_on);
                 let act = mix(mix(#321E14, vec4(0.05, 0.06, 0.10, 0.14), self.light_mode), vec4(ink, 0.18), self.acrylic_on);
                 let bg = mix(mix(vec4(0.0, 0.0, 0.0, 0.0), hov, self.hover), act, self.active);
-                sdf.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.25));
+                let pt = clamp(self.pulse, 0.0, 1.0);
+                let mut soft_glow = 0.0;
+                if (pt > 0.001 && pt < 0.999) {
+                    soft_glow = (1.0 - pt) * (1.0 - pt) * 0.10;
+                }
+                sdf.fill_keep(mix(bg, vec4(ink, 0.18), self.down * 0.20 + soft_glow));
                 let rim = vec4(ink, (0.12 * self.hover + 0.16 * self.active));
                 sdf.stroke(rim, 1.0);
-                let pt = clamp(self.pulse, 0.0, 1.0);
-                if (pt > 0.001 && pt < 0.999) {
-                    let c = self.rect_size * 0.5;
-                    let max_r = min(c.x, c.y) - 1.2;
-                    let ring_r = mix(max_r * 0.42, max_r, 1.0 - pow(1.0 - pt, 2.5));
-                    sdf.circle(c.x, c.y, ring_r);
-                    sdf.stroke(vec4(ink, 0.34 * (1.0 - pt)), 1.25);
-                }
                 return sdf.result;
             }
         }
@@ -609,15 +555,15 @@ live_design! {
             hover = {
                 default: off,
                 off = {
-                    from: { all: Forward { duration: 0.14 } }
+                    from: { all: Forward { duration: 0.18 } }
                     apply: { draw_bg: { down: 0.0, hover: 0.0 }, draw_icon: { down: 0.0, hover: 0.0 } }
                 }
                 on = {
-                    from: { all: Forward { duration: 0.11 } }
+                    from: { all: Forward { duration: 0.14 } }
                     apply: { draw_bg: { down: 0.0, hover: 1.0 }, draw_icon: { down: 0.0, hover: 1.0 } }
                 }
                 down = {
-                    from: { all: Forward { duration: 0.05 } }
+                    from: { all: Forward { duration: 0.08 } }
                     apply: { draw_bg: { down: 1.0, hover: 1.0 }, draw_icon: { down: 1.0, hover: 1.0 } }
                 }
             }
@@ -675,7 +621,7 @@ live_design! {
             uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let inset = 0.5 + self.down * 1.1;
+                let inset = 0.5;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 7.0);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 let solid_idle = mix(mix(vec4(0.050, 0.054, 0.074, 1.0), vec4(0.112, 0.120, 0.168, 1.0), self.hover), mix(vec4(0.90, 0.87, 0.81, 1.0), vec4(0.84, 0.80, 0.74, 1.0), self.hover), self.light_mode);
@@ -754,7 +700,7 @@ live_design! {
                     return vec4(0.0, 0.0, 0.0, 0.0);
                 }
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let inset = 0.5 + self.down * 1.4;
+                let inset = 0.5;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 let solid_fill = mix(mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover), mix(vec4(0.90, 0.87, 0.81, 1.0), vec4(0.84, 0.80, 0.74, 1.0), self.hover), self.light_mode);
@@ -816,6 +762,197 @@ live_design! {
         }
     }
 
+    // Spotify-Style Pastel Radio Station Card (supports both prebuilt Spotify 3-circle CDN artwork
+    // and Ferric's GPU-rendered pastel 3-circle triptych for YouTube/Local/Guest users)
+    StationCard = <View> {
+        width: Fill,
+        height: 188,
+        padding: 8,
+        flow: Down,
+        spacing: 6,
+        show_bg: true,
+        cursor: Hand,
+        draw_bg: {
+            instance hover: 0.0
+            instance down: 0.0
+            uniform ghost: 0.0
+            uniform acrylic_on: 0.0
+            uniform accent_col: #E86A2C
+            uniform light_mode: 0.0
+            fn pixel(self) -> vec4 {
+                if (self.ghost > 0.5) {
+                    return vec4(0.0, 0.0, 0.0, 0.0);
+                }
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let inset = 0.5;
+                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
+                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                let solid_fill = mix(mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover), mix(vec4(0.90, 0.87, 0.81, 1.0), vec4(0.84, 0.80, 0.74, 1.0), self.hover), self.light_mode);
+                let acr_fill = mix(vec4(ink, 0.032 + 0.035 * self.light_mode), vec4(ink, 0.10 + 0.03 * self.light_mode), self.hover);
+                let fill = mix(solid_fill, acr_fill, self.acrylic_on);
+                let sheen = smoothstep(0.45, 0.0, self.pos.y) * self.hover * 0.065 * (1.0 - self.light_mode);
+                let lifted = vec4(clamp(fill.xyz + vec3(sheen), 0.0, 1.0), fill.w);
+                let pressed = mix(lifted, vec4(ink, 0.15), self.down * 0.22);
+                sdf.fill_keep(pressed);
+                let hov_rim = mix(mix(#434966, #A89E88, self.light_mode), self.accent_col, 0.28);
+                let solid_b = mix(mix(#1B1D27, #D0C6B2, self.light_mode), hov_rim, self.hover);
+                let acr_b = vec4(ink, 0.06 + 0.07 * self.light_mode + 0.14 * self.hover);
+                sdf.stroke(mix(solid_b, acr_b, self.acrylic_on), 1.0);
+                return sdf.result;
+            }
+        }
+        animator: {
+            hover = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.22 } } apply: { draw_bg: { hover: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { hover: 1.0 } } }
+            }
+            down = {
+                default: off,
+                off = { from: { all: Forward { duration: 0.12 } } apply: { draw_bg: { down: 0.0 } } }
+                on = { from: { all: Forward { duration: 0.05 } } apply: { draw_bg: { down: 1.0 } } }
+            }
+        }
+        inner = <View> {
+            width: Fill,
+            height: Fill,
+            flow: Down,
+            spacing: 6,
+            art_stage = <View> {
+                width: Fill,
+                height: 124,
+                flow: Overlay,
+                full_art_wrap = <View> {
+                    visible: false,
+                    width: Fill,
+                    height: Fill,
+                    full_art = <FerricCoverArt> {
+                        width: Fill,
+                        height: Fill,
+                        draw_bg: { radius: 7.0 }
+                    }
+                }
+                triptych_box = <View> {
+                    visible: true,
+                    width: Fill,
+                    height: Fill,
+                    flow: Down,
+                    padding: { left: 7, right: 7, top: 6, bottom: 6 }
+                    show_bg: true,
+                    cursor: Hand,
+                    draw_bg: {
+                        uniform card_col: #7CECD4
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 7.0);
+                            let top_lift = mix(self.card_col.xyz, vec3(1.0, 1.0, 1.0), 0.14 * (1.0 - self.pos.y));
+                            let bot_shade = mix(top_lift, self.card_col.xyz * 0.90, smoothstep(0.55, 1.0, self.pos.y));
+                            sdf.fill(vec4(bot_shade, 1.0));
+                            return sdf.result;
+                        }
+                    }
+                    <View> {
+                        width: Fill,
+                        height: 13,
+                        flow: Right,
+                        align: { y: 0.5 },
+                        <View> {
+                            width: 11,
+                            height: 11,
+                            show_bg: true,
+                            draw_bg: {
+                                fn pixel(self) -> vec4 {
+                                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                    sdf.circle(5.5, 5.5, 4.6);
+                                    sdf.fill(#0B0D14);
+                                    sdf.circle(5.5, 5.5, 2.0);
+                                    sdf.fill(vec4(1.0, 1.0, 1.0, 0.90));
+                                    return sdf.result;
+                                }
+                            }
+                        }
+                        <View> { width: Fill, height: 1 }
+                        radio_tag = <Label> {
+                            width: Fit,
+                            padding: 0,
+                            draw_text: {
+                                color: #0B0D14,
+                                text_style: <THEME_FONT_BOLD> { font_size: 7.2, line_spacing: 1.0 }
+                            }
+                            text: "RADIO"
+                        }
+                    }
+                    <View> {
+                        width: Fill,
+                        height: Fill,
+                        flow: Overlay,
+                        align: { x: 0.5, y: 0.5 },
+                        left_wrap = <View> {
+                            width: Fill,
+                            height: Fill,
+                            align: { x: 0.08, y: 0.5 },
+                            art_left = <FerricCoverArt> {
+                                width: 44,
+                                height: 44,
+                                draw_bg: { circle: 1.0 }
+                            }
+                        }
+                        right_wrap = <View> {
+                            width: Fill,
+                            height: Fill,
+                            align: { x: 0.92, y: 0.5 },
+                            art_right = <FerricCoverArt> {
+                                width: 44,
+                                height: 44,
+                                draw_bg: { circle: 1.0 }
+                            }
+                        }
+                        center_wrap = <View> {
+                            width: Fill,
+                            height: Fill,
+                            align: { x: 0.5, y: 0.5 },
+                            art_center = <FerricCoverArt> {
+                                width: 64,
+                                height: 64,
+                                draw_bg: { circle: 1.0 }
+                            }
+                        }
+                    }
+                    card_title = <Label> {
+                        width: Fill,
+                        flow: Right,
+                        padding: 0,
+                        draw_text: {
+                            color: #0B0D14,
+                            text_style: <THEME_FONT_DISPLAY> { font_size: 9.8, line_spacing: 1.0 }
+                        }
+                        text: ""
+                    }
+                }
+            }
+            <View> {
+                width: Fill,
+                height: Fit,
+                flow: Down,
+                spacing: 2,
+                title = <Label> {
+                    width: Fill,
+                    flow: Right,
+                    padding: 0,
+                    draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 9.0, line_spacing: 1.0 } }
+                    text: ""
+                }
+                sub = <Label> {
+                    width: Fill,
+                    flow: Right,
+                    padding: 0,
+                    draw_text: { color: #969AAC, text_style: <THEME_FONT_REGULAR> { font_size: 7.8, line_spacing: 1.0 } }
+                    text: ""
+                }
+            }
+        }
+    }
+
     // Visual Grid Card for Albums / Artists / Playlists pages (5-col balanced, ghost-spacer safe)
     GridCard = <View> {
         width: Fill,
@@ -837,7 +974,7 @@ live_design! {
                     return vec4(0.0, 0.0, 0.0, 0.0);
                 }
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let inset = 0.5 + self.down * 1.4;
+                let inset = 0.5;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 8.0);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                 let solid_fill = mix(mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.118, 0.126, 0.174, 1.0), self.hover), mix(vec4(0.90, 0.87, 0.81, 1.0), vec4(0.84, 0.80, 0.74, 1.0), self.hover), self.light_mode);
@@ -1088,7 +1225,7 @@ live_design! {
             height: 40,
             draw_bg: { radius: 5.0 }
         }
-        <View> {
+        meta = <View> {
             width: Fill,
             height: Fit,
             flow: Down,
@@ -1175,7 +1312,7 @@ live_design! {
                 }
             }
         }
-        <View> {
+        meta = <View> {
             width: Fill,
             height: Fit,
             flow: Down,
@@ -1301,7 +1438,7 @@ live_design! {
                                     height: Fit,
                                     flow: Right,
                                     align: { y: 0.5 }
-                                    spacing: 7,
+                                    spacing: 8,
 
                                     nav_home = <FerricIconBtn> {
                                         width: 28,
@@ -1312,14 +1449,14 @@ live_design! {
                                             fn pixel(self) -> vec4 {
                                                 let p = self.pos * self.rect_size;
                                                 let sdf = Sdf2d::viewport(p);
-                                                let inset = 0.5 + self.down * 0.65;
-                                                let r = (self.rect_size.y - inset * 2.0) * 0.5;
-                                                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
+                                                let inset = 0.75 + self.down * 0.55;
+                                                let rad = min(self.rect_size.x, self.rect_size.y) * 0.5 - inset;
+                                                sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, rad);
                                                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                                                 let solid_idle = mix(mix(#14151D, #222533, self.hover), mix(#E4DDD0, #D8CFC0, self.hover), self.light_mode);
                                                 let acr_idle = mix(vec4(ink, 0.08 + 0.025 * self.light_mode), vec4(ink, 0.16), self.hover);
                                                 let idle = mix(solid_idle, acr_idle, self.acrylic_on);
-                                                let solid_act = mix(#252838, #12151F, self.light_mode);
+                                                let solid_act = mix(#252838, #DDD5C5, self.light_mode);
                                                 let acr_act = vec4(ink, 0.21);
                                                 sdf.fill_keep(mix(idle, mix(solid_act, acr_act, self.acrylic_on), self.active));
                                                 let rim = mix(vec4(ink, 0.10 + 0.09 * self.hover), vec4(ink, 0.24), self.active);
@@ -1334,9 +1471,9 @@ live_design! {
                                     }
 
                                     top_search_box = <View> {
-                                        width: 306,
+                                        width: 318,
                                         height: 28,
-                                        padding: { left: 10, right: 6, top: 0, bottom: 0 }
+                                        padding: { left: 11, right: 8, top: 0, bottom: 0 }
                                         flow: Right,
                                         align: { y: 0.5 }
                                         spacing: 6,
@@ -1348,7 +1485,7 @@ live_design! {
                                             uniform light_mode: 0.0
                                             fn pixel(self) -> vec4 {
                                                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                                let r = (self.rect_size.y - 1.0) * 0.50;
+                                                let r = (self.rect_size.y - 1.0) * 0.25;
                                                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
                                                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                                                 let solid_c = mix(mix(#11131B, #1A1D2B, self.hover), mix(#E4DDD0, #DAD1C1, self.hover), self.light_mode);
@@ -1432,14 +1569,14 @@ live_design! {
                                             fn pixel(self) -> vec4 {
                                                 let p = self.pos * self.rect_size;
                                                 let sdf = Sdf2d::viewport(p);
-                                                let inset = 0.5 + self.down * 0.65;
-                                                let r = (self.rect_size.y - inset * 2.0) * 0.5;
-                                                sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
+                                                let inset = 0.75 + self.down * 0.55;
+                                                let rad = min(self.rect_size.x, self.rect_size.y) * 0.5 - inset;
+                                                sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, rad);
                                                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
                                                 let solid_idle = mix(mix(#14151D, #222533, self.hover), mix(#E4DDD0, #D8CFC0, self.hover), self.light_mode);
                                                 let acr_idle = mix(vec4(ink, 0.08 + 0.025 * self.light_mode), vec4(ink, 0.16), self.hover);
                                                 let idle = mix(solid_idle, acr_idle, self.acrylic_on);
-                                                let solid_act = mix(#252838, #12151F, self.light_mode);
+                                                let solid_act = mix(#252838, #DDD5C5, self.light_mode);
                                                 let acr_act = vec4(ink, 0.21);
                                                 sdf.fill_keep(mix(idle, mix(solid_act, acr_act, self.acrylic_on), self.active));
                                                 let rim = mix(vec4(ink, 0.10 + 0.09 * self.hover), vec4(ink, 0.24), self.active);
@@ -1559,70 +1696,98 @@ live_design! {
                                     nav_artists = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, draw_text: { text_style: { font_size: 7.9 } }, text: "Artists" }
                                 }
 
-                                // Inline filter search + count row
-                                sidebar_filter_box = <View> {
+                                // Dynamic account/source playlist filter row (auto-visible when 2+ sources exist)
+                                sidebar_pl_source_row = <View> {
+                                    visible: false,
+                                    width: Fill,
+                                    height: Fit,
+                                    padding: { left: 2, right: 2 }
+                                    flow: Right,
+                                    spacing: 3,
+                                    sb_src_all_btn = <FerricChipBtn> { height: 20, padding: { left: 5, right: 5 }, draw_bg: { active: 1.0 }, draw_text: { active: 1.0, text_style: { font_size: 7.3 } }, text: "All" }
+                                    sb_src_yt_btn = <FerricChipBtn> { visible: false, height: 20, padding: { left: 5, right: 5 }, draw_text: { text_style: { font_size: 7.3 } }, text: "YouTube" }
+                                    sb_src_sp_btn = <FerricChipBtn> { visible: false, height: 20, padding: { left: 5, right: 5 }, draw_text: { text_style: { font_size: 7.3 } }, text: "Spotify" }
+                                    sb_src_sp_prem_btn = <FerricChipBtn> { visible: false, height: 20, padding: { left: 5, right: 5 }, draw_text: { text_style: { font_size: 7.3 } }, text: "Premium" }
+                                    sb_src_local_btn = <FerricChipBtn> { visible: false, height: 20, padding: { left: 5, right: 5 }, draw_text: { text_style: { font_size: 7.3 } }, text: "Local" }
+                                }
+
+                                // Inline filter search + count + Newest/Oldest/A-Z sort cycle row
+                                <View> {
                                     width: Fill,
                                     height: 25,
-                                    padding: { left: 7, right: 7, top: 0, bottom: 0 }
                                     flow: Right,
                                     align: { y: 0.5 }
-                                    spacing: 5,
-                                    show_bg: true,
-                                    draw_bg: {
-                                        uniform acrylic_on: 0.0
-                                        uniform light_mode: 0.0
-                                        fn pixel(self) -> vec4 {
-                                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
-                                            let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
-                                            let solid_c = mix(#11131B, #E6DFD2, self.light_mode);
-                                            let acr_c = vec4(ink, 0.055 + 0.025 * self.light_mode);
-                                            sdf.fill_keep(mix(solid_c, acr_c, self.acrylic_on));
-                                            let b_col = mix(mix(#1E2130, #CBC2AC, self.light_mode), vec4(ink, 0.09 + 0.04 * self.light_mode), self.acrylic_on);
-                                            sdf.stroke(b_col, 1.0);
-                                            return sdf.result;
-                                        }
-                                    }
-                                    sidebar_filter_icon = <Icon> {
-                                        icon_walk: { width: 11, height: 11 }
-                                        draw_icon: {
-                                            curve: 1.15,
-                                            linearize: 0.08,
-                                            brightness: 1.05,
-                                            svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
-                                            color: #7D8090
-                                        }
-                                    }
-                                    sidebar_lib_filter_input = <FerricInput> {
+                                    spacing: 4,
+                                    sidebar_filter_box = <View> {
                                         width: Fill,
-                                        height: Fill,
-                                        padding: { left: 1, right: 1, top: 0, bottom: 0 }
-                                        empty_text: "Filter library..."
+                                        height: 25,
+                                        padding: { left: 7, right: 7, top: 0, bottom: 0 }
+                                        flow: Right,
+                                        align: { y: 0.5 }
+                                        spacing: 5,
+                                        show_bg: true,
                                         draw_bg: {
-                                            color: #00000000,
-                                            color_empty: #00000000,
-                                            color_hover: #00000000,
-                                            color_focus: #00000000,
-                                            border_size: 0.0,
-                                            border_color_1: #00000000,
-                                            border_color_2: #00000000,
-                                            border_color_1_empty: #00000000,
-                                            border_color_2_empty: #00000000,
-                                            border_color_1_hover: #00000000,
-                                            border_color_2_hover: #00000000,
-                                            border_color_1_focus: #00000000,
-                                            border_color_2_focus: #00000000
+                                            uniform acrylic_on: 0.0
+                                            uniform light_mode: 0.0
+                                            fn pixel(self) -> vec4 {
+                                                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0);
+                                                let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
+                                                let solid_c = mix(#11131B, #E6DFD2, self.light_mode);
+                                                let acr_c = vec4(ink, 0.055 + 0.025 * self.light_mode);
+                                                sdf.fill_keep(mix(solid_c, acr_c, self.acrylic_on));
+                                                let b_col = mix(mix(#1E2130, #CBC2AC, self.light_mode), vec4(ink, 0.09 + 0.04 * self.light_mode), self.acrylic_on);
+                                                sdf.stroke(b_col, 1.0);
+                                                return sdf.result;
+                                            }
                                         }
-                                        draw_text: {
-                                            color: #F4F4F7,
-                                            color_empty: #7D8090,
-                                            text_style: <THEME_FONT_REGULAR> { font_size: 8.0, line_spacing: 1.0 }
+                                        sidebar_filter_icon = <Icon> {
+                                            icon_walk: { width: 11, height: 11 }
+                                            draw_icon: {
+                                                curve: 1.15,
+                                                linearize: 0.08,
+                                                brightness: 1.05,
+                                                svg_path: "M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3C5.91 3 3 5.91 3 9.5C3 13.09 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5C5 7.01 7.01 5 9.5 5C11.99 5 14 7.01 14 9.5C14 11.99 11.99 14 9.5 14Z"
+                                                color: #7D8090
+                                            }
+                                        }
+                                        sidebar_lib_filter_input = <FerricInput> {
+                                            width: Fill,
+                                            height: Fill,
+                                            padding: { left: 1, right: 1, top: 0, bottom: 0 }
+                                            empty_text: "Filter..."
+                                            draw_bg: {
+                                                color: #00000000,
+                                                color_empty: #00000000,
+                                                color_hover: #00000000,
+                                                color_focus: #00000000,
+                                                border_size: 0.0,
+                                                border_color_1: #00000000,
+                                                border_color_2: #00000000,
+                                                border_color_1_empty: #00000000,
+                                                border_color_2_empty: #00000000,
+                                                border_color_1_hover: #00000000,
+                                                border_color_2_hover: #00000000,
+                                                border_color_1_focus: #00000000,
+                                                border_color_2_focus: #00000000
+                                            }
+                                            draw_text: {
+                                                color: #F4F4F7,
+                                                color_empty: #7D8090,
+                                                text_style: <THEME_FONT_REGULAR> { font_size: 8.0, line_spacing: 1.0 }
+                                            }
+                                        }
+                                        lbl_m_pinned = <Label> {
+                                            width: Fit,
+                                            draw_text: { color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 7.5 } }
+                                            text: "0"
                                         }
                                     }
-                                    lbl_m_pinned = <Label> {
-                                        width: Fit,
-                                        draw_text: { color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 7.5 } }
-                                        text: "0"
+                                    sb_pl_sort_btn = <FerricChipBtn> {
+                                        height: 24,
+                                        padding: { left: 6, right: 6 }
+                                        draw_text: { text_style: { font_size: 7.3 } }
+                                        text: "Newest"
                                     }
                                 }
 
@@ -1636,8 +1801,10 @@ live_design! {
                                         badge = {
                                             draw_bg: { bg_a: #4A35D6, bg_b: #8F7BF9 }
                                         }
-                                        title = { text: "Liked Songs" }
-                                        sub = { text: "Playlist · 0 songs" }
+                                        meta = {
+                                            title = { text: "Liked Songs" }
+                                            sub = { text: "Playlist · 0 songs" }
+                                        }
                                     }
                                     pin_local_row = <SidebarSmartRow> {
                                         badge = {
@@ -1648,8 +1815,25 @@ live_design! {
                                                 }
                                             }
                                         }
-                                        title = { text: "Local Lossless" }
-                                        sub = { text: "Local · 0 songs" }
+                                        meta = {
+                                            title = { text: "Local Lossless" }
+                                            sub = { text: "Local · 0 songs" }
+                                        }
+                                    }
+                                    sidebar_empty_wrap = <View> {
+                                        visible: false,
+                                        width: Fill,
+                                        height: Fit,
+                                        padding: { top: 8, bottom: 4, left: 6, right: 6 }
+                                        sidebar_empty_lbl = <Label> {
+                                            width: Fill,
+                                            height: Fit,
+                                            draw_text: {
+                                                color: #8A8EA2,
+                                                text_style: <THEME_FONT_REGULAR> { font_size: 8.1, line_spacing: 1.35 }
+                                            }
+                                            text: "No playlists yet. Sign in via Settings or click + Create."
+                                        }
                                     }
                                     pin_slot_0 = <SidebarLibraryRow> { visible: false }
                                     pin_slot_1 = <SidebarLibraryRow> { visible: false }
@@ -1691,24 +1875,6 @@ live_design! {
                                     pin_slot_37 = <SidebarLibraryRow> { visible: false }
                                     pin_slot_38 = <SidebarLibraryRow> { visible: false }
                                     pin_slot_39 = <SidebarLibraryRow> { visible: false }
-                                }
-
-                                div_h_side = <FerricDividerH> { margin: { top: 2, bottom: 2 } }
-                                <View> {
-                                    width: Fill,
-                                    height: Fit,
-                                    flow: Right,
-                                    spacing: 4,
-                                    nav_settings = <FerricNavItem> {
-                                        width: Fill,
-                                        text: "Settings"
-                                        draw_icon: { svg_path: "M19.14 12.94C19.18 12.64 19.2 12.33 19.2 12C19.2 11.68 19.18 11.36 19.13 11.06L21.16 9.48C21.34 9.34 21.39 9.07 21.28 8.87L19.36 5.55C19.24 5.33 18.99 5.26 18.77 5.33L16.38 6.29C15.88 5.91 15.35 5.59 14.76 5.35L14.4 2.81C14.36 2.57 14.16 2.4 13.92 2.4H10.08C9.84 2.4 9.65 2.57 9.61 2.81L9.25 5.35C8.66 5.59 8.12 5.92 7.63 6.29L5.24 5.33C5.02 5.25 4.77 5.33 4.65 5.55L2.74 8.87C2.62 9.08 2.66 9.34 2.86 9.48L4.89 11.06C4.84 11.36 4.8 11.69 4.8 12C4.8 12.31 4.82 12.64 4.87 12.94L2.84 14.52C2.66 14.66 2.61 14.93 2.72 15.13L4.64 18.45C4.76 18.67 5.01 18.74 5.23 18.67L7.62 17.71C8.12 18.09 8.65 18.41 9.24 18.65L9.6 21.19C9.65 21.43 9.84 21.6 10.08 21.6H13.92C14.16 21.6 14.36 21.43 14.39 21.19L14.75 18.65C15.34 18.41 15.88 18.09 16.37 17.71L18.76 18.67C18.98 18.75 19.23 18.67 19.35 18.45L21.27 15.13C21.39 14.91 21.34 14.66 21.15 14.52L19.14 12.94ZM12 15.6C10.02 15.6 8.4 13.98 8.4 12C8.4 10.02 10.02 8.4 12 8.4C13.98 8.4 15.6 10.02 15.6 12C15.6 13.98 13.98 15.6 12 15.6Z" }
-                                    }
-                                    sidebar_add_folder_btn = <FerricNavItem> {
-                                        width: Fill,
-                                        text: "Add Folder"
-                                        draw_icon: { svg_path: "M20 6H12L10 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V8C22 6.89 21.11 6 20 6ZM19 14H16V17H14V14H11V12H14V9H16V12H19V14Z" }
-                                    }
                                 }
                             }
 
@@ -1797,6 +1963,54 @@ live_design! {
                                                 qp_6 = <QuickPickTile> {}
                                                 qp_7 = <QuickPickTile> {}
                                             }
+                                        }
+                                    }
+
+                                    // SECTION 2: RECOMMENDED STATIONS (Spotify-Style Pastel Radio Cards)
+                                    stations_wrap = <View> {
+                                        visible: false,
+                                        width: Fill,
+                                        height: Fit,
+                                        flow: Down,
+                                        spacing: 8,
+
+                                        <View> {
+                                            width: Fill,
+                                            height: Fit,
+                                            flow: Right,
+                                            align: { y: 0.85 },
+                                            spacing: 4,
+                                            <View> {
+                                                width: Fill,
+                                                height: Fit,
+                                                flow: Down,
+                                                spacing: 1,
+                                                lbl_m_stations = <Label> {
+                                                    width: Fill,
+                                                    draw_text: { color: #8B8E9E, text_style: <THEME_FONT_REGULAR> { font_size: 7.9 } }
+                                                    text: "Non-stop music based on your favorite songs and artists."
+                                                }
+                                                lbl_t_stations = <Label> {
+                                                    width: Fill,
+                                                    draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 12.5 } }
+                                                    text: "Recommended Stations"
+                                                }
+                                            }
+                                            stations_refresh_btn = <FerricBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Refresh" }
+                                            stations_prev_btn = <FerricIconBtn> { width: 24, height: 24, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
+                                            stations_next_btn = <FerricIconBtn> { width: 24, height: 24, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
+                                        }
+
+                                        <View> {
+                                            width: Fill,
+                                            height: Fit,
+                                            flow: Right,
+                                            spacing: 8,
+                                            st_c0 = <StationCard> {}
+                                            st_c1 = <StationCard> {}
+                                            st_c2 = <StationCard> {}
+                                            st_c3 = <StationCard> {}
+                                            st_c4 = <StationCard> {}
                                         }
                                     }
 
@@ -2169,6 +2383,35 @@ live_design! {
                                         pl_prev_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
                                         pl_next_btn = <FerricIconBtn> { width: 26, height: 26, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                     }
+                                    <View> {
+                                        width: Fill,
+                                        height: Fit,
+                                        flow: Right,
+                                        align: { y: 0.5 }
+                                        spacing: 8,
+                                        pl_source_filter_row = <View> {
+                                            visible: false,
+                                            width: Fit,
+                                            height: Fit,
+                                            flow: Right,
+                                            spacing: 5,
+                                            pl_src_all_btn = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
+                                            pl_src_yt_btn = <FerricChipBtn> { visible: false, text: "YouTube" }
+                                            pl_src_sp_btn = <FerricChipBtn> { visible: false, text: "Spotify" }
+                                            pl_src_sp_prem_btn = <FerricChipBtn> { visible: false, text: "Spotify Premium" }
+                                            pl_src_local_btn = <FerricChipBtn> { visible: false, text: "Local" }
+                                        }
+                                        <View> { width: Fill, height: 1 }
+                                        <View> {
+                                            width: Fit,
+                                            height: Fit,
+                                            flow: Right,
+                                            spacing: 5,
+                                            pl_sort_newest_btn = <FerricChipBtn> { text: "Newest", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
+                                            pl_sort_oldest_btn = <FerricChipBtn> { text: "Oldest" }
+                                            pl_sort_az_btn = <FerricChipBtn> { text: "A-Z" }
+                                        }
+                                    }
                                     playlists_empty_card = <FerricCard> {
                                         visible: false,
                                         width: Fill,
@@ -2262,6 +2505,7 @@ live_design! {
                                                 width: Fill, height: Fit, margin: { top: 4 }, flow: Right, spacing: 6,
                                                 detail_play_btn = <FerricPrimaryBtn> { text: "Play", draw_icon: { svg_path: "M8 5V19L19 12L8 5Z" } }
                                                 detail_shuffle_btn = <FerricBtn> { height: 28, text: "Shuffle" }
+                                                detail_save_pl_btn = <FerricBtn> { visible: false, height: 28, text: "+ Save Playlist" }
                                                 detail_radio_btn = <FerricBtn> { height: 28, text: "Start Radio" }
                                                 detail_pin_btn = <FerricBtn> { height: 28, text: "Pin" }
                                                 detail_queue_btn = <FerricBtn> { height: 28, text: "+ Queue" }
@@ -2349,31 +2593,24 @@ live_design! {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_acct_spotify = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account (Direct OAuth 2.0 PKCE · Premium)" }
+                                                lbl_t_acct_spotify = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account (Direct OAuth 2.0 PKCE · Premium Only)" }
                                                 spotify_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Not Connected" }
                                             }
                                             lbl_m_acct_spotify = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
-                                                text: "For Spotify Premium accounts: sign in directly in one click without a manual Client ID (built-in desktop OAuth 2.0 PKCE on 127.0.0.1:8989/login, tokens encrypted with Windows DPAPI), or enter an optional custom Client ID. Free accounts can use Spotify Web Sign-In below."
+                                                text: "For Spotify Premium accounts: one-click sign-in via built-in desktop OAuth 2.0 PKCE (127.0.0.1:8989/login, tokens encrypted with Windows DPAPI). Non-Premium accounts are rejected automatically — use Spotify Web Sign-In below for Free accounts."
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                spotify_client_input = <FerricInput> { width: Fill, empty_text: "Optional custom Client ID (leave blank for direct built-in login)" }
                                                 spotify_login_btn = <FerricPrimaryBtn> { text: "Sign in with Spotify" }
                                                 spotify_sync_btn = <FerricBtn> { height: 28, text: "Sync Library" }
                                                 spotify_logout_btn = <FerricBtn> { height: 28, text: "Sign Out" }
                                             }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                spotify_dev_portal_btn = <FerricBtn> { height: 26, text: "Open Developer Dashboard" }
-                                                spotify_copy_portal_btn = <FerricBtn> { height: 26, text: "Copy Dashboard URL" }
-                                                spotify_copy_redirect_btn = <FerricBtn> { height: 26, text: "Copy Redirect URI" }
-                                            }
                                             spotify_oauth_status_lbl = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.5 } }
-                                                text: "Direct Premium sign-in ready (127.0.0.1:8989/login)  ·  Custom Client ID redirect: http://127.0.0.1:43824/callback"
+                                                text: "Ready — requires an active Spotify Premium subscription (127.0.0.1:8989/login)."
                                             }
                                         }
 
@@ -2526,14 +2763,6 @@ live_design! {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                lbl_t_pb_speed = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.2 } }, text: "Playback Speed" }
-                                                spd_075_btn = <FerricBtn> { text: "0.75x" }
-                                                spd_100_btn = <FerricBtn> { text: "1.0x" }
-                                                spd_125_btn = <FerricBtn> { text: "1.25x" }
-                                                spd_150_btn = <FerricBtn> { text: "1.5x" }
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                                 sleep_status_lbl = <Label> { width: Fill, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Sleep Timer: Off" }
                                                 slp_off_btn = <FerricBtn> { text: "Off" }
                                                 slp_15_btn = <FerricBtn> { text: "15m" }
@@ -2563,7 +2792,7 @@ live_design! {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
                                                 lbl_t_eq_preamp = <Label> { width: 68, draw_text: { color: #C8CAD6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Preamp" }
                                                 eq_preamp_slider = <FerricBarSlider> { min: -12.0, max: 12.0, value: 0.0 }
-                                                eq_preamp_lbl = <Label> { width: 48, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "+0.0 dB" }
+                                                eq_preamp_lbl = <Label> { width: 64, padding: 0, align: { x: 1.0, y: 0.5 }, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "+0.0 dB" }
                                             }
 
                                             // 13 EQ Presets
@@ -2615,44 +2844,86 @@ live_design! {
                                     // TAB D: APPEARANCE, UI ZOOM, ADAPTIVE ARTWORK & NATIVE WINDOWS ACRYLIC
                                     tab_appearance = <View> {
                                         visible: false,
-                                        width: Fill, height: Fit, flow: Down, spacing: 10,
+                                        width: Fill, height: Fit, flow: Down, spacing: 12,
 
+                                        // CARD 1: THEME & INTERFACE SCALE
                                         card_app_theme = <FerricCard> {
-                                            flow: Down, spacing: 10,
-                                            lbl_t_app_title = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Theme, Interface Zoom & Native Windows Acrylic" }
+                                            flow: Down, spacing: 12,
                                             <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 6,
-                                                pal_amoled_btn = <FerricBtn> { text: "AMOLED Black" }
-                                                pal_acrylic_btn = <FerricBtn> { text: "Native Acrylic" }
-                                                pal_obsidian_btn = <FerricBtn> { text: "Obsidian Studio" }
-                                                pal_cream_btn = <FerricBtn> { text: "Warm Cream" }
+                                                width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                lbl_t_app_title = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.6 } }, text: "Theme & Interface" }
+                                                lbl_m_app_theme_desc = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.4 } }, text: "Choose your surface palette, interface zoom scale, and cover-driven accent tint." }
                                             }
                                             <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                lbl_t_app_zoom = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Interface Zoom (Ctrl - / Ctrl + / Ctrl 0)" }
-                                                zoom_out_btn = <FerricBtn> { height: 24, padding: { left: 9, right: 9 }, text: "-" }
-                                                zoom_val_lbl = <Label> { width: 42, align: { x: 0.5, y: 0.5 }, draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.0 } }, text: "100%" }
-                                                zoom_in_btn = <FerricBtn> { height: 24, padding: { left: 9, right: 9 }, text: "+" }
-                                                zoom_reset_btn = <FerricBtn> { height: 24, text: "Reset" }
+                                                width: Fill, height: Fit, flow: Right, spacing: 8,
+                                                pal_amoled_btn = <FerricBtn> { height: 30, padding: { left: 13, right: 13 }, text: "AMOLED Black" }
+                                                pal_acrylic_btn = <FerricBtn> { height: 30, padding: { left: 13, right: 13 }, text: "Native Acrylic" }
+                                                pal_obsidian_btn = <FerricBtn> { height: 30, padding: { left: 13, right: 13 }, text: "Obsidian Studio" }
+                                                pal_cream_btn = <FerricBtn> { height: 30, padding: { left: 13, right: 13 }, text: "Warm Cream" }
                                             }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_app_acr = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Native Windows 11 Acrylic Transparency (Real OS DWM blur behind window)" }
-                                                acrylic_toggle = <FerricToggle> { is_on: false }
-                                            }
+                                            div_h_app = <FerricDividerH> {}
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                lbl_m_app_opacity = <Label> { width: 140, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Opacity" }
-                                                acrylic_opacity_slider = <FerricBarSlider> { min: 0.18, max: 0.94, value: 0.72, wheel_adjust: true, wheel_step: 0.04 }
-                                                acrylic_opacity_lbl = <Label> { width: 42, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "72%" }
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                    lbl_t_app_zoom = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_MEDIUM> { font_size: 9.0 } }, text: "Interface Zoom" }
+                                                    lbl_m_app_zoom_hint = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }, text: "Scale typography, spacing, and sidebars (Ctrl - / Ctrl + / Ctrl 0)" }
+                                                }
+                                                zoom_out_btn = <FerricBtn> { height: 26, padding: { left: 10, right: 10 }, text: "-" }
+                                                zoom_val_lbl = <Label> { width: 50, padding: 0, align: { x: 0.5, y: 0.5 }, draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.0 } }, text: "100%" }
+                                                zoom_in_btn = <FerricBtn> { height: 26, padding: { left: 10, right: 10 }, text: "+" }
+                                                zoom_reset_btn = <FerricBtn> { height: 26, padding: { left: 10, right: 10 }, text: "Reset" }
                                             }
                                             <View> {
-                                                width: Fill, height: Fit, flow: Down, spacing: 6,
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                    lbl_t_app_adaptive = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_MEDIUM> { font_size: 9.0 } }, text: "Adaptive Artwork Accent" }
+                                                    lbl_m_app_adaptive_hint = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }, text: "Tint seekbar, active indicators, and lyrics highlight from the playing cover art." }
+                                                }
+                                                adaptive_art_toggle = <FerricToggle> { is_on: true }
+                                            }
+                                        }
+
+                                        // CARD 2: NATIVE WINDOWS 11 ACRYLIC & GLASS TINT
+                                        card_app_acrylic = <FerricCard> {
+                                            flow: Down, spacing: 12,
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                    lbl_t_app_acr = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.4 } }, text: "Native Windows 11 Acrylic" }
+                                                    lbl_m_app_acr_desc = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.3 } }, text: "Real OS DWM blur behind the window using hardware DirectComposition." }
+                                                }
+                                                acrylic_toggle = <FerricToggle> { is_on: false }
+                                            }
+                                            div_h_app_acr = <FerricDividerH> {}
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
+                                                lbl_m_app_opacity = <Label> { width: 118, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Acrylic Opacity" }
+                                                acrylic_opacity_slider = <FerricBarSlider> { min: 0.18, max: 0.94, value: 0.72, wheel_adjust: true, wheel_step: 0.04 }
+                                                <View> {
+                                                    width: 52, height: Fit, align: { x: 1.0, y: 0.5 },
+                                                    acrylic_opacity_lbl = <Label> { width: Fit, draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 8.8 } }, text: "72%" }
+                                                }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                    lbl_t_app_acr_adaptive = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_MEDIUM> { font_size: 9.0 } }, text: "Adaptive Acrylic Tint" }
+                                                    lbl_m_app_acr_adaptive_hint = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }, text: "Smoothly shift the glass tint to harmonize with the current song cover." }
+                                                }
+                                                adaptive_acrylic_tint_toggle = <FerricToggle> { is_on: true }
+                                            }
+                                            div_h_app_tint = <FerricDividerH> {}
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 9,
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
-                                                    lbl_t_app_tint = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Acrylic Glass Tint Color (Custom RGB)" }
+                                                    lbl_t_app_tint = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_MEDIUM> { font_size: 9.0 } }, text: "Manual Glass Tint" }
                                                     acrylic_tint_preview = <View> {
-                                                        width: 18, height: 18,
+                                                        width: 16, height: 16,
                                                         show_bg: true,
                                                         draw_bg: {
                                                             uniform tint_col: #0B0D14
@@ -2667,41 +2938,51 @@ live_design! {
                                                             }
                                                         }
                                                     }
-                                                    acrylic_tint_lbl = <Label> { width: 64, draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.6 } }, text: "#0B0D14" }
+                                                    acrylic_tint_lbl = <Label> { width: Fit, draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 8.6 } }, text: "#0B0D14" }
                                                 }
                                                 <View> {
-                                                    width: Fill, height: Fit, flow: Right, spacing: 5,
-                                                    tint_obsidian_btn = <FerricChipBtn> { text: "Obsidian" }
-                                                    tint_ember_btn = <FerricChipBtn> { text: "Ember" }
-                                                    tint_copper_btn = <FerricChipBtn> { text: "Copper" }
-                                                    tint_midnight_btn = <FerricChipBtn> { text: "Midnight" }
-                                                    tint_emerald_btn = <FerricChipBtn> { text: "Emerald" }
-                                                    tint_crimson_btn = <FerricChipBtn> { text: "Crimson" }
-                                                    tint_slate_btn = <FerricChipBtn> { text: "Slate" }
-                                                    tint_smoke_btn = <FerricChipBtn> { text: "Smoke" }
-                                                }
-                                                acrylic_color_picker = <FerricColorPicker> {
-                                                    width: Fill,
-                                                    height: 138,
-                                                }
-                                                <View> {
-                                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                    acrylic_tint_input = <FerricInput> { width: 160, height: 28, empty_text: "#RRGGBB (e.g. #2B140A)" }
-                                                    acrylic_tint_apply_btn = <FerricBtn> { height: 28, text: "Apply Tint" }
+                                                    width: Fill, height: Fit, flow: Right, align: { y: 0.0 }, spacing: 14,
+                                                    acrylic_color_picker = <FerricColorPicker> {
+                                                        width: Fill,
+                                                        height: 110,
+                                                    }
+                                                    <View> {
+                                                        width: 316, height: Fit, flow: Down, spacing: 8,
+                                                        lbl_m_app_presets = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 8.2 } }, text: "Quick Presets" }
+                                                        <View> {
+                                                            width: Fill, height: Fit, flow: Right, spacing: 5,
+                                                            tint_obsidian_btn = <FerricChipBtn> { width: Fill, text: "Obsidian" }
+                                                            tint_ember_btn = <FerricChipBtn> { width: Fill, text: "Ember" }
+                                                            tint_copper_btn = <FerricChipBtn> { width: Fill, text: "Copper" }
+                                                            tint_midnight_btn = <FerricChipBtn> { width: Fill, text: "Midnight" }
+                                                        }
+                                                        <View> {
+                                                            width: Fill, height: Fit, flow: Right, spacing: 5,
+                                                            tint_emerald_btn = <FerricChipBtn> { width: Fill, text: "Emerald" }
+                                                            tint_crimson_btn = <FerricChipBtn> { width: Fill, text: "Crimson" }
+                                                            tint_slate_btn = <FerricChipBtn> { width: Fill, text: "Slate" }
+                                                            tint_smoke_btn = <FerricChipBtn> { width: Fill, text: "Smoke" }
+                                                        }
+                                                        <View> {
+                                                            width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                            acrylic_tint_input = <FerricInput> { width: Fill, height: 28, empty_text: "#RRGGBB" }
+                                                            acrylic_tint_apply_btn = <FerricBtn> { height: 28, padding: { left: 12, right: 12 }, text: "Apply" }
+                                                        }
+                                                    }
                                                 }
                                             }
+                                        }
+
+                                        // CARD 3: THEME PROFILES
+                                        card_app_profiles = <FerricCard> {
+                                            flow: Right, align: { y: 0.5 }, spacing: 10,
                                             <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_app_adaptive = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Adaptive Artwork Accent (Tint seekbar, lyrics & active indicator from cover art)" }
-                                                adaptive_art_toggle = <FerricToggle> { is_on: true }
+                                                width: Fill, height: Fit, flow: Down, spacing: 2,
+                                                lbl_t_app_profiles = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.0 } }, text: "Theme Profiles" }
+                                                lbl_m_app_profiles = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.3 } }, text: "Import or export your custom Ferric color palette as JSON." }
                                             }
-                                            div_h_app = <FerricDividerH> {}
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                lbl_m_app_profiles = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Custom Theme Profiles" }
-                                                theme_import_btn = <FerricBtn> { height: 24, text: "Import Theme JSON" }
-                                                theme_export_btn = <FerricBtn> { height: 24, text: "Export Theme JSON" }
-                                            }
+                                            theme_import_btn = <FerricBtn> { height: 28, padding: { left: 12, right: 12 }, text: "Import JSON" }
+                                            theme_export_btn = <FerricBtn> { height: 28, padding: { left: 12, right: 12 }, text: "Export JSON" }
                                         }
                                     }
 
@@ -2854,7 +3135,7 @@ live_design! {
                                         card_st_keys = <FerricCard> {
                                             flow: Down, spacing: 5,
                                             lbl_t_st_keys = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Keyboard Shortcuts" }
-                                            lbl_m_st_keys = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Space: Play / Pause  ·  Ctrl+K: Focus Search  ·  Ctrl+F: Search Page  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down / Mouse Wheel: Volume" }
+                                            lbl_m_st_keys = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Space: Play / Pause  ·  Ctrl+K: Focus Search  ·  Ctrl+P: Powerbar  ·  Ctrl+F: Search Page  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down / Mouse Wheel: Volume" }
                                         }
                                     }
 
@@ -3147,6 +3428,12 @@ live_design! {
                                 align: { x: 1.0, y: 0.5 }
                                 spacing: 3,
 
+                                speed_pill_btn = <FerricBtn> {
+                                    height: 22,
+                                    padding: { left: 7, right: 7 }
+                                    text: "1.0x"
+                                    draw_text: { color: #B4B6C4, color_hover: #FFFFFF, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
+                                }
                                 codec_pill_btn = <FerricBtn> {
                                     height: 22,
                                     padding: { left: 7, right: 7 }
@@ -3214,7 +3501,7 @@ live_design! {
                                 width: Fill, height: 30, flow: Right, align: { y: 0.5 }, spacing: 8,
                                 signal_path_lbl = <Label> {
                                     width: Fill, padding: 0,
-                                    draw_text: { color: #FFFFFF4C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
+                                    draw_text: { color: #FFFFFF9E, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
                                     text: "Signal Path: WASAPI 48.0 kHz · 6.0s Bass-Swap"
                                 }
                                 fs_close_btn = <Button> {
@@ -3225,7 +3512,7 @@ live_design! {
                                         instance hover: 0.0
                                         fn pixel(self) -> vec4 {
                                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                            let r = (self.rect_size.y - 1.0) * 0.28;
+                                            let r = (self.rect_size.y - 1.0) * 0.25;
                                             sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, r);
                                             sdf.fill_keep(vec4(1.0, 1.0, 1.0, 0.08 + 0.12 * self.hover));
                                             sdf.stroke(vec4(1.0, 1.0, 1.0, 0.15 + 0.18 * self.hover), 1.0);
@@ -3477,7 +3764,7 @@ live_design! {
 
                                 fs_lyr_source = <Label> {
                                     width: Fill, padding: 0,
-                                    draw_text: { color: #FFFFFF45, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
+                                    draw_text: { color: #FFFFFF9E, text_style: <THEME_FONT_MEDIUM> { font_size: 8.0 } }
                                     text: "Synced Lyrics"
                                 }
 
@@ -3677,9 +3964,9 @@ live_design! {
                                 tm_copy_btn = <FerricBtn> { height: 26, text: "Copy Info" }
                             }
 
-                            <FerricDividerH> {}
+                            tm_div_1 = <FerricDividerH> {}
 
-                            <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_BOLD> { font_size: 8.2 } }, text: "ADD TO PLAYLIST" }
+                            tm_add_pl_hdr = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_BOLD> { font_size: 8.2 } }, text: "ADD TO PLAYLIST" }
                             <View> {
                                 width: Fill, height: Fit, flow: Right, spacing: 5,
                                 tm_pl_0 = <FerricChipBtn> { visible: false, text: "Playlist 1" }
@@ -3698,7 +3985,7 @@ live_design! {
                                 tm_new_pl_btn = <FerricPrimaryBtn> { height: 28, text: "+ Create" }
                             }
 
-                            <FerricDividerH> {}
+                            tm_div_2 = <FerricDividerH> {}
 
                             <View> {
                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
@@ -3715,6 +4002,71 @@ live_design! {
             }
         }
     }
+}
+
+type PaletteCacheKey = (
+    bool,
+    u16,
+    (u8, u8, u8),
+    (u8, u8, u8),
+    (u8, u8, u8),
+    (u8, u8, u8),
+    (u8, u8, u8),
+);
+
+fn read_text_file_capped(path: &std::path::Path, max_bytes: u64) -> Result<String, String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Selected path is not a regular file".to_string());
+    }
+    if meta.len() > max_bytes {
+        return Err(format!(
+            "File is too large ({} KiB, max {} KiB)",
+            meta.len() / 1024,
+            max_bytes / 1024
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = Vec::with_capacity(meta.len().min(max_bytes) as usize);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > max_bytes {
+        return Err(format!(
+            "File exceeds max allowed size ({} KiB)",
+            max_bytes / 1024
+        ));
+    }
+    String::from_utf8(buf).map_err(|_| "File is not valid UTF-8 text".to_string())
+}
+
+fn friendly_error_message(raw: &str) -> String {
+    let trimmed = raw
+        .trim()
+        .strip_prefix("network request failed: ")
+        .unwrap_or(raw.trim());
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+    if first_line.is_empty() {
+        return "Operation failed. Please try again.".to_string();
+    }
+    // Redact accidental local drive paths before displaying user-facing error text.
+    let redacted = if first_line.contains(":\\") {
+        first_line
+            .split_whitespace()
+            .map(|tok| {
+                if tok.contains(":\\") {
+                    "[local path]"
+                } else {
+                    tok
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        first_line.to_string()
+    };
+    clip_text(&clean_display_text(&redacted), 140)
 }
 
 #[derive(Live, LiveHook)]
@@ -3751,6 +4103,14 @@ pub struct App {
     qp_page: usize,
     #[rust]
     shelf_pages: [usize; 8],
+    #[rust]
+    recommended_stations: Vec<RecommendedStation>,
+    #[rust]
+    stations_page: usize,
+    #[rust]
+    stations_request_seq: u64,
+    #[rust]
+    stations_rotation_epoch: usize,
     #[rust]
     home_loading_more: bool,
     #[rust]
@@ -3796,6 +4156,10 @@ pub struct App {
     #[rust]
     theme: ThemeConfig,
     #[rust]
+    palette_cache: RefCell<Option<(PaletteCacheKey, AdaptivePalette)>>,
+    #[rust]
+    last_fs_backdrop_playing: Option<bool>,
+    #[rust]
     eq: EqConfig,
     #[rust]
     dsp: PlaybackDspSettings,
@@ -3811,6 +4175,10 @@ pub struct App {
     update_popup_visible: bool,
     #[rust]
     update_download_in_flight: bool,
+    #[rust]
+    update_download_gen: u64,
+    #[rust]
+    waiting_for_radio_after_eof: bool,
     #[rust]
     update_cancel: Option<Arc<AtomicBool>>,
     #[rust]
@@ -3838,13 +4206,11 @@ pub struct App {
     #[rust]
     displayed_accent: Vec4,
     #[rust]
+    displayed_acrylic_tint: Vec4,
+    #[rust]
     started_at: Option<Instant>,
     #[rust]
     startup_trim_stage: u8,
-    #[rust]
-    last_trim_at: Option<Instant>,
-    #[rust]
-    artwork_uploads_since_trim: u32,
     #[rust]
     lease: Option<ActiveSpeakerLease>,
     #[rust]
@@ -3863,6 +4229,10 @@ pub struct App {
     last_finished_seq: u64,
     #[rust]
     active_filter: LibraryFilter,
+    #[rust]
+    playlist_source_filter: PlaylistSourceFilter,
+    #[rust]
+    playlist_sort: PlaylistSortOrder,
     #[rust]
     sort_field: SortField,
     #[rust]
@@ -3897,6 +4267,12 @@ pub struct App {
     window_hidden_or_minimized: bool,
     #[rust]
     tray_second_trim_at: Option<Instant>,
+    #[rust]
+    post_load_trim_at: Option<Instant>,
+    #[rust]
+    artwork_was_pending: bool,
+    #[rust]
+    artwork_cleared_for_tray: bool,
     #[rust]
     toast_until: Option<Instant>,
     #[rust]
@@ -3973,6 +4349,20 @@ pub struct App {
     initialized: bool,
 }
 
+fn station_pastel_vec4(idx: u8) -> Vec4 {
+    const PALETTE: [&str; 8] = [
+        "#7CECD4", // Mint Aqua
+        "#FFA3DC", // Bubblegum Pink
+        "#FFD86B", // Warm Gold
+        "#8FF0A4", // Fresh Mint Green
+        "#D8A8FF", // Soft Lavender
+        "#FFB088", // Coral Peach
+        "#B9F25A", // Acid Lime
+        "#92D6FF", // Sky Cyan
+    ];
+    rgba_vec4(PALETTE[(idx as usize) % PALETTE.len()])
+}
+
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
@@ -4040,16 +4430,15 @@ impl App {
             0.016
         };
         self.motion_last_t = time;
-        let k = (1.0 - (-16.0 * dt).exp()) as f32;
+        let k_sidebar = (1.0 - (-11.5 * dt).exp()) as f32;
         let mut active = false;
 
-        if self.page_reveal_t < 0.995 {
-            self.page_reveal_t = (self.page_reveal_t + (1.0 - self.page_reveal_t) * k).min(1.0);
-            if 1.0 - self.page_reveal_t < 0.01 {
-                self.page_reveal_t = 1.0;
-            } else {
+        if self.page_reveal_t < 0.999 {
+            self.page_reveal_t = (self.page_reveal_t + (dt as f32) / 0.22_f32).min(1.0);
+            if self.page_reveal_t < 0.999 {
                 active = true;
             }
+            let ease = 1.0 - (1.0 - f64::from(self.page_reveal_t)).powi(3);
             let (base_top, base_bottom) = match self.active_page {
                 MainPage::Home => (12.0, 26.0),
                 MainPage::Albums | MainPage::Artists | MainPage::Playlists | MainPage::Settings => {
@@ -4057,7 +4446,7 @@ impl App {
                 }
                 _ => (14.0, 12.0),
             };
-            let top_pad = base_top + 16.0 * (1.0 - f64::from(self.page_reveal_t));
+            let top_pad = base_top + 6.0 * (1.0 - ease);
             self.ui.view(self.active_page_view_id()).apply_over(
                 cx,
                 live! { padding: { left: 18.0, right: 18.0, top: (top_pad), bottom: (base_bottom) } },
@@ -4065,16 +4454,17 @@ impl App {
         }
 
         if (self.fs_reveal_target - self.fs_reveal_t).abs() > 0.004 {
-            // Graceful ~320ms 2-phase rise on Open, brisk ~240ms glide-down + dissolve on Close
-            let rate = if self.fs_reveal_target > self.fs_reveal_t {
-                11.5
+            if self.fs_reveal_target > self.fs_reveal_t {
+                // Keep Fullscreen Lyrics open choreography unchanged (graceful ~320ms 2-phase rise)
+                let k_fs = (1.0 - (-11.5 * dt).exp()) as f32;
+                self.fs_reveal_t = (self.fs_reveal_t
+                    + (self.fs_reveal_target - self.fs_reveal_t) * k_fs)
+                    .clamp(0.0, 1.0);
             } else {
-                14.5
-            };
-            let k_fs = (1.0 - (-rate * dt).exp()) as f32;
-            self.fs_reveal_t = (self.fs_reveal_t
-                + (self.fs_reveal_target - self.fs_reveal_t) * k_fs)
-                .clamp(0.0, 1.0);
+                // Unhurried, silky ~460ms 2-phase close dissolve (linear progress into smoothstep01
+                // so lyrics & cover glide out gently before the aurora backdrop dissolves away)
+                self.fs_reveal_t = (self.fs_reveal_t - (dt as f32) / 0.46_f32).max(0.0);
+            }
             if (self.fs_reveal_target - self.fs_reveal_t).abs() <= 0.006 {
                 self.fs_reveal_t = self.fs_reveal_target;
                 self.apply_fullscreen_reveal(cx);
@@ -4116,34 +4506,32 @@ impl App {
             self.sync_video_bounds(cx);
         }
 
-        if self.cmdk_open && self.cmdk_reveal_t < 0.995 {
-            self.cmdk_reveal_t = (self.cmdk_reveal_t + (1.0 - self.cmdk_reveal_t) * k).min(1.0);
-            if 1.0 - self.cmdk_reveal_t < 0.01 {
-                self.cmdk_reveal_t = 1.0;
-            } else {
+        if self.cmdk_open && self.cmdk_reveal_t < 0.999 {
+            self.cmdk_reveal_t = (self.cmdk_reveal_t + (dt as f32) / 0.20_f32).min(1.0);
+            if self.cmdk_reveal_t < 0.999 {
                 active = true;
             }
-            let y_align = 0.20 + 0.03 * (1.0 - f64::from(self.cmdk_reveal_t));
+            let ease = 1.0 - (1.0 - f64::from(self.cmdk_reveal_t)).powi(3);
+            let y_align = 0.20 + 0.012 * (1.0 - ease);
             self.ui
                 .view(id!(cmdk_modal))
                 .apply_over(cx, live! { align: { x: 0.5, y: (y_align) } });
         }
 
-        if self.toast_until.is_some() && self.toast_reveal_t < 0.995 {
-            self.toast_reveal_t = (self.toast_reveal_t + (1.0 - self.toast_reveal_t) * k).min(1.0);
-            if 1.0 - self.toast_reveal_t < 0.01 {
-                self.toast_reveal_t = 1.0;
-            } else {
+        if self.toast_until.is_some() && self.toast_reveal_t < 0.999 {
+            self.toast_reveal_t = (self.toast_reveal_t + (dt as f32) / 0.22_f32).min(1.0);
+            if self.toast_reveal_t < 0.999 {
                 active = true;
             }
-            let b_pad = 54.0 + 14.0 * f64::from(self.toast_reveal_t);
+            let ease = 1.0 - (1.0 - f64::from(self.toast_reveal_t)).powi(3);
+            let b_pad = 58.0 + 10.0 * ease;
             self.ui
                 .view(id!(toast_wrap))
                 .apply_over(cx, live! { padding: { right: 16.0, bottom: (b_pad) } });
         }
 
         if (self.left_w_target - self.left_w_cur).abs() > 0.5 {
-            self.left_w_cur += (self.left_w_target - self.left_w_cur) * f64::from(k);
+            self.left_w_cur += (self.left_w_target - self.left_w_cur) * f64::from(k_sidebar);
             if (self.left_w_target - self.left_w_cur).abs() <= 0.8 {
                 self.left_w_cur = self.left_w_target;
             } else {
@@ -4161,7 +4549,7 @@ impl App {
         }
 
         if (self.right_w_target - self.right_w_cur).abs() > 0.5 {
-            self.right_w_cur += (self.right_w_target - self.right_w_cur) * f64::from(k);
+            self.right_w_cur += (self.right_w_target - self.right_w_cur) * f64::from(k_sidebar);
             if (self.right_w_target - self.right_w_cur).abs() <= 0.8 {
                 self.right_w_cur = self.right_w_target;
             } else {
@@ -4179,7 +4567,7 @@ impl App {
         }
 
         if !self.icon_pulses.is_empty() {
-            let step = (dt as f32) / 0.26_f32;
+            let step = (dt as f32) / 0.32_f32;
             let mut idx = 0;
             while idx < self.icon_pulses.len() {
                 let (btn_id, cur_t, kind) = self.icon_pulses[idx];
@@ -4223,7 +4611,23 @@ impl App {
             (raw.y * 255.0).round().clamp(0.0, 255.0) as u8,
             (raw.z * 255.0).round().clamp(0.0, 255.0) as u8,
         );
-        self.theme.adaptive_palette(active_rgb)
+        let key: PaletteCacheKey = (
+            self.theme.acrylic_enabled,
+            (self.theme.acrylic_opacity * 1000.0).round() as u16,
+            active_rgb,
+            parse_hex_rgb(&self.theme.canvas_hex).unwrap_or((10, 10, 14)),
+            parse_hex_rgb(&self.theme.surface_hex).unwrap_or((15, 16, 22)),
+            parse_hex_rgb(&self.theme.accent_hex).unwrap_or((232, 106, 44)),
+            self.theme.acrylic_tint_rgb(),
+        );
+        if let Some((cached_key, cached_pal)) = *self.palette_cache.borrow()
+            && cached_key == key
+        {
+            return cached_pal;
+        }
+        let pal = self.theme.adaptive_palette(active_rgb);
+        *self.palette_cache.borrow_mut() = Some((key, pal));
+        pal
     }
 
     fn style_chip_btn(&self, cx: &mut Cx, btn_id: &[LiveId], active: bool) {
@@ -4245,6 +4649,23 @@ impl App {
         );
     }
 
+    /// Fullscreen stage chips always sit over the dark blurred aurora backdrop and must never invert into light mode.
+    fn style_fs_chip_btn(&self, cx: &mut Cx, btn_id: &[LiveId], active: bool) {
+        let a = if active { 1.0_f32 } else { 0.0_f32 };
+        let acr = if self.theme.acrylic_enabled {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        self.ui.button(btn_id).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (a), acrylic_on: (acr), light_mode: 0.0 }
+                draw_text: { active: (a), color: #C8CAD6, light_mode: 0.0 }
+            },
+        );
+    }
+
     fn target_accent(&self) -> Vec4 {
         if self.theme.adaptive_album_art
             && let Some(cur) = self.queue.current()
@@ -4261,6 +4682,30 @@ impl App {
             self.displayed_accent
         } else {
             self.target_accent()
+        }
+    }
+
+    fn target_acrylic_tint(&self) -> Vec4 {
+        if self.theme.acrylic_enabled
+            && self.theme.adaptive_acrylic_tint
+            && let Some(cur) = self.queue.current()
+            && let Some(art_cache) = &self.artwork
+            && let Some(cached) = art_cache.get_for_track(cur)
+        {
+            let rgb = derive_acrylic_tint_from_accent(
+                [cached.accent.x, cached.accent.y, cached.accent.z],
+                self.theme.is_light_surface(),
+            );
+            return vec4(rgb[0], rgb[1], rgb[2], 1.0);
+        }
+        rgba_vec4(&self.theme.acrylic_tint_hex)
+    }
+
+    fn current_acrylic_tint(&self) -> Vec4 {
+        if self.displayed_acrylic_tint.w > 0.5 {
+            self.displayed_acrylic_tint
+        } else {
+            self.target_acrylic_tint()
         }
     }
 
@@ -4346,14 +4791,16 @@ impl App {
         self.ui
             .button(id!(dur_btn))
             .apply_over(cx, live! { width: ((40.0 * z).max(32.0)) });
-        self.ui.button(id!(codec_pill_btn)).apply_over(
-            cx,
-            live! {
-                height: ((22.0 * z).max(18.0)),
-                padding: { left: ((7.0 * z).max(4.5)), right: ((7.0 * z).max(4.5)) },
-                draw_text: { text_style: { font_size: ((7.8 * z).max(6.6)) } }
-            },
-        );
+        for pill_id in [id!(speed_pill_btn), id!(codec_pill_btn)] {
+            self.ui.button(pill_id).apply_over(
+                cx,
+                live! {
+                    height: ((22.0 * z).max(18.0)),
+                    padding: { left: ((7.0 * z).max(4.5)), right: ((7.0 * z).max(4.5)) },
+                    draw_text: { text_style: { font_size: ((7.8 * z).max(6.6)) } }
+                },
+            );
+        }
         for b_id in [
             id!(shuffle_btn),
             id!(prev_btn),
@@ -4399,16 +4846,6 @@ impl App {
         );
         self.sync_fullscreen_media_layout(cx);
 
-        for nid in [id!(nav_settings), id!(sidebar_add_folder_btn)] {
-            self.ui.button(nid).apply_over(
-                cx,
-                live! {
-                    height: (28.0 * z),
-                    draw_text: { text_style: { font_size: (8.8 * z) } }
-                },
-            );
-        }
-
         for vid in [
             id!(qp_0),
             id!(qp_1),
@@ -4419,14 +4856,50 @@ impl App {
             id!(qp_6),
             id!(qp_7),
         ] {
-            self.ui.view(vid).apply_over(
+            let qv = self.ui.view(vid);
+            qv.apply_over(
                 cx,
                 live! {
                     height: (48.0 * z),
                     art = { width: (36.0 * z), height: (36.0 * z) }
-                    title = { draw_text: { text_style: { font_size: (9.4 * z) } } }
-                    sub = { draw_text: { text_style: { font_size: (8.2 * z) } } }
                 },
+            );
+            qv.label(id!(title)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (9.4 * z) } } },
+            );
+            qv.label(id!(sub)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (8.2 * z) } } },
+            );
+        }
+
+        for sid in [id!(st_c0), id!(st_c1), id!(st_c2), id!(st_c3), id!(st_c4)] {
+            let sv = self.ui.view(sid);
+            sv.apply_over(
+                cx,
+                live! {
+                    height: (188.0 * z),
+                    inner = { art_stage = { height: (124.0 * z) } }
+                },
+            );
+            sv.ferric_cover_art(id!(art_center))
+                .apply_over(cx, live! { width: (64.0 * z), height: (64.0 * z) });
+            sv.ferric_cover_art(id!(art_left))
+                .apply_over(cx, live! { width: (44.0 * z), height: (44.0 * z) });
+            sv.ferric_cover_art(id!(art_right))
+                .apply_over(cx, live! { width: (44.0 * z), height: (44.0 * z) });
+            sv.label(id!(card_title)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (9.8 * z) } } },
+            );
+            sv.label(id!(title)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (9.0 * z) } } },
+            );
+            sv.label(id!(sub)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (7.8 * z) } } },
             );
         }
 
@@ -4591,14 +5064,21 @@ impl App {
             id!(qu_8),
             id!(qu_9),
         ] {
-            self.ui.view(qid).apply_over(
+            let qmv = self.ui.view(qid);
+            qmv.apply_over(
                 cx,
                 live! {
                     height: (44.0 * z),
                     art = { width: (32.0 * z), height: (32.0 * z) }
-                    title = { draw_text: { text_style: { font_size: (9.0 * z) } } }
-                    sub = { draw_text: { text_style: { font_size: (8.0 * z) } } }
                 },
+            );
+            qmv.label(id!(title)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (9.0 * z) } } },
+            );
+            qmv.label(id!(sub)).apply_over(
+                cx,
+                live! { draw_text: { text_style: { font_size: (8.0 * z) } } },
             );
         }
 
@@ -4652,6 +5132,10 @@ impl App {
             (id!(vq_480_btn), VideoQuality::P480),
             (id!(vq_720_btn), VideoQuality::P720),
             (id!(vq_1080_btn), VideoQuality::P1080),
+        ] {
+            self.style_fs_chip_btn(cx, btn, cur_q == q);
+        }
+        for (btn, q) in [
             (id!(svq_auto_btn), VideoQuality::Auto),
             (id!(svq_360_btn), VideoQuality::P360),
             (id!(svq_480_btn), VideoQuality::P480),
@@ -4842,8 +5326,8 @@ impl App {
         }
         self.sync_fullscreen_media_layout(cx);
         self.start_motion(cx);
-        self.style_chip_btn(cx, id!(fs_mode_art_btn), false);
-        self.style_chip_btn(cx, id!(fs_mode_video_btn), true);
+        self.style_fs_chip_btn(cx, id!(fs_mode_art_btn), false);
+        self.style_fs_chip_btn(cx, id!(fs_mode_video_btn), true);
         self.refresh_video_quality_buttons(cx);
         let accent = self.current_accent();
         self.ui.button(id!(bar_video_btn)).apply_over(
@@ -4950,8 +5434,8 @@ impl App {
         if animate && self.fs_video_morph_t > 0.004 {
             self.start_motion(cx);
         }
-        self.style_chip_btn(cx, id!(fs_mode_art_btn), true);
-        self.style_chip_btn(cx, id!(fs_mode_video_btn), false);
+        self.style_fs_chip_btn(cx, id!(fs_mode_art_btn), true);
+        self.style_fs_chip_btn(cx, id!(fs_mode_video_btn), false);
         let muted = rgba_to_vec4(self.adaptive_palette().icon_idle);
         self.ui.button(id!(bar_video_btn)).apply_over(
             cx,
@@ -4967,8 +5451,6 @@ impl App {
         self.initialized = true;
         self.started_at = Some(Instant::now());
         self.startup_trim_stage = 0;
-        self.last_trim_at = None;
-        self.artwork_uploads_since_trim = 0;
         self.active_page = MainPage::Home;
         self.active_settings_tab = SettingsTab::Accounts;
         self.nav_history = Some(NavHistory::new(MainPage::Home));
@@ -5031,6 +5513,7 @@ impl App {
             self.theme.acrylic_enabled,
             self.theme.acrylic_opacity,
             self.theme.acrylic_tint_rgb(),
+            self.theme.is_light_surface(),
         );
         self.hide_native_makepad_caption(cx);
         win32_install_window_hooks();
@@ -5048,10 +5531,16 @@ impl App {
             if !yt_signed_in {
                 let _ = store.delete_account_synced_playlists();
             }
-            if !self.accounts.spotify_connected
-                || self.accounts.spotify_access_token.trim().is_empty()
-            {
-                let _ = store.delete_spotify_synced_playlists();
+            let sp_oauth_signed_in = self.accounts.spotify_connected
+                && !self.accounts.spotify_access_token.trim().is_empty();
+            let sp_web_signed_in = self.accounts.spotify_web_connected
+                && (!self.accounts.spotify_web_access_token.trim().is_empty()
+                    || !self.accounts.spotify_web_cookie.trim().is_empty());
+            if !sp_oauth_signed_in {
+                let _ = store.delete_spotify_premium_synced_playlists();
+            }
+            if !sp_web_signed_in {
+                let _ = store.delete_spotify_web_synced_playlists();
             }
             self.update_settings = store.load_update_settings().unwrap_or_default();
             self.session_state = store.load_session_state().unwrap_or_default();
@@ -5065,6 +5554,7 @@ impl App {
         self.right_w_cur = 260.0 * init_z;
         self.right_w_target = 260.0 * init_z;
         self.displayed_accent = rgba_vec4(&self.theme.accent_hex);
+        self.displayed_acrylic_tint = rgba_vec4(&self.theme.acrylic_tint_hex);
         win32_set_close_to_tray(self.dsp.close_to_tray);
         self.queue.shuffle = self.session_state.shuffle;
         self.queue.repeat = self.session_state.repeat;
@@ -5079,9 +5569,10 @@ impl App {
         self.smtc = Some(SmtcBridge::try_init());
         self.discord_rpc = Some(DiscordRpcBridge::start(self.discord_settings.clone()));
         let dev_id = format!("ferric-pc-{}", csprng_hex(6));
-        self.lease = Some(ActiveSpeakerLease::new(dev_id.clone(), "Desktop-PC"));
+        self.lease = Some(ActiveSpeakerLease::new(dev_id, "Desktop-PC"));
         self.lan_ip = detect_local_lan_ip();
-        self.lan_beacon = LanDiscoveryBeacon::bind_default(&dev_id).ok();
+        // Bind LAN UDP discovery socket lazily only when the user opens Settings > Connect.
+        self.lan_beacon = None;
 
         let (tx, rx) = mpsc::channel();
         self.bg_tx = Some(tx);
@@ -5091,10 +5582,62 @@ impl App {
             .ui
             .image(id!(brand_icon))
             .load_png_from_data(cx, BRAND_ICON_PNG);
+        self.ui
+            .label(id!(lbl_t_st_update))
+            .set_text(cx, &format!("Software Updates (Ferric v{APP_VERSION})"));
 
         self.regenerate_pairing_qr(cx);
         self.rebuild_library_views(cx);
         self.refresh_spotify_account_ui(cx);
+        // Sync persisted connected status labels on cold start so Settings > Accounts never displays stale defaults.
+        if self.accounts.youtube_connected && !self.accounts.youtube_sapisid.is_empty() {
+            let yt_pl_n = self
+                .playlists
+                .iter()
+                .filter(|p| PlaylistSourceFilter::YouTube.matches_playlist(p))
+                .count();
+            let name = self.accounts.youtube_channel_name.trim();
+            self.ui.label(id!(oauth_status_lbl)).set_text(
+                cx,
+                &if name.is_empty() {
+                    format!("Signed in with Google · {yt_pl_n} synced playlists.")
+                } else {
+                    format!("Signed in as {name} · {yt_pl_n} synced playlists.")
+                },
+            );
+        }
+        if self.is_spotify_oauth_session_active() {
+            let prem_pl_n = self
+                .playlists
+                .iter()
+                .filter(|p| PlaylistSourceFilter::SpotifyPremium.matches_playlist(p))
+                .count();
+            let name = self.accounts.spotify_user_name.trim();
+            self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
+                cx,
+                &if name.is_empty() {
+                    format!("Spotify Premium connected · {prem_pl_n} playlists synced.")
+                } else {
+                    format!("Spotify Premium: {name} · {prem_pl_n} playlists synced.")
+                },
+            );
+        }
+        if self.is_spotify_web_session_active() {
+            let web_pl_n = self
+                .playlists
+                .iter()
+                .filter(|p| PlaylistSourceFilter::Spotify.matches_playlist(p))
+                .count();
+            let name = self.accounts.spotify_web_user_name.trim();
+            self.ui.label(id!(spotify_web_status_lbl)).set_text(
+                cx,
+                &if name.is_empty() {
+                    format!("Spotify Web connected · {web_pl_n} playlists synced.")
+                } else {
+                    format!("Spotify Web: {name} · {web_pl_n} playlists synced.")
+                },
+            );
+        }
         if !self.all_tracks.is_empty() {
             self.queue.set_tracks(self.all_tracks.clone(), None);
         }
@@ -5110,6 +5653,7 @@ impl App {
             self.load_and_play_demo_suite(cx);
         } else {
             self.spawn_ytm_rich_home(cx, 0, None, !self.accounts.youtube_connected);
+            self.spawn_recommended_stations(cx, false);
             if startup_play_first()
                 && !self.all_tracks.is_empty()
                 && let Some((idx, first)) = self
@@ -5301,17 +5845,6 @@ impl App {
                 },
             );
         }
-        {
-            let active = target == MainPage::Settings;
-            self.ui.button(id!(nav_settings)).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), light_mode: (lm) }
-                    draw_icon: { color: (if active { bright } else { icon_muted }), color_hover: (icon_hov), color_focus: (icon_hov), color_down: (icon_hov) }
-                    draw_text: { color: (if active { bright } else { muted }), color_hover: (icon_hov), color_focus: (icon_hov), color_down: (icon_hov) }
-                },
-            );
-        }
 
         let can_b = self.nav_history.as_ref().is_some_and(NavHistory::can_back);
         let can_f = self
@@ -5393,9 +5926,14 @@ impl App {
             self.refresh_storage_stats(cx);
         } else if tab == SettingsTab::Integrations {
             self.refresh_discord_preview(cx);
+        } else if tab == SettingsTab::Connect && self.lan_beacon.is_none() {
+            let dev_id = self
+                .lease
+                .as_ref()
+                .map(|l| l.local_device_id.clone())
+                .unwrap_or_else(|| format!("ferric-pc-{}", csprng_hex(6)));
+            self.lan_beacon = LanDiscoveryBeacon::bind_default(&dev_id).ok();
         }
-        self.page_reveal_t = 0.0;
-        self.start_motion(cx);
         self.ui.redraw(cx);
     }
 
@@ -5493,11 +6031,11 @@ impl App {
             );
             self.ui.label(id!(signal_path_lbl)).apply_over(
                 cx,
-                live! { draw_text: { color: (vec4(1.0, 1.0, 1.0, 0.30 * content_alpha)) } },
+                live! { draw_text: { color: (vec4(1.0, 1.0, 1.0, 0.62 * content_alpha)) } },
             );
             self.ui.label(id!(fs_lyr_source)).apply_over(
                 cx,
-                live! { draw_text: { color: (vec4(1.0, 1.0, 1.0, 0.27 * content_alpha)) } },
+                live! { draw_text: { color: (vec4(1.0, 1.0, 1.0, 0.62 * content_alpha)) } },
             );
             self.sync_fullscreen_media_layout(cx);
         }
@@ -5509,6 +6047,7 @@ impl App {
         self.fs_video_morph_t = 0.0;
         self.fs_video_morph_target = 0.0;
         self.fs_video_bounds_sync_pending = false;
+        self.last_fs_backdrop_playing = None;
         self.ui.view(id!(fullscreen_overlay)).set_visible(cx, false);
         self.ui.view(id!(fs_stage_content)).set_visible(cx, true);
         self.ui.view(id!(shell_col)).set_visible(cx, true);
@@ -5568,9 +6107,10 @@ impl App {
             self.ui
                 .ferric_ambient_stage(id!(fs_backdrop))
                 .set_state(cx, true, is_playing, accent, acr);
+            self.last_fs_backdrop_playing = Some(is_playing);
             self.sync_fullscreen_backdrop_artwork(cx);
-            self.style_chip_btn(cx, id!(fs_mode_art_btn), !self.video_open);
-            self.style_chip_btn(cx, id!(fs_mode_video_btn), self.video_open);
+            self.style_fs_chip_btn(cx, id!(fs_mode_art_btn), !self.video_open);
+            self.style_fs_chip_btn(cx, id!(fs_mode_video_btn), self.video_open);
             self.apply_fullscreen_reveal(cx);
             self.start_motion(cx);
         } else {
@@ -5802,20 +6342,12 @@ impl App {
         };
         let rep_col = match self.queue.repeat {
             RepeatMode::Off => muted,
-            RepeatMode::All => accent,
-            RepeatMode::One => {
-                if pal.is_light {
-                    vec4(0.62, 0.42, 0.04, 1.0)
-                } else {
-                    vec4(0.95, 0.78, 0.36, 1.0)
-                }
-            }
+            RepeatMode::All | RepeatMode::One => accent,
         };
         let rep_hov = if rep_active { rep_col } else { icon_hover };
         let fs_rep_col = match self.queue.repeat {
             RepeatMode::Off => fs_muted,
-            RepeatMode::All => raw_accent,
-            RepeatMode::One => vec4(0.95, 0.78, 0.36, 1.0),
+            RepeatMode::All | RepeatMode::One => raw_accent,
         };
         let fs_rep_hov = if rep_active { fs_rep_col } else { fs_hover };
         self.ui
@@ -5832,7 +6364,7 @@ impl App {
         let accent = rgba_to_vec4(pal.accent);
         let brand_accent = rgba_to_vec4(pal.brand_accent);
         let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
-        let acrylic_tint = rgba_vec4(&self.theme.acrylic_tint_hex);
+        let acrylic_tint = self.current_acrylic_tint();
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
         } else {
@@ -5855,6 +6387,23 @@ impl App {
                 }
             },
         );
+        for pid in [
+            id!(top_bar),
+            id!(left_sidebar),
+            id!(center_stage),
+            id!(right_sidebar),
+        ] {
+            self.ui.view(pid).apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        acrylic_on: (acr),
+                        acrylic_opacity: (op),
+                        acrylic_tint: (acrylic_tint)
+                    }
+                },
+            );
+        }
         self.ui.view(id!(bottom_bar)).apply_over(
             cx,
             live! {
@@ -5892,12 +6441,6 @@ impl App {
             cx,
             live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
         );
-        for nid in [id!(nav_settings), id!(sidebar_add_folder_btn)] {
-            self.ui.button(nid).apply_over(
-                cx,
-                live! { draw_bg: { accent_col: (accent), light_mode: (lm) } },
-            );
-        }
         for qid in [
             id!(qp_0),
             id!(qp_1),
@@ -5984,12 +6527,12 @@ impl App {
         ] {
             self.ui
                 .ferric_bar_slider(sid)
-                .apply_over(cx, live! { draw_bg: { fill_col: (brand_accent) } });
+                .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
         }
         for (slider_id, _) in eq_band_ids() {
             self.ui
                 .ferric_vert_slider(slider_id)
-                .apply_over(cx, live! { draw_bg: { fill_col: (brand_accent) } });
+                .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
         }
         for tid in [
             id!(close_to_tray_toggle),
@@ -6000,6 +6543,7 @@ impl App {
             id!(mono_toggle),
             id!(eq_enable_toggle),
             id!(acrylic_toggle),
+            id!(adaptive_acrylic_tint_toggle),
             id!(adaptive_art_toggle),
             id!(discord_enable_toggle),
             id!(discord_paused_toggle),
@@ -6009,8 +6553,9 @@ impl App {
         ] {
             self.ui
                 .ferric_toggle(tid)
-                .apply_over(cx, live! { draw_bg: { on_col: (brand_accent) } });
+                .apply_over(cx, live! { draw_bg: { on_col: (accent) } });
         }
+        // Interactive readouts & stage kickers follow the live adaptive cover accent
         for lid in [
             id!(zoom_val_lbl),
             id!(acrylic_opacity_lbl),
@@ -6019,14 +6564,109 @@ impl App {
             id!(connect_lan_ip_lbl),
             id!(xfade_val_lbl),
             id!(fadein_val_lbl),
-            id!(yt_state_lbl),
-            id!(discord_status_lbl),
             id!(detail_kind_lbl),
             id!(update_popup_sub),
         ] {
             self.ui
                 .label(lid)
+                .apply_over(cx, live! { draw_text: { color: (accent) } });
+        }
+        // Account & integration connection badges stay strictly Ferric Burnt Orange across all cards
+        for lid in [
+            id!(yt_state_lbl),
+            id!(spotify_state_lbl),
+            id!(spotify_web_state_lbl),
+            id!(discord_status_lbl),
+        ] {
+            self.ui
+                .label(lid)
                 .apply_over(cx, live! { draw_text: { color: (brand_accent) } });
+        }
+        // Input focus borders & cursors track live adaptive accent seamlessly
+        for bare_inp in [id!(top_search_input), id!(sidebar_lib_filter_input)] {
+            self.ui
+                .text_input(bare_inp)
+                .apply_over(cx, live! { draw_cursor: { color: (accent) } });
+        }
+        for iid in [
+            id!(songs_filter_input),
+            id!(search_page_input),
+            id!(pl_new_input),
+            id!(detail_rename_input),
+            id!(quick_sync_input),
+            id!(sub_url_input),
+            id!(sub_user_input),
+            id!(sub_pass_input),
+            id!(autoeq_input),
+            id!(acrylic_tint_input),
+            id!(discord_client_id_input),
+            id!(cmdk_input),
+            id!(tm_new_pl_input),
+        ] {
+            self.ui.text_input(iid).apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        border_color_1_focus: (accent),
+                        border_color_2_focus: (accent)
+                    }
+                    draw_cursor: { color: (accent) }
+                },
+            );
+        }
+        // Top account person icon & bottom speed/codec pills follow adaptive cover accent live
+        let icon_hover = rgba_to_vec4(pal.icon_hover);
+        self.ui.button(id!(top_account_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (accent), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (accent) } },
+        );
+        for pill_id in [id!(speed_pill_btn), id!(codec_pill_btn)] {
+            self.ui
+                .button(pill_id)
+                .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+        }
+        // Active sidebar library highlights follow adaptive cover accent live
+        let text_primary = rgba_to_vec4(pal.text_primary);
+        let liked_act =
+            self.active_page == MainPage::Songs && self.active_filter == LibraryFilter::Liked;
+        let local_act =
+            self.active_page == MainPage::Songs && self.active_filter == LibraryFilter::Local;
+        self.ui
+            .view(id!(pin_liked_row))
+            .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+        self.ui
+            .view(id!(pin_liked_row))
+            .label(id!(title))
+            .apply_over(
+                cx,
+                live! { draw_text: { color: (if liked_act { accent } else { text_primary }) } },
+            );
+        self.ui
+            .view(id!(pin_local_row))
+            .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+        self.ui
+            .view(id!(pin_local_row))
+            .label(id!(title))
+            .apply_over(
+                cx,
+                live! { draw_text: { color: (if local_act { accent } else { text_primary }) } },
+            );
+        let entries = self.resolve_sidebar_library_entries();
+        let active_detail_id =
+            (self.active_page == MainPage::Detail).then_some(self.detail_state.id.as_str());
+        for (i, slot) in sidebar_pin_slot_ids().into_iter().enumerate() {
+            let is_act = entries
+                .get(i)
+                .is_some_and(|entry| active_detail_id == Some(entry.id.as_str()));
+            self.ui
+                .view(slot)
+                .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+            if is_act {
+                self.ui
+                    .view(slot)
+                    .label(id!(title))
+                    .apply_over(cx, live! { draw_text: { color: (accent) } });
+            }
         }
         self.ui.view(id!(q_now_row)).apply_over(
             cx,
@@ -6041,7 +6681,7 @@ impl App {
         );
         self.ui
             .ferric_eq_graph(id!(eq_graph))
-            .apply_over(cx, live! { draw_bg: { accent: (brand_accent) } });
+            .apply_over(cx, live! { draw_bg: { accent: (accent) } });
         self.ui
             .ferric_lyrics_view(id!(rs_lyrics_scroll))
             .set_style(cx, accent, z, pal.is_light);
@@ -6261,11 +6901,17 @@ impl App {
 
     fn refresh_top_account_btn(&self, cx: &mut Cx) {
         let yt_ok = self.accounts.youtube_connected && !self.accounts.youtube_sapisid.is_empty();
-        let sp_ok = self.accounts.spotify_connected
-            && (!self.accounts.spotify_access_token.trim().is_empty()
-                || !self.accounts.spotify_web_cookie.trim().is_empty());
+        let sp_oauth_ok = self.is_spotify_oauth_session_active();
+        let sp_web_ok = self.is_spotify_web_session_active();
+        let sp_ok = sp_oauth_ok || sp_web_ok;
         let yt_name = self.accounts.youtube_channel_name.trim();
-        let sp_name = self.accounts.spotify_user_name.trim();
+        let sp_name = if sp_oauth_ok && !self.accounts.spotify_user_name.trim().is_empty() {
+            self.accounts.spotify_user_name.trim()
+        } else if sp_web_ok && !self.accounts.spotify_web_user_name.trim().is_empty() {
+            self.accounts.spotify_web_user_name.trim()
+        } else {
+            ""
+        };
         let top_acct = if yt_ok && sp_ok {
             if !yt_name.is_empty() {
                 clip_text(yt_name, 16)
@@ -6290,19 +6936,148 @@ impl App {
             "Sign in".to_string()
         };
         let pal = self.adaptive_palette();
-        let icon_col = if yt_ok || sp_ok {
-            if pal.is_light {
-                vec4(0.075, 0.478, 0.282, 1.0)
-            } else {
-                vec4(0.353, 0.820, 0.549, 1.0)
-            }
-        } else {
-            rgba_to_vec4(pal.brand_accent)
-        };
+        let icon_col = rgba_to_vec4(pal.accent);
+        let icon_hover = rgba_to_vec4(pal.icon_hover);
         self.ui.button(id!(top_account_btn)).set_text(cx, &top_acct);
+        self.ui.button(id!(top_account_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (icon_col), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_col) } },
+        );
+    }
+
+    fn filtered_playlists(&self) -> Vec<Playlist> {
+        let mut out: Vec<Playlist> = self
+            .playlists
+            .iter()
+            .filter(|pl| self.playlist_source_filter.matches_playlist(pl))
+            .cloned()
+            .collect();
+        self.playlist_sort.apply(&mut out);
+        out
+    }
+
+    fn sync_playlist_sort_ui(&self, cx: &mut Cx) {
         self.ui
-            .button(id!(top_account_btn))
-            .apply_over(cx, live! { draw_icon: { color: (icon_col) } });
+            .button(id!(sb_pl_sort_btn))
+            .set_text(cx, self.playlist_sort.label());
+        self.style_chip_btn(
+            cx,
+            id!(sb_pl_sort_btn),
+            self.playlist_sort != PlaylistSortOrder::Newest,
+        );
+        for (btn, order) in [
+            (id!(pl_sort_newest_btn), PlaylistSortOrder::Newest),
+            (id!(pl_sort_oldest_btn), PlaylistSortOrder::Oldest),
+            (id!(pl_sort_az_btn), PlaylistSortOrder::NameAZ),
+        ] {
+            self.style_chip_btn(cx, btn, self.playlist_sort == order);
+        }
+    }
+
+    fn set_playlist_sort(&mut self, cx: &mut Cx, order: PlaylistSortOrder) {
+        self.playlist_sort = order;
+        self.playlists_page = 0;
+        self.refresh_sidebar_library(cx);
+        self.refresh_playlists_grid(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn available_playlist_sources(&self) -> (bool, bool, bool, bool) {
+        let has_yt = (self.accounts.youtube_connected && !self.accounts.youtube_sapisid.is_empty())
+            || self
+                .playlists
+                .iter()
+                .any(|p| PlaylistSourceFilter::YouTube.matches_playlist(p));
+        let has_sp_web = self.is_spotify_web_session_active()
+            || self
+                .playlists
+                .iter()
+                .any(|p| PlaylistSourceFilter::Spotify.matches_playlist(p));
+        let has_sp_prem = self.is_spotify_oauth_session_active()
+            || self
+                .playlists
+                .iter()
+                .any(|p| PlaylistSourceFilter::SpotifyPremium.matches_playlist(p));
+        let has_local = self
+            .playlists
+            .iter()
+            .any(|p| PlaylistSourceFilter::Local.matches_playlist(p));
+        (has_yt, has_sp_web, has_sp_prem, has_local)
+    }
+
+    fn sync_playlist_source_filter_ui(&mut self, cx: &mut Cx) {
+        let (has_yt, has_sp_web, has_sp_prem, has_local) = self.available_playlist_sources();
+        let active_selected_available = match self.playlist_source_filter {
+            PlaylistSourceFilter::All => true,
+            PlaylistSourceFilter::YouTube => has_yt,
+            PlaylistSourceFilter::Spotify => has_sp_web,
+            PlaylistSourceFilter::SpotifyPremium => has_sp_prem,
+            PlaylistSourceFilter::Local => has_local,
+        };
+        if !active_selected_available {
+            self.playlist_source_filter = PlaylistSourceFilter::All;
+        }
+        let source_count = usize::from(has_yt)
+            + usize::from(has_sp_web)
+            + usize::from(has_sp_prem)
+            + usize::from(has_local);
+        let show_row =
+            source_count >= 2 || self.playlist_source_filter != PlaylistSourceFilter::All;
+        self.ui
+            .view(id!(sidebar_pl_source_row))
+            .set_visible(cx, show_row);
+        self.ui
+            .view(id!(pl_source_filter_row))
+            .set_visible(cx, show_row);
+        for (sb_btn, pl_btn, vis, kind) in [
+            (
+                id!(sb_src_all_btn),
+                id!(pl_src_all_btn),
+                true,
+                PlaylistSourceFilter::All,
+            ),
+            (
+                id!(sb_src_yt_btn),
+                id!(pl_src_yt_btn),
+                has_yt,
+                PlaylistSourceFilter::YouTube,
+            ),
+            (
+                id!(sb_src_sp_btn),
+                id!(pl_src_sp_btn),
+                has_sp_web,
+                PlaylistSourceFilter::Spotify,
+            ),
+            (
+                id!(sb_src_sp_prem_btn),
+                id!(pl_src_sp_prem_btn),
+                has_sp_prem,
+                PlaylistSourceFilter::SpotifyPremium,
+            ),
+            (
+                id!(sb_src_local_btn),
+                id!(pl_src_local_btn),
+                has_local,
+                PlaylistSourceFilter::Local,
+            ),
+        ] {
+            let is_act = self.playlist_source_filter == kind;
+            self.ui.button(sb_btn).set_visible(cx, vis);
+            self.ui.button(pl_btn).set_visible(cx, vis);
+            if show_row && vis {
+                self.style_chip_btn(cx, sb_btn, is_act);
+                self.style_chip_btn(cx, pl_btn, is_act);
+            }
+        }
+        self.sync_playlist_sort_ui(cx);
+    }
+
+    fn set_playlist_source_filter(&mut self, cx: &mut Cx, filter: PlaylistSourceFilter) {
+        self.playlist_source_filter = filter;
+        self.playlists_page = 0;
+        self.refresh_sidebar_library(cx);
+        self.refresh_playlists_grid(cx);
+        self.ui.redraw(cx);
     }
 
     fn resolve_sidebar_library_entries(&self) -> Vec<SidebarLibraryEntry> {
@@ -6315,11 +7090,15 @@ impl App {
         };
         let format_pl_sub = |pl: &Playlist, pinned: bool| {
             let prefix = if pinned { "Pinned · " } else { "" };
-            let src = match pl.source {
-                TrackSource::Spotify => "Spotify",
-                TrackSource::Local => "Local",
-                TrackSource::Subsonic => "Subsonic",
-                _ => "YouTube",
+            let src = if pl.id.starts_with("spotify:premium:") {
+                "Spotify Premium"
+            } else {
+                match pl.source {
+                    TrackSource::Spotify => "Spotify",
+                    TrackSource::Local => "Local",
+                    TrackSource::Subsonic => "Subsonic",
+                    _ => "YouTube",
+                }
             };
             format!("{prefix}Playlist · {src} · {} songs", pl.track_count)
         };
@@ -6331,6 +7110,9 @@ impl App {
                 break;
             }
             if let Some(pl) = self.playlists.iter().find(|p| &p.id == pin_id) {
+                if !self.playlist_source_filter.matches_playlist(pl) {
+                    continue;
+                }
                 let sub = format_pl_sub(pl, true);
                 if matches_query(&pl.name, &sub) && seen.insert(pl.id.clone()) {
                     out.push(SidebarLibraryEntry {
@@ -6341,7 +7123,9 @@ impl App {
                         is_circle: false,
                     });
                 }
-            } else if let Some(alb) = self.album_groups.iter().find(|g| &g.id == pin_id) {
+            } else if self.playlist_source_filter == PlaylistSourceFilter::All
+                && let Some(alb) = self.album_groups.iter().find(|g| &g.id == pin_id)
+            {
                 let sub = format!("Pinned · Album · {}", alb.subtitle);
                 if matches_query(&alb.title, &sub) && seen.insert(alb.id.clone()) {
                     out.push(SidebarLibraryEntry {
@@ -6352,7 +7136,9 @@ impl App {
                         is_circle: false,
                     });
                 }
-            } else if let Some(art) = self.artist_groups.iter().find(|g| &g.id == pin_id) {
+            } else if self.playlist_source_filter == PlaylistSourceFilter::All
+                && let Some(art) = self.artist_groups.iter().find(|g| &g.id == pin_id)
+            {
                 let sub = "Pinned · Artist".to_string();
                 if matches_query(&art.title, &sub) && seen.insert(art.id.clone()) {
                     out.push(SidebarLibraryEntry {
@@ -6365,7 +7151,24 @@ impl App {
                 }
             }
         }
-        for pl in &self.playlists {
+        let mut sorted_pls: Vec<&Playlist> = self
+            .playlists
+            .iter()
+            .filter(|pl| self.playlist_source_filter.matches_playlist(pl))
+            .collect();
+        match self.playlist_sort {
+            PlaylistSortOrder::Newest => {}
+            PlaylistSortOrder::Oldest => sorted_pls.reverse(),
+            PlaylistSortOrder::NameAZ => {
+                sorted_pls.sort_by(|a, b| {
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase())
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+            }
+        }
+        for pl in sorted_pls {
             if out.len() >= MAX_SIDEBAR_SLOTS {
                 break;
             }
@@ -6384,6 +7187,7 @@ impl App {
     }
 
     fn refresh_sidebar_library(&mut self, cx: &mut Cx) {
+        self.sync_playlist_source_filter_ui(cx);
         let entries = self.resolve_sidebar_library_entries();
         if let Some(cache) = &mut self.artwork {
             for entry in &entries {
@@ -6411,7 +7215,8 @@ impl App {
             .count();
         let query = self.sidebar_filter_query.trim().to_ascii_lowercase();
 
-        let liked_vis = query.is_empty() || "liked songs".contains(&query);
+        let liked_vis = self.playlist_source_filter == PlaylistSourceFilter::All
+            && (query.is_empty() || "liked songs".contains(&query));
         let liked_act =
             self.active_page == MainPage::Songs && self.active_filter == LibraryFilter::Liked;
         let liked_row = self.ui.view(id!(pin_liked_row));
@@ -6427,6 +7232,7 @@ impl App {
                 }
             },
         );
+        liked_row.label(id!(title)).set_text(cx, "Liked Songs");
         liked_row.label(id!(title)).apply_over(
             cx,
             live! { draw_text: { color: (if liked_act { accent } else { title_col }) } },
@@ -6438,7 +7244,10 @@ impl App {
             .label(id!(sub))
             .apply_over(cx, live! { draw_text: { color: (sub_col) } });
 
-        let local_vis = query.is_empty() || "local lossless".contains(&query);
+        let local_vis = matches!(
+            self.playlist_source_filter,
+            PlaylistSourceFilter::All | PlaylistSourceFilter::Local
+        ) && (query.is_empty() || "local lossless".contains(&query));
         let local_act =
             self.active_page == MainPage::Songs && self.active_filter == LibraryFilter::Local;
         let local_row = self.ui.view(id!(pin_local_row));
@@ -6454,6 +7263,7 @@ impl App {
                 }
             },
         );
+        local_row.label(id!(title)).set_text(cx, "Local Lossless");
         local_row.label(id!(title)).apply_over(
             cx,
             live! { draw_text: { color: (if local_act { accent } else { title_col }) } },
@@ -6468,6 +7278,30 @@ impl App {
         self.ui
             .label(id!(lbl_m_pinned))
             .set_text(cx, &format!("{}", entries.len()));
+        let empty_wrap = self.ui.view(id!(sidebar_empty_wrap));
+        let empty_lbl = self.ui.label(id!(sidebar_empty_lbl));
+        if entries.is_empty() {
+            empty_wrap.set_visible(cx, true);
+            empty_lbl.set_text(
+                cx,
+                &if !query.is_empty() {
+                    format!(
+                        "No playlists matching \"{}\".",
+                        self.sidebar_filter_query.trim()
+                    )
+                } else if self.playlist_source_filter != PlaylistSourceFilter::All {
+                    format!(
+                        "No {} playlists synced yet.",
+                        self.playlist_source_filter.label()
+                    )
+                } else {
+                    "No playlists yet. Sign in via Settings or click + Create.".to_string()
+                },
+            );
+            empty_lbl.apply_over(cx, live! { draw_text: { color: (sub_col) } });
+        } else {
+            empty_wrap.set_visible(cx, false);
+        }
 
         let active_detail_id =
             (self.active_page == MainPage::Detail).then_some(self.detail_state.id.as_str());
@@ -6596,6 +7430,18 @@ impl App {
                     }
                 }
             }
+            let st_off = self.stations_page * 5;
+            for st in self.recommended_stations.iter().skip(st_off).take(5) {
+                if let Some(url) = st.center_art_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+                if let Some(url) = st.left_art_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+                if let Some(url) = st.right_art_url.as_deref() {
+                    let _ = cache.request_url(url);
+                }
+            }
         }
 
         let active_id = self.queue.current().map(|t| t.id.as_str());
@@ -6608,7 +7454,7 @@ impl App {
         } else {
             0.0_f32
         };
-        let accent = self.current_accent();
+        let accent = rgba_to_vec4(self.adaptive_palette().accent);
         let qp_ids = [
             id!(qp_0),
             id!(qp_1),
@@ -6655,6 +7501,104 @@ impl App {
             } else {
                 v.set_visible(cx, false);
             }
+        }
+
+        // Section 2: Spotify-Style Recommended Stations (5 cards per page, pastel 3-circle triptych or Spotify CDN cover)
+        if !self.recommended_stations.is_empty() {
+            self.ui.view(id!(stations_wrap)).set_visible(cx, true);
+            let st_off = self.stations_page * 5;
+            let st_ids = [id!(st_c0), id!(st_c1), id!(st_c2), id!(st_c3), id!(st_c4)];
+            for (ci, sid) in st_ids.into_iter().enumerate() {
+                let sv = self.ui.view(sid);
+                sv.set_visible(cx, true);
+                if let Some(st) = self.recommended_stations.get(st_off + ci).cloned() {
+                    sv.view(id!(inner)).set_visible(cx, true);
+                    sv.apply_over(
+                        cx,
+                        live! {
+                            cursor: Hand,
+                            draw_bg: {
+                                ghost: 0.0,
+                                acrylic_on: (acr),
+                                accent_col: (accent)
+                            }
+                        },
+                    );
+                    sv.label(id!(title))
+                        .set_text(cx, &clip_text(&clean_display_text(&st.title), 18));
+                    sv.label(id!(sub))
+                        .set_text(cx, &clip_text(&clean_display_text(&st.subtitle), 26));
+                    if st.is_spotify_prebuilt_art && st.center_art_url.is_some() {
+                        sv.view(id!(full_art_wrap)).set_visible(cx, true);
+                        sv.view(id!(triptych_box)).set_visible(cx, false);
+                        self.bind_cover_art_url(
+                            cx,
+                            sv.ferric_cover_art(id!(full_art)),
+                            st.center_art_url.as_deref(),
+                            None,
+                            false,
+                            0.5,
+                            false,
+                        );
+                    } else {
+                        sv.view(id!(full_art_wrap)).set_visible(cx, false);
+                        let tbox = sv.view(id!(triptych_box));
+                        tbox.set_visible(cx, true);
+                        let card_col = station_pastel_vec4(st.palette_idx);
+                        tbox.apply_over(cx, live! { draw_bg: { card_col: (card_col) } });
+                        tbox.label(id!(card_title))
+                            .set_text(cx, &clip_text(&clean_display_text(&st.display_name), 15));
+                        self.bind_cover_art_url(
+                            cx,
+                            tbox.ferric_cover_art(id!(art_center)),
+                            st.center_art_url.as_deref(),
+                            None,
+                            false,
+                            0.5,
+                            true,
+                        );
+                        let left_url = st.left_art_url.as_deref().or(st.center_art_url.as_deref());
+                        let right_url = st
+                            .right_art_url
+                            .as_deref()
+                            .or(st.left_art_url.as_deref())
+                            .or(st.center_art_url.as_deref());
+                        tbox.view(id!(left_wrap))
+                            .set_visible(cx, left_url.is_some());
+                        tbox.view(id!(right_wrap))
+                            .set_visible(cx, right_url.is_some());
+                        self.bind_cover_art_url(
+                            cx,
+                            tbox.ferric_cover_art(id!(art_left)),
+                            left_url,
+                            None,
+                            false,
+                            0.5,
+                            true,
+                        );
+                        self.bind_cover_art_url(
+                            cx,
+                            tbox.ferric_cover_art(id!(art_right)),
+                            right_url,
+                            None,
+                            false,
+                            0.5,
+                            true,
+                        );
+                    }
+                } else {
+                    sv.view(id!(inner)).set_visible(cx, false);
+                    sv.apply_over(
+                        cx,
+                        live! {
+                            cursor: Default,
+                            draw_bg: { ghost: 1.0 }
+                        },
+                    );
+                }
+            }
+        } else {
+            self.ui.view(id!(stations_wrap)).set_visible(cx, false);
         }
 
         // 8 Dynamic Horizontal Real-Cover Shelves (Trending, New Releases, Charts, Mixes, Radio, Continuations)
@@ -6829,7 +7773,7 @@ impl App {
             .audio
             .as_ref()
             .is_some_and(|a| a.telemetry().is_playing);
-        let accent = self.current_accent();
+        let accent = rgba_to_vec4(self.adaptive_palette().accent);
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
         } else {
@@ -7205,13 +8149,29 @@ impl App {
 
     fn refresh_playlists_grid(&mut self, cx: &mut Cx) {
         const PER_PAGE: usize = 20;
-        let total = self.playlists.len();
+        self.sync_playlist_source_filter_ui(cx);
+        let filtered = self.filtered_playlists();
+        let total = filtered.len();
+        let max_pl_page = total.saturating_sub(1) / PER_PAGE;
+        if self.playlists_page > max_pl_page {
+            self.playlists_page = max_pl_page;
+        }
         self.ui
             .view(id!(playlists_empty_card))
             .set_visible(cx, total == 0);
+        if total == 0 {
+            let empty_title = if self.playlist_source_filter == PlaylistSourceFilter::All {
+                "No playlists yet".to_string()
+            } else {
+                format!("No {} playlists yet", self.playlist_source_filter.label())
+            };
+            self.ui
+                .label(id!(lbl_t_pl_empty))
+                .set_text(cx, &empty_title);
+        }
         let start = self.playlists_page * PER_PAGE;
         if let Some(cache) = &mut self.artwork {
-            for pl in self.playlists.iter().skip(start).take(PER_PAGE) {
+            for pl in filtered.iter().skip(start).take(PER_PAGE) {
                 if let Some(url) = pl.thumbnail_url.as_deref() {
                     let _ = cache.request_url(url);
                 }
@@ -7251,15 +8211,18 @@ impl App {
         }
         for (i, vid) in ids.into_iter().enumerate() {
             let v = self.ui.view(vid);
-            if let Some(pl) = self.playlists.get(start + i) {
+            if let Some(pl) = filtered.get(start + i) {
                 v.set_visible(cx, true);
                 v.apply_over(cx, live! { draw_bg: { ghost: 0.0 } });
                 v.view(id!(inner)).set_visible(cx, true);
                 v.label(id!(title)).set_text(cx, &clip_text(&pl.name, 22));
-                v.label(id!(sub)).set_text(
-                    cx,
-                    &format!("{} · {} songs", pl.source.as_badge(), pl.track_count),
-                );
+                let badge = if pl.id.starts_with("spotify:premium:") {
+                    "SPOTIFY PREMIUM"
+                } else {
+                    pl.source.as_badge()
+                };
+                v.label(id!(sub))
+                    .set_text(cx, &format!("{badge} · {} songs", pl.track_count));
                 self.bind_cover_art_url(
                     cx,
                     v.ferric_cover_art(id!(art)),
@@ -7371,18 +8334,26 @@ impl App {
     }
 
     fn refresh_detail_hero(&self, cx: &mut Cx) {
-        let kind_str = match self.detail_state.kind {
-            YtmCardKind::Album => "ALBUM",
-            YtmCardKind::Artist => "ARTIST",
-            YtmCardKind::Playlist => "PLAYLIST",
-            YtmCardKind::Song => "TRACK",
+        let kind_str = if self.detail_state.is_radio_station {
+            "RADIO STATION"
+        } else {
+            match self.detail_state.kind {
+                YtmCardKind::Album => "ALBUM",
+                YtmCardKind::Artist => "ARTIST",
+                YtmCardKind::Playlist => "PLAYLIST",
+                YtmCardKind::Song => "TRACK",
+            }
         };
         self.ui.label(id!(detail_kind_lbl)).set_text(cx, kind_str);
         self.ui
             .label(id!(detail_title_lbl))
             .set_text(cx, &self.detail_state.title);
         let sub = if self.detail_state.loading {
-            "Loading tracks from YouTube Music...".to_string()
+            if self.detail_state.is_radio_station {
+                "Building personalized radio station...".to_string()
+            } else {
+                "Loading tracks from YouTube Music...".to_string()
+            }
         } else if !self.detail_state.subtitle.is_empty() {
             format!(
                 "{} · {} songs",
@@ -7409,6 +8380,10 @@ impl App {
             .set_text(cx, if is_pinned { "Pinned" } else { "Pin" });
         let is_saved_pl = self.detail_state.kind == YtmCardKind::Playlist
             && self.playlists.iter().any(|p| p.id == self.detail_state.id);
+        self.ui.button(id!(detail_save_pl_btn)).set_visible(
+            cx,
+            !is_saved_pl && !self.detail_state.loading && !self.detail_state.tracks.is_empty(),
+        );
         self.ui
             .button(id!(detail_delete_btn))
             .set_visible(cx, is_saved_pl);
@@ -7434,6 +8409,199 @@ impl App {
         );
     }
 
+    fn save_detail_as_playlist(&mut self, cx: &mut Cx) {
+        if self.detail_state.tracks.is_empty() {
+            self.show_toast(cx, "No tracks ready to save yet");
+            return;
+        }
+        let title = self.detail_state.title.trim();
+        let name = if title.is_empty() {
+            "Saved Station".to_string()
+        } else {
+            title.to_string()
+        };
+        let pl_id = format!("local:pl:{}", csprng_hex(6));
+        let tracks = self.detail_state.tracks.clone();
+        let track_ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
+        let thumb = self
+            .detail_state
+            .thumbnail_url
+            .clone()
+            .or_else(|| tracks.first().and_then(|t| t.thumbnail_url.clone()));
+        let desc = if !self.detail_state.subtitle.trim().is_empty() {
+            self.detail_state.subtitle.clone()
+        } else if !self.detail_state.description.trim().is_empty() {
+            self.detail_state.description.clone()
+        } else {
+            "Saved from Recommended Stations".to_string()
+        };
+        let playlist = Playlist {
+            id: pl_id.clone(),
+            name: name.clone(),
+            source: TrackSource::Local,
+            etag: None,
+            track_count: track_ids.len(),
+            description: desc.clone(),
+            thumbnail_url: thumb.clone(),
+        };
+        if let Some(db) = &mut self.db {
+            let _ = db.upsert_tracks(&tracks);
+            let _ = db.upsert_playlist(&playlist, &track_ids);
+            let _ = db.match_cloud_tracks_to_local();
+            self.all_tracks = db.list_tracks("").unwrap_or_default();
+            self.playlists = db.list_playlists().unwrap_or_default();
+        }
+        self.detail_state.id = pl_id;
+        self.detail_state.kind = YtmCardKind::Playlist;
+        self.detail_state.is_radio_station = false;
+        self.detail_state.description = desc;
+        self.detail_state.thumbnail_url = thumb;
+        if let Some(hist) = &mut self.nav_history {
+            hist.update_current_detail(&self.detail_state);
+        }
+        self.refresh_detail_hero(cx);
+        self.rebuild_library_views(cx);
+        self.refresh_playlists_grid(cx);
+        self.show_toast(
+            cx,
+            &format!("Saved '{}' to Playlists ({} songs)", name, track_ids.len()),
+        );
+    }
+
+    fn open_recommended_station(&mut self, cx: &mut Cx, station: RecommendedStation) {
+        if let Some(url) = station.center_art_url.as_deref()
+            && let Some(cache) = &mut self.artwork
+        {
+            let _ = cache.request_url(url);
+        }
+        if !station.cached_tracks.is_empty() {
+            self.request_artwork_for_tracks(&station.cached_tracks);
+            self.detail_tracks = Rc::new(station.cached_tracks.clone());
+            self.detail_state = DetailViewState {
+                id: station.id,
+                title: station.title,
+                subtitle: station.subtitle,
+                description: String::new(),
+                kind: YtmCardKind::Playlist,
+                is_radio_station: true,
+                thumbnail_url: station.center_art_url,
+                loading: false,
+                tracks: station.cached_tracks,
+            };
+            self.refresh_detail_hero(cx);
+            self.navigate_to(cx, MainPage::Detail, true);
+            return;
+        }
+
+        let station_id = station.id.clone();
+        self.detail_tracks = Rc::new(Vec::new());
+        self.detail_state = DetailViewState {
+            id: station_id.clone(),
+            title: station.title.clone(),
+            subtitle: station.subtitle.clone(),
+            description: String::new(),
+            kind: YtmCardKind::Playlist,
+            is_radio_station: true,
+            thumbnail_url: station.center_art_url.clone(),
+            loading: true,
+            tracks: Vec::new(),
+        };
+        self.refresh_detail_hero(cx);
+        self.navigate_to(cx, MainPage::Detail, true);
+
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        let session = self.current_ytm_session();
+        let sp_token = if !self.accounts.spotify_web_access_token.trim().is_empty() {
+            Some(self.accounts.spotify_web_access_token.trim().to_string())
+        } else if !self.accounts.spotify_access_token.trim().is_empty() {
+            Some(self.accounts.spotify_access_token.trim().to_string())
+        } else {
+            None
+        };
+        let liked_sp_ids: std::collections::HashSet<String> = self
+            .all_tracks
+            .iter()
+            .filter(|t| t.liked)
+            .filter_map(|t| t.spotify_id.clone())
+            .collect();
+        let library_pool: Vec<Track> = self.all_tracks.iter().take(600).cloned().collect();
+
+        thread::spawn(move || {
+            // Engine A: real Spotify Radio playlist (~50 tracks via Pathfinder or public embed)
+            if let Some(pid) = station.spotify_playlist_id.as_deref() {
+                if let Some(tok) = sp_token.as_deref()
+                    && let Ok(bundle) = fetch_spotify_playlist_by_id(tok, pid, &liked_sp_ids)
+                    && !bundle.tracks.is_empty()
+                {
+                    let sub = if bundle.playlist.description.trim().is_empty() {
+                        station.subtitle.clone()
+                    } else {
+                        bundle.playlist.description
+                    };
+                    let _ = tx.send(BgMessage::StationTracksLoaded {
+                        station_id,
+                        tracks: bundle.tracks,
+                        subtitle: sub,
+                        thumbnail_url: bundle
+                            .playlist
+                            .thumbnail_url
+                            .or(station.center_art_url.clone()),
+                        left_art: None,
+                        right_art: None,
+                    });
+                    return;
+                }
+                let pub_url = format!("https://open.spotify.com/playlist/{pid}");
+                if let Ok((pl, tracks)) = import_spotify_public_url(&pub_url)
+                    && !tracks.is_empty()
+                {
+                    let sub = if pl.description.trim().is_empty() {
+                        station.subtitle.clone()
+                    } else {
+                        pl.description
+                    };
+                    let _ = tx.send(BgMessage::StationTracksLoaded {
+                        station_id,
+                        tracks,
+                        subtitle: sub,
+                        thumbnail_url: pl.thumbnail_url.or(station.center_art_url.clone()),
+                        left_art: None,
+                        right_art: None,
+                    });
+                    return;
+                }
+            }
+
+            // Engine B: Algorithmic multi-hop Spotify-parity radio expansion
+            match expand_recommended_station_tracks(&session, &station, &library_pool) {
+                Ok(expanded) => {
+                    let thumb = station.center_art_url.clone().or_else(|| {
+                        expanded
+                            .tracks
+                            .first()
+                            .and_then(|t| t.thumbnail_url.clone())
+                    });
+                    let _ = tx.send(BgMessage::StationTracksLoaded {
+                        station_id,
+                        tracks: expanded.tracks,
+                        subtitle: expanded.subtitle,
+                        thumbnail_url: thumb,
+                        left_art: expanded.left_art,
+                        right_art: expanded.right_art,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(BgMessage::StationTracksFailed {
+                        station_id,
+                        error: err.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
     fn open_local_detail(&mut self, cx: &mut Cx, group: CollectionGroup) {
         self.request_artwork_for_tracks(&group.tracks);
         self.detail_tracks = Rc::new(group.tracks.clone());
@@ -7443,6 +8611,7 @@ impl App {
             subtitle: group.subtitle,
             description: String::new(),
             kind: group.kind,
+            is_radio_station: false,
             thumbnail_url: group.thumbnail_url,
             loading: false,
             tracks: group.tracks,
@@ -7502,6 +8671,7 @@ impl App {
             subtitle: card.subtitle,
             description: String::new(),
             kind: card.kind,
+            is_radio_station: false,
             thumbnail_url: card.thumbnail_url,
             loading: true,
             tracks: Vec::new(),
@@ -7596,18 +8766,22 @@ impl App {
             .ferric_toggle(id!(mono_toggle))
             .set_active(cx, self.dsp.mono_audio);
 
-        for (btn, spd) in [
-            (id!(spd_075_btn), 0.75_f32),
-            (id!(spd_100_btn), 1.0_f32),
-            (id!(spd_125_btn), 1.25_f32),
-            (id!(spd_150_btn), 1.5_f32),
-        ] {
-            let active = (self.dsp.playback_speed - spd).abs() < 0.05;
-            self.ui.button(btn).apply_over(
-                cx,
-                live! { draw_bg: { active: (if active { 1.0 } else { 0.0 }) } },
-            );
-        }
+        let spd = self.dsp.playback_speed;
+        let spd_label = if (spd - 0.75).abs() < 0.05 {
+            "0.75x"
+        } else if (spd - 1.25).abs() < 0.05 {
+            "1.25x"
+        } else if (spd - 1.50).abs() < 0.05 {
+            "1.5x"
+        } else {
+            "1.0x"
+        };
+        let spd_modified = (spd - 1.0).abs() >= 0.05;
+        self.ui.button(id!(speed_pill_btn)).set_text(cx, spd_label);
+        self.ui.button(id!(speed_pill_btn)).apply_over(
+            cx,
+            live! { draw_bg: { active: (if spd_modified { 1.0 } else { 0.0 }) } },
+        );
 
         self.ui
             .ferric_toggle(id!(eq_enable_toggle))
@@ -7692,6 +8866,9 @@ impl App {
         self.ui
             .ferric_toggle(id!(acrylic_toggle))
             .set_active(cx, self.theme.acrylic_enabled);
+        self.ui
+            .ferric_toggle(id!(adaptive_acrylic_tint_toggle))
+            .set_active(cx, self.theme.adaptive_acrylic_tint);
         self.ui
             .ferric_bar_slider(id!(acrylic_opacity_slider))
             .set_value(cx, f64::from(self.theme.acrylic_opacity));
@@ -7778,6 +8955,7 @@ impl App {
             self.theme.acrylic_enabled,
             self.theme.acrylic_opacity,
             self.theme.acrylic_tint_rgb(),
+            self.theme.is_light_surface(),
         );
 
         let pal = self.adaptive_palette();
@@ -7790,13 +8968,12 @@ impl App {
         let icon_muted = rgba_to_vec4(pal.icon_muted);
         let divider_col = rgba_to_vec4(pal.divider);
         let accent = rgba_to_vec4(pal.accent);
-        let brand_accent = rgba_to_vec4(pal.brand_accent);
         let danger_col = rgba_to_vec4(pal.danger_text);
 
         let canvas = rgba_vec4(&self.theme.canvas_hex);
         let surface = rgba_vec4(&self.theme.surface_hex);
         let border = rgba_vec4(&self.theme.border_hex);
-        let acrylic_tint = rgba_vec4(&self.theme.acrylic_tint_hex);
+        let acrylic_tint = self.current_acrylic_tint();
 
         let op = self.theme.acrylic_opacity.clamp(0.18, 0.94);
         self.ui.view(id!(body)).apply_over(
@@ -7832,6 +9009,18 @@ impl App {
                 },
             );
         }
+        self.ui.view(id!(bottom_bar)).apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    base_col: (surface),
+                    light_mode: (lm),
+                    acrylic_on: (acr),
+                    acrylic_opacity: (op),
+                    acrylic_tint: (acrylic_tint)
+                }
+            },
+        );
 
         // Propagate clean Native Acrylic / AMOLED / Light surface polarity to all cards
         for card_id in [
@@ -7846,6 +9035,8 @@ impl App {
             id!(card_pb_speed),
             id!(card_eq_main),
             id!(card_app_theme),
+            id!(card_app_acrylic),
+            id!(card_app_profiles),
             id!(card_discord_rpc),
             id!(card_st_cache),
             id!(card_st_update),
@@ -7888,6 +9079,11 @@ impl App {
             id!(qp_5),
             id!(qp_6),
             id!(qp_7),
+            id!(st_c0),
+            id!(st_c1),
+            id!(st_c2),
+            id!(st_c3),
+            id!(st_c4),
             id!(sh0_c0),
             id!(sh0_c1),
             id!(sh0_c2),
@@ -8083,11 +9279,17 @@ impl App {
         self.ui
             .widget(id!(top_search_icon))
             .apply_over(cx, live! { draw_icon: { color: (icon_muted) } });
+        let sel_col = if pal.is_light {
+            vec4(accent.x, accent.y, accent.z, 0.28)
+        } else {
+            vec4(1.0, 1.0, 1.0, 0.25)
+        };
         self.ui.text_input(id!(top_search_input)).apply_over(
             cx,
             live! {
                 draw_text: { color: (text_primary), color_empty: (text_muted) }
-                draw_cursor: { color: (brand_accent) }
+                draw_cursor: { color: (accent) }
+                draw_selection: { color: (sel_col), color_hover: (sel_col), color_focus: (sel_col) }
             },
         );
         self.ui.view(id!(sidebar_filter_box)).apply_over(
@@ -8106,7 +9308,8 @@ impl App {
                 cx,
                 live! {
                     draw_text: { color: (text_primary), color_empty: (text_muted) }
-                    draw_cursor: { color: (brand_accent) }
+                    draw_cursor: { color: (accent) }
+                    draw_selection: { color: (sel_col), color_hover: (sel_col), color_focus: (sel_col) }
                 },
             );
 
@@ -8150,7 +9353,6 @@ impl App {
             id!(search_page_input),
             id!(pl_new_input),
             id!(detail_rename_input),
-            id!(spotify_client_input),
             id!(quick_sync_input),
             id!(sub_url_input),
             id!(sub_user_input),
@@ -8179,7 +9381,8 @@ impl App {
                         border_color_2_focus: (accent)
                     }
                     draw_text: { color: (text_primary), color_empty: (text_muted) }
-                    draw_cursor: { color: (brand_accent) }
+                    draw_cursor: { color: (accent) }
+                    draw_selection: { color: (sel_col), color_hover: (sel_col), color_focus: (sel_col) }
                 },
             );
         }
@@ -8221,6 +9424,7 @@ impl App {
             id!(sidebar_create_pl_btn),
             id!(home_retry_btn),
             id!(home_play_all_btn),
+            id!(stations_refresh_btn),
             id!(home_load_more_btn),
             id!(home_shuffle_feed_btn),
             id!(search_clear_btn),
@@ -8232,6 +9436,7 @@ impl App {
             id!(pl_empty_import_btn),
             id!(pl_empty_google_btn),
             id!(detail_shuffle_btn),
+            id!(detail_save_pl_btn),
             id!(detail_radio_btn),
             id!(detail_pin_btn),
             id!(detail_queue_btn),
@@ -8242,9 +9447,6 @@ impl App {
             id!(guest_refresh_btn),
             id!(spotify_sync_btn),
             id!(spotify_logout_btn),
-            id!(spotify_dev_portal_btn),
-            id!(spotify_copy_portal_btn),
-            id!(spotify_copy_redirect_btn),
             id!(spotify_web_sync_btn),
             id!(spotify_web_logout_btn),
             id!(quick_spotify_btn),
@@ -8259,10 +9461,6 @@ impl App {
             id!(curve_bass_btn),
             id!(curve_eqp_btn),
             id!(curve_velvet_btn),
-            id!(spd_075_btn),
-            id!(spd_100_btn),
-            id!(spd_125_btn),
-            id!(spd_150_btn),
             id!(slp_off_btn),
             id!(slp_15_btn),
             id!(slp_30_btn),
@@ -8308,6 +9506,7 @@ impl App {
             id!(rs_lyr_expand),
             id!(rs_lyr_copy),
             id!(rs_watch_video),
+            id!(speed_pill_btn),
             id!(codec_pill_btn),
             id!(cmdk_close_btn),
             id!(cmdk_home_btn),
@@ -8329,6 +9528,8 @@ impl App {
             id!(tm_artist_btn),
             id!(tm_album_btn),
             id!(tm_copy_btn),
+            id!(update_whats_new_btn),
+            id!(update_popup_close_btn),
         ] {
             self.ui.button(btn_id).apply_over(
                 cx,
@@ -8338,9 +9539,10 @@ impl App {
                 },
             );
         }
-        self.ui
-            .button(id!(top_account_btn))
-            .apply_over(cx, live! { draw_icon: { color: (brand_accent) } });
+        self.ui.button(id!(top_account_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (accent), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (accent) } },
+        );
         for danger_btn_id in [
             id!(songs_clear_demo_btn),
             id!(detail_delete_btn),
@@ -8352,7 +9554,7 @@ impl App {
                 cx,
                 live! {
                     draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
-                    draw_text: { color: (danger_col), color_hover: (danger_col), color_focus: (danger_col) }
+                    draw_text: { color: (danger_col), color_hover: (danger_col), color_focus: (danger_col), color_down: (danger_col) }
                 },
             );
         }
@@ -8388,26 +9590,6 @@ impl App {
                 },
             );
         }
-        // Left sidebar bottom utility items (Settings, Add Folder)
-        {
-            let active = self.active_page == MainPage::Settings;
-            self.ui.button(id!(nav_settings)).apply_over(
-                cx,
-                live! {
-                    draw_bg: { active: (if active { 1.0 } else { 0.0 }), acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
-                    draw_icon: { color: (if active { text_primary } else { icon_idle }), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
-                    draw_text: { color: (if active { text_primary } else { text_secondary }), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
-                },
-            );
-        }
-        self.ui.button(id!(sidebar_add_folder_btn)).apply_over(
-            cx,
-            live! {
-                draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
-                draw_icon: { color: (icon_idle), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
-                draw_text: { color: (text_secondary), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
-            },
-        );
         for row_id in [
             id!(pin_liked_row) as &[LiveId],
             id!(pin_local_row) as &[LiveId],
@@ -8425,6 +9607,9 @@ impl App {
             row.label(id!(sub))
                 .apply_over(cx, live! { draw_text: { color: (text_muted) } });
         }
+        self.ui
+            .label(id!(sidebar_empty_lbl))
+            .apply_over(cx, live! { draw_text: { color: (text_muted) } });
 
         // All Chip buttons (moods, filters, tabs, tint presets, quality, queue/lyrics tabs)
         for chip_id in [
@@ -8453,6 +9638,20 @@ impl App {
             id!(flt_local_btn),
             id!(flt_spotify_btn),
             id!(flt_youtube_btn),
+            id!(sb_src_all_btn),
+            id!(sb_src_yt_btn),
+            id!(sb_src_sp_btn),
+            id!(sb_src_sp_prem_btn),
+            id!(sb_src_local_btn),
+            id!(sb_pl_sort_btn),
+            id!(pl_src_all_btn),
+            id!(pl_src_yt_btn),
+            id!(pl_src_sp_btn),
+            id!(pl_src_sp_prem_btn),
+            id!(pl_src_local_btn),
+            id!(pl_sort_newest_btn),
+            id!(pl_sort_oldest_btn),
+            id!(pl_sort_az_btn),
             id!(st_accounts_btn),
             id!(st_playback_btn),
             id!(st_eq_btn),
@@ -8506,6 +9705,8 @@ impl App {
             id!(top_search_clear_btn),
             id!(qp_prev_btn),
             id!(qp_next_btn),
+            id!(stations_prev_btn),
+            id!(stations_next_btn),
             id!(sh0_prev_btn),
             id!(sh0_next_btn),
             id!(sh1_prev_btn),
@@ -8582,15 +9783,19 @@ impl App {
                 },
             );
         }
-        let (play_bg, play_hov, play_glyph) = if pal.is_light {
+        let (play_bg, play_hov, play_down, play_aura, play_glyph) = if pal.is_light {
             (
                 vec4(0.071, 0.082, 0.118, 1.0),
                 vec4(0.137, 0.157, 0.220, 1.0),
+                vec4(0.043, 0.051, 0.078, 1.0),
+                vec4(0.06, 0.07, 0.11, 1.0),
                 vec4(1.0, 1.0, 1.0, 1.0),
             )
         } else {
             (
                 vec4(1.0, 1.0, 1.0, 1.0),
+                vec4(1.0, 1.0, 1.0, 1.0),
+                rgba_vec4("#D8DAE4"),
                 vec4(1.0, 1.0, 1.0, 1.0),
                 vec4(0.035, 0.035, 0.051, 1.0),
             )
@@ -8601,6 +9806,8 @@ impl App {
                 draw_bg: {
                     accent_col: (play_bg),
                     accent_hover: (play_hov),
+                    accent_down: (play_down),
+                    aura_col: (play_aura),
                     glyph_col: (play_glyph)
                 }
             },
@@ -8612,6 +9819,11 @@ impl App {
         } else {
             rgba_vec4("#3E404C")
         };
+        let slider_thumb = if pal.is_light {
+            text_primary
+        } else {
+            rgba_vec4("#F4F4F7")
+        };
         for sid in [
             id!(seek_slider),
             id!(vol_slider),
@@ -8620,22 +9832,24 @@ impl App {
             id!(eq_preamp_slider),
             id!(acrylic_opacity_slider),
         ] {
-            self.ui
-                .ferric_bar_slider(sid)
-                .apply_over(cx, live! { draw_bg: { track_col: (slider_track) } });
+            self.ui.ferric_bar_slider(sid).apply_over(
+                cx,
+                live! { draw_bg: { track_col: (slider_track), thumb_col: (slider_thumb) } },
+            );
         }
-        let vert_track = if pal.is_light {
-            vec4(0.06, 0.07, 0.11, 0.22)
+        let (vert_track, vert_tick) = if pal.is_light {
+            (vec4(0.06, 0.07, 0.11, 0.22), vec4(0.06, 0.07, 0.11, 0.36))
         } else {
-            rgba_vec4("#262834")
+            (rgba_vec4("#262834"), rgba_vec4("#323544"))
         };
         for (slider_id, _) in eq_band_ids() {
-            self.ui
-                .ferric_vert_slider(slider_id)
-                .apply_over(cx, live! { draw_bg: { track_col: (vert_track) } });
+            self.ui.ferric_vert_slider(slider_id).apply_over(
+                cx,
+                live! { draw_bg: { track_col: (vert_track), thumb_col: (slider_thumb), tick_col: (vert_tick) } },
+            );
         }
         let (tog_off, tog_border) = if pal.is_light {
-            (vec4(0.06, 0.07, 0.11, 0.22), vec4(0.06, 0.07, 0.11, 0.34))
+            (vec4(0.06, 0.07, 0.11, 0.44), vec4(0.06, 0.07, 0.11, 0.52))
         } else {
             (rgba_vec4("#222430"), rgba_vec4("#323544"))
         };
@@ -8648,6 +9862,7 @@ impl App {
             id!(mono_toggle),
             id!(eq_enable_toggle),
             id!(acrylic_toggle),
+            id!(adaptive_acrylic_tint_toggle),
             id!(adaptive_art_toggle),
             id!(discord_enable_toggle),
             id!(discord_paused_toggle),
@@ -8667,7 +9882,7 @@ impl App {
         };
         self.ui.ferric_eq_graph(id!(eq_graph)).apply_over(
             cx,
-            live! { draw_bg: { bg_col: (eq_bg), border_col: (eq_border) } },
+            live! { draw_bg: { bg_col: (eq_bg), border_col: (eq_border), light_mode: (lm) } },
         );
 
         // Dividers adapt cleanly to light/dark background
@@ -8676,15 +9891,18 @@ impl App {
             id!(div_top_search),
             id!(div_top_r),
             id!(div_h_top),
-            id!(div_h_side),
             id!(left_divider),
             id!(right_divider),
             id!(div_h_recents),
             id!(div_h_songs),
             id!(div_h_detail),
             id!(div_h_app),
+            id!(div_h_app_acr),
+            id!(div_h_app_tint),
             id!(div_h_disc),
             id!(div_h_rs),
+            id!(tm_div_1),
+            id!(tm_div_2),
         ] {
             self.ui
                 .widget(div_id)
@@ -8696,6 +9914,7 @@ impl App {
             id!(brand_title_lbl),
             id!(lbl_m_library),
             id!(lbl_t_quick_picks),
+            id!(lbl_t_stations),
             id!(sh0_title_lbl),
             id!(sh1_title_lbl),
             id!(sh2_title_lbl),
@@ -8730,7 +9949,6 @@ impl App {
             id!(lbl_t_pb_trim),
             id!(lbl_t_pb_rg),
             id!(lbl_t_pb_mono),
-            id!(lbl_t_pb_speed),
             id!(sleep_status_lbl),
             id!(lbl_t_eq_title),
             id!(lbl_t_eq_preamp),
@@ -8747,8 +9965,10 @@ impl App {
             id!(lbl_t_app_title),
             id!(lbl_t_app_zoom),
             id!(lbl_t_app_acr),
+            id!(lbl_t_app_acr_adaptive),
             id!(lbl_t_app_tint),
             id!(lbl_t_app_adaptive),
+            id!(lbl_t_app_profiles),
             id!(lbl_t_disc_title),
             id!(discord_prev_title),
             id!(lbl_t_disc_en),
@@ -8774,6 +9994,7 @@ impl App {
         // All secondary/muted shell labels -> WCAG-verified secondary/muted ink
         for lid in [
             id!(lbl_m_pinned),
+            id!(lbl_m_stations),
             id!(home_status_lbl),
             id!(search_status_lbl),
             id!(lbl_m_recent),
@@ -8801,7 +10022,13 @@ impl App {
             id!(eq_f7),
             id!(eq_f8),
             id!(eq_f9),
+            id!(lbl_m_app_theme_desc),
+            id!(lbl_m_app_zoom_hint),
+            id!(lbl_m_app_adaptive_hint),
+            id!(lbl_m_app_acr_desc),
             id!(lbl_m_app_opacity),
+            id!(lbl_m_app_acr_adaptive_hint),
+            id!(lbl_m_app_presets),
             id!(lbl_m_app_profiles),
             id!(discord_prev_header),
             id!(discord_prev_artist),
@@ -8819,6 +10046,7 @@ impl App {
             id!(pos_lbl),
             id!(update_popup_notes),
             id!(tm_sub_lbl),
+            id!(tm_add_pl_hdr),
         ] {
             self.ui
                 .label(lid)
@@ -8827,7 +10055,7 @@ impl App {
         self.ui.button(id!(dur_btn)).apply_over(
             cx,
             live! {
-                draw_text: { color: (text_secondary), color_hover: (text_primary), color_focus: (text_primary) }
+                draw_text: { color: (text_secondary), color_hover: (text_primary), color_focus: (text_primary), color_down: (text_primary) }
             },
         );
 
@@ -8841,9 +10069,13 @@ impl App {
             id!(vq_720_btn),
             id!(vq_1080_btn),
         ] {
-            self.ui
-                .button(fs_chip_id)
-                .apply_over(cx, live! { draw_bg: { acrylic_on: (acr) } });
+            self.ui.button(fs_chip_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { acrylic_on: (acr), light_mode: 0.0 }
+                    draw_text: { color: #C8CAD6, light_mode: 0.0 }
+                },
+            );
         }
 
         self.apply_adaptive_accent_live(cx);
@@ -9089,6 +10321,19 @@ impl App {
             return;
         }
         let Some(vid) = track.youtube_video_id.clone() else {
+            if self.queue.peek_upcoming(5).is_empty() {
+                let fallback: Vec<Track> = self
+                    .home_quick_picks_pool()
+                    .into_iter()
+                    .filter(|t| t.id != track.id)
+                    .take(15)
+                    .collect();
+                if !fallback.is_empty() {
+                    self.queue.append_tracks(fallback);
+                    self.sync_next_deck_to_engine();
+                    self.prefetch_next_online_track();
+                }
+            }
             return;
         };
         let Some(tx) = self.bg_tx.clone() else {
@@ -9137,6 +10382,7 @@ impl App {
     fn is_text_input_focused(&self, cx: &Cx) -> bool {
         for input_id in [
             id!(top_search_input),
+            id!(sidebar_lib_filter_input),
             id!(search_page_input),
             id!(songs_filter_input),
             id!(pl_new_input),
@@ -9299,7 +10545,7 @@ impl App {
             cache.pin_active_track(None);
         }
         if let Some(smtc) = &mut self.smtc {
-            smtc.set_playing(false);
+            smtc.set_stopped();
         }
         if let Some(rpc) = &mut self.discord_rpc {
             rpc.update_playback(None);
@@ -9475,12 +10721,23 @@ impl App {
         {
             let mut out = String::from("#EXTM3U\n");
             for t in &self.detail_state.tracks {
-                let secs = (t.duration_ms / 1000) as i64;
-                out.push_str(&format!("#EXTINF:{secs},{} - {}\n", t.artist, t.title));
+                let secs = i64::try_from(t.duration_ms / 1000).unwrap_or(i64::MAX);
+                let artist = t.artist.replace(['\r', '\n'], " ");
+                let title = t.title.replace(['\r', '\n'], " ");
+                out.push_str(&format!("#EXTINF:{secs},{artist} - {title}\n"));
                 if let Some(p) = &t.path {
-                    out.push_str(&format!("{}\n", p.to_string_lossy()));
+                    let path_line = p.to_string_lossy().replace(['\r', '\n'], "");
+                    if !path_line.is_empty() {
+                        out.push_str(&format!("{path_line}\n"));
+                    }
                 } else if let Some(vid) = &t.youtube_video_id {
-                    out.push_str(&format!("https://music.youtube.com/watch?v={vid}\n"));
+                    let vid_clean: String = vid
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                        .collect();
+                    if !vid_clean.is_empty() {
+                        out.push_str(&format!("https://music.youtube.com/watch?v={vid_clean}\n"));
+                    }
                 }
             }
             match std::fs::write(&dest, out) {
@@ -9822,9 +11079,8 @@ impl App {
         self.apply_adaptive_accent_live(cx);
 
         if let Some(smtc) = &mut self.smtc {
-            smtc.try_attach_late();
-            smtc.set_metadata(&track.title, &track.artist, &track.album, track.duration_ms);
-            smtc.set_playing(true);
+            smtc.set_metadata_for_track(track);
+            smtc.sync_playback(true, 0, track.duration_ms);
         }
         if let Some(rpc) = &mut self.discord_rpc {
             rpc.update_playback(Some(DiscordTrackSnapshot {
@@ -10034,11 +11290,39 @@ impl App {
         }
         for t in &self.all_tracks {
             if t.liked && seen_ids.insert(t.id.clone()) {
-                scored_tracks.push((20, t.clone()));
+                scored_tracks.push((22, t.clone()));
             }
         }
+        // Absorb full cross-account playlist library (Spotify, YouTube, Local) so every unique
+        // artist in the user's playlists contributes to Home discovery & Refresh rotation.
+        let mut lib_artist_freq: HashMap<String, (String, i32, Track)> = HashMap::new();
+        for t in self.all_tracks.iter().take(1500) {
+            let key = primary_artist_key(&t.artist);
+            if key.is_empty() || key.eq_ignore_ascii_case("unknown artist") {
+                continue;
+            }
+            let norm = key.to_ascii_lowercase();
+            lib_artist_freq
+                .entry(norm)
+                .and_modify(|e| {
+                    e.1 += if t.liked { 6 } else { 3 };
+                    if e.2.youtube_video_id.is_none() && t.youtube_video_id.is_some() {
+                        e.2 = t.clone();
+                    }
+                })
+                .or_insert_with(|| (key, if t.liked { 10 } else { 5 }, t.clone()));
+        }
+        let mut lib_artists_sorted: Vec<(String, i32, Track)> =
+            lib_artist_freq.into_values().collect();
+        lib_artists_sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
+        for (_, freq_score, rep_track) in lib_artists_sorted.iter().take(48) {
+            if seen_ids.insert(rep_track.id.clone()) {
+                scored_tracks.push(((*freq_score).min(18), rep_track.clone()));
+            }
+        }
+
         scored_tracks.sort_by_key(|t| std::cmp::Reverse(t.0));
-        let top_tracks: Vec<Track> = scored_tracks.into_iter().take(20).map(|(_, t)| t).collect();
+        let top_tracks: Vec<Track> = scored_tracks.into_iter().take(60).map(|(_, t)| t).collect();
 
         let mut artist_scores: HashMap<String, (String, i32)> = HashMap::new();
         for (artist, &cnt) in &self.session_state.artist_play_counts {
@@ -10046,27 +11330,129 @@ impl App {
             if !key.is_empty() {
                 let norm = key.to_ascii_lowercase();
                 let entry = artist_scores.entry(norm).or_insert((key, 0));
-                entry.1 += (cnt as i32) * 10;
+                entry.1 += (cnt as i32) * 12;
             }
         }
         for (idx, t) in top_tracks.iter().enumerate() {
             let key = primary_artist_key(&t.artist);
             if !key.is_empty() {
                 let norm = key.to_ascii_lowercase();
-                let w = 20_i32.saturating_sub(idx as i32).max(2) + if t.liked { 8 } else { 0 };
+                let w =
+                    26_i32.saturating_sub((idx as i32) / 2).max(4) + if t.liked { 10 } else { 0 };
                 let entry = artist_scores.entry(norm).or_insert((key, 0));
                 entry.1 += w;
             }
         }
+        for (disp, freq_score, _) in lib_artists_sorted.into_iter().take(40) {
+            let norm = disp.to_ascii_lowercase();
+            let entry = artist_scores.entry(norm).or_insert((disp, 0));
+            entry.1 += freq_score;
+        }
         let mut artist_list: Vec<(String, i32)> = artist_scores.into_values().collect();
         artist_list.sort_by_key(|a| std::cmp::Reverse(a.1));
-        let top_artists: Vec<String> = artist_list.into_iter().take(8).map(|(a, _)| a).collect();
+        let top_artists: Vec<String> = artist_list.into_iter().take(32).map(|(a, _)| a).collect();
 
         YtmHomeTasteProfile {
             top_tracks,
             top_artists,
             recent_searches: self.session_state.recent_searches.clone(),
         }
+    }
+
+    fn spawn_recommended_stations(&mut self, cx: &mut Cx, rotate: bool) {
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        self.stations_request_seq = self.stations_request_seq.wrapping_add(1);
+        let seq = self.stations_request_seq;
+        if rotate {
+            self.stations_rotation_epoch = self.stations_rotation_epoch.wrapping_add(1);
+        }
+        let rot = self.stations_rotation_epoch;
+        self.stations_page = 0;
+
+        let taste = self.build_home_taste_profile();
+        let library_tracks: Vec<Track> = self.all_tracks.iter().take(1500).cloned().collect();
+        let home_tracks: Vec<Track> = self
+            .rich_home
+            .quick_picks
+            .iter()
+            .take(40)
+            .cloned()
+            .collect();
+
+        // Immediately surface instant algorithmic stations from local/synced library so Home feels
+        // zero-latency while Engine A (Spotify Pathfinder `home`) fetches live personalized Radio cards.
+        let instant = build_algorithmic_recommended_stations_rotated(
+            &taste,
+            &library_tracks,
+            &home_tracks,
+            15,
+            rot,
+        );
+        if !instant.is_empty() && (self.recommended_stations.is_empty() || rotate) {
+            self.recommended_stations = instant;
+            self.refresh_home_ui(cx);
+        }
+
+        let sp_token = if !self.accounts.spotify_web_access_token.trim().is_empty() {
+            Some(self.accounts.spotify_web_access_token.trim().to_string())
+        } else if !self.accounts.spotify_access_token.trim().is_empty() {
+            Some(self.accounts.spotify_access_token.trim().to_string())
+        } else {
+            None
+        };
+
+        thread::spawn(move || {
+            let mut merged: Vec<RecommendedStation> = Vec::new();
+            let mut seen_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+
+            // Engine A: Real Spotify Pathfinder `home` Recommended Stations when signed into Spotify
+            if let Some(tok) = sp_token.as_deref()
+                && let Ok(mut sp_cards) = fetch_spotify_recommended_stations(tok)
+            {
+                if rot > 0 && sp_cards.len() > 2 {
+                    let shift = (rot * 3) % sp_cards.len();
+                    sp_cards.rotate_left(shift);
+                }
+                for (i, card) in sp_cards.into_iter().enumerate() {
+                    let key = card.display_name.trim().to_ascii_lowercase();
+                    if !key.is_empty() && seen_names.insert(key) {
+                        merged.push(RecommendedStation::from_spotify_card(&card, (i % 8) as u8));
+                        if merged.len() >= 15 {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Engine B: Spotify-parity multi-locale algorithmic stations (fills up to 15 cards = 3 pages,
+            // rotating through deeper library clusters on Refresh!)
+            if merged.len() < 15 {
+                let algo = build_algorithmic_recommended_stations_rotated(
+                    &taste,
+                    &library_tracks,
+                    &home_tracks,
+                    15,
+                    rot,
+                );
+                for st in algo {
+                    let key = st.display_name.trim().to_ascii_lowercase();
+                    if !key.is_empty() && seen_names.insert(key) {
+                        merged.push(st);
+                        if merged.len() >= 15 {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let _ = tx.send(BgMessage::RecommendedStationsLoaded {
+                seq,
+                stations: merged,
+            });
+        });
     }
 
     fn spawn_ytm_rich_home(
@@ -10125,6 +11511,7 @@ impl App {
             .set_text(cx, "Loading more...");
         let session = self.current_ytm_session();
         let cont = self.rich_home.continuation_token.clone();
+        let taste = self.build_home_taste_profile();
         let fallback_mood = if !self.rich_home.chips.is_empty() {
             let idx = self.home_more_cycle % self.rich_home.chips.len();
             self.home_more_cycle = self.home_more_cycle.wrapping_add(1);
@@ -10133,7 +11520,12 @@ impl App {
             None
         };
         thread::spawn(move || {
-            match fetch_home_continuation(&session, cont.as_deref(), fallback_mood.as_deref()) {
+            match fetch_home_continuation(
+                &session,
+                cont.as_deref(),
+                fallback_mood.as_deref(),
+                &taste,
+            ) {
                 Ok(more) => {
                     let _ = tx.send(BgMessage::YtmHomeMoreLoaded(Box::new(more)));
                 }
@@ -10433,73 +11825,73 @@ impl App {
         });
     }
 
+    fn is_spotify_oauth_session_active(&self) -> bool {
+        self.accounts.spotify_connected && !self.accounts.spotify_access_token.trim().is_empty()
+    }
+
     fn is_spotify_web_session_active(&self) -> bool {
-        self.accounts.spotify_connected && !self.accounts.spotify_web_cookie.trim().is_empty()
+        self.accounts.spotify_web_connected
+            && (!self.accounts.spotify_web_cookie.trim().is_empty()
+                || !self.accounts.spotify_web_access_token.trim().is_empty())
     }
 
     fn refresh_spotify_account_ui(&self, cx: &mut Cx) {
         let pal = self.adaptive_palette();
-        let connected_col = if pal.is_light {
-            vec4(0.075, 0.478, 0.282, 1.0)
-        } else {
-            vec4(0.353, 0.820, 0.549, 1.0)
-        };
-        let idle_col = rgba_to_vec4(pal.brand_accent);
+        let status_col = rgba_to_vec4(pal.brand_accent);
 
+        let oauth_active = self.is_spotify_oauth_session_active();
         let web_active = self.is_spotify_web_session_active();
-        let oauth_active = self.accounts.spotify_connected && !web_active;
-        let name = self.accounts.spotify_user_name.trim();
-        let connected_lbl = if name.is_empty() {
-            "Connected".to_string()
-        } else {
-            format!("Connected · {name}")
-        };
+        let oauth_name = self.accounts.spotify_user_name.trim();
+        let web_name = self.accounts.spotify_web_user_name.trim();
 
-        let (oauth_text, oauth_col) = if oauth_active {
-            (connected_lbl.clone(), connected_col)
+        let oauth_text = if oauth_active {
+            if oauth_name.is_empty() {
+                "Connected · Premium".to_string()
+            } else {
+                format!("Connected · {oauth_name} (Premium)")
+            }
         } else {
-            ("Not Connected".to_string(), idle_col)
+            "Not Connected".to_string()
         };
         self.ui
             .label(id!(spotify_state_lbl))
             .set_text(cx, &oauth_text);
         self.ui
             .label(id!(spotify_state_lbl))
-            .apply_over(cx, live! { draw_text: { color: (oauth_col) } });
+            .apply_over(cx, live! { draw_text: { color: (status_col) } });
 
-        let (web_text, web_col) = if web_active {
-            (connected_lbl, connected_col)
+        let web_text = if web_active {
+            if web_name.is_empty() {
+                "Connected".to_string()
+            } else {
+                format!("Connected · {web_name}")
+            }
         } else {
-            ("Not Connected".to_string(), idle_col)
+            "Not Connected".to_string()
         };
         self.ui
             .label(id!(spotify_web_state_lbl))
             .set_text(cx, &web_text);
         self.ui
             .label(id!(spotify_web_state_lbl))
-            .apply_over(cx, live! { draw_text: { color: (web_col) } });
+            .apply_over(cx, live! { draw_text: { color: (status_col) } });
 
-        if self.ui.text_input(id!(spotify_client_input)).text() != self.accounts.spotify_client_id {
-            self.ui
-                .text_input(id!(spotify_client_input))
-                .set_text(cx, &self.accounts.spotify_client_id);
-        }
         self.refresh_top_account_btn(cx);
     }
 
     fn start_spotify_login(&mut self, cx: &mut Cx) {
-        let custom_client_id = self.accounts.spotify_client_id.trim().to_string();
         let (effective_client_id, callback_port, callback_path) = {
-            let (cid, port, path) = spotify_oauth_endpoint_config(&custom_client_id);
+            let (cid, port, path) = spotify_oauth_endpoint_config("");
             (cid.to_string(), port, path)
         };
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
         let cancel = activate_oauth_cancel_token();
-        self.ui
-            .label(id!(spotify_oauth_status_lbl))
-            .set_text(cx, "Opening Spotify authorization in your browser...");
+        self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
+            cx,
+            "Opening Spotify authorization in your browser (verifying Premium status after sign-in)...",
+        );
         thread::spawn(move || {
             let pkce = generate_pkce_pair();
             let listener = match bind_loopback_callback(callback_port, callback_path, &pkce.state) {
@@ -10524,10 +11916,14 @@ impl App {
                         &redirect_uri,
                         &pkce.verifier,
                     )
+                })
+                .and_then(|tokens| {
+                    let display_name = verify_spotify_premium_account(&tokens.access_token)?;
+                    Ok((display_name, tokens))
                 });
             let _ = match outcome {
-                Ok(tokens) => tx.send(BgMessage::SpotifyLoginResult {
-                    client_id: custom_client_id,
+                Ok((display_name, tokens)) => tx.send(BgMessage::SpotifyLoginResult {
+                    display_name,
                     tokens,
                 }),
                 Err(err) => tx.send(BgMessage::SpotifyLoginFailed(err.to_string())),
@@ -10535,12 +11931,7 @@ impl App {
         });
     }
 
-    fn sync_spotify_library(&mut self, cx: &mut Cx) {
-        self.sync_spotify_library_with_delay(cx, 0);
-    }
-
-    fn sync_spotify_library_with_delay(&mut self, cx: &mut Cx, initial_delay_ms: u64) {
-        let web_session = self.is_spotify_web_session_active();
+    fn sync_spotify_library_for(&mut self, cx: &mut Cx, web_session: bool, initial_delay_ms: u64) {
         let status_lbl = if web_session {
             id!(spotify_web_status_lbl)
         } else {
@@ -10553,21 +11944,34 @@ impl App {
             );
             return;
         }
-        let token = self.accounts.spotify_access_token.trim().to_string();
+        let token = if web_session {
+            self.accounts.spotify_web_access_token.trim().to_string()
+        } else {
+            self.accounts.spotify_access_token.trim().to_string()
+        };
         if token.is_empty() {
             self.ui.label(status_lbl).set_text(
                 cx,
-                "Sign in with Spotify first to sync your Liked Songs and playlists.",
+                if web_session {
+                    "Sign in via Web first to sync your Spotify Liked Songs and playlists."
+                } else {
+                    "Sign in with a Spotify Premium account first to sync your library."
+                },
             );
             return;
         }
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
+        let snapshot_prefix = if web_session {
+            "spotify:playlist:"
+        } else {
+            "spotify:premium:playlist:"
+        };
         let existing_snapshots: HashMap<String, String> = self
             .playlists
             .iter()
-            .filter(|pl| pl.id.starts_with("spotify:playlist:"))
+            .filter(|pl| pl.id.starts_with(snapshot_prefix))
             .filter_map(|pl| {
                 pl.etag
                     .as_deref()
@@ -10580,9 +11984,9 @@ impl App {
         self.ui.label(status_lbl).set_text(
             cx,
             if web_session {
-                "Syncing your Spotify library gently (respecting rate limits)..."
+                "Syncing your Spotify Web library..."
             } else {
-                "Syncing your Spotify library..."
+                "Syncing your Spotify Premium library..."
             },
         );
         thread::spawn(move || {
@@ -10592,8 +11996,14 @@ impl App {
             let msg =
                 match sync_spotify_catalog_with_snapshots(&token, &existing_snapshots, web_session)
                 {
-                    Ok(report) => BgMessage::SpotifyCatalogSynced(Box::new(report)),
-                    Err(err) => BgMessage::SpotifySyncFailed(err.to_string()),
+                    Ok(report) => BgMessage::SpotifyCatalogSynced {
+                        web_session,
+                        report: Box::new(report),
+                    },
+                    Err(err) => BgMessage::SpotifySyncFailed {
+                        web_session,
+                        error: err.to_string(),
+                    },
                 };
             let _ = tx.send(msg);
         });
@@ -10694,6 +12104,7 @@ impl App {
         if let Some(cancel) = self.update_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
+        self.update_download_gen = self.update_download_gen.wrapping_add(1);
         self.update_download_in_flight = false;
         self.update_popup_visible = false;
         self.ui.view(id!(update_popup)).set_visible(cx, false);
@@ -10710,6 +12121,8 @@ impl App {
         let Some(tx) = self.bg_tx.clone() else {
             return;
         };
+        self.update_download_gen = self.update_download_gen.wrapping_add(1);
+        let gen_id = self.update_download_gen;
         self.update_download_in_flight = true;
         let cancel = Arc::new(AtomicBool::new(false));
         self.update_cancel = Some(Arc::clone(&cancel));
@@ -10726,19 +12139,24 @@ impl App {
                 &dest_dir,
                 &cancel,
                 move |pct| {
-                    let _ =
-                        progress_tx.send(BgMessage::UpdateDownload(DownloadEvent::Progress(pct)));
+                    let _ = progress_tx.send(BgMessage::UpdateDownload {
+                        gen_id,
+                        event: DownloadEvent::Progress(pct),
+                    });
                 },
             );
             match res {
                 Ok((path, sha256)) => {
-                    let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Ready {
-                        path,
-                        sha256,
-                    }));
+                    let _ = tx.send(BgMessage::UpdateDownload {
+                        gen_id,
+                        event: DownloadEvent::Ready { path, sha256 },
+                    });
                 }
                 Err(err) => {
-                    let _ = tx.send(BgMessage::UpdateDownload(DownloadEvent::Failed(err)));
+                    let _ = tx.send(BgMessage::UpdateDownload {
+                        gen_id,
+                        event: DownloadEvent::Failed(err),
+                    });
                 }
             }
         });
@@ -10755,46 +12173,44 @@ impl App {
             && Instant::now() >= due
         {
             self.tray_second_trim_at = None;
+            cx.textures.free_unused_textures();
             if let Some(db) = &self.db {
                 db.shrink_memory();
             }
             win32_trim_working_set();
         }
+        if let Some(due) = self.post_load_trim_at
+            && Instant::now() >= due
+        {
+            let art_busy = self
+                .artwork
+                .as_ref()
+                .is_some_and(ArtworkCache::has_pending_work);
+            if !art_busy {
+                self.post_load_trim_at = None;
+                cx.textures.free_unused_textures();
+                if let Some(db) = &self.db {
+                    db.shrink_memory();
+                }
+                win32_trim_working_set();
+            }
+        }
         if let Some(started) = self.started_at {
             let elapsed = started.elapsed();
-            if self.startup_trim_stage == 0 && elapsed >= Duration::from_millis(1_800) {
-                self.startup_trim_stage = 1;
-                self.last_trim_at = Some(Instant::now());
-                self.artwork_uploads_since_trim = 0;
-                if let Some(db) = &self.db {
-                    db.shrink_memory();
+            if self.startup_trim_stage == 0 && elapsed >= Duration::from_millis(3_400) {
+                let art_busy = self
+                    .artwork
+                    .as_ref()
+                    .is_some_and(ArtworkCache::has_pending_work);
+                if !art_busy || elapsed >= Duration::from_millis(6_500) {
+                    self.startup_trim_stage = 1;
+                    self.post_load_trim_at = None;
+                    cx.textures.free_unused_textures();
+                    if let Some(db) = &self.db {
+                        db.shrink_memory();
+                    }
+                    win32_trim_working_set();
                 }
-                win32_trim_working_set();
-            } else if self.startup_trim_stage == 1 && elapsed >= Duration::from_millis(4_200) {
-                self.startup_trim_stage = 2;
-                self.last_trim_at = Some(Instant::now());
-                self.artwork_uploads_since_trim = 0;
-                if let Some(db) = &self.db {
-                    db.shrink_memory();
-                }
-                win32_trim_working_set();
-            } else if self.startup_trim_stage >= 2
-                && !self.window_hidden_or_minimized
-                && self.page_reveal_t >= 0.995
-                && ((self.artwork_uploads_since_trim >= 6
-                    && self
-                        .last_trim_at
-                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(6)))
-                    || self
-                        .last_trim_at
-                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(30)))
-            {
-                self.last_trim_at = Some(Instant::now());
-                self.artwork_uploads_since_trim = 0;
-                if let Some(db) = &self.db {
-                    db.shrink_memory();
-                }
-                win32_trim_working_set();
             }
         }
         self.tick_counter = self.tick_counter.wrapping_add(1);
@@ -10802,6 +12218,35 @@ impl App {
         // 0b. Poll System Tray & Win32 subclass events
         for tray_ev in win32_poll_tray_events() {
             match tray_ev {
+                TrayEvent::Minimized => {
+                    // Taskbar minimize: pause hidden 60 FPS animations without dropping VRAM cover cache
+                    // or paging out DirectComposition so unminimizing restores Acrylic blur instantaneously.
+                    self.window_hidden_or_minimized = true;
+                    if self.video_open {
+                        self.close_native_video_stage_inner(cx, false);
+                    }
+                    if !self.fullscreen_open && self.fs_reveal_t > 0.004 {
+                        self.finish_fullscreen_close(cx);
+                    }
+                    let accent = self.current_accent();
+                    let acr = if self.theme.acrylic_enabled {
+                        1.0_f32
+                    } else {
+                        0.0_f32
+                    };
+                    self.ui
+                        .ferric_ambient_stage(id!(fs_backdrop))
+                        .set_state(cx, false, false, accent, acr);
+                    self.ui
+                        .ferric_lyrics_view(id!(rs_lyrics_scroll))
+                        .set_playback_state(cx, 0, false);
+                    self.ui
+                        .ferric_lyrics_view(id!(fs_lyrics_scroll))
+                        .set_playback_state(cx, 0, false);
+                    if let Some(db) = &self.db {
+                        db.shrink_memory();
+                    }
+                }
                 TrayEvent::HiddenToTray => {
                     self.window_hidden_or_minimized = true;
                     if self.video_open {
@@ -10827,8 +12272,9 @@ impl App {
                         .ferric_lyrics_view(id!(fs_lyrics_scroll))
                         .set_playback_state(cx, 0, false);
                     if let Some(cache) = &mut self.artwork {
-                        cache.clear_all_for_tray();
+                        cache.clear_all_for_tray(cx);
                         self.artwork_snapshot = Rc::new(HashMap::new());
+                        self.artwork_cleared_for_tray = true;
                     }
                     self.missing_art_queue.borrow_mut().clear();
                     self.missing_art_queue.borrow_mut().shrink_to_fit();
@@ -10842,11 +12288,6 @@ impl App {
                 TrayEvent::ShowWindow => {
                     self.window_hidden_or_minimized = false;
                     self.tray_second_trim_at = None;
-                    if let Some(cur) = self.queue.current().cloned()
-                        && let Some(cache) = &mut self.artwork
-                    {
-                        cache.pin_active_track(Some(&cur));
-                    }
                     let (is_playing, pos_ms) = self.audio.as_ref().map_or((false, 0), |a| {
                         let t = a.telemetry();
                         (t.is_playing, t.position_ms)
@@ -10863,7 +12304,15 @@ impl App {
                             .set_state(cx, true, is_playing, accent, acr);
                     }
                     self.update_lyrics_display(cx, pos_ms);
-                    self.refresh_all_artwork_slots(cx);
+                    if self.artwork_cleared_for_tray {
+                        self.artwork_cleared_for_tray = false;
+                        if let Some(cur) = self.queue.current().cloned()
+                            && let Some(cache) = &mut self.artwork
+                        {
+                            cache.pin_active_track(Some(&cur));
+                        }
+                        self.refresh_all_artwork_slots(cx);
+                    }
                     self.sync_video_bounds(cx);
                     cx.redraw_all();
                 }
@@ -10873,7 +12322,7 @@ impl App {
                     }
                 }
                 TrayEvent::NextTrack => {
-                    if let Some(next) = self.queue.next_track().cloned() {
+                    if let Some(next) = self.queue.next_track_manual().cloned() {
                         self.play_track(cx, next);
                     }
                 }
@@ -10897,17 +12346,28 @@ impl App {
         let window_hidden = win32_is_window_hidden_or_minimized();
 
         // 0c. Poll async GPU artwork cache (skip uploads while minimized/hidden in tray)
-        if !window_hidden
-            && let Some(cache) = &mut self.artwork
-            && cache.poll(cx)
-        {
-            self.artwork_uploads_since_trim = self.artwork_uploads_since_trim.saturating_add(1);
-            self.refresh_all_artwork_slots(cx);
-            self.apply_adaptive_accent_live(cx);
+        if !window_hidden && let Some(cache) = &mut self.artwork {
+            let changed = cache.poll(cx);
+            let pending = cache.has_pending_work();
+            if changed {
+                self.refresh_all_artwork_slots(cx);
+                if let Some(cur) = self.queue.current()
+                    && let Some(smtc) = &mut self.smtc
+                {
+                    smtc.refresh_cover_if_cached(cur);
+                }
+            }
+            if pending {
+                self.artwork_was_pending = true;
+            } else if self.artwork_was_pending {
+                self.artwork_was_pending = false;
+                self.post_load_trim_at = Some(Instant::now() + Duration::from_millis(1_600));
+            }
         }
 
-        // 0d. Smooth exponential accent color lerp when switching tracks
+        // 0d. Smooth exponential accent + adaptive Acrylic glass tint lerp when switching tracks
         if !window_hidden {
+            let mut color_moved = false;
             let target = self.target_accent();
             let diff = (target.x - self.displayed_accent.x).abs()
                 + (target.y - self.displayed_accent.y).abs()
@@ -10920,6 +12380,31 @@ impl App {
                     self.displayed_accent.z + (target.z - self.displayed_accent.z) * k,
                     1.0,
                 );
+                color_moved = true;
+            }
+            let target_tint = self.target_acrylic_tint();
+            if self.displayed_acrylic_tint.w < 0.5 {
+                self.displayed_acrylic_tint = target_tint;
+                color_moved = true;
+            } else {
+                let diff_tint = (target_tint.x - self.displayed_acrylic_tint.x).abs()
+                    + (target_tint.y - self.displayed_acrylic_tint.y).abs()
+                    + (target_tint.z - self.displayed_acrylic_tint.z).abs();
+                if diff_tint > 0.004 {
+                    let kt = 0.085_f32;
+                    self.displayed_acrylic_tint = vec4(
+                        self.displayed_acrylic_tint.x
+                            + (target_tint.x - self.displayed_acrylic_tint.x) * kt,
+                        self.displayed_acrylic_tint.y
+                            + (target_tint.y - self.displayed_acrylic_tint.y) * kt,
+                        self.displayed_acrylic_tint.z
+                            + (target_tint.z - self.displayed_acrylic_tint.z) * kt,
+                        1.0,
+                    );
+                    color_moved = true;
+                }
+            }
+            if color_moved {
                 self.apply_adaptive_accent_live(cx);
             }
         }
@@ -11036,6 +12521,10 @@ impl App {
                     self.rebuild_library_views(cx);
                     self.refresh_home_ui(cx);
                     self.refresh_right_sidebar(cx);
+                    self.post_load_trim_at = Some(Instant::now() + Duration::from_millis(1_800));
+                    if mood_index == 0 && self.recommended_stations.len() < 5 {
+                        self.spawn_recommended_stations(cx, false);
+                    }
 
                     if startup_play_first()
                         && !self.startup_auto_played
@@ -11160,6 +12649,7 @@ impl App {
                             subtitle: detail.subtitle,
                             description: detail.description,
                             kind: detail.kind,
+                            is_radio_station: false,
                             thumbnail_url: detail.thumbnail_url,
                             loading: false,
                             tracks: detail.tracks,
@@ -11214,8 +12704,17 @@ impl App {
                         let added = self.queue.append_tracks(tracks);
                         if added > 0 {
                             self.queue_context = format!("{seed_title} radio");
-                            self.sync_next_deck_to_engine();
-                            self.prefetch_next_online_track();
+                            if self.waiting_for_radio_after_eof {
+                                self.waiting_for_radio_after_eof = false;
+                                if let Some(next) = self.queue.next_track().cloned() {
+                                    self.play_track(cx, next);
+                                }
+                            } else {
+                                self.sync_next_deck_to_engine();
+                                self.prefetch_next_online_track();
+                            }
+                        } else {
+                            self.waiting_for_radio_after_eof = false;
                         }
                         self.refresh_right_sidebar(cx);
                     }
@@ -11227,6 +12726,7 @@ impl App {
                     self.radio_loading = false;
                     if self.queue.current().map(|t| t.id.as_str()) == Some(seed_track_id.as_str()) {
                         self.last_radio_seed_id = None;
+                        let mut added = 0usize;
                         if self.queue.peek_upcoming(5).is_empty() {
                             let fallback: Vec<Track> = self
                                 .home_quick_picks_pool()
@@ -11235,7 +12735,17 @@ impl App {
                                 .take(15)
                                 .collect();
                             if !fallback.is_empty() {
-                                self.queue.append_tracks(fallback);
+                                added = self.queue.append_tracks(fallback);
+                            }
+                        }
+                        if added > 0 && self.waiting_for_radio_after_eof {
+                            self.waiting_for_radio_after_eof = false;
+                            if let Some(next) = self.queue.next_track().cloned() {
+                                self.play_track(cx, next);
+                            }
+                        } else {
+                            self.waiting_for_radio_after_eof = false;
+                            if added > 0 {
                                 self.sync_next_deck_to_engine();
                                 self.prefetch_next_online_track();
                             }
@@ -11302,16 +12812,21 @@ impl App {
                     self.rebuild_library_views(cx);
                     self.refresh_playlists_grid(cx);
                     self.spawn_ytm_rich_home(cx, 0, None, false);
+                    self.spawn_recommended_stations(cx, false);
                 }
                 BgMessage::YtmAccountSyncFailed(err) => {
                     self.ui
                         .label(id!(oauth_status_lbl))
                         .set_text(cx, &format!("YouTube Music sync failed: {err}"));
                 }
-                BgMessage::SpotifyLoginResult { client_id, tokens } => {
-                    self.accounts.spotify_client_id = client_id;
+                BgMessage::SpotifyLoginResult {
+                    display_name,
+                    tokens,
+                } => {
                     self.accounts.spotify_connected = true;
-                    self.accounts.spotify_web_cookie.clear();
+                    if !display_name.trim().is_empty() {
+                        self.accounts.spotify_user_name = display_name;
+                    }
                     self.accounts.spotify_access_token = tokens.access_token;
                     if let Some(refresh) = tokens.refresh_token {
                         self.accounts.spotify_refresh_token = refresh;
@@ -11320,23 +12835,48 @@ impl App {
                         let _ = db.save_accounts(&self.accounts);
                     }
                     self.refresh_spotify_account_ui(cx);
-                    self.show_toast(cx, "Signed in with Spotify! Syncing library...");
-                    self.sync_spotify_library(cx);
+                    self.show_toast(cx, "Spotify Premium verified! Syncing library...");
+                    self.sync_spotify_library_for(cx, false, 0);
                 }
                 BgMessage::SpotifyLoginFailed(err) => {
+                    let clean_err = friendly_error_message(&err);
                     self.ui
                         .label(id!(spotify_oauth_status_lbl))
-                        .set_text(cx, &format!("Spotify sign-in failed: {err}"));
+                        .set_text(cx, &format!("Spotify sign-in rejected: {clean_err}"));
+                    self.refresh_spotify_account_ui(cx);
+                    self.show_toast(
+                        cx,
+                        if clean_err.contains("Spotify Premium required") {
+                            "Spotify Premium required — use Spotify Web Sign-In for Free accounts"
+                        } else {
+                            "Spotify Direct OAuth sign-in failed"
+                        },
+                    );
                 }
-                BgMessage::SpotifyCatalogSynced(report) => {
+                BgMessage::SpotifyCatalogSynced {
+                    web_session,
+                    report,
+                } => {
                     self.spotify_sync_in_flight = false;
-                    if self.accounts.spotify_access_token.trim().is_empty() {
+                    let active_token = if web_session {
+                        self.accounts.spotify_web_access_token.trim()
+                    } else {
+                        self.accounts.spotify_access_token.trim()
+                    };
+                    if active_token.is_empty() {
                         continue;
                     }
                     let report = *report;
-                    self.accounts.spotify_connected = true;
-                    if !report.display_name.trim().is_empty() {
-                        self.accounts.spotify_user_name = report.display_name.clone();
+                    if web_session {
+                        self.accounts.spotify_web_connected = true;
+                        if !report.display_name.trim().is_empty() {
+                            self.accounts.spotify_web_user_name = report.display_name.clone();
+                        }
+                    } else {
+                        self.accounts.spotify_connected = true;
+                        if !report.display_name.trim().is_empty() {
+                            self.accounts.spotify_user_name = report.display_name.clone();
+                        }
                     }
                     let liked_n = report.liked_tracks.len();
                     let pl_updated = report.playlists.len();
@@ -11366,7 +12906,7 @@ impl App {
                     if let Some(db) = &self.db {
                         let _ = db.save_accounts(&self.accounts);
                     }
-                    let status_lbl = if self.is_spotify_web_session_active() {
+                    let status_lbl = if web_session {
                         id!(spotify_web_status_lbl)
                     } else {
                         id!(spotify_oauth_status_lbl)
@@ -11391,6 +12931,7 @@ impl App {
                     self.refresh_spotify_account_ui(cx);
                     self.rebuild_library_views(cx);
                     self.refresh_playlists_grid(cx);
+                    self.spawn_recommended_stations(cx, false);
                     self.show_toast(
                         cx,
                         &if rl_skipped > 0 {
@@ -11404,30 +12945,33 @@ impl App {
                         },
                     );
                 }
-                BgMessage::SpotifySyncFailed(err) => {
+                BgMessage::SpotifySyncFailed { web_session, error } => {
                     self.spotify_sync_in_flight = false;
-                    let status_lbl = if self.is_spotify_web_session_active() {
+                    let status_lbl = if web_session {
                         id!(spotify_web_status_lbl)
                     } else {
                         id!(spotify_oauth_status_lbl)
                     };
+                    let clean = friendly_error_message(&error);
                     self.ui
                         .label(status_lbl)
-                        .set_text(cx, &format!("Spotify sync failed: {err}"));
+                        .set_text(cx, &format!("Spotify sync failed: {clean}"));
                 }
                 BgMessage::SpotifyWebLoginResult { sp_dc, token_json } => {
                     match ferric_providers::spotify_web::parse_web_token_json(&token_json) {
                         Ok(token) => {
                             self.accounts.spotify_web_cookie = sp_dc;
-                            self.accounts.spotify_access_token = token;
-                            self.accounts.spotify_refresh_token.clear();
-                            self.accounts.spotify_connected = true;
+                            self.accounts.spotify_web_access_token = token;
+                            self.accounts.spotify_web_connected = true;
                             if let Some(db) = &self.db {
                                 let _ = db.save_accounts(&self.accounts);
                             }
                             self.refresh_spotify_account_ui(cx);
-                            self.show_toast(cx, "Spotify session connected! Reading library...");
-                            self.sync_spotify_library_with_delay(cx, 500);
+                            self.show_toast(
+                                cx,
+                                "Spotify Web session connected! Reading library...",
+                            );
+                            self.sync_spotify_library_for(cx, true, 500);
                         }
                         Err(err) => {
                             self.ui
@@ -11437,9 +12981,95 @@ impl App {
                     }
                 }
                 BgMessage::SpotifyWebLoginFailed(err) => {
+                    let clean = friendly_error_message(&err);
                     self.ui
                         .label(id!(spotify_web_status_lbl))
-                        .set_text(cx, &format!("Spotify Web sign-in: {err}"));
+                        .set_text(cx, &format!("Spotify Web sign-in: {clean}"));
+                }
+                BgMessage::RecommendedStationsLoaded { seq, stations } => {
+                    if seq != self.stations_request_seq {
+                        continue;
+                    }
+                    if !stations.is_empty() {
+                        // Preserve any cached_tracks from already-opened stations with matching IDs
+                        let mut next = stations;
+                        for st in &mut next {
+                            if let Some(prev) = self
+                                .recommended_stations
+                                .iter()
+                                .find(|p| p.id == st.id && !p.cached_tracks.is_empty())
+                            {
+                                st.cached_tracks = prev.cached_tracks.clone();
+                            }
+                        }
+                        self.recommended_stations = next;
+                        self.stations_page = 0;
+                        self.refresh_home_ui(cx);
+                        self.ui.redraw(cx);
+                    }
+                }
+                BgMessage::StationTracksLoaded {
+                    station_id,
+                    tracks,
+                    subtitle,
+                    thumbnail_url,
+                    left_art,
+                    right_art,
+                } => {
+                    if let Some(st) = self
+                        .recommended_stations
+                        .iter_mut()
+                        .find(|s| s.id == station_id)
+                    {
+                        st.cached_tracks = tracks.clone();
+                        if !subtitle.trim().is_empty() {
+                            st.subtitle = subtitle.clone();
+                        }
+                        if let Some(la) = left_art {
+                            st.left_art_url = Some(la);
+                        }
+                        if let Some(ra) = right_art {
+                            st.right_art_url = Some(ra);
+                        }
+                        if st.center_art_url.is_none()
+                            && let Some(tu) = thumbnail_url.clone()
+                        {
+                            st.center_art_url = Some(tu);
+                        }
+                    }
+                    if self.detail_state.id == station_id {
+                        self.request_artwork_for_tracks(&tracks);
+                        if let Some(url) = thumbnail_url.as_deref()
+                            && let Some(cache) = &mut self.artwork
+                        {
+                            let _ = cache.request_url(url);
+                        }
+                        self.detail_tracks = Rc::new(tracks.clone());
+                        self.detail_state.tracks = tracks;
+                        if !subtitle.trim().is_empty() {
+                            self.detail_state.subtitle = subtitle;
+                        }
+                        if thumbnail_url.is_some() {
+                            self.detail_state.thumbnail_url = thumbnail_url;
+                        }
+                        self.detail_state.loading = false;
+                        if let Some(hist) = &mut self.nav_history {
+                            hist.update_current_detail(&self.detail_state);
+                        }
+                        self.refresh_detail_hero(cx);
+                    }
+                    if self.active_page == MainPage::Home {
+                        self.refresh_home_ui(cx);
+                    }
+                    self.ui.redraw(cx);
+                }
+                BgMessage::StationTracksFailed { station_id, error } => {
+                    if self.detail_state.id == station_id {
+                        self.detail_state.loading = false;
+                        self.detail_state.subtitle = format!("Station load failed: {error}");
+                        self.refresh_detail_hero(cx);
+                        self.show_toast(cx, "Could not load station tracks — retry shortly");
+                    }
                 }
                 BgMessage::StreamReady {
                     track_id,
@@ -11512,12 +13142,9 @@ impl App {
                     } else {
                         self.sync_next_deck_to_engine();
                     }
-                    // Release TLS/stream download & decode staging pages cleanly right after playback settles
                     if let Some(db) = &self.db {
                         db.shrink_memory();
                     }
-                    win32_trim_working_set();
-                    self.tray_second_trim_at = Some(Instant::now() + Duration::from_secs(3));
                 }
                 BgMessage::StreamFailed {
                     track_id,
@@ -11535,7 +13162,7 @@ impl App {
                         self.consecutive_stream_failures =
                             self.consecutive_stream_failures.saturating_add(1);
                         if self.consecutive_stream_failures <= 3
-                            && let Some(next_candidate) = self.queue.next_track().cloned()
+                            && let Some(next_candidate) = self.queue.next_track_manual().cloned()
                             && next_candidate.id != track_id
                         {
                             self.show_toast(cx, "Skipping unavailable stream...");
@@ -11545,7 +13172,8 @@ impl App {
                                 .label(id!(np_artist_lbl))
                                 .set_text(cx, "Stream unavailable");
                             self.ui.button(id!(codec_pill_btn)).set_text(cx, "OFFLINE");
-                            self.show_toast(cx, &format!("Stream failed: {error}"));
+                            let clean = friendly_error_message(&error);
+                            self.show_toast(cx, &format!("Stream failed: {clean}"));
                         }
                     }
                 }
@@ -11648,45 +13276,53 @@ impl App {
                         }
                     }
                 }
-                BgMessage::UpdateDownload(ev) => match ev {
-                    DownloadEvent::Progress(pct_opt) => {
-                        let txt = match pct_opt {
-                            Some(pct) => format!("Downloading {pct}%"),
-                            None => "Downloading...".to_string(),
-                        };
-                        self.ui.button(id!(update_now_btn)).set_text(cx, &txt);
+                BgMessage::UpdateDownload { gen_id, event } => {
+                    if gen_id != self.update_download_gen || !self.update_popup_visible {
+                        continue;
                     }
-                    DownloadEvent::Verifying => {
-                        self.ui
-                            .button(id!(update_now_btn))
-                            .set_text(cx, "Verifying SHA-256...");
-                    }
-                    DownloadEvent::Ready { path, sha256 } => {
-                        self.update_download_in_flight = false;
-                        let updates_dir = app_data_dir().join("updates");
-                        match launch_verified_installer(&path, &updates_dir, &sha256) {
-                            Ok(()) => {
-                                self.close_native_video_stage(cx);
-                                win32_force_quit();
-                                cx.quit();
-                            }
-                            Err(err) => {
-                                self.ui.button(id!(update_now_btn)).set_text(cx, "Retry");
-                                self.ui.label(id!(update_popup_sub)).set_text(cx, &err);
-                                self.show_toast(cx, &err);
+                    match event {
+                        DownloadEvent::Progress(pct_opt) => {
+                            let txt = match pct_opt {
+                                Some(pct) => format!("Downloading {pct}%"),
+                                None => "Downloading...".to_string(),
+                            };
+                            self.ui.button(id!(update_now_btn)).set_text(cx, &txt);
+                        }
+                        DownloadEvent::Verifying => {
+                            self.ui
+                                .button(id!(update_now_btn))
+                                .set_text(cx, "Verifying SHA-256...");
+                        }
+                        DownloadEvent::Ready { path, sha256 } => {
+                            self.update_download_in_flight = false;
+                            let updates_dir = app_data_dir().join("updates");
+                            match launch_verified_installer(&path, &updates_dir, &sha256) {
+                                Ok(()) => {
+                                    self.close_native_video_stage(cx);
+                                    win32_force_quit();
+                                    cx.quit();
+                                }
+                                Err(err) => {
+                                    self.ui.button(id!(update_now_btn)).set_text(cx, "Retry");
+                                    self.ui.label(id!(update_popup_sub)).set_text(cx, &err);
+                                    self.show_toast(cx, &err);
+                                }
                             }
                         }
+                        DownloadEvent::Failed(err) => {
+                            self.update_download_in_flight = false;
+                            self.ui.button(id!(update_now_btn)).set_text(cx, "Retry");
+                            self.ui.label(id!(update_popup_sub)).set_text(cx, &err);
+                        }
                     }
-                    DownloadEvent::Failed(err) => {
-                        self.update_download_in_flight = false;
-                        self.ui.button(id!(update_now_btn)).set_text(cx, "Retry");
-                        self.ui.label(id!(update_popup_sub)).set_text(cx, &err);
-                    }
-                },
+                }
             }
         }
 
-        // 2. Poll Windows SMTC hardware media keys
+        // 2. Poll Windows SMTC hardware media keys & third-party media overlay commands
+        if let Some(smtc) = &mut self.smtc {
+            smtc.try_attach_late();
+        }
         let smtc_cmds = self
             .smtc
             .as_ref()
@@ -11710,7 +13346,7 @@ impl App {
                     }
                 }
                 SmtcCommand::Next => {
-                    if let Some(next) = self.queue.next_track().cloned() {
+                    if let Some(next) = self.queue.next_track_manual().cloned() {
                         self.play_track(cx, next);
                     }
                 }
@@ -11722,6 +13358,18 @@ impl App {
                 SmtcCommand::Stop => {
                     if let Some(a) = &self.audio {
                         a.send(EngineCommand::Stop);
+                    }
+                }
+                SmtcCommand::SetPositionMs(target_ms) => {
+                    if let Some(a) = &self.audio {
+                        a.send(EngineCommand::SeekMs(target_ms));
+                    }
+                }
+                SmtcCommand::SeekRelativeMs(delta_ms) => {
+                    if let Some(a) = &self.audio {
+                        let cur_ms = a.telemetry().position_ms as i64;
+                        let target_ms = (cur_ms + delta_ms).max(0) as u64;
+                        a.send(EngineCommand::SeekMs(target_ms));
                     }
                 }
             }
@@ -11806,7 +13454,10 @@ impl App {
                 .set_maximized(cx, win32_is_active_window_maximized());
         }
 
-        // 6. Audio Telemetry, Zero-Gap Crossfade Auto-Transition, Prefetch, Video Sync & Spectrum
+        // 6. Audio Telemetry, Device Hot-Swap Recovery, Zero-Gap Crossfade Auto-Transition, Prefetch, Video Sync & Spectrum
+        if let Some(audio) = &mut self.audio {
+            audio.poll_device_recovery();
+        }
         if let Some(audio) = &self.audio {
             let snap = audio.telemetry();
             if snap.track_finished_seq != self.last_finished_seq {
@@ -11818,6 +13469,7 @@ impl App {
                         .label(id!(sleep_status_lbl))
                         .set_text(cx, "Sleep Timer: Stopped after song");
                 } else if let Some(next) = self.queue.next_track().cloned() {
+                    self.waiting_for_radio_after_eof = false;
                     if snap.auto_transitioned {
                         self.last_pos_txt.clear();
                         self.last_dur_txt.clear();
@@ -11831,9 +13483,35 @@ impl App {
                         self.play_track(cx, next);
                     }
                 } else {
-                    self.ui
-                        .ferric_play_btn(id!(play_pause_btn))
-                        .set_playing(cx, false);
+                    if self.session_state.autoplay_radio
+                        && self.queue.repeat == RepeatMode::Off
+                        && let Some(cur) = self.queue.current().cloned()
+                    {
+                        self.waiting_for_radio_after_eof = true;
+                        if !self.radio_loading {
+                            self.maybe_fetch_radio_for_track(&cur, true);
+                        }
+                        if let Some(next) = self.queue.next_track().cloned() {
+                            self.waiting_for_radio_after_eof = false;
+                            self.play_track(cx, next);
+                            self.refresh_right_sidebar(cx);
+                        } else {
+                            self.ui
+                                .ferric_play_btn(id!(play_pause_btn))
+                                .set_playing(cx, false);
+                            self.ui
+                                .ferric_play_btn(id!(fs_play_pause_btn))
+                                .set_playing(cx, false);
+                        }
+                    } else {
+                        self.waiting_for_radio_after_eof = false;
+                        self.ui
+                            .ferric_play_btn(id!(play_pause_btn))
+                            .set_playing(cx, false);
+                        self.ui
+                            .ferric_play_btn(id!(fs_play_pause_btn))
+                            .set_playing(cx, false);
+                    }
                 }
             }
 
@@ -11861,7 +13539,10 @@ impl App {
             }
 
             if let Some(smtc) = &mut self.smtc {
-                smtc.set_playing(snap.is_playing);
+                let eff_dur = snap
+                    .duration_ms
+                    .max(self.queue.current().map_or(0, |t| t.duration_ms));
+                smtc.sync_playback(snap.is_playing, snap.position_ms, eff_dur);
             }
             let cur_track_key = self
                 .queue
@@ -11961,6 +13642,21 @@ impl App {
                 self.ui
                     .ferric_play_btn(id!(fs_play_pause_btn))
                     .set_playing(cx, snap.is_playing);
+                if self.last_fs_backdrop_playing != Some(snap.is_playing) {
+                    self.last_fs_backdrop_playing = Some(snap.is_playing);
+                    let acr = if self.theme.acrylic_enabled {
+                        1.0_f32
+                    } else {
+                        0.0_f32
+                    };
+                    self.ui.ferric_ambient_stage(id!(fs_backdrop)).set_state(
+                        cx,
+                        true,
+                        snap.is_playing,
+                        self.current_accent(),
+                        acr,
+                    );
+                }
             }
 
             let next_codec = if snap.is_crossfading {
@@ -11995,11 +13691,11 @@ impl App {
                             }
                         },
                     );
-                } else if self.tick_counter.is_multiple_of(3) {
-                    // Calm ~3.3 Hz musical equalizer bar pulse strictly on visible cover slots
-                    // to avoid triggering 10-20 Hz full-window D3D11 repaints while reading/browsing.
+                } else if self.tick_counter.is_multiple_of(5) {
+                    // Calm ~2 Hz musical equalizer bar pulse strictly on visible cover slots
+                    // to avoid triggering high-rate full-window D3D11 repaints while reading/browsing.
                     let raw_avg = (norm(0) + norm(1) + norm(2)) / 3.0;
-                    let q_avg = (raw_avg * 16.0).round() / 16.0;
+                    let q_avg = (raw_avg * 10.0).round() / 10.0;
                     self.ui
                         .ferric_cover_art(id!(np_art))
                         .set_state(cx, true, q_avg, accent, false);
@@ -12090,7 +13786,8 @@ impl App {
                 None
             };
             self.spawn_ytm_rich_home(cx, self.active_mood_idx, params, true);
-            self.show_toast(cx, "Refreshing YouTube Music feed...");
+            self.spawn_recommended_stations(cx, true);
+            self.show_toast(cx, "Refreshing Home & Recommended Stations...");
         }
         if self.ui.button(id!(top_search_clear_btn)).clicked(actions) {
             self.clear_search_state(cx, true);
@@ -12108,9 +13805,7 @@ impl App {
             self.navigate_to(cx, MainPage::Settings, true);
             self.switch_settings_tab(cx, SettingsTab::Accounts);
         }
-        if self.ui.button(id!(top_settings_btn)).clicked(actions)
-            || self.ui.button(id!(nav_settings)).clicked(actions)
-        {
+        if self.ui.button(id!(top_settings_btn)).clicked(actions) {
             self.navigate_to(cx, MainPage::Settings, true);
         }
 
@@ -12132,6 +13827,41 @@ impl App {
             self.navigate_to(cx, MainPage::Playlists, true);
             self.ui.widget(id!(pl_new_input)).set_key_focus(cx);
             self.show_toast(cx, "Type a playlist name and press Enter to create");
+        }
+        for (btn, filter) in [
+            (id!(sb_src_all_btn), PlaylistSourceFilter::All),
+            (id!(sb_src_yt_btn), PlaylistSourceFilter::YouTube),
+            (id!(sb_src_sp_btn), PlaylistSourceFilter::Spotify),
+            (
+                id!(sb_src_sp_prem_btn),
+                PlaylistSourceFilter::SpotifyPremium,
+            ),
+            (id!(sb_src_local_btn), PlaylistSourceFilter::Local),
+            (id!(pl_src_all_btn), PlaylistSourceFilter::All),
+            (id!(pl_src_yt_btn), PlaylistSourceFilter::YouTube),
+            (id!(pl_src_sp_btn), PlaylistSourceFilter::Spotify),
+            (
+                id!(pl_src_sp_prem_btn),
+                PlaylistSourceFilter::SpotifyPremium,
+            ),
+            (id!(pl_src_local_btn), PlaylistSourceFilter::Local),
+        ] {
+            if self.ui.button(btn).clicked(actions) {
+                self.set_playlist_source_filter(cx, filter);
+            }
+        }
+        if self.ui.button(id!(sb_pl_sort_btn)).clicked(actions) {
+            let next = self.playlist_sort.next();
+            self.set_playlist_sort(cx, next);
+        }
+        for (btn, order) in [
+            (id!(pl_sort_newest_btn), PlaylistSortOrder::Newest),
+            (id!(pl_sort_oldest_btn), PlaylistSortOrder::Oldest),
+            (id!(pl_sort_az_btn), PlaylistSortOrder::NameAZ),
+        ] {
+            if self.ui.button(btn).clicked(actions) {
+                self.set_playlist_sort(cx, order);
+            }
         }
         if let Some(filter_txt) = self
             .ui
@@ -12208,7 +13938,8 @@ impl App {
         }
         if self.ui.button(id!(home_shuffle_feed_btn)).clicked(actions) {
             self.spawn_ytm_rich_home(cx, 0, None, true);
-            self.show_toast(cx, "Discovering fresh recommendations...");
+            self.spawn_recommended_stations(cx, true);
+            self.show_toast(cx, "Discovering fresh albums, playlists & stations...");
         }
         if self.ui.button(id!(home_play_all_btn)).clicked(actions) {
             let pool = self.home_quick_picks_pool();
@@ -12255,6 +13986,41 @@ impl App {
                         self.queue.set_tracks(pool, Some(idx));
                         self.play_track(cx, track);
                     }
+                }
+            }
+        }
+
+        // Recommended Stations paging, refresh & clicks
+        if self.ui.button(id!(stations_refresh_btn)).clicked(actions) {
+            self.spawn_recommended_stations(cx, true);
+            self.show_toast(cx, "Shuffling Recommended Stations...");
+        }
+        if self.ui.button(id!(stations_prev_btn)).clicked(actions) && self.stations_page > 0 {
+            self.stations_page -= 1;
+            self.refresh_home_ui(cx);
+        }
+        if self.ui.button(id!(stations_next_btn)).clicked(actions)
+            && (self.stations_page + 1) * 5 < self.recommended_stations.len()
+        {
+            self.stations_page += 1;
+            self.refresh_home_ui(cx);
+        }
+        for (ci, sid) in [id!(st_c0), id!(st_c1), id!(st_c2), id!(st_c3), id!(st_c4)]
+            .into_iter()
+            .enumerate()
+        {
+            let sv = self.ui.view(sid);
+            let tbox = sv.view(id!(triptych_box));
+            if sv.ferric_cover_art(id!(full_art)).clicked(actions)
+                || tbox.ferric_cover_art(id!(art_center)).clicked(actions)
+                || tbox.ferric_cover_art(id!(art_left)).clicked(actions)
+                || tbox.ferric_cover_art(id!(art_right)).clicked(actions)
+                || view_clicked(&tbox, actions)
+                || view_clicked(&sv, actions)
+            {
+                let idx = self.stations_page * 5 + ci;
+                if let Some(st) = self.recommended_stations.get(idx).cloned() {
+                    self.open_recommended_station(cx, st);
                 }
             }
         }
@@ -12661,7 +14427,7 @@ impl App {
                 .add_filter("Playlist Files", &["m3u", "m3u8", "csv"])
                 .pick_file()
         {
-            match std::fs::read_to_string(&file) {
+            match read_text_file_capped(&file, 4 * 1024 * 1024) {
                 Ok(content) => {
                     let stem = file
                         .file_stem()
@@ -12696,8 +14462,9 @@ impl App {
             self.playlists_page -= 1;
             self.refresh_playlists_grid(cx);
         }
+        let filtered_playlists_view = self.filtered_playlists();
         if self.ui.button(id!(pl_next_btn)).clicked(actions)
-            && (self.playlists_page + 1) * 20 < self.playlists.len()
+            && (self.playlists_page + 1) * 20 < filtered_playlists_view.len()
         {
             self.playlists_page += 1;
             self.refresh_playlists_grid(cx);
@@ -12729,7 +14496,9 @@ impl App {
         {
             let v = self.ui.view(vid);
             if (v.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&v, actions))
-                && let Some(pl) = self.playlists.get(self.playlists_page * 20 + i).cloned()
+                && let Some(pl) = filtered_playlists_view
+                    .get(self.playlists_page * 20 + i)
+                    .cloned()
             {
                 let tracks = self
                     .db
@@ -12775,6 +14544,9 @@ impl App {
             if let Some(first) = self.queue.current().cloned() {
                 self.play_track(cx, first);
             }
+        }
+        if self.ui.button(id!(detail_save_pl_btn)).clicked(actions) {
+            self.save_detail_as_playlist(cx);
         }
         if self.ui.button(id!(detail_radio_btn)).clicked(actions)
             && let Some(first) = self.detail_state.tracks.first().cloned()
@@ -12868,8 +14640,7 @@ impl App {
         }
 
         // Add Local Music Folder
-        if (self.ui.button(id!(add_folder_btn)).clicked(actions)
-            || self.ui.button(id!(sidebar_add_folder_btn)).clicked(actions))
+        if self.ui.button(id!(add_folder_btn)).clicked(actions)
             && let Some(folder) = rfd::FileDialog::new()
                 .set_title("Select Local Music Folder")
                 .pick_folder()
@@ -13200,7 +14971,7 @@ impl App {
         }
         if (self.ui.button(id!(next_btn)).clicked(actions)
             || self.ui.button(id!(fs_next_btn)).clicked(actions))
-            && let Some(next) = self.queue.next_track().cloned()
+            && let Some(next) = self.queue.next_track_manual().cloned()
         {
             self.play_track(cx, next);
         }
@@ -13553,14 +15324,16 @@ impl App {
         }
         if self.ui.button(id!(yt_logout_btn)).clicked(actions) {
             self.ytm_signed_out_recently = true;
+            self.accounts.zeroize_youtube_secrets();
             self.accounts.youtube_connected = false;
-            self.accounts.youtube_cookie.clear();
-            self.accounts.youtube_sapisid.clear();
             self.accounts.youtube_channel_name.clear();
             self.accounts.youtube_visitor_data.clear();
             self.accounts.youtube_playlist_count = 0;
-            // Remove persisted WebView2 login profile so Google cookies do not remain on disk.
-            let _ = std::fs::remove_dir_all(app_data_dir().join("webview2_profile"));
+            // Offload WebView2 login profile removal to a background thread so UI stays responsive.
+            let profile_dir = app_data_dir().join("webview2_profile");
+            thread::spawn(move || {
+                let _ = std::fs::remove_dir_all(profile_dir);
+            });
             if let Some(db) = &mut self.db {
                 let _ = db.save_accounts(&self.accounts);
                 let _ = db.delete_account_synced_playlists();
@@ -13578,122 +15351,102 @@ impl App {
             self.spawn_ytm_rich_home(cx, 0, None, true);
             self.show_toast(cx, "Signed out — Guest Mode active");
         }
-        if let Some(typed) = self
-            .ui
-            .text_input(id!(spotify_client_input))
-            .changed(actions)
-        {
-            let trimmed = typed.trim().to_string();
-            if trimmed != self.accounts.spotify_client_id {
-                self.accounts.spotify_client_id = trimmed;
-                if let Some(db) = &self.db {
-                    let _ = db.save_accounts(&self.accounts);
-                }
-            }
-        }
         if self.ui.button(id!(spotify_login_btn)).clicked(actions) {
             self.start_spotify_login(cx);
         }
         if self.ui.button(id!(spotify_sync_btn)).clicked(actions) {
-            self.sync_spotify_library(cx);
+            self.sync_spotify_library_for(cx, false, 0);
         }
-        if self.ui.button(id!(spotify_dev_portal_btn)).clicked(actions) {
-            const URL: &str = "https://developer.spotify.com/dashboard";
-            if let Err(err) = open_allowed_url(URL) {
-                self.ui
-                    .label(id!(spotify_oauth_status_lbl))
-                    .set_text(cx, &format!("Could not open browser: {err}"));
+        if self.ui.button(id!(spotify_logout_btn)).clicked(actions) {
+            if !self.is_spotify_oauth_session_active() {
+                self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
+                    cx,
+                    "Direct OAuth (Premium) is not signed in. Your Spotify Web session was not touched.",
+                );
             } else {
-                self.show_toast(cx, "Opened Spotify Developer Dashboard");
-            }
-        }
-        if self
-            .ui
-            .button(id!(spotify_copy_portal_btn))
-            .clicked(actions)
-        {
-            const URL: &str = "https://developer.spotify.com/dashboard";
-            match copy_text_to_clipboard(URL) {
-                Ok(()) => {
-                    self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
-                        cx,
-                        "Copied dashboard URL: https://developer.spotify.com/dashboard",
-                    );
-                    self.show_toast(cx, "Copied Spotify Developer Dashboard URL");
+                self.accounts.zeroize_spotify_direct_secrets();
+                self.accounts.spotify_connected = false;
+                self.accounts.spotify_user_name.clear();
+                let keep_synced = self.is_spotify_web_session_active();
+                if !keep_synced {
+                    self.accounts.spotify_playlist_count = 0;
+                    self.accounts.spotify_liked_count = 0;
                 }
-                Err(err) => {
-                    self.ui
-                        .label(id!(spotify_oauth_status_lbl))
-                        .set_text(cx, &format!("Clipboard error: {err}"));
+                if let Some(db) = &mut self.db {
+                    let _ = db.save_accounts(&self.accounts);
+                    let _ = db.delete_spotify_premium_synced_playlists();
+                    self.playlists = db.list_playlists().unwrap_or_default();
+                } else {
+                    self.playlists
+                        .retain(|pl| !pl.id.starts_with("spotify:premium:playlist:"));
                 }
-            }
-        }
-        if self
-            .ui
-            .button(id!(spotify_copy_redirect_btn))
-            .clicked(actions)
-        {
-            let redirect = if is_builtin_spotify_desktop_client(&self.accounts.spotify_client_id) {
-                SPOTIFY_DESKTOP_REDIRECT_URI
-            } else {
-                "http://127.0.0.1:43824/callback"
-            };
-            match copy_text_to_clipboard(redirect) {
-                Ok(()) => {
-                    self.ui
-                        .label(id!(spotify_oauth_status_lbl))
-                        .set_text(cx, &format!("Copied redirect URI: {redirect}"));
-                    self.show_toast(cx, "Copied Redirect URI");
-                }
-                Err(err) => {
-                    self.ui
-                        .label(id!(spotify_oauth_status_lbl))
-                        .set_text(cx, &format!("Clipboard error: {err}"));
-                }
+                self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
+                    cx,
+                    if keep_synced {
+                        "Spotify Direct OAuth signed out. Active Spotify Web session and playlists were kept."
+                    } else {
+                        "Spotify Direct OAuth signed out. Synced Spotify Premium playlists removed; liked tracks kept."
+                    },
+                );
+                self.refresh_spotify_account_ui(cx);
+                self.rebuild_library_views(cx);
+                self.refresh_playlists_grid(cx);
+                self.show_toast(cx, "Spotify Direct OAuth signed out");
             }
         }
         if self.ui.button(id!(spotify_web_login_btn)).clicked(actions) {
             self.start_spotify_web_login(cx);
         }
         if self.ui.button(id!(spotify_web_sync_btn)).clicked(actions) {
-            if self.accounts.spotify_access_token.trim().is_empty() {
+            if self.accounts.spotify_web_access_token.trim().is_empty() {
                 self.start_spotify_web_login(cx);
             } else {
-                self.sync_spotify_library(cx);
+                self.sync_spotify_library_for(cx, true, 0);
             }
         }
-        if self.ui.button(id!(spotify_logout_btn)).clicked(actions)
-            || self.ui.button(id!(spotify_web_logout_btn)).clicked(actions)
-        {
-            let from_web = self.ui.button(id!(spotify_web_logout_btn)).clicked(actions);
-            self.accounts.spotify_connected = false;
-            self.accounts.spotify_access_token.clear();
-            self.accounts.spotify_refresh_token.clear();
-            self.accounts.spotify_user_name.clear();
-            self.accounts.spotify_playlist_count = 0;
-            self.accounts.spotify_liked_count = 0;
-            self.accounts.spotify_web_cookie.clear();
-            if let Some(db) = &mut self.db {
-                let _ = db.save_accounts(&self.accounts);
-                let _ = db.delete_spotify_synced_playlists();
-                self.playlists = db.list_playlists().unwrap_or_default();
+        if self.ui.button(id!(spotify_web_logout_btn)).clicked(actions) {
+            if !self.is_spotify_web_session_active() {
+                self.ui.label(id!(spotify_web_status_lbl)).set_text(
+                    cx,
+                    "Spotify Web Sign-In is not signed in. Your Direct OAuth session was not touched.",
+                );
             } else {
-                self.playlists
-                    .retain(|pl| !pl.id.starts_with("spotify:playlist:"));
+                self.accounts.zeroize_spotify_web_secrets();
+                self.accounts.spotify_web_connected = false;
+                self.accounts.spotify_web_user_name.clear();
+                // Clean up Spotify Web browser profile and any legacy capture file off the UI thread.
+                let sp_profile_dir = app_data_dir().join("spotify_web_profile");
+                let legacy_capture = std::env::temp_dir().join("ferric_spotify_capture.txt");
+                thread::spawn(move || {
+                    let _ = std::fs::remove_dir_all(sp_profile_dir);
+                    let _ = std::fs::remove_file(legacy_capture);
+                });
+                let keep_synced = self.is_spotify_oauth_session_active();
+                if !keep_synced {
+                    self.accounts.spotify_playlist_count = 0;
+                    self.accounts.spotify_liked_count = 0;
+                }
+                if let Some(db) = &mut self.db {
+                    let _ = db.save_accounts(&self.accounts);
+                    let _ = db.delete_spotify_web_synced_playlists();
+                    self.playlists = db.list_playlists().unwrap_or_default();
+                } else {
+                    self.playlists
+                        .retain(|pl| !pl.id.starts_with("spotify:playlist:"));
+                }
+                self.ui.label(id!(spotify_web_status_lbl)).set_text(
+                    cx,
+                    if keep_synced {
+                        "Spotify Web signed out. Active Direct OAuth session and playlists were kept."
+                    } else {
+                        "Spotify Web signed out. Synced Spotify Web playlists removed; liked tracks kept."
+                    },
+                );
+                self.refresh_spotify_account_ui(cx);
+                self.rebuild_library_views(cx);
+                self.refresh_playlists_grid(cx);
+                self.show_toast(cx, "Spotify Web signed out");
             }
-            let status_lbl = if from_web {
-                id!(spotify_web_status_lbl)
-            } else {
-                id!(spotify_oauth_status_lbl)
-            };
-            self.ui.label(status_lbl).set_text(
-                cx,
-                "Spotify signed out. Synced Spotify playlists removed; liked tracks kept.",
-            );
-            self.refresh_spotify_account_ui(cx);
-            self.rebuild_library_views(cx);
-            self.refresh_playlists_grid(cx);
-            self.show_toast(cx, "Spotify signed out");
         }
         if self.ui.button(id!(quick_spotify_btn)).clicked(actions) {
             let input = self.ui.text_input(id!(quick_sync_input)).text();
@@ -13873,6 +15626,9 @@ impl App {
             if let Some(db) = &self.db {
                 let _ = db.save_session_state(&self.session_state);
             }
+            if on && let Some(cur) = self.queue.current().cloned() {
+                self.maybe_fetch_radio_for_track(&cur, true);
+            }
             self.refresh_right_sidebar(cx);
         }
         if let Some(on) = self
@@ -13903,17 +15659,29 @@ impl App {
             self.dsp.mono_audio = on;
             self.apply_dsp_live(cx);
         }
-        for (btn, spd) in [
-            (id!(spd_075_btn), 0.75_f32),
-            (id!(spd_100_btn), 1.0_f32),
-            (id!(spd_125_btn), 1.25_f32),
-            (id!(spd_150_btn), 1.5_f32),
-        ] {
-            if self.ui.button(btn).clicked(actions) {
-                self.dsp.playback_speed = spd;
-                self.sync_controls_from_state(cx);
-                self.apply_dsp_live(cx);
-            }
+        if self.ui.button(id!(speed_pill_btn)).clicked(actions) {
+            let next_spd = if (self.dsp.playback_speed - 0.75).abs() < 0.05 {
+                1.0_f32
+            } else if (self.dsp.playback_speed - 1.0).abs() < 0.05 {
+                1.25_f32
+            } else if (self.dsp.playback_speed - 1.25).abs() < 0.05 {
+                1.5_f32
+            } else {
+                0.75_f32
+            };
+            self.dsp.playback_speed = next_spd;
+            self.sync_controls_from_state(cx);
+            self.apply_dsp_live(cx);
+            let lbl = if (next_spd - 0.75).abs() < 0.05 {
+                "0.75x"
+            } else if (next_spd - 1.25).abs() < 0.05 {
+                "1.25x"
+            } else if (next_spd - 1.50).abs() < 0.05 {
+                "1.5x"
+            } else {
+                "1.0x"
+            };
+            self.show_toast(cx, &format!("Playback speed: {lbl}"));
         }
         for (btn, mins_opt) in [
             (id!(slp_off_btn), None),
@@ -14042,8 +15810,7 @@ impl App {
                 .add_filter("Equalizer APO", &["txt"])
                 .pick_file()
         {
-            match std::fs::read_to_string(&file)
-                .map_err(|e| e.to_string())
+            match read_text_file_capped(&file, 256 * 1024)
                 .and_then(|raw| EqConfig::from_equalizer_apo(&raw).map_err(|e| e.to_string()))
             {
                 Ok(parsed) => {
@@ -14074,6 +15841,8 @@ impl App {
             let z = self.theme.ui_zoom;
             self.theme = ThemeConfig::pure_amoled();
             self.theme.ui_zoom = z;
+            self.displayed_accent = self.target_accent();
+            self.displayed_acrylic_tint = self.target_acrylic_tint();
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
@@ -14081,6 +15850,8 @@ impl App {
             let z = self.theme.ui_zoom;
             self.theme = ThemeConfig::native_acrylic();
             self.theme.ui_zoom = z;
+            self.displayed_accent = self.target_accent();
+            self.displayed_acrylic_tint = self.target_acrylic_tint();
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
             self.show_toast(cx, "Native Windows 11 Acrylic enabled");
@@ -14089,6 +15860,8 @@ impl App {
             let z = self.theme.ui_zoom;
             self.theme = ThemeConfig::obsidian_slate();
             self.theme.ui_zoom = z;
+            self.displayed_accent = self.target_accent();
+            self.displayed_acrylic_tint = self.target_acrylic_tint();
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
@@ -14096,6 +15869,8 @@ impl App {
             let z = self.theme.ui_zoom;
             self.theme = ThemeConfig::cream_light();
             self.theme.ui_zoom = z;
+            self.displayed_accent = self.target_accent();
+            self.displayed_acrylic_tint = self.target_acrylic_tint();
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
         }
@@ -14130,12 +15905,45 @@ impl App {
         if let Some(enabled) = self.ui.ferric_toggle(id!(acrylic_toggle)).toggled(actions) {
             self.theme.acrylic_enabled = enabled;
             if enabled {
-                self.theme.name = "Native Acrylic".to_string();
+                if self.theme.name != "Warm Cream Light" {
+                    self.theme.name = "Native Acrylic".to_string();
+                } else if self.theme.acrylic_tint_hex.eq_ignore_ascii_case("#0B0D14") {
+                    self.theme.acrylic_tint_hex = "#EFE8DA".to_string();
+                }
             } else if self.theme.name == "Native Acrylic" {
-                self.theme.name = "AMOLED Black".to_string();
+                self.theme.name = if self.theme.canvas_hex.eq_ignore_ascii_case("#F3EEE3") {
+                    "Warm Cream Light".to_string()
+                } else if self.theme.canvas_hex.eq_ignore_ascii_case("#0D0E12") {
+                    "Obsidian Studio".to_string()
+                } else {
+                    "AMOLED Black".to_string()
+                };
+            }
+            self.displayed_accent = self.target_accent();
+            self.displayed_acrylic_tint = self.target_acrylic_tint();
+            self.sync_controls_from_state(cx);
+            self.apply_theme_live(cx);
+        }
+        if let Some(on) = self
+            .ui
+            .ferric_toggle(id!(adaptive_acrylic_tint_toggle))
+            .toggled(actions)
+        {
+            self.theme.adaptive_acrylic_tint = on;
+            if on && !self.theme.acrylic_enabled {
+                self.theme.acrylic_enabled = true;
+                self.theme.name = "Native Acrylic".to_string();
             }
             self.sync_controls_from_state(cx);
             self.apply_theme_live(cx);
+            self.show_toast(
+                cx,
+                if on {
+                    "Adaptive Acrylic Tint enabled — follows playing cover"
+                } else {
+                    "Adaptive Acrylic Tint disabled (using manual glass tint)"
+                },
+            );
         }
         if let Some(v) = self
             .ui
@@ -14171,6 +15979,8 @@ impl App {
         ] {
             if self.ui.button(btn).clicked(actions) {
                 self.theme.acrylic_tint_hex = hex.to_string();
+                self.theme.adaptive_acrylic_tint = false;
+                self.displayed_acrylic_tint = rgba_vec4(hex);
                 if !self.theme.acrylic_enabled {
                     self.theme.acrylic_enabled = true;
                     self.theme.name = "Native Acrylic".to_string();
@@ -14186,11 +15996,13 @@ impl App {
             .changed(actions)
         {
             self.theme.acrylic_tint_hex = picked_hex.clone();
+            self.theme.adaptive_acrylic_tint = false;
             if !self.theme.acrylic_enabled {
                 self.theme.acrylic_enabled = true;
                 self.theme.name = "Native Acrylic".to_string();
             }
             let tint_v4 = rgba_vec4(&picked_hex);
+            self.displayed_acrylic_tint = tint_v4;
             self.ui
                 .label(id!(acrylic_tint_lbl))
                 .set_text(cx, &picked_hex);
@@ -14208,6 +16020,8 @@ impl App {
             .committed(actions)
         {
             self.theme.acrylic_tint_hex = picked_hex.clone();
+            self.theme.adaptive_acrylic_tint = false;
+            self.displayed_acrylic_tint = rgba_vec4(&picked_hex);
             if !self.theme.acrylic_enabled {
                 self.theme.acrylic_enabled = true;
                 self.theme.name = "Native Acrylic".to_string();
@@ -14228,6 +16042,8 @@ impl App {
             let formatted = format!("#{}", clean.to_ascii_uppercase());
             if parse_hex_rgb(&formatted).is_ok() {
                 self.theme.acrylic_tint_hex = formatted.clone();
+                self.theme.adaptive_acrylic_tint = false;
+                self.displayed_acrylic_tint = rgba_vec4(&formatted);
                 if !self.theme.acrylic_enabled {
                     self.theme.acrylic_enabled = true;
                     self.theme.name = "Native Acrylic".to_string();
@@ -14815,6 +16631,20 @@ impl AppMain for App {
                 self.ui.redraw(cx);
                 return;
             }
+            if ke.modifiers.control && ke.key_code == KeyCode::KeyP {
+                self.cmdk_open = !self.cmdk_open;
+                self.ui
+                    .view(id!(cmdk_modal))
+                    .set_visible(cx, self.cmdk_open);
+                if self.cmdk_open {
+                    self.cmdk_reveal_t = 0.0;
+                    self.ui.widget(id!(cmdk_input)).set_key_focus(cx);
+                    self.start_motion(cx);
+                }
+                self.sync_video_bounds(cx);
+                self.ui.redraw(cx);
+                return;
+            }
             if ke.modifiers.control && ke.key_code == KeyCode::KeyF {
                 self.navigate_to(cx, MainPage::Search, true);
                 return;
@@ -14856,7 +16686,7 @@ impl AppMain for App {
             }
             if ke.modifiers.shift
                 && ke.key_code == KeyCode::ArrowRight
-                && let Some(next) = self.queue.next_track().cloned()
+                && let Some(next) = self.queue.next_track_manual().cloned()
             {
                 self.play_track(cx, next);
                 return;

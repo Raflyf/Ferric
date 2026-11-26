@@ -193,24 +193,32 @@ mod imp {
             }
             let pos_sec = safe_pos_secs(pos_sec);
             if let Some(tx) = &self.cmd_tx {
-                let _ = tx.send(VideoCmd::SetBounds(rect));
-                let _ = tx.send(VideoCmd::SetVisible(initially_visible));
-                let _ = tx.send(VideoCmd::LoadStream {
-                    url: stream_url,
-                    pos_sec,
-                    playing,
-                });
-                self.wake_thread();
-                return;
+                let sent = tx.send(VideoCmd::SetBounds(rect)).is_ok()
+                    && tx.send(VideoCmd::SetVisible(initially_visible)).is_ok()
+                    && tx
+                        .send(VideoCmd::LoadStream {
+                            url: stream_url.clone(),
+                            pos_sec,
+                            playing,
+                        })
+                        .is_ok();
+                if sent {
+                    self.wake_thread();
+                    return;
+                }
+                // Worker exited (e.g. WebView2 init error or closed window); clear dead handle and respawn.
+                self.cmd_tx = None;
+                self.host_hwnd_raw = Arc::new(AtomicIsize::new(0));
             }
 
             let (tx, rx) = mpsc::channel::<VideoCmd>();
-            self.cmd_tx = Some(tx);
-
-            let (hwnd_tx, hwnd_rx) = mpsc::channel::<isize>();
+            let (hwnd_tx, _hwnd_rx) = mpsc::channel::<isize>();
             let profile_dir = self.profile_dir.clone();
-            let shared_hwnd = Arc::clone(&self.host_hwnd_raw);
-            let _ = thread::Builder::new()
+            // Fresh per-session AtomicIsize prevents a closing previous worker from clobbering
+            // a newly spawned worker's active HWND.
+            let session_hwnd = Arc::new(AtomicIsize::new(0));
+            let shared_hwnd = Arc::clone(&session_hwnd);
+            if thread::Builder::new()
                 .name("ferric-video-stage".to_string())
                 .spawn(move || {
                     let _ = run_video_sta(
@@ -225,9 +233,11 @@ mod imp {
                         hwnd_tx,
                         shared_hwnd,
                     );
-                });
-            if let Ok(raw) = hwnd_rx.recv_timeout(std::time::Duration::from_millis(600)) {
-                self.host_hwnd_raw.store(raw, Ordering::Release);
+                })
+                .is_ok()
+            {
+                self.host_hwnd_raw = session_hwnd;
+                self.cmd_tx = Some(tx);
             }
         }
 
@@ -677,6 +687,14 @@ mod imp {
             is_visible: Cell::new(initially_visible),
             last_bounds: Cell::new(init_rect),
         });
+
+        // Guard against the host HWND being closed during async WebView2 initialization.
+        if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() } {
+            unsafe {
+                let _ = state.controller.Close();
+            }
+            return Ok(());
+        }
 
         // SAFETY: Attach Rc pointer (`Rc::into_raw`) released cleanly once in `WM_DESTROY`.
         unsafe {

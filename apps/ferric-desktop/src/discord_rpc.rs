@@ -144,14 +144,11 @@ fn set_status(slot: &Arc<Mutex<String>>, text: impl Into<String>) {
 
 fn normalize_cover_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
-    if trimmed.bytes().any(|b| b.is_ascii_control() || b == b' ') {
+    if !ferric_providers::ytmusic::is_allowed_artwork_url(trimmed) {
         return None;
     }
     let rest = trimmed.strip_prefix("https://")?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') || authority.contains(':') {
-        return None;
-    }
     let host = authority.to_ascii_lowercase();
     if (host == "googleusercontent.com" || host.ends_with(".googleusercontent.com"))
         && let Some(eq_idx) = trimmed.rfind('=')

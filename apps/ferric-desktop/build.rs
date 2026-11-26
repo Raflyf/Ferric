@@ -11,10 +11,10 @@ fn main() {
         res.set("OriginalFilename", "ferric.exe");
         res.set("CompanyName", "Raflyf");
         res.set("LegalCopyright", "Copyright (c) 2026 Raflyf");
-        res.set_manifest(
+        let manifest = format!(
             r#"
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
-  <assemblyIdentity version="0.1.0.0" processorArchitecture="amd64" name="Raflyf.Ferric" type="win32"/>
+  <assemblyIdentity version="{ver}.0" processorArchitecture="amd64" name="Raflyf.Ferric" type="win32"/>
   <description>Ferric</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
@@ -26,7 +26,7 @@ fn main() {
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
       <!-- Windows 10 and Windows 11 -->
-      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}"/>
     </application>
   </compatibility>
   <asmv3:application>
@@ -39,7 +39,9 @@ fn main() {
   </asmv3:application>
 </assembly>
 "#,
+            ver = env!("CARGO_PKG_VERSION"),
         );
+        res.set_manifest(&manifest);
         res.compile()
             .expect("winresource failed to compile Windows PE icon, version info, and manifest");
     }

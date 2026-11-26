@@ -169,10 +169,13 @@ live_design! {
             }
             draw_bg: {
                 instance hover: 0.0
+                uniform light_mode: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
-                    sdf.fill(vec4(0.18, 0.19, 0.25, 0.80 * self.hover));
+                    let hov_dark = vec4(0.18, 0.19, 0.25, 0.80 * self.hover);
+                    let hov_light = vec4(0.05, 0.06, 0.10, 0.12 * self.hover);
+                    sdf.fill(mix(hov_dark, hov_light, self.light_mode));
                     return sdf.result;
                 }
             }
@@ -205,10 +208,13 @@ live_design! {
             }
             draw_bg: {
                 instance hover: 0.0
+                uniform light_mode: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
-                    sdf.fill(vec4(0.18, 0.19, 0.25, 0.80 * self.hover));
+                    let hov_dark = vec4(0.18, 0.19, 0.25, 0.80 * self.hover);
+                    let hov_light = vec4(0.05, 0.06, 0.10, 0.12 * self.hover);
+                    sdf.fill(mix(hov_dark, hov_light, self.light_mode));
                     return sdf.result;
                 }
             }
@@ -241,10 +247,13 @@ live_design! {
             }
             draw_bg: {
                 instance hover: 0.0
+                uniform light_mode: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
-                    sdf.fill(vec4(0.18, 0.19, 0.25, 0.80 * self.hover));
+                    let hov_dark = vec4(0.18, 0.19, 0.25, 0.80 * self.hover);
+                    let hov_light = vec4(0.05, 0.06, 0.10, 0.12 * self.hover);
+                    sdf.fill(mix(hov_dark, hov_light, self.light_mode));
                     return sdf.result;
                 }
             }
@@ -380,8 +389,8 @@ live_design! {
                     uniform light_mode: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        let inset = 0.5 + self.down * 0.6;
-                        let r = (self.rect_size.y - inset * 2.0) * 0.28;
+                        let inset = 0.5;
+                        let r = (self.rect_size.y - inset * 2.0) * 0.25;
                         sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
                         let dark_col = mix(mix(#F2F3F7, #FFFFFF, self.hover), #D6D9E4, self.down);
                         let light_col = mix(mix(#FFFFFF, #F5F1EA, self.hover), #E4DEC8, self.down);
@@ -420,12 +429,17 @@ live_design! {
                 draw_bg: {
                     instance hover: 0.0
                     instance down: 0.0
+                    uniform light_mode: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        let inset = 0.5 + self.down * 0.6;
+                        let inset = 0.5;
                         sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
-                        sdf.fill_keep(mix(mix(#181A22, #252836, self.hover), #2D3042, self.down));
-                        sdf.stroke(mix(#2A2C38, #444861, self.hover), 1.0);
+                        let dark_bg = mix(mix(#181A22, #252836, self.hover), #2D3042, self.down);
+                        let light_bg = mix(mix(#E7E0D1, #DDD5C4, self.hover), #CFC6B2, self.down);
+                        let dark_b = mix(#2A2C38, #444861, self.hover);
+                        let light_b = mix(vec4(0.08, 0.09, 0.14, 0.18), vec4(0.08, 0.09, 0.14, 0.30), self.hover);
+                        sdf.fill_keep(mix(dark_bg, light_bg, self.light_mode));
+                        sdf.stroke(mix(dark_b, light_b, self.light_mode), 1.0);
                         return sdf.result;
                     }
                 }
@@ -459,12 +473,17 @@ live_design! {
                 draw_bg: {
                     instance hover: 0.0
                     instance down: 0.0
+                    uniform light_mode: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        let inset = 0.5 + self.down * 0.6;
+                        let inset = 0.5;
                         sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
-                        sdf.fill_keep(mix(mix(#181A22, #252836, self.hover), #2D3042, self.down));
-                        sdf.stroke(mix(#2A2C38, #444861, self.hover), 1.0);
+                        let dark_bg = mix(mix(#181A22, #252836, self.hover), #2D3042, self.down);
+                        let light_bg = mix(mix(#E7E0D1, #DDD5C4, self.hover), #CFC6B2, self.down);
+                        let dark_b = mix(#2A2C38, #444861, self.hover);
+                        let light_b = mix(vec4(0.08, 0.09, 0.14, 0.18), vec4(0.08, 0.09, 0.14, 0.30), self.hover);
+                        sdf.fill_keep(mix(dark_bg, light_bg, self.light_mode));
+                        sdf.stroke(mix(dark_b, light_b, self.light_mode), 1.0);
                         return sdf.result;
                     }
                 }
@@ -498,12 +517,17 @@ live_design! {
                 draw_bg: {
                     instance hover: 0.0
                     instance down: 0.0
+                    uniform light_mode: 0.0
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        let inset = 0.5 + self.down * 0.6;
+                        let inset = 0.5;
                         sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0);
-                        sdf.fill_keep(mix(mix(#241710, #382216, self.hover), #472A1B, self.down));
-                        sdf.stroke(mix(#6E3920, #B85A2C, self.hover), 1.0);
+                        let dark_bg = mix(mix(#241710, #382216, self.hover), #472A1B, self.down);
+                        let light_bg = mix(mix(#F3DFD3, #ECCFBE, self.hover), #E4BEA9, self.down);
+                        let dark_b = mix(#6E3920, #B85A2C, self.hover);
+                        let light_b = mix(#C67B52, #B35526, self.hover);
+                        sdf.fill_keep(mix(dark_bg, light_bg, self.light_mode));
+                        sdf.stroke(mix(dark_b, light_b, self.light_mode), 1.0);
                         return sdf.result;
                     }
                 }
@@ -766,7 +790,55 @@ impl Widget for TrackList {
                                     }
                                     empty_title_lbl = { draw_text: { color: (text_primary) } }
                                     empty_sub_lbl = { draw_text: { color: (text_secondary) } }
-                                    empty_discover_btn = { draw_bg: { light_mode: (light_mode) } }
+                                },
+                            );
+                            // Action buttons live inside an anonymous child <View>, so apply directly via WidgetRef lookup.
+                            empty
+                                .button(id!(empty_discover_btn))
+                                .apply_over(cx, live! { draw_bg: { light_mode: (light_mode) } });
+                            let btn_text_col = text_primary;
+                            let btn_hover_col = icon_hover;
+                            for btn_id in [id!(empty_add_folder_btn), id!(empty_youtube_btn)] {
+                                empty.button(btn_id).apply_over(
+                                    cx,
+                                    live! {
+                                        draw_bg: { light_mode: (light_mode) }
+                                        draw_text: {
+                                            color: (btn_text_col),
+                                            color_hover: (btn_hover_col),
+                                            color_focus: (btn_hover_col),
+                                            color_down: (btn_hover_col)
+                                        }
+                                        draw_icon: {
+                                            color: (accent),
+                                            color_hover: (btn_hover_col),
+                                            color_focus: (btn_hover_col),
+                                            color_down: (btn_hover_col)
+                                        }
+                                    },
+                                );
+                            }
+                            let demo_txt = if light_mode > 0.5 {
+                                accent
+                            } else {
+                                vec4(0.961, 0.643, 0.451, 1.0)
+                            };
+                            empty.button(id!(empty_demo_btn)).apply_over(
+                                cx,
+                                live! {
+                                    draw_bg: { light_mode: (light_mode) }
+                                    draw_text: {
+                                        color: (demo_txt),
+                                        color_hover: (btn_hover_col),
+                                        color_focus: (btn_hover_col),
+                                        color_down: (btn_hover_col)
+                                    }
+                                    draw_icon: {
+                                        color: (accent),
+                                        color_hover: (btn_hover_col),
+                                        color_focus: (btn_hover_col),
+                                        color_down: (btn_hover_col)
+                                    }
                                 },
                             );
                             empty.draw_all(cx, scope);
@@ -796,15 +868,32 @@ impl Widget for TrackList {
                                 }
                                 art_tile = { width: (art_sz), height: (art_sz) }
                                 idx_lbl = { draw_text: { color: (idx_col), text_style: { font_size: (sub_fs) } } }
-                                title_lbl = { draw_text: { color: (title_col), text_style: { font_size: (title_fs) } } }
-                                artist_lbl = { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
                                 album_lbl = { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
                                 dur_lbl = { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
-                                queue_add_btn = { draw_icon: { color: (icon_idle), color_hover: (icon_hover) } }
-                                like_btn = { draw_icon: { color: (like_col), color_hover: (icon_hover) } }
-                                pl_add_btn = { draw_icon: { color: (icon_idle), color_hover: (icon_hover) } }
+                                queue_add_btn = {
+                                    draw_bg: { light_mode: (light_mode) }
+                                    draw_icon: { color: (icon_idle), color_hover: (icon_hover) }
+                                }
+                                like_btn = {
+                                    draw_bg: { light_mode: (light_mode) }
+                                    draw_icon: { color: (like_col), color_hover: (icon_hover) }
+                                }
+                                pl_add_btn = {
+                                    draw_bg: { light_mode: (light_mode) }
+                                    draw_icon: { color: (icon_idle), color_hover: (icon_hover) }
+                                }
                                 delete_btn = { draw_icon: { color: (icon_idle) } }
                             },
+                        );
+                        // `title_lbl` and `artist_lbl` are nested inside `info_col`, so direct `row.apply_over`
+                        // skips them in Makepad 1.0 — style them directly for Warm Cream Light & UI Zoom.
+                        row.label(id!(title_lbl)).apply_over(
+                            cx,
+                            live! { draw_text: { color: (title_col), text_style: { font_size: (title_fs) } } },
+                        );
+                        row.label(id!(artist_lbl)).apply_over(
+                            cx,
+                            live! { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } },
                         );
 
                         let art_ref = row.ferric_cover_art(id!(art_tile));

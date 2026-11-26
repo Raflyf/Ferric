@@ -337,7 +337,8 @@ live_design! {
                     sdf.fill(self.accent);
                 }
 
-                return sdf.result;
+                let a = clamp(self.opacity, 0.0, 1.0);
+                return sdf.result * a;
             }
         }
     }
@@ -2163,6 +2164,8 @@ pub struct DrawFerricCoverArt {
     hover_y: f32,
     #[live(0.0_f32)]
     hero: f32,
+    #[live(1.0_f32)]
+    opacity: f32,
     #[live]
     accent: Vec4,
 }
@@ -2281,6 +2284,21 @@ impl FerricCoverArtRef {
             inner.draw_bg.level = level;
             inner.draw_bg.accent = accent;
             inner.draw_bg.circle = next_circ;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn set_morph_visual(&self, cx: &mut Cx, opacity: f32, radius: f32) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let next_op = opacity.clamp(0.0, 1.0);
+            let next_rad = radius.clamp(4.0, 40.0);
+            if (inner.draw_bg.opacity - next_op).abs() < 0.004
+                && (inner.draw_bg.radius - next_rad).abs() < 0.05
+            {
+                return;
+            }
+            inner.draw_bg.opacity = next_op;
+            inner.draw_bg.radius = next_rad;
             inner.draw_bg.redraw(cx);
         }
     }

@@ -2866,11 +2866,13 @@ live_design! {
                                                 align: { x: 0.5, y: 0.5 }
                                                 show_bg: true,
                                                 draw_bg: {
+                                                    uniform reveal: 1.0
                                                     fn pixel(self) -> vec4 {
                                                         let p = self.pos * self.rect_size;
                                                         let sdf = Sdf2d::viewport(p);
+                                                        let a = clamp(self.reveal, 0.0, 1.0);
                                                         sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 16.0);
-                                                        sdf.fill(vec4(0.04, 0.05, 0.08, 0.34));
+                                                        sdf.fill(vec4(0.04, 0.05, 0.08, 0.44 * a));
                                                         return sdf.result;
                                                     }
                                                 }
@@ -2886,21 +2888,34 @@ live_design! {
                                                 }
                                             }
 
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 4,
-                                                vq_auto_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "Auto", draw_text: { text_style: { font_size: 8.0 } } }
-                                                vq_360_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "360p", draw_text: { text_style: { font_size: 8.0 } } }
-                                                vq_480_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "480p", draw_text: { text_style: { font_size: 8.0 } } }
-                                                vq_720_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "720p", draw_text: { text_style: { font_size: 8.0 } } }
-                                                vq_1080_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "1080p", draw_text: { text_style: { font_size: 8.0 } } }
-                                            }
-
-                                            vid_status_lbl = <Label> {
+                                            fs_video_footer = <View> {
                                                 width: Fill,
-                                                padding: 0,
-                                                align: { x: 0.5, y: 0.5 }
-                                                draw_text: { color: #FFFFFF7A, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
-                                                text: "Synced to WASAPI"
+                                                height: 54,
+                                                flow: Down,
+                                                align: { x: 0.5, y: 0.0 }
+                                                fs_video_footer_inner = <View> {
+                                                    width: Fill,
+                                                    height: Fit,
+                                                    flow: Down,
+                                                    align: { x: 0.5, y: 0.5 }
+                                                    spacing: 8,
+                                                    <View> {
+                                                        width: Fill, height: Fit, flow: Right, align: { x: 0.5, y: 0.5 }, spacing: 4,
+                                                        vq_auto_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "Auto", draw_text: { text_style: { font_size: 8.0 } } }
+                                                        vq_360_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "360p", draw_text: { text_style: { font_size: 8.0 } } }
+                                                        vq_480_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "480p", draw_text: { text_style: { font_size: 8.0 } } }
+                                                        vq_720_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "720p", draw_text: { text_style: { font_size: 8.0 } } }
+                                                        vq_1080_btn = <FerricChipBtn> { height: 22, padding: { left: 7, right: 7 }, text: "1080p", draw_text: { text_style: { font_size: 8.0 } } }
+                                                    }
+
+                                                    vid_status_lbl = <Label> {
+                                                        width: Fill,
+                                                        padding: 0,
+                                                        align: { x: 0.5, y: 0.5 }
+                                                        draw_text: { color: #FFFFFF7A, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
+                                                        text: "Synced to WASAPI"
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -3464,6 +3479,12 @@ pub struct App {
     #[rust]
     fs_reveal_t: f32,
     #[rust]
+    fs_video_morph_t: f32,
+    #[rust]
+    fs_video_morph_target: f32,
+    #[rust]
+    fs_video_bounds_sync_pending: bool,
+    #[rust]
     cmdk_reveal_t: f32,
     #[rust]
     toast_reveal_t: f32,
@@ -3614,6 +3635,10 @@ impl App {
             self.fs_reveal_t = (self.fs_reveal_t + (1.0 - self.fs_reveal_t) * k).min(1.0);
             if 1.0 - self.fs_reveal_t < 0.01 {
                 self.fs_reveal_t = 1.0;
+                if self.video_open && self.fs_video_morph_t >= 0.99 {
+                    self.fs_video_bounds_sync_pending = true;
+                    active = true;
+                }
             } else {
                 active = true;
             }
@@ -3622,6 +3647,27 @@ impl App {
                 cx,
                 live! { padding: { left: 48.0, right: 38.0, top: (top_pad), bottom: 18.0 } },
             );
+        }
+
+        if self.fullscreen_open
+            && (self.fs_video_morph_target - self.fs_video_morph_t).abs() > 0.004
+        {
+            let k_media = (1.0 - (-12.5 * dt).exp()) as f32;
+            self.fs_video_morph_t += (self.fs_video_morph_target - self.fs_video_morph_t) * k_media;
+            if (self.fs_video_morph_target - self.fs_video_morph_t).abs() <= 0.005 {
+                self.fs_video_morph_t = self.fs_video_morph_target;
+                if self.video_open && self.fs_video_morph_t >= 0.99 {
+                    // Schedule one post-layout frame so `video_stage_slot` reports its settled final rect.
+                    self.fs_video_bounds_sync_pending = true;
+                    active = true;
+                }
+            } else {
+                active = true;
+            }
+            self.sync_fullscreen_media_layout(cx);
+        } else if self.fs_video_bounds_sync_pending && self.fs_reveal_t >= 0.995 {
+            self.fs_video_bounds_sync_pending = false;
+            self.sync_video_bounds(cx);
         }
 
         if self.cmdk_open && self.cmdk_reveal_t < 0.995 {
@@ -4226,9 +4272,20 @@ impl App {
             ),
         );
         self.ui.label(id!(vid_stage_hint_lbl)).set_text(cx, "");
+        let initially_visible = self.fullscreen_open
+            && self.fs_reveal_t >= 0.96
+            && self.fs_video_morph_t >= 0.96
+            && !self.cmdk_open
+            && !self.track_menu_open
+            && !self.update_popup_visible
+            && !win32_is_window_hidden_or_minimized();
         let owner = win32_main_hwnd_raw();
         if let Some(vp) = &mut self.video_player {
-            vp.open_or_load(owner, rect, chosen.url, pos_sec, playing);
+            vp.open_or_load(owner, rect, chosen.url, pos_sec, playing, initially_visible);
+        }
+        if !initially_visible && self.fullscreen_open {
+            self.fs_video_bounds_sync_pending = true;
+            self.start_motion(cx);
         }
         self.last_video_sync = Some(Instant::now());
     }
@@ -4244,6 +4301,8 @@ impl App {
             return;
         }
         let obstructed = !self.fullscreen_open
+            || self.fs_reveal_t < 0.96
+            || self.fs_video_morph_t < 0.96
             || self.cmdk_open
             || self.track_menu_open
             || self.update_popup_visible
@@ -4258,32 +4317,72 @@ impl App {
         }
     }
 
+    fn smoothstep01(x: f32) -> f32 {
+        let c = x.clamp(0.0, 1.0);
+        c * c * (3.0 - 2.0 * c)
+    }
+
     fn sync_fullscreen_media_layout(&self, cx: &mut Cx) {
         let z = self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
-        if self.video_open {
-            let card_w = (600.0 * z).min(680.0);
-            let box_w = (568.0 * z).min(640.0);
-            let frame_h = (box_w * 9.0 / 16.0).round();
-            let box_h = frame_h + 64.0;
+        let t = self.fs_video_morph_t.clamp(0.0, 1.0);
+        let tf = f64::from(t);
+
+        let cover_card_w = 410.0 * z;
+        let video_card_w = (600.0 * z).min(680.0);
+        let card_w = cover_card_w + (video_card_w - cover_card_w) * tf;
+
+        let cover_box = 316.0 * z;
+        let video_box_w = (568.0 * z).min(640.0);
+        let video_frame_h_final = (video_box_w * 9.0 / 16.0).round();
+        let video_box_h = video_frame_h_final + 64.0;
+        let box_w = cover_box + (video_box_w - cover_box) * tf;
+        let box_h = cover_box + (video_box_h - cover_box) * tf;
+        let cur_frame_h = (box_w * 9.0 / 16.0).round().max(110.0);
+
+        let art_sz = (304.0 - 28.0 * tf) * z;
+        let art_alpha = Self::smoothstep01(1.0 - t / 0.62);
+        let art_radius = 28.0 - 8.0 * t;
+        let vid_alpha = Self::smoothstep01((t - 0.14) / 0.86);
+        let hint_alpha = Self::smoothstep01((t - 0.30) / 0.70);
+        let ctrl_alpha = Self::smoothstep01((t - 0.48) / 0.52);
+
+        self.ui
+            .view(id!(fs_left_card))
+            .apply_over(cx, live! { width: (card_w) });
+        self.ui
+            .view(id!(fs_media_box))
+            .apply_over(cx, live! { width: (box_w), height: (box_h) });
+
+        let show_art = art_alpha > 0.008;
+        self.ui.view(id!(fs_art_wrap)).set_visible(cx, show_art);
+        if show_art {
+            let art = self.ui.ferric_cover_art(id!(fs_art));
+            art.apply_over(cx, live! { width: (art_sz), height: (art_sz) });
+            art.set_morph_visual(cx, art_alpha, art_radius);
+        }
+
+        let show_vid = t > 0.04;
+        self.ui.view(id!(fs_video_wrap)).set_visible(cx, show_vid);
+        if show_vid {
+            self.ui.view(id!(video_stage_frame)).apply_over(
+                cx,
+                live! { height: (cur_frame_h), draw_bg: { reveal: (vid_alpha) } },
+            );
+            let hint_col = vec4(0.824, 0.839, 0.894, hint_alpha);
             self.ui
-                .view(id!(fs_left_card))
-                .apply_over(cx, live! { width: (card_w) });
+                .label(id!(vid_stage_hint_lbl))
+                .apply_over(cx, live! { draw_text: { color: (hint_col) } });
+
+            let show_footer = t > 0.48;
             self.ui
-                .view(id!(fs_media_box))
-                .apply_over(cx, live! { width: (box_w), height: (box_h) });
-            self.ui
-                .view(id!(video_stage_frame))
-                .apply_over(cx, live! { height: (frame_h) });
-        } else {
-            self.ui
-                .view(id!(fs_left_card))
-                .apply_over(cx, live! { width: (410.0 * z) });
-            self.ui
-                .view(id!(fs_media_box))
-                .apply_over(cx, live! { width: (316.0 * z), height: (316.0 * z) });
-            self.ui
-                .ferric_cover_art(id!(fs_art))
-                .apply_over(cx, live! { width: (304.0 * z), height: (304.0 * z) });
+                .view(id!(fs_video_footer_inner))
+                .set_visible(cx, show_footer);
+            if show_footer {
+                let status_col = vec4(1.0, 1.0, 1.0, 0.48 * ctrl_alpha);
+                self.ui
+                    .label(id!(vid_status_lbl))
+                    .apply_over(cx, live! { draw_text: { color: (status_col) } });
+            }
         }
     }
 
@@ -4292,14 +4391,19 @@ impl App {
             self.show_toast(cx, "Play a song first to watch its video clip");
             return;
         };
+        let was_fullscreen = self.fullscreen_open;
         // Video Clip lives INSIDE Fullscreen Lyrics Mode replacing the Left Cover Art card
         if !self.fullscreen_open {
             self.set_fullscreen(cx, true);
         }
         self.video_open = true;
+        self.fs_video_morph_target = 1.0;
+        if !was_fullscreen || self.fs_video_morph_t >= 0.995 {
+            self.fs_video_morph_t = 1.0;
+            self.fs_video_bounds_sync_pending = true;
+        }
         self.sync_fullscreen_media_layout(cx);
-        self.ui.view(id!(fs_art_wrap)).set_visible(cx, false);
-        self.ui.view(id!(fs_video_wrap)).set_visible(cx, true);
+        self.start_motion(cx);
         self.style_chip_btn(cx, id!(fs_mode_art_btn), false);
         self.style_chip_btn(cx, id!(fs_mode_video_btn), true);
         self.refresh_video_quality_buttons(cx);
@@ -4391,15 +4495,25 @@ impl App {
     }
 
     fn close_native_video_stage(&mut self, cx: &mut Cx) {
+        self.close_native_video_stage_inner(cx, self.fullscreen_open);
+    }
+
+    fn close_native_video_stage_inner(&mut self, cx: &mut Cx, animate: bool) {
         self.video_open = false;
-        self.sync_fullscreen_media_layout(cx);
-        self.ui.view(id!(fs_video_wrap)).set_visible(cx, false);
-        self.ui.view(id!(fs_art_wrap)).set_visible(cx, true);
-        self.style_chip_btn(cx, id!(fs_mode_art_btn), true);
-        self.style_chip_btn(cx, id!(fs_mode_video_btn), false);
+        self.fs_video_morph_target = 0.0;
+        self.fs_video_bounds_sync_pending = false;
         if let Some(vp) = &mut self.video_player {
             vp.close();
         }
+        if !animate {
+            self.fs_video_morph_t = 0.0;
+        }
+        self.sync_fullscreen_media_layout(cx);
+        if animate && self.fs_video_morph_t > 0.004 {
+            self.start_motion(cx);
+        }
+        self.style_chip_btn(cx, id!(fs_mode_art_btn), true);
+        self.style_chip_btn(cx, id!(fs_mode_video_btn), false);
         let muted = rgba_to_vec4(self.adaptive_palette().icon_idle);
         self.ui.button(id!(bar_video_btn)).apply_over(
             cx,
@@ -4425,6 +4539,9 @@ impl App {
         self.right_lyrics_tab = false;
         self.page_reveal_t = 1.0;
         self.fs_reveal_t = 1.0;
+        self.fs_video_morph_t = 0.0;
+        self.fs_video_morph_target = 0.0;
+        self.fs_video_bounds_sync_pending = false;
         self.cmdk_reveal_t = 1.0;
         self.toast_reveal_t = 1.0;
         self.missing_art_queue = Rc::new(RefCell::new(Vec::new()));
@@ -4666,7 +4783,7 @@ impl App {
 
     fn navigate_to(&mut self, cx: &mut Cx, target: MainPage, push_history: bool) {
         if self.video_open {
-            self.close_native_video_stage(cx);
+            self.close_native_video_stage_inner(cx, false);
         }
         self.active_page = target;
         if push_history && let Some(hist) = &mut self.nav_history {
@@ -4876,7 +4993,7 @@ impl App {
 
     fn set_fullscreen(&mut self, cx: &mut Cx, open: bool) {
         if !open && self.video_open {
-            self.close_native_video_stage(cx);
+            self.close_native_video_stage_inner(cx, false);
         }
         self.fullscreen_open = open;
         self.last_pos_txt.clear();
@@ -4901,19 +5018,21 @@ impl App {
             acr,
         );
         if open {
+            let t0 = if self.video_open { 1.0 } else { 0.0 };
+            self.fs_video_morph_t = t0;
+            self.fs_video_morph_target = t0;
+            self.fs_video_bounds_sync_pending = self.video_open;
             self.sync_fullscreen_media_layout(cx);
             self.sync_fullscreen_backdrop_artwork(cx);
             self.fs_reveal_t = 0.0;
-            self.ui
-                .view(id!(fs_art_wrap))
-                .set_visible(cx, !self.video_open);
-            self.ui
-                .view(id!(fs_video_wrap))
-                .set_visible(cx, self.video_open);
             self.style_chip_btn(cx, id!(fs_mode_art_btn), !self.video_open);
             self.style_chip_btn(cx, id!(fs_mode_video_btn), self.video_open);
             self.start_motion(cx);
         } else {
+            self.fs_video_morph_t = 0.0;
+            self.fs_video_morph_target = 0.0;
+            self.fs_video_bounds_sync_pending = false;
+            self.sync_fullscreen_media_layout(cx);
             self.ui
                 .ferric_lyrics_view(id!(fs_lyrics_scroll))
                 .set_playback_state(cx, pos_ms, false);
@@ -12107,12 +12226,13 @@ impl App {
                 self.open_native_video_stage(cx);
             }
         }
-        if self.ui.button(id!(rs_watch_video)).clicked(actions)
-            || self.ui.button(id!(fs_mode_video_btn)).clicked(actions)
+        if (self.ui.button(id!(rs_watch_video)).clicked(actions)
+            || self.ui.button(id!(fs_mode_video_btn)).clicked(actions))
+            && !(self.fullscreen_open && self.video_open)
         {
             self.open_native_video_stage(cx);
         }
-        if self.ui.button(id!(fs_mode_art_btn)).clicked(actions) {
+        if self.ui.button(id!(fs_mode_art_btn)).clicked(actions) && self.video_open {
             self.close_native_video_stage(cx);
         }
         for (btn, vq) in [

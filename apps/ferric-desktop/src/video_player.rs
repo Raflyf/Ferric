@@ -16,7 +16,7 @@ pub struct VideoViewportRect {
 mod imp {
     use super::VideoViewportRect;
     use ferric_providers::ytmusic::is_allowed_stream_url;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::ffi::c_void;
     use std::path::{Component, Path, PathBuf, Prefix};
     use std::rc::Rc;
@@ -156,6 +156,8 @@ mod imp {
         webview: ICoreWebView2,
         cmd_rx: RefCell<Receiver<VideoCmd>>,
         shared_hwnd: Arc<AtomicIsize>,
+        is_visible: Cell<bool>,
+        last_bounds: Cell<VideoViewportRect>,
     }
 
     pub struct NativeVideoPlayer {
@@ -184,6 +186,7 @@ mod imp {
             stream_url: String,
             pos_sec: f64,
             playing: bool,
+            initially_visible: bool,
         ) {
             if !is_allowed_video_stream_url(&stream_url) {
                 return;
@@ -191,7 +194,7 @@ mod imp {
             let pos_sec = safe_pos_secs(pos_sec);
             if let Some(tx) = &self.cmd_tx {
                 let _ = tx.send(VideoCmd::SetBounds(rect));
-                let _ = tx.send(VideoCmd::SetVisible(true));
+                let _ = tx.send(VideoCmd::SetVisible(initially_visible));
                 let _ = tx.send(VideoCmd::LoadStream {
                     url: stream_url,
                     pos_sec,
@@ -217,6 +220,7 @@ mod imp {
                         stream_url,
                         pos_sec,
                         playing,
+                        initially_visible,
                         rx,
                         hwnd_tx,
                         shared_hwnd,
@@ -281,10 +285,16 @@ mod imp {
         }
     }
 
-    fn player_shell_html(initial_url: &str, initial_pos: f64, initial_playing: bool) -> String {
+    fn player_shell_html(
+        initial_url: &str,
+        initial_pos: f64,
+        initial_playing: bool,
+        initially_visible: bool,
+    ) -> String {
         let quoted_url = js_quote_safe(initial_url);
         let safe_pos = safe_pos_secs(initial_pos);
         let init_play = if initial_playing { "true" } else { "false" };
+        let init_visible_js = if initially_visible { "true" } else { "false" };
         format!(
             r#"<!DOCTYPE html>
 <html>
@@ -296,9 +306,15 @@ mod imp {
   html, body {{
     margin: 0; padding: 0; width: 100%; height: 100%;
     background: #0A0C12; overflow: hidden;
-    display: flex; align-items: center; justify-content: center;
     user-select: none; position: relative;
   }}
+  #stage {{
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    position: relative; opacity: 0;
+    transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }}
+  #stage.shown {{ opacity: 1; }}
   video {{
     width: 100%; height: 100%; object-fit: cover;
     background: #0A0C12; opacity: 0;
@@ -318,16 +334,30 @@ mod imp {
 </style>
 </head>
 <body>
-  <div id="msg">Loading video stream...</div>
-  <video id="v" muted playsinline autoplay preload="auto" disablePictureInPicture controlsList="nodownload noplaybackrate"></video>
-  <div id="vignette"></div>
+  <div id="stage">
+    <div id="msg">Loading video stream...</div>
+    <video id="v" muted playsinline autoplay preload="auto" disablePictureInPicture controlsList="nodownload noplaybackrate"></video>
+    <div id="vignette"></div>
+  </div>
   <script>
     document.addEventListener('contextmenu', e => e.preventDefault());
     document.addEventListener('dragstart', e => e.preventDefault());
+    const stage = document.getElementById('stage');
     const v = document.getElementById('v');
     const msg = document.getElementById('msg');
     let desiredPos = {safe_pos:.3};
     let desiredPlaying = {init_play};
+    window.__ferricStageVisible = (vis) => {{
+      if (vis) {{
+        stage.classList.remove('shown');
+        requestAnimationFrame(() => requestAnimationFrame(() => stage.classList.add('shown')));
+      }} else {{
+        stage.classList.remove('shown');
+      }}
+    }};
+    if ({init_visible_js}) {{
+      requestAnimationFrame(() => requestAnimationFrame(() => stage.classList.add('shown')));
+    }}
     const reveal = () => {{
       if (v.videoWidth > 0 && v.videoHeight > 0) {{
         const ar = v.videoWidth / v.videoHeight;
@@ -451,6 +481,7 @@ mod imp {
         initial_url: String,
         initial_pos: f64,
         initial_playing: bool,
+        initially_visible: bool,
         cmd_rx: Receiver<VideoCmd>,
         hwnd_tx: Sender<isize>,
         shared_hwnd: Arc<AtomicIsize>,
@@ -505,22 +536,31 @@ mod imp {
         shared_hwnd.store(hwnd.0 as isize, Ordering::Release);
         let _ = hwnd_tx.send(hwnd.0 as isize);
 
-        // SAFETY: Show docked stage directly on top of Ferric's viewport without stealing keyboard focus.
+        // SAFETY: Position docked stage cleanly; only show immediately when `initially_visible` is true
+        // so Cover -> Video morph animations can pre-buffer silently without popping at an intermediate rect.
+        let init_w = rect.width.max(160);
+        let init_h = rect.height.max(90);
+        let init_rect = VideoViewportRect {
+            x: rect.x,
+            y: rect.y,
+            width: init_w,
+            height: init_h,
+        };
         unsafe {
-            let init_w = rect.width.max(160);
-            let init_h = rect.height.max(90);
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOP),
-                rect.x,
-                rect.y,
+                init_rect.x,
+                init_rect.y,
                 init_w,
                 init_h,
                 SWP_NOACTIVATE,
             );
             apply_rounded_video_corners(hwnd, init_w, init_h);
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            let _ = UpdateWindow(hwnd);
+            if initially_visible {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                let _ = UpdateWindow(hwnd);
+            }
         }
 
         let cleanup_hwnd = |h: HWND, slot: &Arc<AtomicIsize>| {
@@ -608,7 +648,7 @@ mod imp {
             let mut client = RECT::default();
             let _ = GetClientRect(hwnd, &mut client);
             let _ = controller.SetBounds(client);
-            let _ = controller.SetIsVisible(true);
+            let _ = controller.SetIsVisible(initially_visible);
             let wv = match controller.CoreWebView2() {
                 Ok(wv) => wv,
                 Err(e) => {
@@ -618,7 +658,12 @@ mod imp {
                 }
             };
             harden_video_webview(&wv);
-            let html = player_shell_html(&initial_url, initial_pos, initial_playing);
+            let html = player_shell_html(
+                &initial_url,
+                initial_pos,
+                initial_playing,
+                initially_visible,
+            );
             let html_w = CoTaskMemPWSTR::from(html.as_str());
             let _ = wv.NavigateToString(*html_w.as_ref().as_pcwstr());
             wv
@@ -629,13 +674,22 @@ mod imp {
             webview,
             cmd_rx: RefCell::new(cmd_rx),
             shared_hwnd,
+            is_visible: Cell::new(initially_visible),
+            last_bounds: Cell::new(init_rect),
         });
 
         // SAFETY: Attach Rc pointer (`Rc::into_raw`) released cleanly once in `WM_DESTROY`.
         unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::into_raw(state) as isize);
+            SetWindowLongPtrW(
+                hwnd,
+                GWLP_USERDATA,
+                Rc::into_raw(Rc::clone(&state)) as isize,
+            );
             let _ = SetTimer(Some(hwnd), CMD_POLL_TIMER, 120, None);
         }
+        // Flush any bounds/visibility updates queued while WebView2 was initializing with zero timer lag.
+        drain_video_commands(hwnd, &state);
+        drop(state);
 
         let mut msg = MSG::default();
         loop {
@@ -706,23 +760,51 @@ mod imp {
                     }
                 }
                 VideoCmd::SetBounds(r) => {
+                    let clamped = VideoViewportRect {
+                        x: r.x,
+                        y: r.y,
+                        width: r.width.max(120),
+                        height: r.height.max(80),
+                    };
+                    if st.last_bounds.get() == clamped {
+                        continue;
+                    }
+                    st.last_bounds.set(clamped);
                     // SAFETY: Keep docked video surface locked to Ferric's viewport rect with smooth rounded corners.
                     unsafe {
-                        let w = r.width.max(120);
-                        let h = r.height.max(80);
-                        let _ =
-                            SetWindowPos(hwnd, None, r.x, r.y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-                        apply_rounded_video_corners(hwnd, w, h);
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            clamped.x,
+                            clamped.y,
+                            clamped.width,
+                            clamped.height,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                        apply_rounded_video_corners(hwnd, clamped.width, clamped.height);
                         let mut client = RECT::default();
                         let _ = GetClientRect(hwnd, &mut client);
                         let _ = st.controller.SetBounds(client);
                     }
                 }
                 VideoCmd::SetVisible(vis) => {
-                    // SAFETY: Show/hide docked video surface cleanly.
+                    if st.is_visible.get() == vis {
+                        continue;
+                    }
+                    st.is_visible.set(vis);
+                    let script = if vis {
+                        "(function r(n){if(window.__ferricStageVisible){window.__ferricStageVisible(true);}else if(n>0){setTimeout(()=>r(n-1),40);}})(25);"
+                    } else {
+                        "window.__ferricStageVisible && window.__ferricStageVisible(false);"
+                    };
+                    let w_script = CoTaskMemPWSTR::from(script);
+                    // SAFETY: Show/hide docked video surface cleanly with smooth opacity reveal on entry.
                     unsafe {
                         let _ = st.controller.SetIsVisible(vis);
                         let _ = ShowWindow(hwnd, if vis { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                        let _ = st
+                            .webview
+                            .ExecuteScript(*w_script.as_ref().as_pcwstr(), None);
                     }
                 }
                 VideoCmd::Close => {
@@ -818,6 +900,7 @@ mod imp {
             _stream_url: String,
             _pos_sec: f64,
             _playing: bool,
+            _initially_visible: bool,
         ) {
         }
         pub fn set_bounds(&self, _rect: VideoViewportRect) {}

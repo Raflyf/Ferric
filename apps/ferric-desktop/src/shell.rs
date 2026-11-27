@@ -13,6 +13,10 @@ const ALLOWED_HTTPS_PREFIXES: &[&str] = &[
 const ALLOWED_HTTPS_EXACT: &[&str] = &[
     "https://github.com/Raflyf/Ferric",
     "https://discord.com/developers/applications",
+    "https://livelydesk.vercel.app",
+    "https://livelydesk.vercel.app/ferric",
+    "https://yapp.ink/raflyf",
+    "https://saweria.co/BuyMatcha",
 ];
 
 /// Events emitted by the Win32 window subclass & System Tray icon back to Ferric's UI loop.
@@ -1980,6 +1984,20 @@ mod win_impl {
                 WM_SHOWWINDOW | WM_MOVE | WM_WINDOWPOSCHANGED => {
                     push_event(TrayEvent::WindowMovedOrResized);
                 }
+                0x0011 => {
+                    // WM_QUERYENDSESSION: always consent to OS shutdown / MSI Restart Manager close.
+                    return LRESULT(1);
+                }
+                0x0016 => {
+                    // WM_ENDSESSION: exit immediately even when Close-to-Tray is enabled.
+                    if wparam.0 != 0 {
+                        FORCE_QUIT.store(true, Ordering::Release);
+                        remove_tray_icon(hwnd);
+                        push_event(TrayEvent::QuitApp);
+                        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                    return LRESULT(0);
+                }
                 WM_CLOSE => {
                     if CLOSE_TO_TRAY.load(Ordering::Acquire) && !FORCE_QUIT.load(Ordering::Acquire)
                     {
@@ -2381,4 +2399,38 @@ fn shell_open(target: &str, working_dir: Option<&str>) -> Result<(), String> {
 #[cfg(not(target_os = "windows"))]
 fn shell_open(_target: &str, _working_dir: Option<&str>) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_external_url;
+
+    #[test]
+    fn allows_official_about_and_support_urls_fail_closed() {
+        for ok_url in [
+            "https://github.com/Raflyf/Ferric",
+            "https://github.com/Raflyf/Ferric/releases",
+            "https://github.com/Raflyf/Ferric/blob/main/CHANGELOG.md",
+            "https://github.com/Raflyf/Ferric/issues",
+            "https://github.com/Raflyf/Ferric/blob/main/LICENSE",
+            "https://livelydesk.vercel.app/ferric",
+            "https://yapp.ink/raflyf",
+            "https://saweria.co/BuyMatcha",
+        ] {
+            assert!(is_safe_external_url(ok_url), "expected allowed: {ok_url}");
+        }
+        for bad_url in [
+            "http://livelydesk.vercel.app/ferric",
+            "https://livelydesk.vercel.app/other",
+            "https://yapp.ink/other",
+            "https://saweria.co/other",
+            "https://github.com/Raflyf/Ferric/../../evil",
+            "https://evil.example/https://github.com/Raflyf/Ferric",
+        ] {
+            assert!(
+                !is_safe_external_url(bad_url),
+                "expected rejected: {bad_url}"
+            );
+        }
+    }
 }

@@ -47,17 +47,13 @@ use ferric_providers::local_scanner::scan_local_folder;
 use ferric_providers::lyrics::{
     SyncedLyrics, fetch_best_free_lyrics, is_polluted_multilingual_lrc,
 };
-use ferric_providers::oauth::{
-    activate_oauth_cancel_token, bind_loopback_callback, generate_pkce_pair, spotify_authorize_url,
-    spotify_exchange_code, spotify_oauth_endpoint_config, sync_spotify_catalog_with_snapshots,
-};
+use ferric_providers::oauth::sync_spotify_catalog_with_snapshots;
 use ferric_providers::public_sync::{
     import_spotify_public_url, import_youtube_public_url, parse_spotify_target,
     parse_youtube_target,
 };
 use ferric_providers::spotify_web::{
     fetch_spotify_playlist_by_id, fetch_spotify_recommended_stations,
-    verify_spotify_premium_account,
 };
 use ferric_providers::subsonic::{SubsonicCredentials, sync_subsonic_catalog};
 use ferric_providers::updater::{
@@ -1708,7 +1704,6 @@ live_design! {
                                     sb_src_all_btn = <FerricChipBtn> { height: 20, padding: { left: 5, right: 5 }, draw_bg: { active: 1.0 }, draw_text: { active: 1.0, text_style: { font_size: 7.3 } }, text: "All" }
                                     sb_src_yt_btn = <FerricChipBtn> { visible: false, height: 20, padding: { left: 5, right: 5 }, draw_text: { text_style: { font_size: 7.3 } }, text: "YouTube" }
                                     sb_src_sp_btn = <FerricChipBtn> { visible: false, height: 20, padding: { left: 5, right: 5 }, draw_text: { text_style: { font_size: 7.3 } }, text: "Spotify" }
-                                    sb_src_sp_prem_btn = <FerricChipBtn> { visible: false, height: 20, padding: { left: 5, right: 5 }, draw_text: { text_style: { font_size: 7.3 } }, text: "Premium" }
                                     sb_src_local_btn = <FerricChipBtn> { visible: false, height: 20, padding: { left: 5, right: 5 }, draw_text: { text_style: { font_size: 7.3 } }, text: "Local" }
                                 }
 
@@ -2400,7 +2395,6 @@ live_design! {
                                             pl_src_all_btn = <FerricChipBtn> { text: "All", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
                                             pl_src_yt_btn = <FerricChipBtn> { visible: false, text: "YouTube" }
                                             pl_src_sp_btn = <FerricChipBtn> { visible: false, text: "Spotify" }
-                                            pl_src_sp_prem_btn = <FerricChipBtn> { visible: false, text: "Spotify Premium" }
                                             pl_src_local_btn = <FerricChipBtn> { visible: false, text: "Local" }
                                         }
                                         <View> { width: Fill, height: 1 }
@@ -2558,6 +2552,7 @@ live_design! {
                                         st_integrations_btn = <FerricChipBtn> { text: "Integrations" }
                                         st_storage_btn = <FerricChipBtn> { text: "Storage" }
                                         st_connect_btn = <FerricChipBtn> { text: "Connect" }
+                                        st_about_btn = <FerricChipBtn> { text: "About" }
                                     }
 
                                     // TAB A: ACCOUNTS & SOURCES
@@ -2591,53 +2586,28 @@ live_design! {
                                             }
                                         }
 
-                                        card_acct_spotify = <FerricCard> {
-                                            flow: Down, spacing: 8,
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_acct_spotify = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account (Direct OAuth 2.0 PKCE · Premium Only)" }
-                                                spotify_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Not Connected" }
-                                            }
-                                            lbl_m_acct_spotify = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
-                                                text: "For Spotify Premium accounts: one-click sign-in via built-in desktop OAuth 2.0 PKCE (127.0.0.1:8989/login, tokens encrypted with Windows DPAPI). Non-Premium accounts are rejected automatically — use Spotify Web Sign-In below for Free accounts."
-                                            }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                spotify_login_btn = <FerricPrimaryBtn> { text: "Sign in with Spotify" }
-                                                spotify_sync_btn = <FerricBtn> { height: 28, text: "Sync Library" }
-                                                spotify_logout_btn = <FerricBtn> { height: 28, text: "Sign Out" }
-                                            }
-                                            spotify_oauth_status_lbl = <Label> {
-                                                width: Fill,
-                                                draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.5 } }
-                                                text: "Ready — requires an active Spotify Premium subscription (127.0.0.1:8989/login)."
-                                            }
-                                        }
-
                                         card_acct_spotify_web = <FerricCard> {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_acct_spotify_web = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Web Sign-In (Free & Premium · No Client ID)" }
+                                                lbl_t_acct_spotify_web = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Spotify Account (Free & Premium)" }
                                                 spotify_web_state_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Not Connected" }
                                             }
                                             lbl_m_spotify_web = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
-                                                text: "Works for Spotify Free and Premium accounts without a Client ID: signs in via Spotify's web player and syncs your Liked Songs and playlists directly (cookies & tokens encrypted with Windows DPAPI)."
+                                                text: "Works for both Spotify Free and Premium accounts: signs in via Spotify and syncs your Liked Songs, playlists, and Recommended Stations directly (cookies & tokens encrypted with Windows DPAPI)."
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                spotify_web_login_btn = <FerricPrimaryBtn> { text: "Sign in via Web" }
-                                                spotify_web_sync_btn = <FerricBtn> { height: 28, text: "Sync Web Library" }
+                                                spotify_web_login_btn = <FerricPrimaryBtn> { text: "Sign in with Spotify" }
+                                                spotify_web_sync_btn = <FerricBtn> { height: 28, text: "Sync Library" }
                                                 spotify_web_logout_btn = <FerricBtn> { height: 28, text: "Sign Out" }
                                             }
                                             spotify_web_status_lbl = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.5 } }
-                                                text: "Web session not connected — sign in via browser or import public Spotify links below."
+                                                text: "Not signed in — connect any Spotify Free or Premium account, or import public Spotify links below."
                                             }
                                         }
 
@@ -3119,21 +3089,6 @@ live_design! {
                                             }
                                         }
 
-                                        card_st_update = <FerricCard> {
-                                            flow: Down, spacing: 8,
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_st_update = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Software Updates (Ferric)" }
-                                                auto_update_toggle = <FerricToggle> { is_on: true }
-                                            }
-                                            update_status_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "SHA-256 verified GitHub Releases MSI updater" }
-                                            <View> {
-                                                width: Fill, height: Fit, flow: Right, spacing: 6,
-                                                check_updates_btn = <FerricBtn> { text: "Check for Updates" }
-                                                open_releases_btn = <FerricBtn> { text: "Open GitHub Releases" }
-                                            }
-                                        }
-
                                         card_st_keys = <FerricCard> {
                                             flow: Down, spacing: 5,
                                             lbl_t_st_keys = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Keyboard Shortcuts" }
@@ -3158,6 +3113,90 @@ live_design! {
                                                     connect_gen_pair_btn = <FerricBtn> { text: "Regenerate QR" }
                                                     connect_copy_pair_btn = <FerricBtn> { text: "Copy Pairing URI" }
                                                 }
+                                            }
+                                        }
+                                    }
+
+                                    // TAB G: ABOUT, UPDATES & LINKS
+                                    tab_about = <View> {
+                                        visible: false,
+                                        width: Fill, height: Fit, flow: Down, spacing: 10,
+
+                                        card_ab_hero = <FerricCard> {
+                                            flow: Right, align: { y: 0.5 }, spacing: 16,
+                                            about_brand_icon = <Image> {
+                                                width: 56,
+                                                height: 56,
+                                                fit: Smallest
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Down, spacing: 4,
+                                                <View> {
+                                                    width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
+                                                    lbl_t_ab_name = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 14.5 } }, text: "Ferric" }
+                                                    about_version_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.2 } }, text: "v0.1.1 · Windows x64" }
+                                                }
+                                                lbl_m_ab_tagline = <Label> {
+                                                    width: Fill,
+                                                    draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
+                                                    text: "Native Rust desktop music player for local lossless libraries, YouTube Music, and Spotify — with synced lyrics, 10-band EQ, and Windows 11 Acrylic."
+                                                }
+                                                lbl_m_ab_meta = <Label> {
+                                                    width: Fill,
+                                                    draw_text: { color: #9A9CA8, text_style: <THEME_FONT_MEDIUM> { font_size: 8.3 } }
+                                                    text: "Part of the LivelyDesk suite  ·  MIT License  ·  © Rafly Firmansyah"
+                                                }
+                                            }
+                                        }
+
+                                        card_st_update = <FerricCard> {
+                                            flow: Down, spacing: 8,
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
+                                                lbl_t_st_update = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Software Updates (Ferric)" }
+                                                lbl_m_st_auto_upd = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.4 } }, text: "Auto-check on startup" }
+                                                auto_update_toggle = <FerricToggle> { is_on: true }
+                                            }
+                                            update_status_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "SHA-256 verified GitHub Releases MSI updater" }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                                check_updates_btn = <FerricBtn> { height: 28, text: "Check for Updates" }
+                                                open_releases_btn = <FerricBtn> { height: 28, text: "Open GitHub Releases" }
+                                            }
+                                        }
+
+                                        card_ab_links = <FerricCard> {
+                                            flow: Down, spacing: 8,
+                                            lbl_t_ab_links = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Links & Resources" }
+                                            lbl_m_ab_links = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Official product page, source repository, changelog, license, and issue tracker." }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                                about_web_btn = <FerricBtn> { height: 28, text: "Website (LivelyDesk)" }
+                                                about_github_btn = <FerricBtn> { height: 28, text: "GitHub" }
+                                                about_changelog_btn = <FerricBtn> { height: 28, text: "Changelog" }
+                                                about_issues_btn = <FerricBtn> { height: 28, text: "Report Issue" }
+                                                about_license_btn = <FerricBtn> { height: 28, text: "MIT License" }
+                                            }
+                                        }
+
+                                        card_ab_support = <FerricCard> {
+                                            flow: Down, spacing: 8,
+                                            lbl_t_ab_support = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Support Development" }
+                                            lbl_m_ab_support = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "Ferric is free and open source. Optional support helps fund development and never gates or unlocks features." }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                                about_coffee_btn = <FerricBtn> { height: 28, text: "Buy Me a Coffee" }
+                                                about_saweria_btn = <FerricBtn> { height: 28, text: "Saweria" }
+                                            }
+                                        }
+
+                                        card_ab_system = <FerricCard> {
+                                            flow: Down, spacing: 8,
+                                            lbl_t_ab_sys = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Engine & Privacy" }
+                                            lbl_m_ab_sys = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Built with Rust, Makepad (DirectX 11 + DirectComposition), Symphonia, pure-Rust Opus, Rubato, and SQLite. Saved credentials are encrypted locally with Windows DPAPI; zero analytics or telemetry." }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                                about_copy_diag_btn = <FerricBtn> { height: 28, text: "Copy System Info" }
                                             }
                                         }
                                     }
@@ -5598,16 +5637,28 @@ impl App {
         self.bg_tx = Some(tx);
         self.bg_rx = Some(rx);
 
-        if let Some(brand_buf) = decode_and_downscale_image(BRAND_ICON_PNG, 64) {
+        if let Some(brand_buf) = decode_and_downscale_image(BRAND_ICON_PNG, 128) {
             let tex = brand_buf.into_new_texture(cx);
             tex.set_release_cpu_after_upload(cx, true);
-            self.ui.image(id!(brand_icon)).set_texture(cx, Some(tex));
+            self.ui
+                .image(id!(brand_icon))
+                .set_texture(cx, Some(tex.clone()));
+            self.ui
+                .image(id!(about_brand_icon))
+                .set_texture(cx, Some(tex));
         } else {
             let _ = self
                 .ui
                 .image(id!(brand_icon))
                 .load_png_from_data(cx, BRAND_ICON_PNG);
+            let _ = self
+                .ui
+                .image(id!(about_brand_icon))
+                .load_png_from_data(cx, BRAND_ICON_PNG);
         }
+        self.ui
+            .label(id!(about_version_lbl))
+            .set_text(cx, &format!("v{APP_VERSION} · Windows x64 · Native Rust"));
         self.ui
             .label(id!(lbl_t_st_update))
             .set_text(cx, &format!("Software Updates (Ferric v{APP_VERSION})"));
@@ -5632,22 +5683,6 @@ impl App {
                 },
             );
         }
-        if self.is_spotify_oauth_session_active() {
-            let prem_pl_n = self
-                .playlists
-                .iter()
-                .filter(|p| PlaylistSourceFilter::SpotifyPremium.matches_playlist(p))
-                .count();
-            let name = self.accounts.spotify_user_name.trim();
-            self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
-                cx,
-                &if name.is_empty() {
-                    format!("Spotify Premium connected · {prem_pl_n} playlists synced.")
-                } else {
-                    format!("Spotify Premium: {name} · {prem_pl_n} playlists synced.")
-                },
-            );
-        }
         if self.is_spotify_web_session_active() {
             let web_pl_n = self
                 .playlists
@@ -5658,9 +5693,9 @@ impl App {
             self.ui.label(id!(spotify_web_status_lbl)).set_text(
                 cx,
                 &if name.is_empty() {
-                    format!("Spotify Web connected · {web_pl_n} playlists synced.")
+                    format!("Spotify connected · {web_pl_n} playlists synced.")
                 } else {
-                    format!("Spotify Web: {name} · {web_pl_n} playlists synced.")
+                    format!("Spotify: {name} · {web_pl_n} playlists synced.")
                 },
             );
         }
@@ -5742,6 +5777,10 @@ impl App {
             "connect" => {
                 self.navigate_to(cx, MainPage::Settings, false);
                 self.switch_settings_tab(cx, SettingsTab::Connect);
+            }
+            "about" => {
+                self.navigate_to(cx, MainPage::Settings, false);
+                self.switch_settings_tab(cx, SettingsTab::About);
             }
             "now" | "lyrics" | "fullscreen" => {
                 self.set_fullscreen(cx, true);
@@ -5973,6 +6012,7 @@ impl App {
             ),
             (SettingsTab::Storage, id!(tab_storage), id!(st_storage_btn)),
             (SettingsTab::Connect, id!(tab_connect), id!(st_connect_btn)),
+            (SettingsTab::About, id!(tab_about), id!(st_about_btn)),
         ];
         for (t, vid, bid) in defs {
             let active = t == tab;
@@ -7135,6 +7175,7 @@ impl App {
             id!(acrylic_tint_lbl),
             id!(eq_preamp_lbl),
             id!(connect_lan_ip_lbl),
+            id!(about_version_lbl),
             id!(xfade_val_lbl),
             id!(fadein_val_lbl),
             id!(detail_kind_lbl),
@@ -7147,7 +7188,6 @@ impl App {
         // Account & integration connection badges stay strictly Ferric Burnt Orange across all cards
         for lid in [
             id!(yt_state_lbl),
-            id!(spotify_state_lbl),
             id!(spotify_web_state_lbl),
             id!(discord_status_lbl),
         ] {
@@ -7555,45 +7595,37 @@ impl App {
         self.ui.redraw(cx);
     }
 
-    fn available_playlist_sources(&self) -> (bool, bool, bool, bool) {
+    fn available_playlist_sources(&self) -> (bool, bool, bool) {
         let has_yt = (self.accounts.youtube_connected && !self.accounts.youtube_sapisid.is_empty())
             || self
                 .playlists
                 .iter()
                 .any(|p| PlaylistSourceFilter::YouTube.matches_playlist(p));
-        let has_sp_web = self.is_spotify_web_session_active()
+        let has_sp = self.is_spotify_web_session_active()
+            || self.is_spotify_oauth_session_active()
             || self
                 .playlists
                 .iter()
                 .any(|p| PlaylistSourceFilter::Spotify.matches_playlist(p));
-        let has_sp_prem = self.is_spotify_oauth_session_active()
-            || self
-                .playlists
-                .iter()
-                .any(|p| PlaylistSourceFilter::SpotifyPremium.matches_playlist(p));
         let has_local = self
             .playlists
             .iter()
             .any(|p| PlaylistSourceFilter::Local.matches_playlist(p));
-        (has_yt, has_sp_web, has_sp_prem, has_local)
+        (has_yt, has_sp, has_local)
     }
 
     fn sync_playlist_source_filter_ui(&mut self, cx: &mut Cx) {
-        let (has_yt, has_sp_web, has_sp_prem, has_local) = self.available_playlist_sources();
+        let (has_yt, has_sp, has_local) = self.available_playlist_sources();
         let active_selected_available = match self.playlist_source_filter {
             PlaylistSourceFilter::All => true,
             PlaylistSourceFilter::YouTube => has_yt,
-            PlaylistSourceFilter::Spotify => has_sp_web,
-            PlaylistSourceFilter::SpotifyPremium => has_sp_prem,
+            PlaylistSourceFilter::Spotify => has_sp,
             PlaylistSourceFilter::Local => has_local,
         };
         if !active_selected_available {
             self.playlist_source_filter = PlaylistSourceFilter::All;
         }
-        let source_count = usize::from(has_yt)
-            + usize::from(has_sp_web)
-            + usize::from(has_sp_prem)
-            + usize::from(has_local);
+        let source_count = usize::from(has_yt) + usize::from(has_sp) + usize::from(has_local);
         let show_row =
             source_count >= 2 || self.playlist_source_filter != PlaylistSourceFilter::All;
         self.ui
@@ -7618,14 +7650,8 @@ impl App {
             (
                 id!(sb_src_sp_btn),
                 id!(pl_src_sp_btn),
-                has_sp_web,
+                has_sp,
                 PlaylistSourceFilter::Spotify,
-            ),
-            (
-                id!(sb_src_sp_prem_btn),
-                id!(pl_src_sp_prem_btn),
-                has_sp_prem,
-                PlaylistSourceFilter::SpotifyPremium,
             ),
             (
                 id!(sb_src_local_btn),
@@ -9608,7 +9634,6 @@ impl App {
         // Propagate clean Native Acrylic / AMOLED / Light surface polarity to all cards
         for card_id in [
             id!(card_acct_yt),
-            id!(card_acct_spotify),
             id!(card_acct_spotify_web),
             id!(card_acct_import),
             id!(card_acct_sub),
@@ -9625,6 +9650,10 @@ impl App {
             id!(card_st_update),
             id!(card_st_keys),
             id!(card_conn_main),
+            id!(card_ab_hero),
+            id!(card_ab_links),
+            id!(card_ab_support),
+            id!(card_ab_system),
             id!(playlists_empty_card),
         ] {
             self.ui.view(card_id).apply_over(
@@ -9985,7 +10014,6 @@ impl App {
             id!(pl_empty_focus_btn),
             id!(detail_play_btn),
             id!(yt_login_btn),
-            id!(spotify_login_btn),
             id!(spotify_web_login_btn),
             id!(discord_save_id_btn),
             id!(update_now_btn),
@@ -10029,8 +10057,6 @@ impl App {
             id!(yt_sync_btn),
             id!(yt_logout_btn),
             id!(guest_refresh_btn),
-            id!(spotify_sync_btn),
-            id!(spotify_logout_btn),
             id!(spotify_web_sync_btn),
             id!(spotify_web_logout_btn),
             id!(quick_spotify_btn),
@@ -10085,6 +10111,14 @@ impl App {
             id!(open_releases_btn),
             id!(connect_gen_pair_btn),
             id!(connect_copy_pair_btn),
+            id!(about_web_btn),
+            id!(about_github_btn),
+            id!(about_changelog_btn),
+            id!(about_issues_btn),
+            id!(about_license_btn),
+            id!(about_coffee_btn),
+            id!(about_saweria_btn),
+            id!(about_copy_diag_btn),
             id!(rs_lyr_minus),
             id!(rs_lyr_plus),
             id!(rs_lyr_expand),
@@ -10225,13 +10259,11 @@ impl App {
             id!(sb_src_all_btn),
             id!(sb_src_yt_btn),
             id!(sb_src_sp_btn),
-            id!(sb_src_sp_prem_btn),
             id!(sb_src_local_btn),
             id!(sb_pl_sort_btn),
             id!(pl_src_all_btn),
             id!(pl_src_yt_btn),
             id!(pl_src_sp_btn),
-            id!(pl_src_sp_prem_btn),
             id!(pl_src_local_btn),
             id!(pl_sort_newest_btn),
             id!(pl_sort_oldest_btn),
@@ -10243,6 +10275,7 @@ impl App {
             id!(st_integrations_btn),
             id!(st_storage_btn),
             id!(st_connect_btn),
+            id!(st_about_btn),
             id!(tint_obsidian_btn),
             id!(tint_ember_btn),
             id!(tint_copper_btn),
@@ -10517,7 +10550,6 @@ impl App {
             id!(detail_title_lbl),
             id!(lbl_t_settings),
             id!(lbl_t_acct_yt),
-            id!(lbl_t_acct_spotify),
             id!(lbl_t_acct_spotify_web),
             id!(lbl_t_acct_import),
             id!(lbl_t_acct_sub),
@@ -10565,6 +10597,10 @@ impl App {
             id!(lbl_t_st_update),
             id!(lbl_t_st_keys),
             id!(lbl_t_conn_title),
+            id!(lbl_t_ab_name),
+            id!(lbl_t_ab_links),
+            id!(lbl_t_ab_support),
+            id!(lbl_t_ab_sys),
             id!(np_title_lbl),
             id!(lbl_t_powerbar),
             id!(update_popup_title),
@@ -10590,8 +10626,6 @@ impl App {
             id!(detail_sub_lbl),
             id!(lbl_m_acct_desc),
             id!(oauth_status_lbl),
-            id!(lbl_m_acct_spotify),
-            id!(spotify_oauth_status_lbl),
             id!(lbl_m_spotify_web),
             id!(spotify_web_status_lbl),
             id!(lbl_m_pb_curve),
@@ -10619,9 +10653,15 @@ impl App {
             id!(discord_prev_album),
             id!(lbl_m_disc_hint),
             id!(cache_stats_lbl),
+            id!(lbl_m_st_auto_upd),
             id!(update_status_lbl),
             id!(lbl_m_st_keys),
             id!(connect_peers_lbl),
+            id!(lbl_m_ab_tagline),
+            id!(lbl_m_ab_meta),
+            id!(lbl_m_ab_links),
+            id!(lbl_m_ab_support),
+            id!(lbl_m_ab_sys),
             id!(lbl_m_history),
             id!(q_upnext_header),
             id!(q_radio_status),
@@ -12603,26 +12643,8 @@ impl App {
         let pal = self.adaptive_palette();
         let status_col = rgba_to_vec4(pal.brand_accent);
 
-        let oauth_active = self.is_spotify_oauth_session_active();
         let web_active = self.is_spotify_web_session_active();
-        let oauth_name = self.accounts.spotify_user_name.trim();
         let web_name = self.accounts.spotify_web_user_name.trim();
-
-        let oauth_text = if oauth_active {
-            if oauth_name.is_empty() {
-                "Connected · Premium".to_string()
-            } else {
-                format!("Connected · {oauth_name} (Premium)")
-            }
-        } else {
-            "Not Connected".to_string()
-        };
-        self.ui
-            .label(id!(spotify_state_lbl))
-            .set_text(cx, &oauth_text);
-        self.ui
-            .label(id!(spotify_state_lbl))
-            .apply_over(cx, live! { draw_text: { color: (status_col) } });
 
         let web_text = if web_active {
             if web_name.is_empty() {
@@ -12643,64 +12665,8 @@ impl App {
         self.refresh_top_account_btn(cx);
     }
 
-    fn start_spotify_login(&mut self, cx: &mut Cx) {
-        let (effective_client_id, callback_port, callback_path) = {
-            let (cid, port, path) = spotify_oauth_endpoint_config("");
-            (cid.to_string(), port, path)
-        };
-        let Some(tx) = self.bg_tx.clone() else {
-            return;
-        };
-        let cancel = activate_oauth_cancel_token();
-        self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
-            cx,
-            "Opening Spotify authorization in your browser (verifying Premium status after sign-in)...",
-        );
-        thread::spawn(move || {
-            let pkce = generate_pkce_pair();
-            let listener = match bind_loopback_callback(callback_port, callback_path, &pkce.state) {
-                Ok(listener) => listener,
-                Err(err) => {
-                    let _ = tx.send(BgMessage::SpotifyLoginFailed(err.to_string()));
-                    return;
-                }
-            };
-            let redirect_uri = listener.redirect_uri.clone();
-            let authorize_url = spotify_authorize_url(&effective_client_id, &redirect_uri, &pkce);
-            if let Err(err) = open_allowed_url(&authorize_url) {
-                let _ = tx.send(BgMessage::SpotifyLoginFailed(err));
-                return;
-            }
-            let outcome = listener
-                .wait_for_auth_code(&cancel, std::time::Duration::from_secs(240))
-                .and_then(|code| {
-                    spotify_exchange_code(
-                        &effective_client_id,
-                        &code,
-                        &redirect_uri,
-                        &pkce.verifier,
-                    )
-                })
-                .and_then(|tokens| {
-                    let display_name = verify_spotify_premium_account(&tokens.access_token)?;
-                    Ok((display_name, tokens))
-                });
-            let _ = match outcome {
-                Ok((display_name, tokens)) => tx.send(BgMessage::SpotifyLoginResult {
-                    display_name,
-                    tokens,
-                }),
-                Err(err) => tx.send(BgMessage::SpotifyLoginFailed(err.to_string())),
-            };
-        });
-    }
-
     fn sync_spotify_library_for(&mut self, cx: &mut Cx, web_session: bool, initial_delay_ms: u64) {
-        let status_lbl = if web_session {
-            id!(spotify_web_status_lbl)
-        } else {
-            id!(spotify_oauth_status_lbl)
-        };
+        let status_lbl = id!(spotify_web_status_lbl);
         if self.spotify_sync_in_flight {
             self.ui.label(status_lbl).set_text(
                 cx,
@@ -12764,10 +12730,7 @@ impl App {
                         web_session,
                         report: Box::new(report),
                     },
-                    Err(err) => BgMessage::SpotifySyncFailed {
-                        web_session,
-                        error: err.to_string(),
-                    },
+                    Err(err) => BgMessage::SpotifySyncFailed(err.to_string()),
                 };
             let _ = tx.send(msg);
         });
@@ -13674,40 +13637,6 @@ impl App {
                         .label(id!(oauth_status_lbl))
                         .set_text(cx, &format!("YouTube Music sync failed: {err}"));
                 }
-                BgMessage::SpotifyLoginResult {
-                    display_name,
-                    tokens,
-                } => {
-                    self.accounts.spotify_connected = true;
-                    if !display_name.trim().is_empty() {
-                        self.accounts.spotify_user_name = display_name;
-                    }
-                    self.accounts.spotify_access_token = tokens.access_token;
-                    if let Some(refresh) = tokens.refresh_token {
-                        self.accounts.spotify_refresh_token = refresh;
-                    }
-                    if let Some(db) = &self.db {
-                        let _ = db.save_accounts(&self.accounts);
-                    }
-                    self.refresh_spotify_account_ui(cx);
-                    self.show_toast(cx, "Spotify Premium verified! Syncing library...");
-                    self.sync_spotify_library_for(cx, false, 0);
-                }
-                BgMessage::SpotifyLoginFailed(err) => {
-                    let clean_err = friendly_error_message(&err);
-                    self.ui
-                        .label(id!(spotify_oauth_status_lbl))
-                        .set_text(cx, &format!("Spotify sign-in rejected: {clean_err}"));
-                    self.refresh_spotify_account_ui(cx);
-                    self.show_toast(
-                        cx,
-                        if clean_err.contains("Spotify Premium required") {
-                            "Spotify Premium required — use Spotify Web Sign-In for Free accounts"
-                        } else {
-                            "Spotify Direct OAuth sign-in failed"
-                        },
-                    );
-                }
                 BgMessage::SpotifyCatalogSynced {
                     web_session,
                     report,
@@ -13761,11 +13690,7 @@ impl App {
                     if let Some(db) = &self.db {
                         let _ = db.save_accounts(&self.accounts);
                     }
-                    let status_lbl = if web_session {
-                        id!(spotify_web_status_lbl)
-                    } else {
-                        id!(spotify_oauth_status_lbl)
-                    };
+                    let status_lbl = id!(spotify_web_status_lbl);
                     let status_msg = if rl_skipped > 0 {
                         format!(
                             "Spotify: {} · {liked_n} liked & {total_spotify_pl} playlists saved ({rl_skipped} deferred by HTTP 429 — wait ~1 min and press Sync again to finish).",
@@ -13800,16 +13725,11 @@ impl App {
                         },
                     );
                 }
-                BgMessage::SpotifySyncFailed { web_session, error } => {
+                BgMessage::SpotifySyncFailed(error) => {
                     self.spotify_sync_in_flight = false;
-                    let status_lbl = if web_session {
-                        id!(spotify_web_status_lbl)
-                    } else {
-                        id!(spotify_oauth_status_lbl)
-                    };
                     let clean = friendly_error_message(&error);
                     self.ui
-                        .label(status_lbl)
+                        .label(id!(spotify_web_status_lbl))
                         .set_text(cx, &format!("Spotify sync failed: {clean}"));
                 }
                 BgMessage::SpotifyWebLoginResult { sp_dc, token_json } => {
@@ -14732,18 +14652,10 @@ impl App {
             (id!(sb_src_all_btn), PlaylistSourceFilter::All),
             (id!(sb_src_yt_btn), PlaylistSourceFilter::YouTube),
             (id!(sb_src_sp_btn), PlaylistSourceFilter::Spotify),
-            (
-                id!(sb_src_sp_prem_btn),
-                PlaylistSourceFilter::SpotifyPremium,
-            ),
             (id!(sb_src_local_btn), PlaylistSourceFilter::Local),
             (id!(pl_src_all_btn), PlaylistSourceFilter::All),
             (id!(pl_src_yt_btn), PlaylistSourceFilter::YouTube),
             (id!(pl_src_sp_btn), PlaylistSourceFilter::Spotify),
-            (
-                id!(pl_src_sp_prem_btn),
-                PlaylistSourceFilter::SpotifyPremium,
-            ),
             (id!(pl_src_local_btn), PlaylistSourceFilter::Local),
         ] {
             if self.ui.button(btn).clicked(actions) {
@@ -16218,6 +16130,7 @@ impl App {
             (id!(st_integrations_btn), SettingsTab::Integrations),
             (id!(st_storage_btn), SettingsTab::Storage),
             (id!(st_connect_btn), SettingsTab::Connect),
+            (id!(st_about_btn), SettingsTab::About),
         ] {
             if self.ui.button(btn).clicked(actions) {
                 self.switch_settings_tab(cx, tab);
@@ -16263,49 +16176,6 @@ impl App {
             self.spawn_ytm_rich_home(cx, 0, None, true);
             self.show_toast(cx, "Signed out — Guest Mode active");
         }
-        if self.ui.button(id!(spotify_login_btn)).clicked(actions) {
-            self.start_spotify_login(cx);
-        }
-        if self.ui.button(id!(spotify_sync_btn)).clicked(actions) {
-            self.sync_spotify_library_for(cx, false, 0);
-        }
-        if self.ui.button(id!(spotify_logout_btn)).clicked(actions) {
-            if !self.is_spotify_oauth_session_active() {
-                self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
-                    cx,
-                    "Direct OAuth (Premium) is not signed in. Your Spotify Web session was not touched.",
-                );
-            } else {
-                self.accounts.zeroize_spotify_direct_secrets();
-                self.accounts.spotify_connected = false;
-                self.accounts.spotify_user_name.clear();
-                let keep_synced = self.is_spotify_web_session_active();
-                if !keep_synced {
-                    self.accounts.spotify_playlist_count = 0;
-                    self.accounts.spotify_liked_count = 0;
-                }
-                if let Some(db) = &mut self.db {
-                    let _ = db.save_accounts(&self.accounts);
-                    let _ = db.delete_spotify_premium_synced_playlists();
-                    self.playlists = db.list_playlists().unwrap_or_default();
-                } else {
-                    self.playlists
-                        .retain(|pl| !pl.id.starts_with("spotify:premium:playlist:"));
-                }
-                self.ui.label(id!(spotify_oauth_status_lbl)).set_text(
-                    cx,
-                    if keep_synced {
-                        "Spotify Direct OAuth signed out. Active Spotify Web session and playlists were kept."
-                    } else {
-                        "Spotify Direct OAuth signed out. Synced Spotify Premium playlists removed; liked tracks kept."
-                    },
-                );
-                self.refresh_spotify_account_ui(cx);
-                self.rebuild_library_views(cx);
-                self.refresh_playlists_grid(cx);
-                self.show_toast(cx, "Spotify Direct OAuth signed out");
-            }
-        }
         if self.ui.button(id!(spotify_web_login_btn)).clicked(actions) {
             self.start_spotify_web_login(cx);
         }
@@ -16317,15 +16187,19 @@ impl App {
             }
         }
         if self.ui.button(id!(spotify_web_logout_btn)).clicked(actions) {
-            if !self.is_spotify_web_session_active() {
-                self.ui.label(id!(spotify_web_status_lbl)).set_text(
-                    cx,
-                    "Spotify Web Sign-In is not signed in. Your Direct OAuth session was not touched.",
-                );
+            if !self.is_spotify_web_session_active() && !self.is_spotify_oauth_session_active() {
+                self.ui
+                    .label(id!(spotify_web_status_lbl))
+                    .set_text(cx, "Spotify is not signed in.");
             } else {
                 self.accounts.zeroize_spotify_web_secrets();
+                self.accounts.zeroize_spotify_direct_secrets();
                 self.accounts.spotify_web_connected = false;
                 self.accounts.spotify_web_user_name.clear();
+                self.accounts.spotify_connected = false;
+                self.accounts.spotify_user_name.clear();
+                self.accounts.spotify_playlist_count = 0;
+                self.accounts.spotify_liked_count = 0;
                 // Clean up Spotify Web browser profile and any legacy capture file off the UI thread.
                 let sp_profile_dir = app_data_dir().join("spotify_web_profile");
                 let legacy_capture = std::env::temp_dir().join("ferric_spotify_capture.txt");
@@ -16333,31 +16207,25 @@ impl App {
                     let _ = std::fs::remove_dir_all(sp_profile_dir);
                     let _ = std::fs::remove_file(legacy_capture);
                 });
-                let keep_synced = self.is_spotify_oauth_session_active();
-                if !keep_synced {
-                    self.accounts.spotify_playlist_count = 0;
-                    self.accounts.spotify_liked_count = 0;
-                }
                 if let Some(db) = &mut self.db {
                     let _ = db.save_accounts(&self.accounts);
                     let _ = db.delete_spotify_web_synced_playlists();
+                    let _ = db.delete_spotify_premium_synced_playlists();
                     self.playlists = db.list_playlists().unwrap_or_default();
                 } else {
-                    self.playlists
-                        .retain(|pl| !pl.id.starts_with("spotify:playlist:"));
+                    self.playlists.retain(|pl| {
+                        !pl.id.starts_with("spotify:playlist:")
+                            && !pl.id.starts_with("spotify:premium:playlist:")
+                    });
                 }
                 self.ui.label(id!(spotify_web_status_lbl)).set_text(
                     cx,
-                    if keep_synced {
-                        "Spotify Web signed out. Active Direct OAuth session and playlists were kept."
-                    } else {
-                        "Spotify Web signed out. Synced Spotify Web playlists removed; liked tracks kept."
-                    },
+                    "Spotify signed out. Synced Spotify playlists removed; liked tracks kept.",
                 );
                 self.refresh_spotify_account_ui(cx);
                 self.rebuild_library_views(cx);
                 self.refresh_playlists_grid(cx);
-                self.show_toast(cx, "Spotify Web signed out");
+                self.show_toast(cx, "Spotify signed out");
             }
         }
         if self.ui.button(id!(quick_spotify_btn)).clicked(actions) {
@@ -17187,6 +17055,50 @@ impl App {
         }
         if self.ui.button(id!(update_popup_close_btn)).clicked(actions) {
             self.dismiss_update_popup(cx);
+        }
+
+        // About Tab Links, Support & System Info
+        for (btn_id, url) in [
+            (id!(about_web_btn), "https://livelydesk.vercel.app/ferric"),
+            (id!(about_github_btn), "https://github.com/Raflyf/Ferric"),
+            (
+                id!(about_changelog_btn),
+                "https://github.com/Raflyf/Ferric/blob/main/CHANGELOG.md",
+            ),
+            (
+                id!(about_issues_btn),
+                "https://github.com/Raflyf/Ferric/issues",
+            ),
+            (
+                id!(about_license_btn),
+                "https://github.com/Raflyf/Ferric/blob/main/LICENSE",
+            ),
+            (id!(about_coffee_btn), "https://yapp.ink/raflyf"),
+            (id!(about_saweria_btn), "https://saweria.co/BuyMatcha"),
+        ] {
+            if self.ui.button(btn_id).clicked(actions)
+                && let Err(err) = open_allowed_url(url)
+            {
+                self.show_toast(cx, &format!("Could not open link: {err}"));
+            }
+        }
+        if self.ui.button(id!(about_copy_diag_btn)).clicked(actions) {
+            let diag = format!(
+                "Ferric v{APP_VERSION} ({} {}) | Theme: {} | Acrylic: {} | UI Zoom: {:.0}% | Library: {} tracks, {} playlists",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                self.theme.name,
+                if self.theme.acrylic_enabled {
+                    "On"
+                } else {
+                    "Off"
+                },
+                self.theme.ui_zoom * 100.0,
+                self.all_tracks.len(),
+                self.playlists.len(),
+            );
+            let _ = copy_text_to_clipboard(&diag);
+            self.show_toast(cx, "System info copied to clipboard");
         }
 
         // Track Actions & Add-to-Playlist Popover Modal (Right-Click / +)

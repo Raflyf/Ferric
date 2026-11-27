@@ -34,6 +34,7 @@ pub enum SettingsTab {
     Integrations,
     Storage,
     Connect,
+    About,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -94,7 +95,6 @@ pub enum PlaylistSourceFilter {
     All,
     YouTube,
     Spotify,
-    SpotifyPremium,
     Local,
 }
 
@@ -104,10 +104,7 @@ impl PlaylistSourceFilter {
         match self {
             Self::All => true,
             Self::YouTube => pl.source == TrackSource::YouTubeMusic,
-            Self::Spotify => {
-                pl.source == TrackSource::Spotify && !pl.id.starts_with("spotify:premium:")
-            }
-            Self::SpotifyPremium => pl.id.starts_with("spotify:premium:"),
+            Self::Spotify => pl.source == TrackSource::Spotify,
             Self::Local => matches!(
                 pl.source,
                 TrackSource::Local | TrackSource::Subsonic | TrackSource::P2pHome
@@ -120,7 +117,6 @@ impl PlaylistSourceFilter {
             Self::All => "All",
             Self::YouTube => "YouTube",
             Self::Spotify => "Spotify",
-            Self::SpotifyPremium => "Spotify Premium",
             Self::Local => "Local",
         }
     }
@@ -416,19 +412,11 @@ pub enum BgMessage {
         gen_id: u64,
         event: DownloadEvent,
     },
-    SpotifyLoginResult {
-        display_name: String,
-        tokens: ferric_providers::oauth::OAuthTokens,
-    },
-    SpotifyLoginFailed(String),
     SpotifyCatalogSynced {
         web_session: bool,
         report: Box<ferric_providers::oauth::CloudSyncReport>,
     },
-    SpotifySyncFailed {
-        web_session: bool,
-        error: String,
-    },
+    SpotifySyncFailed(String),
     SpotifyWebLoginResult {
         sp_dc: String,
         token_json: String,
@@ -766,12 +754,8 @@ mod tests {
         assert!(!PlaylistSourceFilter::YouTube.matches_playlist(&sp_prem));
 
         assert!(PlaylistSourceFilter::Spotify.matches_playlist(&sp_web));
-        assert!(!PlaylistSourceFilter::Spotify.matches_playlist(&sp_prem));
+        assert!(PlaylistSourceFilter::Spotify.matches_playlist(&sp_prem));
         assert!(!PlaylistSourceFilter::Spotify.matches_playlist(&yt));
-
-        assert!(PlaylistSourceFilter::SpotifyPremium.matches_playlist(&sp_prem));
-        assert!(!PlaylistSourceFilter::SpotifyPremium.matches_playlist(&sp_web));
-        assert!(!PlaylistSourceFilter::SpotifyPremium.matches_playlist(&yt));
 
         assert!(PlaylistSourceFilter::Local.matches_playlist(&local));
         assert!(PlaylistSourceFilter::Local.matches_playlist(&sub));

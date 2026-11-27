@@ -6,6 +6,11 @@ All notable changes to Ferric are documented in this file.
 
 ## v0.1.1 (2026-11-27)
 
+### Added
+
+- **Settings > About Tab:** Dedicated About page displaying Ferric's version, SHA-256 verified Software Updates controls (`Check for Updates`, startup auto-check toggle, release notes), project links (LivelyDesk website, GitHub, Changelog, Issues, MIT License), optional support links (Buy Me a Coffee, Saweria), engine/privacy summary, and one-click `Copy System Info`.
+- **Unified Spotify Sign-In:** Consolidated Spotify integration in `Settings > Accounts` into a single **Spotify Account (Free & Premium)** sign-in card and unified `Spotify` playlist filter, removing the redundant Premium-only OAuth card.
+
 ### Improved
 
 - **Sub-100 MB Memory Architecture:** Re-architected artwork caching, GPU texture lifecycles, SQLite memory limits, and shared HTTP/TLS connection pools so Ferric stays under 100 MB Private Working Set across idle, active streaming playback, Fullscreen Lyrics, and system tray residency.
@@ -20,6 +25,7 @@ All notable changes to Ferric are documented in this file.
 - Fixed concurrent WebView2 script execution during Spotify login, removed excess CDP network traffic, and added session/command deadlines so closed login windows never lock future sign-in attempts.
 - Fixed docked Video Clip command bursts during resize/morph animations by coalescing geometry and playback sync updates, and cleared stale window handles on early close.
 - Fixed taskbar thumbnail icon handle cleanup via RAII `Drop` and eliminated unnecessary UTF-16 heap allocations in Win32 window and tray hooks.
+- Fixed MSI uninstall/upgrade auto-closing running or tray-minimized Ferric instances cleanly (`WM_ENDSESSION` handling + pre-`InstallValidate` process-tree termination) and expanded full uninstall cleanup to remove custom install paths and temporary browser profiles (`%TEMP%\ferric-spotify-browser-*`).
 
 ---
 

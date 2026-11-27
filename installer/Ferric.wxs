@@ -38,7 +38,21 @@
         EndSessionMessage="yes"
         PromptToContinue="no"
         RebootPrompt="no"
-        Timeout="5" />
+        Timeout="3" />
+
+    <!-- Auto-close any running or tray-minimized Ferric instance (and WebView2 children)
+         BEFORE InstallValidate so Windows Installer never shows "Files in Use" or leaves locked files. -->
+    <CustomAction
+        Id="SetForceCloseFerricCmd"
+        Property="ForceCloseFerric"
+        Value="&quot;[System64Folder]cmd.exe&quot; /d /c &quot;taskkill /F /T /IM ferric.exe &gt;nul 2&gt;&amp;1 &amp;&amp; ping -n 2 127.0.0.1 &gt;nul&quot;" />
+    <CustomAction
+        Id="ForceCloseFerric"
+        BinaryKey="WixCA"
+        DllEntry="WixQuietExec64"
+        Execute="immediate"
+        Impersonate="yes"
+        Return="ignore" />
 
     <CustomAction
         Id="LaunchApplication"
@@ -46,13 +60,13 @@
         DllEntry="WixShellExec"
         Impersonate="yes" />
 
-    <!-- Clean Uninstall: wipe all Ferric caches, logs, WebView2 profiles, updates & SQLite DB
-         strictly on full Uninstall (NEVER during in-place MSI upgrade). Removes parent
-         %LOCALAPPDATA%\LivelyDesk only when empty so sibling LivelyDesk apps remain untouched. -->
+    <!-- Clean Uninstall: wipe all Ferric caches, logs, WebView2/Spotify profiles, temp dirs,
+         updates & SQLite DB strictly on full Uninstall (NEVER during in-place MSI upgrade).
+         Removes parent %LOCALAPPDATA%\LivelyDesk only when empty so sibling LivelyDesk apps stay untouched. -->
     <CustomAction
         Id="SetCleanUninstallCmd"
         Property="CleanUninstallUserData"
-        Value="&quot;[System64Folder]cmd.exe&quot; /d /c &quot;if exist &quot;%LOCALAPPDATA%\LivelyDesk\Ferric&quot; rd /s /q &quot;%LOCALAPPDATA%\LivelyDesk\Ferric&quot; &amp; rd &quot;%LOCALAPPDATA%\LivelyDesk&quot; 2&gt;nul &amp; if exist &quot;%LOCALAPPDATA%\Programs\Ferric&quot; rd /s /q &quot;%LOCALAPPDATA%\Programs\Ferric&quot; &amp; if exist &quot;%TEMP%\ferric_spotify_capture.txt&quot; del /f /q &quot;%TEMP%\ferric_spotify_capture.txt&quot;&quot;" />
+        Value="&quot;[System64Folder]cmd.exe&quot; /d /c &quot;taskkill /F /T /IM ferric.exe &gt;nul 2&gt;&amp;1 &amp; if exist &quot;%LOCALAPPDATA%\LivelyDesk\Ferric&quot; rd /s /q &quot;%LOCALAPPDATA%\LivelyDesk\Ferric&quot; &amp; rd &quot;%LOCALAPPDATA%\LivelyDesk&quot; 2&gt;nul &amp; if exist &quot;%APPDATA%\LivelyDesk\Ferric&quot; rd /s /q &quot;%APPDATA%\LivelyDesk\Ferric&quot; &amp; rd &quot;%APPDATA%\LivelyDesk&quot; 2&gt;nul &amp; if exist &quot;[INSTALLFOLDER]&quot; rd /s /q &quot;[INSTALLFOLDER]&quot; &amp; if exist &quot;%LOCALAPPDATA%\Programs\Ferric&quot; rd /s /q &quot;%LOCALAPPDATA%\Programs\Ferric&quot; &amp; if exist &quot;%TEMP%\ferric_spotify_capture.txt&quot; del /f /q &quot;%TEMP%\ferric_spotify_capture.txt&quot; &amp; for /d %D in (&quot;%TEMP%\ferric-spotify-browser-*&quot;) do rd /s /q &quot;%D&quot;&quot;" />
     <CustomAction
         Id="CleanUninstallUserData"
         BinaryKey="WixCA"
@@ -62,6 +76,8 @@
         Return="ignore" />
 
     <InstallExecuteSequence>
+      <Custom Action="SetForceCloseFerricCmd" Before="ForceCloseFerric" />
+      <Custom Action="ForceCloseFerric" Before="InstallValidate" />
       <Custom Action="SetCleanUninstallCmd" Before="CleanUninstallUserData">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
       <Custom Action="CleanUninstallUserData" After="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
     </InstallExecuteSequence>

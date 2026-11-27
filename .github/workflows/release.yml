@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Validate release tag matches Cargo.toml version
         shell: pwsh
@@ -118,6 +119,49 @@ jobs:
           $sums = "$msiHash  $msiName`n$zipHash  $zipName`n$exeHash  ferric.exe`n"
           [IO.File]::WriteAllText((Join-Path $PWD "dist\SHA256SUMS.txt"), $sums, [Text.Encoding]::ASCII)
 
+          $repoUrl = "https://github.com/$($env:GITHUB_REPOSITORY)"
+          $runUrl = "$repoUrl/actions/runs/$($env:GITHUB_RUN_ID)"
+          $changelogRaw = Get-Content -Raw -Encoding UTF8 "CHANGELOG.md"
+          $escapedTag = [regex]::Escape($tag)
+          $sectionPattern = "(?ms)^##\s+$escapedTag\b[^\r\n]*\r?\n(.*?)(?=^---\s*\r?\n|^##\s+v\d|\z)"
+          $sectionBody = ""
+          if ($changelogRaw -match $sectionPattern) {
+            $sectionBody = $Matches[1].Trim()
+          } else {
+            throw "Missing '## $tag' section in CHANGELOG.md"
+          }
+
+          $prevTag = (& git tag --sort=-v:refname | Where-Object { $_ -ne $tag -and $_ -match '^v\d+\.\d+\.\d+$' } | Select-Object -First 1)
+          $lines = @(
+            "## Ferric $tag",
+            "",
+            $sectionBody,
+            "",
+            "---",
+            "",
+            "### Download and verification",
+            "",
+            ('- [Windows x64 installer]({0}/releases/download/{1}/{2}) (`{2}`) — Per-user MSI installation' -f $repoUrl, $tag, $msiName),
+            ('- [Portable ZIP]({0}/releases/download/{1}/{2}) (`{2}`) — Native executable, Makepad resources, and docs' -f $repoUrl, $tag, $zipName),
+            ('- [SHA256SUMS.txt]({0}/releases/download/{1}/SHA256SUMS.txt)' -f $repoUrl, $tag),
+            ('- [GitHub Actions build]({0}): formatting, Clippy, unit tests, PE hardening verification, release compilation, and installer build passed.' -f $runUrl),
+            "",
+            ('**Installer SHA256:** `{0}`' -f $msiHash),
+            ('**Portable ZIP SHA256:** `{0}`' -f $zipHash),
+            "",
+            "### Installation notes",
+            "",
+            '- Unsigned build. Keep Windows security protections enabled and verify downloads against `SHA256SUMS.txt`.',
+            '- Local credentials and cookies are encrypted at rest with Windows DPAPI (`CryptProtectData`) and removed completely on full uninstall.',
+            '- Running or tray-minimized Ferric instances close automatically during MSI upgrade or uninstall for a clean file swap and full cleanup.'
+          )
+          if ($prevTag) {
+            $lines += ""
+            $lines += ('**Full Changelog:** [{0}...{1}]({2}/compare/{0}...{1})' -f $prevTag, $tag, $repoUrl)
+          }
+          $releaseNotes = ($lines -join "`n") + "`n"
+          [IO.File]::WriteAllText((Join-Path $PWD "dist\RELEASE_NOTES.md"), $releaseNotes, [Text.Encoding]::UTF8)
+
       - name: Upload verified release payload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -126,6 +170,7 @@ jobs:
             dist/ferricsetup-${{ github.ref_name }}.msi
             dist/Ferric-${{ github.ref_name }}-windows-x86_64.zip
             dist/SHA256SUMS.txt
+            dist/RELEASE_NOTES.md
           retention-days: 5
           if-no-files-found: error
           compression-level: 0
@@ -146,7 +191,9 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          generate_release_notes: true
+          name: Ferric ${{ github.ref_name }}
+          body_path: dist/RELEASE_NOTES.md
+          generate_release_notes: false
           files: |
             dist/ferricsetup-${{ github.ref_name }}.msi
             dist/Ferric-${{ github.ref_name }}-windows-x86_64.zip

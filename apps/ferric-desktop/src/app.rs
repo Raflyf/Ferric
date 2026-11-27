@@ -1,4 +1,4 @@
-use crate::artwork::{ArtworkCache, CachedArtwork};
+use crate::artwork::{ArtworkCache, CachedArtwork, decode_and_downscale_image};
 use crate::discord_rpc::{
     DiscordRpcBridge, DiscordTrackSnapshot, effective_client_id, is_valid_client_id,
 };
@@ -21,7 +21,7 @@ use crate::state::{
     PlaylistSortOrder, PlaylistSourceFilter, SearchFilter, SettingsTab, SleepTimerMode, SortField,
     build_album_groups, build_artist_groups, clip_text, dir_size_bytes, format_bytes_mb,
 };
-use crate::track_list::{TrackListAction, TrackListScope};
+use crate::track_list::{TrackListAction, TrackListScope, TrackListWidgetRefExt};
 use crate::video_player::{NativeVideoPlayer, VideoViewportRect};
 use crate::widgets::*;
 use crate::{startup_load_demo, startup_page_override, startup_play_first};
@@ -76,11 +76,11 @@ use ferric_sync::{
 };
 use makepad_widgets::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1936,6 +1936,7 @@ live_design! {
                                                 text: "Loading YouTube Music..."
                                             }
                                             home_retry_btn = <FerricBtn> { visible: false, height: 24, padding: { left: 8, right: 9 }, text: "Retry" }
+                                            qp_refresh_btn = <FerricBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Refresh" }
                                             home_play_all_btn = <FerricBtn> { height: 24, padding: { left: 9, right: 9 }, text: "Play all" }
                                             qp_prev_btn = <FerricIconBtn> {
                                                 width: 24, height: 24,
@@ -1996,7 +1997,7 @@ live_design! {
                                                     text: "Recommended Stations"
                                                 }
                                             }
-                                            stations_refresh_btn = <FerricBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Refresh" }
+                                            stations_refresh_btn = <FerricBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Shuffle" }
                                             stations_prev_btn = <FerricIconBtn> { width: 24, height: 24, draw_icon: { svg_path: "M15.41 7.41L14 6L8 12L14 18L15.41 16.59L10.83 12L15.41 7.41Z" } }
                                             stations_next_btn = <FerricIconBtn> { width: 24, height: 24, draw_icon: { svg_path: "M8.59 16.59L10 18L16 12L10 6L8.59 7.41L13.17 12L8.59 16.59Z" } }
                                         }
@@ -4266,13 +4267,23 @@ pub struct App {
     #[rust]
     window_hidden_or_minimized: bool,
     #[rust]
+    ui_dirty_while_hidden: bool,
+    #[rust]
     tray_second_trim_at: Option<Instant>,
     #[rust]
     post_load_trim_at: Option<Instant>,
     #[rust]
+    last_open_gpu_trim_at: Option<Instant>,
+    #[rust]
     artwork_was_pending: bool,
     #[rust]
     artwork_cleared_for_tray: bool,
+    #[rust]
+    home_shown_track_ids: VecDeque<String>,
+    #[rust]
+    home_shown_card_ids: VecDeque<String>,
+    #[rust]
+    home_shown_station_artists: VecDeque<String>,
     #[rust]
     toast_until: Option<Instant>,
     #[rust]
@@ -4341,6 +4352,12 @@ pub struct App {
     last_discord_status: String,
     #[rust]
     tick_timer: Timer,
+    #[rust]
+    tick_interval_ms: u32,
+    #[rust]
+    stream_request_seq: Option<Arc<AtomicU64>>,
+    #[rust]
+    lyrics_request_seq: Option<Arc<AtomicU64>>,
     #[rust]
     bg_rx: Option<Receiver<BgMessage>>,
     #[rust]
@@ -5578,10 +5595,16 @@ impl App {
         self.bg_tx = Some(tx);
         self.bg_rx = Some(rx);
 
-        let _ = self
-            .ui
-            .image(id!(brand_icon))
-            .load_png_from_data(cx, BRAND_ICON_PNG);
+        if let Some(brand_buf) = decode_and_downscale_image(BRAND_ICON_PNG, 64) {
+            let tex = brand_buf.into_new_texture(cx);
+            tex.set_release_cpu_after_upload(cx, true);
+            self.ui.image(id!(brand_icon)).set_texture(cx, Some(tex));
+        } else {
+            let _ = self
+                .ui
+                .image(id!(brand_icon))
+                .load_png_from_data(cx, BRAND_ICON_PNG);
+        }
         self.ui
             .label(id!(lbl_t_st_update))
             .set_text(cx, &format!("Software Updates (Ferric v{APP_VERSION})"));
@@ -5647,6 +5670,7 @@ impl App {
         self.refresh_home_ui(cx);
         self.refresh_right_sidebar(cx);
         self.refresh_storage_stats(cx);
+        self.tick_interval_ms = 100;
         self.tick_timer = cx.start_interval(0.10);
 
         if startup_load_demo() {
@@ -5774,6 +5798,11 @@ impl App {
     fn navigate_to(&mut self, cx: &mut Cx, target: MainPage, push_history: bool) {
         if self.video_open {
             self.close_native_video_stage_inner(cx, false);
+        }
+        let prev_page = self.active_page;
+        if prev_page != target {
+            self.unbind_page_cover_textures(cx, prev_page);
+            cx.textures.free_unused_textures();
         }
         self.active_page = target;
         if push_history && let Some(hist) = &mut self.nav_history {
@@ -6167,6 +6196,302 @@ impl App {
         }
     }
 
+    #[inline]
+    fn trim_gpu_memory_now(cx: &Cx) {
+        #[cfg(target_os = "windows")]
+        cx.trim_gpu_memory();
+        #[cfg(not(target_os = "windows"))]
+        let _ = cx;
+    }
+
+    fn sync_tick_timer_rate(&mut self, cx: &mut Cx, desired_ms: u32) {
+        if self.tick_interval_ms == desired_ms {
+            return;
+        }
+        if !self.tick_timer.is_empty() {
+            cx.stop_timer(self.tick_timer);
+        }
+        self.tick_interval_ms = desired_ms;
+        self.tick_timer = cx.start_interval(f64::from(desired_ms) / 1_000.0);
+    }
+
+    fn clear_makepad_font_caches(cx: &mut Cx) {
+        type FontsGlobal = Rc<RefCell<makepad_widgets::makepad_draw::text::fonts::Fonts>>;
+        if cx.has_global::<FontsGlobal>() {
+            cx.get_global::<FontsGlobal>().borrow_mut().clear_caches();
+        }
+    }
+
+    fn unbind_page_cover_textures(&self, cx: &mut Cx, page: MainPage) {
+        match page {
+            MainPage::Albums => {
+                for vid in [
+                    id!(alb_0),
+                    id!(alb_1),
+                    id!(alb_2),
+                    id!(alb_3),
+                    id!(alb_4),
+                    id!(alb_5),
+                    id!(alb_6),
+                    id!(alb_7),
+                    id!(alb_8),
+                    id!(alb_9),
+                    id!(alb_10),
+                    id!(alb_11),
+                    id!(alb_12),
+                    id!(alb_13),
+                    id!(alb_14),
+                    id!(alb_15),
+                    id!(alb_16),
+                    id!(alb_17),
+                    id!(alb_18),
+                    id!(alb_19),
+                ] {
+                    self.ui
+                        .view(vid)
+                        .ferric_cover_art(id!(art))
+                        .set_texture(cx, None, 1.0);
+                }
+            }
+            MainPage::Artists => {
+                for vid in [
+                    id!(art_0),
+                    id!(art_1),
+                    id!(art_2),
+                    id!(art_3),
+                    id!(art_4),
+                    id!(art_5),
+                    id!(art_6),
+                    id!(art_7),
+                    id!(art_8),
+                    id!(art_9),
+                    id!(art_10),
+                    id!(art_11),
+                    id!(art_12),
+                    id!(art_13),
+                    id!(art_14),
+                    id!(art_15),
+                    id!(art_16),
+                    id!(art_17),
+                    id!(art_18),
+                    id!(art_19),
+                ] {
+                    self.ui
+                        .view(vid)
+                        .ferric_cover_art(id!(art))
+                        .set_texture(cx, None, 1.0);
+                }
+            }
+            MainPage::Playlists => {
+                for vid in [
+                    id!(plc_0),
+                    id!(plc_1),
+                    id!(plc_2),
+                    id!(plc_3),
+                    id!(plc_4),
+                    id!(plc_5),
+                    id!(plc_6),
+                    id!(plc_7),
+                    id!(plc_8),
+                    id!(plc_9),
+                    id!(plc_10),
+                    id!(plc_11),
+                    id!(plc_12),
+                    id!(plc_13),
+                    id!(plc_14),
+                    id!(plc_15),
+                    id!(plc_16),
+                    id!(plc_17),
+                    id!(plc_18),
+                    id!(plc_19),
+                ] {
+                    self.ui
+                        .view(vid)
+                        .ferric_cover_art(id!(art))
+                        .set_texture(cx, None, 1.0);
+                }
+            }
+            MainPage::Search => {
+                for cid in [id!(sc_0), id!(sc_1), id!(sc_2), id!(sc_3), id!(sc_4)] {
+                    self.ui
+                        .view(cid)
+                        .ferric_cover_art(id!(art))
+                        .set_texture(cx, None, 1.0);
+                }
+                self.ui
+                    .track_list(id!(search_track_list))
+                    .clear_row_textures(cx);
+            }
+            MainPage::Songs => {
+                self.ui
+                    .track_list(id!(songs_track_list))
+                    .clear_row_textures(cx);
+            }
+            MainPage::Recents => {
+                self.ui
+                    .track_list(id!(recents_track_list))
+                    .clear_row_textures(cx);
+            }
+            MainPage::Detail => {
+                self.ui
+                    .ferric_cover_art(id!(detail_art))
+                    .set_texture(cx, None, 1.0);
+                self.ui
+                    .track_list(id!(detail_track_list))
+                    .clear_row_textures(cx);
+            }
+            MainPage::Settings => {
+                self.ui
+                    .ferric_cover_art(id!(discord_prev_art))
+                    .set_texture(cx, None, 1.0);
+            }
+            MainPage::Home => {}
+        }
+    }
+
+    fn unbind_all_cover_textures_for_tray(&self, cx: &mut Cx) {
+        self.ui
+            .ferric_cover_art(id!(np_art))
+            .set_texture(cx, None, 1.0);
+        self.ui
+            .ferric_cover_art(id!(fs_art))
+            .set_texture(cx, None, 1.0);
+        self.ui
+            .ferric_ambient_stage(id!(fs_backdrop))
+            .set_aurora_zones(cx, None);
+        for qid in [
+            id!(qp_0),
+            id!(qp_1),
+            id!(qp_2),
+            id!(qp_3),
+            id!(qp_4),
+            id!(qp_5),
+            id!(qp_6),
+            id!(qp_7),
+        ] {
+            self.ui
+                .view(qid)
+                .ferric_cover_art(id!(art))
+                .set_texture(cx, None, 1.0);
+        }
+        for sid in [id!(st_c0), id!(st_c1), id!(st_c2), id!(st_c3), id!(st_c4)] {
+            let sv = self.ui.view(sid);
+            sv.ferric_cover_art(id!(full_art))
+                .set_texture(cx, None, 1.0);
+            let tb = sv.view(id!(triptych_box));
+            tb.ferric_cover_art(id!(art_center))
+                .set_texture(cx, None, 1.0);
+            tb.ferric_cover_art(id!(art_left))
+                .set_texture(cx, None, 1.0);
+            tb.ferric_cover_art(id!(art_right))
+                .set_texture(cx, None, 1.0);
+        }
+        for card_ids in [
+            [
+                id!(sh0_c0),
+                id!(sh0_c1),
+                id!(sh0_c2),
+                id!(sh0_c3),
+                id!(sh0_c4),
+            ],
+            [
+                id!(sh1_c0),
+                id!(sh1_c1),
+                id!(sh1_c2),
+                id!(sh1_c3),
+                id!(sh1_c4),
+            ],
+            [
+                id!(sh2_c0),
+                id!(sh2_c1),
+                id!(sh2_c2),
+                id!(sh2_c3),
+                id!(sh2_c4),
+            ],
+            [
+                id!(sh3_c0),
+                id!(sh3_c1),
+                id!(sh3_c2),
+                id!(sh3_c3),
+                id!(sh3_c4),
+            ],
+            [
+                id!(sh4_c0),
+                id!(sh4_c1),
+                id!(sh4_c2),
+                id!(sh4_c3),
+                id!(sh4_c4),
+            ],
+            [
+                id!(sh5_c0),
+                id!(sh5_c1),
+                id!(sh5_c2),
+                id!(sh5_c3),
+                id!(sh5_c4),
+            ],
+            [
+                id!(sh6_c0),
+                id!(sh6_c1),
+                id!(sh6_c2),
+                id!(sh6_c3),
+                id!(sh6_c4),
+            ],
+            [
+                id!(sh7_c0),
+                id!(sh7_c1),
+                id!(sh7_c2),
+                id!(sh7_c3),
+                id!(sh7_c4),
+            ],
+        ] {
+            for cid in card_ids {
+                self.ui
+                    .view(cid)
+                    .ferric_cover_art(id!(art))
+                    .set_texture(cx, None, 1.0);
+            }
+        }
+        for rid in [
+            id!(qh_0),
+            id!(qh_1),
+            id!(qh_2),
+            id!(q_now_row),
+            id!(qu_0),
+            id!(qu_1),
+            id!(qu_2),
+            id!(qu_3),
+            id!(qu_4),
+            id!(qu_5),
+            id!(qu_6),
+            id!(qu_7),
+            id!(qu_8),
+            id!(qu_9),
+        ] {
+            self.ui
+                .view(rid)
+                .ferric_cover_art(id!(art))
+                .set_texture(cx, None, 1.0);
+        }
+        for slot in sidebar_pin_slot_ids() {
+            self.ui
+                .view(slot)
+                .ferric_cover_art(id!(art))
+                .set_texture(cx, None, 1.0);
+        }
+        for page in [
+            MainPage::Albums,
+            MainPage::Artists,
+            MainPage::Playlists,
+            MainPage::Search,
+            MainPage::Songs,
+            MainPage::Recents,
+            MainPage::Detail,
+            MainPage::Settings,
+        ] {
+            self.unbind_page_cover_textures(cx, page);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn bind_cover_art_url(
         &self,
@@ -6178,6 +6503,39 @@ impl App {
         level: f32,
         circle: bool,
     ) {
+        self.bind_cover_art_url_inner(
+            cx, cover_ref, url_opt, track_opt, playing, level, circle, false,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_hero_cover_art_url(
+        &self,
+        cx: &mut Cx,
+        cover_ref: FerricCoverArtRef,
+        url_opt: Option<&str>,
+        track_opt: Option<&Track>,
+        playing: bool,
+        level: f32,
+        circle: bool,
+    ) {
+        self.bind_cover_art_url_inner(
+            cx, cover_ref, url_opt, track_opt, playing, level, circle, true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_cover_art_url_inner(
+        &self,
+        cx: &mut Cx,
+        cover_ref: FerricCoverArtRef,
+        url_opt: Option<&str>,
+        track_opt: Option<&Track>,
+        playing: bool,
+        level: f32,
+        circle: bool,
+        prefer_hero: bool,
+    ) {
         let accent = self.current_accent();
         let key_opt = track_opt.and_then(ArtworkCache::key_for_track).or_else(|| {
             url_opt
@@ -6186,7 +6544,11 @@ impl App {
         });
         if let Some(key) = key_opt
             && let Some(cache) = &self.artwork
-            && let Some(cached) = cache.get(&key)
+            && let Some(cached) = if prefer_hero {
+                cache.get_hero(&key)
+            } else {
+                cache.get(&key)
+            }
         {
             cover_ref.set_texture(cx, Some(cached.texture.clone()), cached.aspect);
         } else {
@@ -6196,10 +6558,16 @@ impl App {
     }
 
     fn refresh_all_artwork_slots(&mut self, cx: &mut Cx) {
+        self.refresh_all_artwork_slots_inner(cx, true);
+    }
+
+    fn refresh_all_artwork_slots_inner(&mut self, cx: &mut Cx, active_cover_changed: bool) {
         if let Some(cache) = &self.artwork {
             self.artwork_snapshot = Rc::new(cache.snapshot());
         }
-        self.apply_adaptive_accent_live(cx);
+        if active_cover_changed {
+            self.apply_adaptive_accent_live(cx);
+        }
         if self.active_page == MainPage::Home {
             self.refresh_home_ui(cx);
         } else if self.active_page == MainPage::Albums {
@@ -6220,7 +6588,7 @@ impl App {
             .as_ref()
             .is_some_and(|a| a.telemetry().is_playing);
         if let Some(cur) = self.queue.current().cloned() {
-            self.bind_cover_art_url(
+            self.bind_hero_cover_art_url(
                 cx,
                 self.ui.ferric_cover_art(id!(np_art)),
                 cur.thumbnail_url.as_deref(),
@@ -6229,7 +6597,7 @@ impl App {
                 0.55,
                 false,
             );
-            self.bind_cover_art_url(
+            self.bind_hero_cover_art_url(
                 cx,
                 self.ui.ferric_cover_art(id!(fs_art)),
                 cur.thumbnail_url.as_deref(),
@@ -6244,15 +6612,15 @@ impl App {
     }
 
     fn sync_fullscreen_backdrop_artwork(&self, cx: &mut Cx) {
-        let tex = self.queue.current().and_then(|cur| {
-            let key = ArtworkCache::key_for_track(cur)?;
-            self.artwork_snapshot
-                .get(&key)
-                .map(|cached| cached.texture.clone())
+        let zones = self.queue.current().and_then(|cur| {
+            self.artwork
+                .as_ref()
+                .and_then(|c| c.get_for_track(cur))
+                .map(|cached| cached.aurora_zones)
         });
         self.ui
             .ferric_ambient_stage(id!(fs_backdrop))
-            .set_texture(cx, tex);
+            .set_aurora_zones(cx, zones);
     }
 
     fn sync_transport_mode_icons(&self, cx: &mut Cx) {
@@ -6356,6 +6724,182 @@ impl App {
         self.ui
             .ferric_repeat_btn(id!(fs_repeat_btn))
             .set_state(cx, rep_mode, fs_rep_col, fs_rep_hov, 0.0, 1.0);
+    }
+
+    /// Lightweight visible-only color lerp step (runs smoothly during track-switch accent transitions
+    /// without mutating hidden Settings/EQ widgets or rebuilding sidebar library entries every tick).
+    fn apply_adaptive_accent_lerp_step(&self, cx: &mut Cx) {
+        let raw_accent = self.current_accent();
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
+        let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
+        let acrylic_tint = self.current_acrylic_tint();
+        let acr = if self.theme.acrylic_enabled {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        let op = self.theme.acrylic_opacity.clamp(0.18, 0.94);
+        let z = self.theme.ui_zoom.clamp(0.65, 1.40);
+        let is_playing = self
+            .audio
+            .as_ref()
+            .is_some_and(|a| a.telemetry().is_playing);
+        self.ui.view(id!(body)).apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    accent_col: (accent),
+                    acrylic_on: (acr),
+                    acrylic_opacity: (op),
+                    acrylic_tint: (acrylic_tint)
+                }
+            },
+        );
+        for pid in [
+            id!(top_bar),
+            id!(left_sidebar),
+            id!(center_stage),
+            id!(right_sidebar),
+        ] {
+            self.ui.view(pid).apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        acrylic_on: (acr),
+                        acrylic_opacity: (op),
+                        acrylic_tint: (acrylic_tint)
+                    }
+                },
+            );
+        }
+        self.ui.view(id!(bottom_bar)).apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    accent_col: (accent),
+                    acrylic_on: (acr),
+                    acrylic_opacity: (op),
+                    acrylic_tint: (acrylic_tint),
+                    light_mode: (lm),
+                    glow_amt: (if self.queue.current().is_some() { 0.36 } else { 0.14 })
+                }
+            },
+        );
+        self.ui
+            .ferric_bar_slider(id!(seek_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui
+            .ferric_bar_slider(id!(vol_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui.view(id!(top_search_box)).apply_over(
+            cx,
+            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
+        );
+        if self.active_page == MainPage::Home {
+            for qid in [
+                id!(qp_0),
+                id!(qp_1),
+                id!(qp_2),
+                id!(qp_3),
+                id!(qp_4),
+                id!(qp_5),
+                id!(qp_6),
+                id!(qp_7),
+            ] {
+                self.ui.view(qid).apply_over(
+                    cx,
+                    live! { draw_bg: { accent_col: (accent), light_mode: (lm) } },
+                );
+            }
+        }
+        let icon_hover = rgba_to_vec4(pal.icon_hover);
+        let muted = rgba_to_vec4(pal.icon_idle);
+        let icon_muted = rgba_to_vec4(pal.icon_muted);
+        let is_liked = self.queue.current().is_some_and(|cur| {
+            self.all_tracks
+                .iter()
+                .find(|t| t.id == cur.id)
+                .map_or(cur.liked, |t| t.liked)
+        });
+        self.ui.button(id!(np_like_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if is_liked { accent } else { icon_muted }) } },
+        );
+        self.sync_transport_mode_icons(cx);
+        self.ui.button(id!(rs_radio_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { icon_muted }) } },
+        );
+        self.ui.button(id!(bar_lyrics_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if self.right_sidebar_open && self.right_lyrics_tab { accent } else { muted }) } },
+        );
+        self.ui.button(id!(bar_queue_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if self.right_sidebar_open && !self.right_lyrics_tab { accent } else { muted }) } },
+        );
+        self.ui.button(id!(bar_video_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if self.video_open { accent } else { muted }) } },
+        );
+        self.ui.button(id!(top_account_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (accent), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (accent) } },
+        );
+        for pill_id in [id!(speed_pill_btn), id!(codec_pill_btn)] {
+            self.ui
+                .button(pill_id)
+                .apply_over(cx, live! { draw_bg: { accent_col: (accent) } });
+        }
+        if self.right_sidebar_open {
+            if self.right_lyrics_tab {
+                self.ui.ferric_lyrics_view(id!(rs_lyrics_scroll)).set_style(
+                    cx,
+                    accent,
+                    z,
+                    pal.is_light,
+                );
+            } else {
+                self.ui.view(id!(q_now_row)).apply_over(
+                    cx,
+                    live! { draw_bg: { accent_col: (accent), acrylic_on: (acr), light_mode: (lm) } },
+                );
+                self.ui
+                    .label(id!(q_now_header))
+                    .apply_over(cx, live! { draw_text: { color: (accent) } });
+            }
+        }
+        if self.fullscreen_open {
+            self.ui
+                .ferric_ambient_stage(id!(fs_backdrop))
+                .set_state(cx, true, is_playing, raw_accent, acr);
+            self.ui
+                .ferric_bar_slider(id!(fs_seek_slider))
+                .apply_over(cx, live! { draw_bg: { fill_col: (raw_accent) } });
+            self.ui
+                .ferric_bar_slider(id!(fs_vol_slider))
+                .apply_over(cx, live! { draw_bg: { fill_col: (raw_accent) } });
+            self.ui.button(id!(fs_like_btn)).apply_over(
+                cx,
+                live! {
+                    draw_bg: { acrylic_on: 1.0, light_mode: 0.0 }
+                    draw_icon: {
+                        color: (if is_liked { raw_accent } else { vec4(1.0, 1.0, 1.0, 0.72) }),
+                        color_hover: #FFFFFF,
+                        color_focus: #FFFFFF
+                    }
+                },
+            );
+            self.ui.view(id!(np_canvas)).apply_over(
+                cx,
+                live! { draw_bg: { accent: (raw_accent), acrylic_on: (acr) } },
+            );
+            self.ui
+                .ferric_lyrics_view(id!(fs_lyrics_scroll))
+                .set_style(cx, raw_accent, z, false);
+        }
+        self.ui.redraw(cx);
     }
 
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
@@ -7189,7 +7733,9 @@ impl App {
     fn refresh_sidebar_library(&mut self, cx: &mut Cx) {
         self.sync_playlist_source_filter_ui(cx);
         let entries = self.resolve_sidebar_library_entries();
-        if let Some(cache) = &mut self.artwork {
+        if !self.window_hidden_or_minimized
+            && let Some(cache) = &mut self.artwork
+        {
             for entry in &entries {
                 if let Some(url) = entry.thumbnail_url.as_deref() {
                     let _ = cache.request_url(url);
@@ -7418,7 +7964,9 @@ impl App {
         // Quick Picks 2x4 grid + 8 Horizontal Dynamic Shelves (request artwork lazily for visible slots)
         let pool = self.home_quick_picks_pool();
         let start = self.qp_page * 8;
-        if let Some(cache) = &mut self.artwork {
+        if !self.window_hidden_or_minimized
+            && let Some(cache) = &mut self.artwork
+        {
             for t in pool.iter().skip(start).take(8) {
                 let _ = cache.request_for_track(t);
             }
@@ -9423,6 +9971,7 @@ impl App {
             id!(top_account_btn),
             id!(sidebar_create_pl_btn),
             id!(home_retry_btn),
+            id!(qp_refresh_btn),
             id!(home_play_all_btn),
             id!(stations_refresh_btn),
             id!(home_load_more_btn),
@@ -10751,9 +11300,18 @@ impl App {
         }
     }
 
-    fn spawn_stream_resolve(&self, track: Track, auto_play: bool) {
+    fn spawn_stream_resolve(&mut self, track: Track, auto_play: bool) {
         let Some(tx) = self.bg_tx.clone() else {
             return;
+        };
+        let seq_counter = Arc::clone(
+            self.stream_request_seq
+                .get_or_insert_with(|| Arc::new(AtomicU64::new(0))),
+        );
+        let expected_seq = if auto_play {
+            Some(seq_counter.fetch_add(1, Ordering::AcqRel).wrapping_add(1))
+        } else {
+            None
         };
         let session = self.current_ytm_session();
         let cache_dir = app_data_dir().join("stream_cache");
@@ -10764,6 +11322,11 @@ impl App {
         let existing_vid = track.youtube_video_id;
 
         thread::spawn(move || {
+            let is_stale =
+                || expected_seq.is_some_and(|mine| seq_counter.load(Ordering::Acquire) != mine);
+            if is_stale() {
+                return;
+            }
             let outcome = (|| {
                 let vid = match existing_vid {
                     Some(v) if !v.trim().is_empty() => v,
@@ -10771,6 +11334,9 @@ impl App {
                         .map_err(|e| e.to_string())?
                         .ok_or_else(|| format!("No YouTube Music stream found for '{title}'"))?,
                 };
+                if is_stale() {
+                    return Err(String::new());
+                }
                 let stream = resolve_and_cache_audio_stream_with_quality(
                     &vid,
                     &session,
@@ -10780,6 +11346,9 @@ impl App {
                 .map_err(|e| e.to_string())?;
                 Ok::<_, String>((vid, stream))
             })();
+            if is_stale() {
+                return;
+            }
 
             match outcome {
                 Ok((video_id, stream)) => {
@@ -10798,6 +11367,7 @@ impl App {
                     });
                 }
             }
+            SignalToUI::set_ui_signal();
         });
     }
 
@@ -10827,10 +11397,11 @@ impl App {
         if reset_failures {
             self.consecutive_stream_failures = 0;
         }
+        let is_hidden = self.window_hidden_or_minimized || win32_is_window_hidden_or_minimized();
         self.last_pos_txt.clear();
         self.last_dur_txt.clear();
         self.last_codec_txt.clear();
-        if let Some(cache) = &mut self.artwork {
+        if !is_hidden && let Some(cache) = &mut self.artwork {
             cache.pin_active_track(Some(&track));
         }
         if let Some(path) = track.path.as_ref().filter(|p| p.is_file()).cloned() {
@@ -10862,56 +11433,62 @@ impl App {
                     fallback_duration_ms: 0,
                 });
             }
-            self.ui
-                .label(id!(np_title_lbl))
-                .set_text(cx, &clip_text(&track.title, 22));
-            self.ui.label(id!(np_artist_lbl)).set_text(
-                cx,
-                &clip_text(&format!("{} · Buffering...", track.artist), 24),
-            );
-            self.ui
-                .label(id!(fs_title_lbl))
-                .set_text(cx, &clip_text(&clean_display_text(&track.title), 36));
-            self.ui.label(id!(fs_artist_lbl)).set_text(
-                cx,
-                &clip_text(&format!("{} · Buffering...", track.artist), 44),
-            );
-            self.ui
-                .button(id!(codec_pill_btn))
-                .set_text(cx, "BUFFERING");
-            self.bind_cover_art_url(
-                cx,
-                self.ui.ferric_cover_art(id!(np_art)),
-                track.thumbnail_url.as_deref(),
-                Some(&track),
-                false,
-                0.5,
-                false,
-            );
-            self.bind_cover_art_url(
-                cx,
-                self.ui.ferric_cover_art(id!(fs_art)),
-                track.thumbnail_url.as_deref(),
-                Some(&track),
-                false,
-                0.5,
-                false,
-            );
-            self.sync_fullscreen_backdrop_artwork(cx);
-            self.refresh_right_sidebar(cx);
-            self.ui.redraw(cx);
+            if is_hidden {
+                self.ui_dirty_while_hidden = true;
+            } else {
+                self.ui
+                    .label(id!(np_title_lbl))
+                    .set_text(cx, &clip_text(&track.title, 22));
+                self.ui.label(id!(np_artist_lbl)).set_text(
+                    cx,
+                    &clip_text(&format!("{} · Buffering...", track.artist), 24),
+                );
+                self.ui
+                    .label(id!(fs_title_lbl))
+                    .set_text(cx, &clip_text(&clean_display_text(&track.title), 36));
+                self.ui.label(id!(fs_artist_lbl)).set_text(
+                    cx,
+                    &clip_text(&format!("{} · Buffering...", track.artist), 44),
+                );
+                self.ui
+                    .button(id!(codec_pill_btn))
+                    .set_text(cx, "BUFFERING");
+                self.bind_cover_art_url(
+                    cx,
+                    self.ui.ferric_cover_art(id!(np_art)),
+                    track.thumbnail_url.as_deref(),
+                    Some(&track),
+                    false,
+                    0.5,
+                    false,
+                );
+                self.bind_cover_art_url(
+                    cx,
+                    self.ui.ferric_cover_art(id!(fs_art)),
+                    track.thumbnail_url.as_deref(),
+                    Some(&track),
+                    false,
+                    0.5,
+                    false,
+                );
+                self.sync_fullscreen_backdrop_artwork(cx);
+                self.refresh_right_sidebar(cx);
+                self.ui.redraw(cx);
+            }
             self.spawn_stream_resolve(track.clone(), true);
             self.maybe_fetch_radio_for_track(&track, false);
             return;
         }
 
-        self.show_toast(
-            cx,
-            &format!(
-                "'{}' has no local file. Search YouTube Music instead.",
-                track.title
-            ),
-        );
+        if !is_hidden {
+            self.show_toast(
+                cx,
+                &format!(
+                    "'{}' has no local file. Search YouTube Music instead.",
+                    track.title
+                ),
+            );
+        }
     }
 
     fn persist_track_to_library(&mut self, track: &Track) {
@@ -10984,12 +11561,43 @@ impl App {
         if let Some(db) = &self.db {
             let _ = db.save_session_state(&self.session_state);
         }
-        if let Some(cache) = &mut self.artwork {
-            cache.pin_active_track(Some(track));
-        }
 
         win32_update_tray_tooltip(&format!("Ferric — {} · {}", track.title, track.artist));
         win32_update_taskbar_playback(&track.title, &track.artist, true);
+
+        if let Some(smtc) = &mut self.smtc {
+            smtc.set_metadata_for_track(track);
+            smtc.sync_playback(true, 0, track.duration_ms);
+        }
+        if let Some(rpc) = &mut self.discord_rpc {
+            rpc.update_playback(Some(DiscordTrackSnapshot {
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                cover_url: track.thumbnail_url.clone(),
+                position_ms: 0,
+                duration_ms: track.duration_ms,
+                is_playing: true,
+            }));
+        }
+
+        self.lyrics_offset_ms = 0;
+
+        // While hidden in System Tray / minimized, skip ALL GPU UI mutations, artwork decode bursts,
+        // and hidden redraws — defer UI sync to `TrayEvent::ShowWindow` and trim transient working set.
+        if self.window_hidden_or_minimized || win32_is_window_hidden_or_minimized() {
+            self.ui_dirty_while_hidden = true;
+            self.tray_second_trim_at = Some(Instant::now() + Duration::from_millis(1_800));
+            return;
+        }
+
+        self.sync_now_playing_ui_widgets(cx, track, true);
+    }
+
+    fn sync_now_playing_ui_widgets(&mut self, cx: &mut Cx, track: &Track, is_playing: bool) {
+        if let Some(cache) = &mut self.artwork {
+            cache.pin_active_track(Some(track));
+        }
 
         let out_rate = self
             .audio
@@ -11042,10 +11650,10 @@ impl App {
         );
         self.ui
             .ferric_play_btn(id!(play_pause_btn))
-            .set_playing(cx, true);
+            .set_playing(cx, is_playing);
         self.ui
             .ferric_play_btn(id!(fs_play_pause_btn))
-            .set_playing(cx, true);
+            .set_playing(cx, is_playing);
         self.ui.label(id!(signal_path_lbl)).set_text(
             cx,
             &format!(
@@ -11057,16 +11665,16 @@ impl App {
             ),
         );
 
-        self.bind_cover_art_url(
+        self.bind_hero_cover_art_url(
             cx,
             self.ui.ferric_cover_art(id!(np_art)),
             track.thumbnail_url.as_deref(),
             Some(track),
-            true,
+            is_playing,
             0.55,
             false,
         );
-        self.bind_cover_art_url(
+        self.bind_hero_cover_art_url(
             cx,
             self.ui.ferric_cover_art(id!(fs_art)),
             track.thumbnail_url.as_deref(),
@@ -11077,28 +11685,33 @@ impl App {
         );
         self.sync_fullscreen_backdrop_artwork(cx);
         self.apply_adaptive_accent_live(cx);
-
-        if let Some(smtc) = &mut self.smtc {
-            smtc.set_metadata_for_track(track);
-            smtc.sync_playback(true, 0, track.duration_ms);
+        if self.active_page == MainPage::Settings {
+            self.refresh_discord_preview(cx);
         }
-        if let Some(rpc) = &mut self.discord_rpc {
-            rpc.update_playback(Some(DiscordTrackSnapshot {
-                title: track.title.clone(),
-                artist: track.artist.clone(),
-                album: track.album.clone(),
-                cover_url: track.thumbnail_url.clone(),
-                position_ms: 0,
-                duration_ms: track.duration_ms,
-                is_playing: true,
-            }));
-        }
-        self.refresh_discord_preview(cx);
 
-        self.lyrics_offset_ms = 0;
         self.load_lyrics_for_track(cx, track);
-        self.rebuild_library_views(cx);
-        self.refresh_home_ui(cx);
+        // Fast O(recents) recents refresh instead of rebuilding all Album/Artist groups on every Next press
+        let recents: Vec<Track> = self
+            .session_state
+            .recent_track_ids
+            .iter()
+            .filter_map(|id| self.all_tracks.iter().find(|t| &t.id == id).cloned())
+            .collect();
+        self.ui.label(id!(recents_sub_lbl)).set_text(
+            cx,
+            &format!(
+                "{} recently played · {} total plays · {} min listened",
+                recents.len(),
+                self.session_state.total_tracks_played,
+                self.session_state.total_listened_secs / 60
+            ),
+        );
+        self.recents_tracks = Rc::new(recents);
+        if self.active_page == MainPage::Songs {
+            self.rebuild_library_views(cx);
+        } else if self.active_page == MainPage::Home {
+            self.refresh_home_ui(cx);
+        }
         self.refresh_right_sidebar(cx);
 
         // If native in-app video clip stage is open, follow the newly playing track automatically
@@ -11109,6 +11722,11 @@ impl App {
     }
 
     fn load_lyrics_for_track(&mut self, cx: &mut Cx, track: &Track) {
+        let seq_counter = Arc::clone(
+            self.lyrics_request_seq
+                .get_or_insert_with(|| Arc::new(AtomicU64::new(0))),
+        );
+        let my_seq = seq_counter.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
         self.synced_lyrics = SyncedLyrics::default();
         self.set_lyrics_center_message(cx, "Searching synced lyrics (LRCLIB)...");
 
@@ -11140,9 +11758,15 @@ impl App {
         let local_path = track.path.clone();
 
         thread::spawn(move || {
-            if let Ok(Some((parsed, raw))) =
-                fetch_best_free_lyrics(&artist, &title, &album, dur_ms, local_path.as_deref())
-            {
+            if seq_counter.load(Ordering::Acquire) != my_seq {
+                return;
+            }
+            let fetched =
+                fetch_best_free_lyrics(&artist, &title, &album, dur_ms, local_path.as_deref());
+            if seq_counter.load(Ordering::Acquire) != my_seq {
+                return;
+            }
+            if let Ok(Some((parsed, raw))) = fetched {
                 let _ = tx.send(BgMessage::LyricsLoaded {
                     track_id,
                     lrc_raw: raw,
@@ -11155,6 +11779,7 @@ impl App {
                     parsed: SyncedLyrics::default(),
                 });
             }
+            SignalToUI::set_ui_signal();
         });
     }
 
@@ -11257,6 +11882,46 @@ impl App {
         });
     }
 
+    fn push_bounded_ring(ring: &mut std::collections::VecDeque<String>, val: String, cap: usize) {
+        if val.is_empty() || cap == 0 {
+            return;
+        }
+        if let Some(pos) = ring.iter().position(|x| x == &val) {
+            ring.remove(pos);
+        }
+        ring.push_back(val);
+        while ring.len() > cap {
+            ring.pop_front();
+        }
+    }
+
+    fn record_home_shown_items(&mut self) {
+        let pool = self.home_quick_picks_pool();
+        let qp_start = self.qp_page * 8;
+        for t in pool.iter().skip(qp_start).take(8) {
+            Self::push_bounded_ring(&mut self.home_shown_track_ids, t.id.clone(), 48);
+            if let Some(vid) = &t.youtube_video_id {
+                Self::push_bounded_ring(&mut self.home_shown_track_ids, vid.clone(), 48);
+            }
+        }
+        for (si, shelf) in self.rich_home.shelves.iter().take(8).enumerate() {
+            let off = self.shelf_pages[si] * 5;
+            for card in shelf.cards.iter().skip(off).take(5) {
+                Self::push_bounded_ring(&mut self.home_shown_card_ids, card.id.clone(), 80);
+            }
+        }
+    }
+
+    fn record_stations_shown(&mut self) {
+        let off = self.stations_page * 5;
+        for st in self.recommended_stations.iter().skip(off).take(5) {
+            let norm = primary_artist_key(&st.seed_artist).to_ascii_lowercase();
+            if !norm.is_empty() {
+                Self::push_bounded_ring(&mut self.home_shown_station_artists, norm, 20);
+            }
+        }
+    }
+
     fn build_home_taste_profile(&self) -> YtmHomeTasteProfile {
         let mut by_id: HashMap<&str, &Track> = HashMap::new();
         for t in &self.all_tracks {
@@ -11264,6 +11929,10 @@ impl App {
         }
         let mut scored_tracks: Vec<(i32, Track)> = Vec::new();
         let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Sublinear play-count weighting + strong exponential recency so recent listening shifts
+        // recommendations cleanly instead of letting old high-play counts permanently lock slot 0..7.
+        let play_weight = |plays: u32| -> i32 { ((1.0 + plays as f32).ln() * 22.0).round() as i32 };
 
         for (pos, id) in self.session_state.recent_track_ids.iter().enumerate() {
             if let Some(t) = by_id.get(id.as_str())
@@ -11274,29 +11943,29 @@ impl App {
                     .track_play_counts
                     .get(&t.id)
                     .copied()
-                    .unwrap_or(1) as i32;
-                let recency = 28_i32.saturating_sub(pos as i32).max(1);
-                let liked_bonus = if t.liked { 16 } else { 0 };
-                scored_tracks.push((plays * 12 + recency + liked_bonus, (*t).clone()));
+                    .unwrap_or(1);
+                let recency = (44.0 * (-0.09 * pos as f32).exp()).round() as i32;
+                let liked_bonus = if t.liked { 18 } else { 0 };
+                scored_tracks.push((play_weight(plays) + recency + liked_bonus, (*t).clone()));
             }
         }
         for (id, &plays) in &self.session_state.track_play_counts {
             if let Some(t) = by_id.get(id.as_str())
                 && seen_ids.insert(t.id.clone())
             {
-                let liked_bonus = if t.liked { 16 } else { 0 };
-                scored_tracks.push(((plays as i32) * 12 + liked_bonus, (*t).clone()));
+                let liked_bonus = if t.liked { 18 } else { 0 };
+                scored_tracks.push((play_weight(plays) + liked_bonus, (*t).clone()));
             }
         }
         for t in &self.all_tracks {
             if t.liked && seen_ids.insert(t.id.clone()) {
-                scored_tracks.push((22, t.clone()));
+                scored_tracks.push((24, t.clone()));
             }
         }
-        // Absorb full cross-account playlist library (Spotify, YouTube, Local) so every unique
-        // artist in the user's playlists contributes to Home discovery & Refresh rotation.
+        // Scan ALL cross-account library tracks (no alphabetical `.take(1500)` truncation) so every
+        // playlist, letter, and locale contributes evenly to Home discovery & Refresh rotation.
         let mut lib_artist_freq: HashMap<String, (String, i32, Track)> = HashMap::new();
-        for t in self.all_tracks.iter().take(1500) {
+        for t in &self.all_tracks {
             let key = primary_artist_key(&t.artist);
             if key.is_empty() || key.eq_ignore_ascii_case("unknown artist") {
                 continue;
@@ -11305,7 +11974,7 @@ impl App {
             lib_artist_freq
                 .entry(norm)
                 .and_modify(|e| {
-                    e.1 += if t.liked { 6 } else { 3 };
+                    e.1 += if t.liked { 5 } else { 2 };
                     if e.2.youtube_video_id.is_none() && t.youtube_video_id.is_some() {
                         e.2 = t.clone();
                     }
@@ -11315,14 +11984,43 @@ impl App {
         let mut lib_artists_sorted: Vec<(String, i32, Track)> =
             lib_artist_freq.into_values().collect();
         lib_artists_sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
-        for (_, freq_score, rep_track) in lib_artists_sorted.iter().take(48) {
+        for (_, freq_score, rep_track) in lib_artists_sorted.iter().take(64) {
             if seen_ids.insert(rep_track.id.clone()) {
-                scored_tracks.push(((*freq_score).min(18), rep_track.clone()));
+                scored_tracks.push(((*freq_score).min(20), rep_track.clone()));
             }
         }
 
         scored_tracks.sort_by_key(|t| std::cmp::Reverse(t.0));
         let top_tracks: Vec<Track> = scored_tracks.into_iter().take(60).map(|(_, t)| t).collect();
+
+        // Build a stratified sample of up to 400 library tracks across the full alphabet/playlists
+        // (prioritizing YT-linked & liked tracks first, then evenly strided deeper library tracks)
+        // so Refresh can sample distant seeds and surface "Rediscover your library".
+        let mut library_tracks: Vec<Track> = Vec::with_capacity(400);
+        let mut lib_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let total_lib = self.all_tracks.len();
+        if total_lib > 0 {
+            let stride = (total_lib / 240).max(1);
+            for t in self.all_tracks.iter().step_by(stride) {
+                if (t.youtube_video_id.is_some() || t.liked) && lib_seen.insert(t.id.clone()) {
+                    library_tracks.push(t.clone());
+                    if library_tracks.len() >= 240 {
+                        break;
+                    }
+                }
+            }
+            if library_tracks.len() < 400 {
+                let stride2 = (total_lib / 320).max(1);
+                for t in self.all_tracks.iter().step_by(stride2) {
+                    if lib_seen.insert(t.id.clone()) {
+                        library_tracks.push(t.clone());
+                        if library_tracks.len() >= 400 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         let mut artist_scores: HashMap<String, (String, i32)> = HashMap::new();
         for (artist, &cnt) in &self.session_state.artist_play_counts {
@@ -11330,7 +12028,7 @@ impl App {
             if !key.is_empty() {
                 let norm = key.to_ascii_lowercase();
                 let entry = artist_scores.entry(norm).or_insert((key, 0));
-                entry.1 += (cnt as i32) * 12;
+                entry.1 += play_weight(cnt);
             }
         }
         for (idx, t) in top_tracks.iter().enumerate() {
@@ -11338,24 +12036,37 @@ impl App {
             if !key.is_empty() {
                 let norm = key.to_ascii_lowercase();
                 let w =
-                    26_i32.saturating_sub((idx as i32) / 2).max(4) + if t.liked { 10 } else { 0 };
+                    28_i32.saturating_sub((idx as i32) / 2).max(4) + if t.liked { 10 } else { 0 };
                 let entry = artist_scores.entry(norm).or_insert((key, 0));
                 entry.1 += w;
             }
         }
-        for (disp, freq_score, _) in lib_artists_sorted.into_iter().take(40) {
+        for (disp, freq_score, _) in lib_artists_sorted.into_iter().take(56) {
             let norm = disp.to_ascii_lowercase();
             let entry = artist_scores.entry(norm).or_insert((disp, 0));
-            entry.1 += freq_score;
+            entry.1 += freq_score.min(24);
         }
         let mut artist_list: Vec<(String, i32)> = artist_scores.into_values().collect();
         artist_list.sort_by_key(|a| std::cmp::Reverse(a.1));
-        let top_artists: Vec<String> = artist_list.into_iter().take(32).map(|(a, _)| a).collect();
+        let top_artists: Vec<String> = artist_list.into_iter().take(48).map(|(a, _)| a).collect();
+
+        let refresh_mood_params = if !self.rich_home.chips.is_empty() {
+            let idx = self.home_more_cycle % self.rich_home.chips.len();
+            Some(self.rich_home.chips[idx].params.clone())
+        } else {
+            None
+        };
 
         YtmHomeTasteProfile {
             top_tracks,
             top_artists,
             recent_searches: self.session_state.recent_searches.clone(),
+            library_tracks,
+            excluded_track_ids: self.home_shown_track_ids.iter().cloned().collect(),
+            excluded_card_ids: self.home_shown_card_ids.iter().cloned().collect(),
+            excluded_artists: self.home_shown_station_artists.iter().cloned().collect(),
+            continuation_token: self.rich_home.continuation_token.clone(),
+            refresh_mood_params,
         }
     }
 
@@ -11366,13 +12077,13 @@ impl App {
         self.stations_request_seq = self.stations_request_seq.wrapping_add(1);
         let seq = self.stations_request_seq;
         if rotate {
+            self.record_stations_shown();
             self.stations_rotation_epoch = self.stations_rotation_epoch.wrapping_add(1);
         }
         let rot = self.stations_rotation_epoch;
         self.stations_page = 0;
 
         let taste = self.build_home_taste_profile();
-        let library_tracks: Vec<Track> = self.all_tracks.iter().take(1500).cloned().collect();
         let home_tracks: Vec<Track> = self
             .rich_home
             .quick_picks
@@ -11381,18 +12092,21 @@ impl App {
             .cloned()
             .collect();
 
-        // Immediately surface instant algorithmic stations from local/synced library so Home feels
-        // zero-latency while Engine A (Spotify Pathfinder `home`) fetches live personalized Radio cards.
+        // Immediately surface instant algorithmic stations from the FULL local/synced library
+        // (no alphabetical `.take(1500)` cutoff) so Home feels zero-latency on startup & Shuffle.
         let instant = build_algorithmic_recommended_stations_rotated(
             &taste,
-            &library_tracks,
+            &self.all_tracks,
             &home_tracks,
             15,
             rot,
         );
-        if !instant.is_empty() && (self.recommended_stations.is_empty() || rotate) {
-            self.recommended_stations = instant;
+        let had_instant = !instant.is_empty();
+        if had_instant && (self.recommended_stations.is_empty() || rotate) {
+            self.recommended_stations = instant.clone();
+            self.record_stations_shown();
             self.refresh_home_ui(cx);
+            self.ui.redraw(cx);
         }
 
         let sp_token = if !self.accounts.spotify_web_access_token.trim().is_empty() {
@@ -11403,55 +12117,52 @@ impl App {
             None
         };
 
+        // When no Spotify token is active and Engine B already produced fresh stations synchronously,
+        // skip spawning a redundant worker thread that would only re-run Engine B and overwrite them.
+        let Some(tok) = sp_token else {
+            return;
+        };
+
         thread::spawn(move || {
+            let Ok(mut sp_cards) = fetch_spotify_recommended_stations(&tok) else {
+                // Keep the already-rendered instant Engine B stations intact on 401/network failure.
+                return;
+            };
+            if sp_cards.is_empty() {
+                return;
+            }
             let mut merged: Vec<RecommendedStation> = Vec::new();
             let mut seen_names: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
 
-            // Engine A: Real Spotify Pathfinder `home` Recommended Stations when signed into Spotify
-            if let Some(tok) = sp_token.as_deref()
-                && let Ok(mut sp_cards) = fetch_spotify_recommended_stations(tok)
-            {
-                if rot > 0 && sp_cards.len() > 2 {
-                    let shift = (rot * 3) % sp_cards.len();
-                    sp_cards.rotate_left(shift);
-                }
-                for (i, card) in sp_cards.into_iter().enumerate() {
-                    let key = card.display_name.trim().to_ascii_lowercase();
-                    if !key.is_empty() && seen_names.insert(key) {
-                        merged.push(RecommendedStation::from_spotify_card(&card, (i % 8) as u8));
-                        if merged.len() >= 15 {
-                            break;
-                        }
+            if rot > 0 && sp_cards.len() > 2 {
+                let shift = (rot * 3) % sp_cards.len();
+                sp_cards.rotate_left(shift);
+            }
+            for (i, card) in sp_cards.into_iter().enumerate() {
+                let key = card.display_name.trim().to_ascii_lowercase();
+                if !key.is_empty() && seen_names.insert(key) {
+                    merged.push(RecommendedStation::from_spotify_card(&card, (i % 8) as u8));
+                    if merged.len() >= 15 {
+                        break;
                     }
                 }
             }
-
-            // Engine B: Spotify-parity multi-locale algorithmic stations (fills up to 15 cards = 3 pages,
-            // rotating through deeper library clusters on Refresh!)
-            if merged.len() < 15 {
-                let algo = build_algorithmic_recommended_stations_rotated(
-                    &taste,
-                    &library_tracks,
-                    &home_tracks,
-                    15,
-                    rot,
-                );
-                for st in algo {
-                    let key = st.display_name.trim().to_ascii_lowercase();
-                    if !key.is_empty() && seen_names.insert(key) {
-                        merged.push(st);
-                        if merged.len() >= 15 {
-                            break;
-                        }
-                    }
+            for st in instant {
+                if merged.len() >= 15 {
+                    break;
+                }
+                let key = st.display_name.trim().to_ascii_lowercase();
+                if !key.is_empty() && seen_names.insert(key) {
+                    merged.push(st);
                 }
             }
-
-            let _ = tx.send(BgMessage::RecommendedStationsLoaded {
-                seq,
-                stations: merged,
-            });
+            if !merged.is_empty() {
+                let _ = tx.send(BgMessage::RecommendedStationsLoaded {
+                    seq,
+                    stations: merged,
+                });
+            }
         });
     }
 
@@ -11471,13 +12182,29 @@ impl App {
         self.qp_page = 0;
         self.shelf_pages = [0; 8];
         self.home_loading_more = false;
+        if fresh_seed {
+            // Snapshot everything currently visible into the session exclusion rings BEFORE rotating,
+            // then advance mood rotation and rotate cached quick_picks/shelves immediately for 0ms feedback.
+            self.record_home_shown_items();
+            self.home_more_cycle = self.home_more_cycle.wrapping_add(1);
+        }
         let session = self.current_ytm_session();
         let taste = self.build_home_taste_profile();
+        if fresh_seed {
+            if self.rich_home.quick_picks.len() > 8 {
+                let shift = 8.min(self.rich_home.quick_picks.len());
+                self.rich_home.quick_picks.rotate_left(shift);
+            }
+            if self.rich_home.shelves.len() > 4 {
+                self.rich_home.shelves.rotate_left(2);
+            }
+        }
         self.ui.button(id!(home_retry_btn)).set_visible(cx, false);
         self.ui
             .label(id!(home_status_lbl))
             .set_text(cx, "Refreshing YouTube Music...");
         self.refresh_home_ui(cx);
+        self.ui.redraw(cx);
 
         thread::spawn(move || {
             match fetch_rich_home(&session, mood_params.as_deref(), fresh_seed, &taste) {
@@ -12167,8 +12894,8 @@ impl App {
         // (no-op single atomic load once installed).
         win32_install_window_hooks();
 
-        // 0b. Multi-stage & idle working-set trim (releases DX11 shader scratch, SQLite cache,
-        // and artwork decode staging pages so Ferric stays strictly <100 MB open and even lower in tray).
+        // 0b. Multi-stage & idle working-set / DXGI trim (releases DX11 shader/staging pools,
+        // SQLite page cache, and artwork decode scratch so Ferric stays lean open and in tray).
         if let Some(due) = self.tray_second_trim_at
             && Instant::now() >= due
         {
@@ -12177,7 +12904,10 @@ impl App {
             if let Some(db) = &self.db {
                 db.shrink_memory();
             }
-            win32_trim_working_set();
+            Self::trim_gpu_memory_now(cx);
+            if self.window_hidden_or_minimized || win32_is_window_hidden_or_minimized() {
+                win32_trim_working_set();
+            }
         }
         if let Some(due) = self.post_load_trim_at
             && Instant::now() >= due
@@ -12192,6 +12922,7 @@ impl App {
                 if let Some(db) = &self.db {
                     db.shrink_memory();
                 }
+                Self::trim_gpu_memory_now(cx);
                 win32_trim_working_set();
             }
         }
@@ -12209,6 +12940,7 @@ impl App {
                     if let Some(db) = &self.db {
                         db.shrink_memory();
                     }
+                    Self::trim_gpu_memory_now(cx);
                     win32_trim_working_set();
                 }
             }
@@ -12246,9 +12978,11 @@ impl App {
                     if let Some(db) = &self.db {
                         db.shrink_memory();
                     }
+                    Self::trim_gpu_memory_now(cx);
                 }
                 TrayEvent::HiddenToTray => {
                     self.window_hidden_or_minimized = true;
+                    self.ui_dirty_while_hidden = true;
                     if self.video_open {
                         self.close_native_video_stage_inner(cx, false);
                     }
@@ -12271,27 +13005,38 @@ impl App {
                     self.ui
                         .ferric_lyrics_view(id!(fs_lyrics_scroll))
                         .set_playback_state(cx, 0, false);
+                    // Unbind widget Texture handles + drop artwork_snapshot BEFORE clearing ArtworkCache
+                    // so `free_unused_textures()` immediately releases every single GPU cover texture.
+                    self.unbind_all_cover_textures_for_tray(cx);
+                    self.artwork_snapshot = Rc::new(HashMap::new());
                     if let Some(cache) = &mut self.artwork {
                         cache.clear_all_for_tray(cx);
-                        self.artwork_snapshot = Rc::new(HashMap::new());
                         self.artwork_cleared_for_tray = true;
                     }
                     self.missing_art_queue.borrow_mut().clear();
                     self.missing_art_queue.borrow_mut().shrink_to_fit();
+                    Self::clear_makepad_font_caches(cx);
                     if let Some(db) = &self.db {
-                        db.shrink_memory();
+                        db.shrink_memory_aggressive();
                     }
+                    cx.shrink_swapchain_for_tray();
+                    Self::trim_gpu_memory_now(cx);
                     win32_trim_working_set();
+                    self.sync_tick_timer_rate(cx, 500);
                     // Schedule a second pass after DX11 finishes retiring frame buffers
                     self.tray_second_trim_at = Some(Instant::now() + Duration::from_millis(900));
                 }
                 TrayEvent::ShowWindow => {
                     self.window_hidden_or_minimized = false;
                     self.tray_second_trim_at = None;
+                    self.sync_tick_timer_rate(cx, 100);
                     let (is_playing, pos_ms) = self.audio.as_ref().map_or((false, 0), |a| {
                         let t = a.telemetry();
                         (t.is_playing, t.position_ms)
                     });
+                    if let Some(cache) = &mut self.artwork {
+                        cache.resume_from_tray();
+                    }
                     if self.fullscreen_open {
                         let accent = self.current_accent();
                         let acr = if self.theme.acrylic_enabled {
@@ -12303,9 +13048,37 @@ impl App {
                             .ferric_ambient_stage(id!(fs_backdrop))
                             .set_state(cx, true, is_playing, accent, acr);
                     }
-                    self.update_lyrics_display(cx, pos_ms);
-                    if self.artwork_cleared_for_tray {
-                        self.artwork_cleared_for_tray = false;
+                    let was_dirty = self.ui_dirty_while_hidden;
+                    self.ui_dirty_while_hidden = false;
+                    let was_cleared = self.artwork_cleared_for_tray;
+                    self.artwork_cleared_for_tray = false;
+                    if was_dirty {
+                        if !self.last_discord_status.is_empty() {
+                            self.ui
+                                .label(id!(discord_status_lbl))
+                                .set_text(cx, &self.last_discord_status);
+                        }
+                        if !self.rich_home.quick_picks.is_empty()
+                            || !self.rich_home.shelves.is_empty()
+                        {
+                            self.ui.label(id!(home_status_lbl)).set_text(
+                                cx,
+                                &format!(
+                                    "{} songs · {} shelves",
+                                    self.rich_home.quick_picks.len(),
+                                    self.rich_home.shelves.len()
+                                ),
+                            );
+                        }
+                        if let Some(cur) = self.queue.current().cloned() {
+                            self.sync_now_playing_ui_widgets(cx, &cur, is_playing);
+                        } else {
+                            self.rebuild_library_views(cx);
+                            self.refresh_home_ui(cx);
+                            self.refresh_right_sidebar(cx);
+                        }
+                    }
+                    if was_cleared {
                         if let Some(cur) = self.queue.current().cloned()
                             && let Some(cache) = &mut self.artwork
                         {
@@ -12313,6 +13086,7 @@ impl App {
                         }
                         self.refresh_all_artwork_slots(cx);
                     }
+                    self.update_lyrics_display(cx, pos_ms);
                     self.sync_video_bounds(cx);
                     cx.redraw_all();
                 }
@@ -12347,11 +13121,12 @@ impl App {
 
         // 0c. Poll async GPU artwork cache (skip uploads while minimized/hidden in tray)
         if !window_hidden && let Some(cache) = &mut self.artwork {
-            let changed = cache.poll(cx);
+            let (changed, pinned_changed) = cache.poll(cx);
             let pending = cache.has_pending_work();
             if changed {
-                self.refresh_all_artwork_slots(cx);
-                if let Some(cur) = self.queue.current()
+                self.refresh_all_artwork_slots_inner(cx, pinned_changed);
+                if pinned_changed
+                    && let Some(cur) = self.queue.current()
                     && let Some(smtc) = &mut self.smtc
                 {
                     smtc.refresh_cover_if_cached(cur);
@@ -12365,7 +13140,24 @@ impl App {
             }
         }
 
+        // Periodic non-disruptive DXGI + SQLite trim while open (prevents multi-minute Intel iGPU
+        // driver pool drift during continuous playback without touching Acrylic or paging active UI).
+        if !window_hidden
+            && !self.artwork_was_pending
+            && self
+                .last_open_gpu_trim_at
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(45))
+        {
+            self.last_open_gpu_trim_at = Some(Instant::now());
+            cx.textures.free_unused_textures();
+            if let Some(db) = &self.db {
+                db.shrink_memory();
+            }
+            Self::trim_gpu_memory_now(cx);
+        }
+
         // 0d. Smooth exponential accent + adaptive Acrylic glass tint lerp when switching tracks
+        let mut color_lerping = false;
         if !window_hidden {
             let mut color_moved = false;
             let target = self.target_accent();
@@ -12405,7 +13197,8 @@ impl App {
                 }
             }
             if color_moved {
-                self.apply_adaptive_accent_live(cx);
+                color_lerping = true;
+                self.apply_adaptive_accent_lerp_step(cx);
             }
         }
 
@@ -12458,7 +13251,10 @@ impl App {
                         let _ = db.save_cached_lyrics(&track_id, &lrc_raw);
                     }
                     if self.queue.current().map(|t| t.id.as_str()) == Some(track_id.as_str()) {
-                        if parsed.lines.is_empty() {
+                        if window_hidden {
+                            self.synced_lyrics = parsed;
+                            self.ui_dirty_while_hidden = true;
+                        } else if parsed.lines.is_empty() {
                             self.set_lyrics_center_message(cx, "No lyrics found for this song.");
                         } else {
                             let mode = if parsed.is_synced {
@@ -12509,19 +13305,26 @@ impl App {
                     }
 
                     self.rich_home = merged;
+                    self.record_home_shown_items();
 
                     if self.queue.is_empty() && !self.rich_home.quick_picks.is_empty() {
                         self.queue
                             .set_tracks(self.rich_home.quick_picks.clone(), None);
                     }
 
-                    self.ui
-                        .label(id!(home_status_lbl))
-                        .set_text(cx, &format!("{pick_n} songs · {shelf_n} shelves"));
-                    self.rebuild_library_views(cx);
-                    self.refresh_home_ui(cx);
-                    self.refresh_right_sidebar(cx);
-                    self.post_load_trim_at = Some(Instant::now() + Duration::from_millis(1_800));
+                    if window_hidden {
+                        self.ui_dirty_while_hidden = true;
+                    } else {
+                        self.ui
+                            .label(id!(home_status_lbl))
+                            .set_text(cx, &format!("{pick_n} songs · {shelf_n} shelves"));
+                        self.rebuild_library_views(cx);
+                        self.refresh_home_ui(cx);
+                        self.refresh_right_sidebar(cx);
+                        self.ui.redraw(cx);
+                        self.post_load_trim_at =
+                            Some(Instant::now() + Duration::from_millis(1_800));
+                    }
                     if mood_index == 0 && self.recommended_stations.len() < 5 {
                         self.spawn_recommended_stations(cx, false);
                     }
@@ -12611,20 +13414,26 @@ impl App {
                             self.rich_home.all_tracks.push(t);
                         }
                     }
-                    self.ui.label(id!(home_status_lbl)).set_text(
-                        cx,
-                        &format!(
-                            "{} songs · {} shelves",
-                            self.rich_home.quick_picks.len(),
-                            self.rich_home.shelves.len()
-                        ),
-                    );
-                    self.rebuild_library_views(cx);
-                    self.refresh_home_ui(cx);
-                    self.show_toast(
-                        cx,
-                        &format!("Loaded {added_shelves} new shelves & {new_picks} songs"),
-                    );
+                    self.record_home_shown_items();
+                    if window_hidden {
+                        self.ui_dirty_while_hidden = true;
+                    } else {
+                        self.ui.label(id!(home_status_lbl)).set_text(
+                            cx,
+                            &format!(
+                                "{} songs · {} shelves",
+                                self.rich_home.quick_picks.len(),
+                                self.rich_home.shelves.len()
+                            ),
+                        );
+                        self.rebuild_library_views(cx);
+                        self.refresh_home_ui(cx);
+                        self.ui.redraw(cx);
+                        self.show_toast(
+                            cx,
+                            &format!("Loaded {added_shelves} new shelves & {new_picks} songs"),
+                        );
+                    }
                 }
                 BgMessage::YtmHomeMoreFailed(err) => {
                     self.home_loading_more = false;
@@ -12716,7 +13525,11 @@ impl App {
                         } else {
                             self.waiting_for_radio_after_eof = false;
                         }
-                        self.refresh_right_sidebar(cx);
+                        if window_hidden {
+                            self.ui_dirty_while_hidden = true;
+                        } else {
+                            self.refresh_right_sidebar(cx);
+                        }
                     }
                 }
                 BgMessage::RadioFailed {
@@ -12750,7 +13563,11 @@ impl App {
                                 self.prefetch_next_online_track();
                             }
                         }
-                        self.refresh_right_sidebar(cx);
+                        if window_hidden {
+                            self.ui_dirty_while_hidden = true;
+                        } else {
+                            self.refresh_right_sidebar(cx);
+                        }
                     }
                 }
                 BgMessage::GoogleLoginResult(outcome) => match outcome {
@@ -13004,8 +13821,13 @@ impl App {
                         }
                         self.recommended_stations = next;
                         self.stations_page = 0;
-                        self.refresh_home_ui(cx);
-                        self.ui.redraw(cx);
+                        self.record_stations_shown();
+                        if window_hidden {
+                            self.ui_dirty_while_hidden = true;
+                        } else {
+                            self.refresh_home_ui(cx);
+                            self.ui.redraw(cx);
+                        }
                     }
                 }
                 BgMessage::StationTracksLoaded {
@@ -13165,8 +13987,12 @@ impl App {
                             && let Some(next_candidate) = self.queue.next_track_manual().cloned()
                             && next_candidate.id != track_id
                         {
-                            self.show_toast(cx, "Skipping unavailable stream...");
+                            if !window_hidden {
+                                self.show_toast(cx, "Skipping unavailable stream...");
+                            }
                             self.play_track_inner(cx, next_candidate, false);
+                        } else if window_hidden {
+                            self.ui_dirty_while_hidden = true;
                         } else {
                             self.ui
                                 .label(id!(np_artist_lbl))
@@ -13465,9 +14291,13 @@ impl App {
                 if matches!(self.sleep_timer, SleepTimerMode::EndOfTrack) {
                     self.sleep_timer = SleepTimerMode::Off;
                     audio.send(EngineCommand::Stop);
-                    self.ui
-                        .label(id!(sleep_status_lbl))
-                        .set_text(cx, "Sleep Timer: Stopped after song");
+                    if window_hidden {
+                        self.ui_dirty_while_hidden = true;
+                    } else {
+                        self.ui
+                            .label(id!(sleep_status_lbl))
+                            .set_text(cx, "Sleep Timer: Stopped after song");
+                    }
                 } else if let Some(next) = self.queue.next_track().cloned() {
                     self.waiting_for_radio_after_eof = false;
                     if snap.auto_transitioned {
@@ -13478,7 +14308,9 @@ impl App {
                         self.prefetch_next_online_track();
                         self.maybe_fetch_radio_for_track(&next, false);
                         self.update_now_playing_metadata(cx, &next);
-                        self.update_lyrics_display(cx, snap.position_ms);
+                        if !window_hidden {
+                            self.update_lyrics_display(cx, snap.position_ms);
+                        }
                     } else {
                         self.play_track(cx, next);
                     }
@@ -13494,8 +14326,12 @@ impl App {
                         if let Some(next) = self.queue.next_track().cloned() {
                             self.waiting_for_radio_after_eof = false;
                             self.play_track(cx, next);
-                            self.refresh_right_sidebar(cx);
-                        } else {
+                            if window_hidden {
+                                self.ui_dirty_while_hidden = true;
+                            } else {
+                                self.refresh_right_sidebar(cx);
+                            }
+                        } else if !window_hidden {
                             self.ui
                                 .ferric_play_btn(id!(play_pause_btn))
                                 .set_playing(cx, false);
@@ -13505,12 +14341,14 @@ impl App {
                         }
                     } else {
                         self.waiting_for_radio_after_eof = false;
-                        self.ui
-                            .ferric_play_btn(id!(play_pause_btn))
-                            .set_playing(cx, false);
-                        self.ui
-                            .ferric_play_btn(id!(fs_play_pause_btn))
-                            .set_playing(cx, false);
+                        if !window_hidden {
+                            self.ui
+                                .ferric_play_btn(id!(play_pause_btn))
+                                .set_playing(cx, false);
+                            self.ui
+                                .ferric_play_btn(id!(fs_play_pause_btn))
+                                .set_playing(cx, false);
+                        }
                     }
                 }
             }
@@ -13589,15 +14427,33 @@ impl App {
                     let st = rpc.status_text();
                     if st != self.last_discord_status {
                         self.last_discord_status = st.clone();
-                        self.ui.label(id!(discord_status_lbl)).set_text(cx, &st);
+                        if window_hidden {
+                            self.ui_dirty_while_hidden = true;
+                        } else {
+                            self.ui.label(id!(discord_status_lbl)).set_text(cx, &st);
+                        }
                     }
                 }
             }
 
             // Skip GPU UI telemetry redraws when hidden in tray / minimized -> near-0% idle GPU/CPU
             if window_hidden {
+                let desired = if snap.is_playing { 500 } else { 1000 };
+                self.sync_tick_timer_rate(cx, desired);
                 return;
             }
+            let desired_open = if snap.is_playing
+                || self.artwork_was_pending
+                || color_lerping
+                || self.pending_live_search.is_some()
+                || self.toast_until.is_some()
+                || self.pending_stream_track_id.is_some()
+            {
+                100
+            } else {
+                350
+            };
+            self.sync_tick_timer_rate(cx, desired_open);
 
             if snap.duration_ms > 0 {
                 let ratio = (snap.position_ms as f64 / snap.duration_ms as f64).clamp(0.0, 1.0);
@@ -13940,6 +14796,18 @@ impl App {
             self.spawn_ytm_rich_home(cx, 0, None, true);
             self.spawn_recommended_stations(cx, true);
             self.show_toast(cx, "Discovering fresh albums, playlists & stations...");
+        }
+        if self.ui.button(id!(qp_refresh_btn)).clicked(actions) {
+            let params = if self.active_mood_idx > 0 {
+                self.rich_home
+                    .chips
+                    .get(self.active_mood_idx - 1)
+                    .map(|c| c.params.clone())
+            } else {
+                None
+            };
+            self.spawn_ytm_rich_home(cx, self.active_mood_idx, params, true);
+            self.show_toast(cx, "Refreshing Quick picks & Home...");
         }
         if self.ui.button(id!(home_play_all_btn)).clicked(actions) {
             let pool = self.home_quick_picks_pool();
@@ -16602,7 +17470,7 @@ impl AppMain for App {
             self.step_motion(cx, nf.time);
         }
 
-        if self.tick_timer.is_event(event).is_some() {
+        if self.tick_timer.is_event(event).is_some() || matches!(event, Event::Signal) {
             self.handle_tick(cx);
         }
 

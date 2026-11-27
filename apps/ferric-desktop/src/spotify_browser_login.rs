@@ -398,14 +398,7 @@ fn wait_for_page(
 
 fn http_get(port: u16, path: &str) -> Option<String> {
     let url = format!("http://127.0.0.1:{port}{path}");
-    let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .max_redirects(0)
-            .max_redirects_will_error(false)
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(3)))
-            .build(),
-    );
+    let agent = ferric_providers::shared_http_agent();
     let response = agent.get(&url).call().ok()?;
     if response.status().as_u16() != 200 {
         return None;

@@ -16,6 +16,7 @@ use crate::{
         TextureFormat,
         TexturePixel,
         TextureId,
+        TextureUpdated,
         CxTexture
     },  
     windows::{
@@ -40,6 +41,7 @@ use crate::{
                 Direct3D11::{
                     D3D11_BIND_INDEX_BUFFER,
                     D3D11_BIND_VERTEX_BUFFER,
+                    D3D11_BOX,
                     D3D11_VIEWPORT,
                     D3D11_BUFFER_DESC,
                     D3D11_USAGE_DEFAULT,
@@ -123,6 +125,7 @@ use crate::{
                 Dxgi::{
                     IDXGIAdapter1,
                     IDXGIDevice,
+                    IDXGIDevice3,
                     IDXGIFactory2,
                     IDXGIResource,
                     IDXGISwapChain1,
@@ -476,15 +479,16 @@ impl Cx {
                 if cx_shader.mapping.flags.debug {
                     crate::log!("{}", hlsl);
                 }
+                let hlsl_hash = hash_str_128(&hlsl);
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.hlsl == hlsl {
+                    if ds.hlsl_hash == hlsl_hash {
                         cx_shader.os_shader_id = Some(index);
                         break;
                     }
                 }
                 if cx_shader.os_shader_id.is_none() {
-                    if let Some(shp) = CxOsDrawShader::new(d3d11_cx, hlsl, &cx_shader.mapping) {
+                    if let Some(shp) = CxOsDrawShader::new(d3d11_cx, &hlsl, hlsl_hash, &cx_shader.mapping) {
                         cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                         self.draw_shaders.os_shaders.push(shp);
                     }
@@ -675,6 +679,7 @@ impl D3d11Window {
         if self.alloc_size == self.window_geom.inner_size && self.render_target_view.is_some() {
             return;
         }
+        let was_shrunk = self.alloc_size.x <= 0.0 || self.alloc_size.y <= 0.0;
         self.alloc_size = self.window_geom.inner_size;
         unsafe {
             // DXGI requires all backbuffer references to be unbound from the immediate context
@@ -715,10 +720,38 @@ impl D3d11Window {
 
             self.swap_texture = Some(swap_texture);
             self.render_target_view = render_target_view;
+            if was_shrunk {
+                self.win32_window.refresh_visible_acrylic_backdrop();
+            }
             if let Some(dcomp_dev) = &self.dcomp_device {
                 let _ = dcomp_dev.Commit();
             }
         }
+    }
+
+    /// Shrink swapchain backbuffers to 1x1 while hidden in System Tray (releases 16-30 MB of iGPU
+    /// shared RAM). Never called for taskbar minimize so taskbar restore stays instant.
+    pub fn shrink_for_tray(&mut self, d3d11_cx: &D3d11Cx) {
+        if self.alloc_size.x <= 0.0 && self.alloc_size.y <= 0.0 {
+            return;
+        }
+        unsafe {
+            d3d11_cx.context.OMSetRenderTargets(None, None);
+            d3d11_cx.context.ClearState();
+            d3d11_cx.context.Flush();
+        }
+        self.swap_texture = None;
+        self.render_target_view = None;
+        self.alloc_size = DVec2::default();
+        unsafe {
+            let _ = self
+                .swap_chain
+                .ResizeBuffers(2, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+            if let Some(dcomp_dev) = &self.dcomp_device {
+                let _ = dcomp_dev.Commit();
+            }
+        }
+        d3d11_cx.trim_gpu_memory();
     }
     
     pub fn present(&mut self, vsync: bool) {
@@ -866,6 +899,18 @@ impl D3d11Cx {
         let hresult = unsafe { (Interface::vtable(&self.context).GetData)(Interface::as_raw(&self.context),Interface::as_raw(&self.query),std::ptr::null_mut(),0,0) };
         hresult != S_FALSE
     }
+
+    /// Flush pending immediate-context references and ask DXGI/D3D11 to release unused internal
+    /// driver staging/buffer pools (reclaims Intel iGPU shared-RAM bloat without touching swapchains).
+    pub fn trim_gpu_memory(&self) {
+        unsafe {
+            self.context.ClearState();
+            self.context.Flush();
+            if let Ok(dxgi_dev3) = self.device.cast::<IDXGIDevice3>() {
+                dxgi_dev3.Trim();
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -885,7 +930,40 @@ pub struct D3d11Buffer {
     pub last_size: usize,
     pub cap_slots: usize,
     pub last_cb_u32: Vec<u32>,
+    pub last_vb_slots: usize,
+    pub last_vb_hash_a: u64,
+    pub last_vb_hash_b: u64,
     pub buffer: Option<ID3D11Buffer>
+}
+
+#[inline]
+fn hash_u32_slice_128(words: &[u32]) -> (u64, u64) {
+    let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h2: u64 = 0x8422_2325_cbf2_9ce4;
+    for &w in words {
+        let v = u64::from(w);
+        h1 = (h1 ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+        h2 = h2
+            .rotate_left(7)
+            .wrapping_add(v ^ 0x9e37_79b9_7f4a_7c15)
+            .wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    (h1, h2)
+}
+
+#[inline]
+fn hash_f32_slice_128(vals: &[f32]) -> (u64, u64) {
+    let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h2: u64 = 0x8422_2325_cbf2_9ce4;
+    for &f in vals {
+        let v = u64::from(f.to_bits());
+        h1 = (h1 ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+        h2 = h2
+            .rotate_left(7)
+            .wrapping_add(v ^ 0x9e37_79b9_7f4a_7c15)
+            .wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    (h1, h2)
 }
 
 impl D3d11Buffer {
@@ -983,15 +1061,15 @@ impl D3d11Buffer {
         }
     }
 
-    pub fn update_with_data(&mut self, d3d11_cx: &D3d11Cx, bind_flags: D3D11_BIND_FLAG, len_slots: usize, data: *const std::ffi::c_void) {
+    pub fn update_with_data(&mut self, d3d11_cx: &D3d11Cx, bind_flags: D3D11_BIND_FLAG, len_slots: usize, data: *const std::ffi::c_void) -> bool {
         if len_slots == 0 {
-            return;
+            return true;
         }
         let Some(byte_width) = len_slots
             .checked_mul(4)
             .and_then(|b| u32::try_from(b).ok())
         else {
-            return;
+            return false;
         };
         let buffer_desc = D3D11_BUFFER_DESC {
             Usage: D3D11_USAGE_DYNAMIC,
@@ -1007,15 +1085,51 @@ impl D3d11Buffer {
             SysMemPitch: 0,
             SysMemSlicePitch: 0
         };
-        let _ = self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data);
+        self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data)
     }
     
     pub fn update_with_u32_index_data(&mut self, d3d11_cx: &D3d11Cx, data: &[u32]) {
-        self.update_with_data(d3d11_cx, D3D11_BIND_INDEX_BUFFER, data.len(), data.as_ptr() as *const _);
+        if data.is_empty() {
+            return;
+        }
+        let (ha, hb) = hash_u32_slice_128(data);
+        if self.buffer.is_some()
+            && self.last_vb_slots == data.len()
+            && self.last_vb_hash_a == ha
+            && self.last_vb_hash_b == hb
+        {
+            return;
+        }
+        if self.update_with_data(d3d11_cx, D3D11_BIND_INDEX_BUFFER, data.len(), data.as_ptr() as *const _) {
+            self.last_vb_slots = data.len();
+            self.last_vb_hash_a = ha;
+            self.last_vb_hash_b = hb;
+        } else {
+            self.last_vb_slots = 0;
+        }
     }
     
     pub fn update_with_f32_vertex_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
-        self.update_with_data(d3d11_cx, D3D11_BIND_VERTEX_BUFFER, data.len(), data.as_ptr() as *const _);
+        if data.is_empty() {
+            return;
+        }
+        // Skip redundant Map(D3D11_MAP_WRITE_DISCARD) on unchanged instance/vertex buffers so
+        // Intel's unified-memory D3D11 driver stops accumulating renamed buffer pools over time.
+        let (ha, hb) = hash_f32_slice_128(data);
+        if self.buffer.is_some()
+            && self.last_vb_slots == data.len()
+            && self.last_vb_hash_a == ha
+            && self.last_vb_hash_b == hb
+        {
+            return;
+        }
+        if self.update_with_data(d3d11_cx, D3D11_BIND_VERTEX_BUFFER, data.len(), data.as_ptr() as *const _) {
+            self.last_vb_slots = data.len();
+            self.last_vb_hash_a = ha;
+            self.last_vb_hash_b = hb;
+        } else {
+            self.last_vb_slots = 0;
+        }
     }
     
     pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
@@ -1089,6 +1203,10 @@ pub struct CxOsTexture {
     shader_resource_view: Option<ID3D11ShaderResourceView >,
     render_target_view: Option<ID3D11RenderTargetView >,
     depth_stencil_view: Option<ID3D11DepthStencilView >,
+    alloc_width: usize,
+    alloc_height: usize,
+    alloc_format: DXGI_FORMAT,
+    alloc_immutable: bool,
 }
 
 impl CxTexture {
@@ -1098,89 +1216,165 @@ impl CxTexture {
         d3d11_cx: &D3d11Cx,
     ) {
         self.previous_platform_resource = None;
-        // TODO maybe we can update the data instead of making a new texture?
         if self.alloc_vec(){}
-        if !self.take_updated().is_empty() {
-            fn get_descs(format: DXGI_FORMAT, width: usize, height: usize, bpp: usize, data: *const std::ffi::c_void)->(D3D11_SUBRESOURCE_DATA,D3D11_TEXTURE2D_DESC) {
-                let sub_data = D3D11_SUBRESOURCE_DATA {
-                    pSysMem: data,
-                    SysMemPitch: (width * bpp) as u32,
-                    SysMemSlicePitch: 0
-                };
-                                            
-                let texture_desc = D3D11_TEXTURE2D_DESC {
-                    Width: width as u32,
-                    Height: height as u32,
-                    MipLevels: 1,
-                    ArraySize: 1,
-                    Format: format,
-                    SampleDesc: DXGI_SAMPLE_DESC {
-                        Count: 1,
-                        Quality: 0
-                    },
-                    Usage: D3D11_USAGE_DEFAULT,
-                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                    CPUAccessFlags: 0,
-                    MiscFlags: 0,
-                };
-                (sub_data,texture_desc)
+        let updated = self.take_updated();
+        if updated.is_empty() {
+            return;
+        }
+        let release_cpu = self.release_cpu_after_upload;
+        let (dxgi_fmt, width, height, bpp, byte_ptr, buf_bytes, is_immutable_cover) = match &self.format {
+            TextureFormat::VecBGRAu8_32 { width, height, data, .. } => {
+                let Some(buf) = data.as_ref() else { return; };
+                (DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4usize, buf.as_ptr() as *const u8, buf.len().saturating_mul(4), release_cpu)
             }
-            
-            let release_cpu = self.release_cpu_after_upload;
-            let (sub_data, mut texture_desc, is_immutable_cover) = match &self.format{
-                TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
-                    let Some(buf) = data.as_ref() else { return; };
-                    let (sd, td) = get_descs(DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4, buf.as_ptr() as *const _);
-                    (sd, td, release_cpu)
+            TextureFormat::VecRGBAf32 { width, height, data, .. } => {
+                let Some(buf) = data.as_ref() else { return; };
+                (DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16usize, buf.as_ptr() as *const u8, buf.len().saturating_mul(4), false)
+            }
+            TextureFormat::VecRu8 { width, height, data, .. } => {
+                let Some(buf) = data.as_ref() else { return; };
+                (DXGI_FORMAT_R8_UNORM, *width, *height, 1usize, buf.as_ptr(), buf.len(), false)
+            }
+            TextureFormat::VecRGu8 { width, height, data, .. } => {
+                let Some(buf) = data.as_ref() else { return; };
+                let bpp = if buf.len() >= width.saturating_mul(*height).saturating_mul(2) { 2usize } else { 1usize };
+                (DXGI_FORMAT_R8G8_UNORM, *width, *height, bpp, buf.as_ptr(), buf.len(), false)
+            }
+            TextureFormat::VecRf32 { width, height, data, .. } => {
+                let Some(buf) = data.as_ref() else { return; };
+                (DXGI_FORMAT_R32_FLOAT, *width, *height, 4usize, buf.as_ptr() as *const u8, buf.len().saturating_mul(4), false)
+            }
+            _ => return,
+        };
+        if width == 0 || height == 0 {
+            return;
+        }
+        let Some(row_pitch_usize) = width.checked_mul(bpp) else {
+            return;
+        };
+        let Some(total_bytes) = row_pitch_usize.checked_mul(height) else {
+            return;
+        };
+        let Ok(row_pitch) = u32::try_from(row_pitch_usize) else {
+            return;
+        };
+        if buf_bytes < total_bytes {
+            return;
+        }
+
+        // Fast in-place subresource update for mutable atlases (e.g. 16 MB 4096x4096 glyph atlas):
+        // copies only the dirty rect (a few KB) instead of reallocating a 16 MB ID3D11Texture2D
+        // on every newly rasterized glyph across song titles and lyrics.
+        if !is_immutable_cover
+            && !self.os.alloc_immutable
+            && self.os.alloc_width == width
+            && self.os.alloc_height == height
+            && self.os.alloc_format == dxgi_fmt
+        {
+            if let Some(existing_tex) = self.os.texture.as_ref() {
+                if let Ok(resource) = existing_tex.cast::<ID3D11Resource>() {
+                    match updated {
+                        TextureUpdated::Partial(rect) => {
+                            let x0 = rect.origin.x.min(width);
+                            let y0 = rect.origin.y.min(height);
+                            let x1 = rect.origin.x.saturating_add(rect.size.width).min(width);
+                            let y1 = rect.origin.y.saturating_add(rect.size.height).min(height);
+                            if x1 > x0 && y1 > y0 {
+                                let start_byte = y0
+                                    .saturating_mul(row_pitch_usize)
+                                    .saturating_add(x0.saturating_mul(bpp));
+                                if start_byte < total_bytes {
+                                    let dst_box = D3D11_BOX {
+                                        left: x0 as u32,
+                                        top: y0 as u32,
+                                        front: 0,
+                                        right: x1 as u32,
+                                        bottom: y1 as u32,
+                                        back: 1,
+                                    };
+                                    unsafe {
+                                        d3d11_cx.context.UpdateSubresource(
+                                            &resource,
+                                            0,
+                                            Some(&dst_box),
+                                            byte_ptr.add(start_byte).cast(),
+                                            row_pitch,
+                                            0,
+                                        );
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                        TextureUpdated::Full => {
+                            unsafe {
+                                d3d11_cx.context.UpdateSubresource(
+                                    &resource,
+                                    0,
+                                    None,
+                                    byte_ptr.cast(),
+                                    row_pitch,
+                                    0,
+                                );
+                            }
+                            return;
+                        }
+                        TextureUpdated::Empty => return,
+                    }
                 }
-                TextureFormat::VecRGBAf32{width, height, data, ..}=>{
-                    let Some(buf) = data.as_ref() else { return; };
-                    let (sd, td) = get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, buf.as_ptr() as *const _);
-                    (sd, td, false)
-                }
-                TextureFormat::VecRu8{width, height, data, ..}=>{
-                    let Some(buf) = data.as_ref() else { return; };
-                    let (sd, td) = get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, buf.as_ptr() as *const _);
-                    (sd, td, false)
-                }
-                TextureFormat::VecRGu8{width, height, data, ..}=>{
-                    let Some(buf) = data.as_ref() else { return; };
-                    let (sd, td) = get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 1, buf.as_ptr() as *const _);
-                    (sd, td, false)
-                }
-                TextureFormat::VecRf32{width, height, data, ..}=>{
-                    let Some(buf) = data.as_ref() else { return; };
-                    let (sd, td) = get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, buf.as_ptr() as *const _);
-                    (sd, td, false)
-                }
-                _=>return
-            };
-            if is_immutable_cover {
+            }
+        }
+
+        let sub_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: byte_ptr.cast(),
+            SysMemPitch: row_pitch,
+            SysMemSlicePitch: 0,
+        };
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: width as u32,
+            Height: height as u32,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: dxgi_fmt,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: if is_immutable_cover {
                 // Static cover artwork never mutates on GPU: IMMUTABLE eliminates driver staging/shadow copies.
-                texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
-            }
-            let mut texture = None;
-            let mut shader_resource_view = None;
-            if unsafe { d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture)) }.is_err() {
-                return;
-            }
-            let Some(tex_ref) = texture.as_ref() else {
-                return;
-            };
-            let Ok(resource): crate::windows::core::Result<ID3D11Resource> = tex_ref.cast() else {
-                return;
-            };
-            if unsafe { d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)) }.is_err() {
-                return;
-            }
-            self.os.texture = texture;
-            self.os.shader_resource_view = shader_resource_view;
-            // Release CPU backing Vec<u32> ONLY for write-once cover textures that explicitly opted in
-            // (never for mutable Makepad font/color glyph atlases that later call take_vec_u32).
-            if is_immutable_cover {
-                if let TextureFormat::VecBGRAu8_32 { data, .. } = &mut self.format {
-                    *data = None;
-                }
+                D3D11_USAGE_IMMUTABLE
+            } else {
+                D3D11_USAGE_DEFAULT
+            },
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture = None;
+        let mut shader_resource_view = None;
+        if unsafe { d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture)) }.is_err() {
+            return;
+        }
+        let Some(tex_ref) = texture.as_ref() else {
+            return;
+        };
+        let Ok(resource): crate::windows::core::Result<ID3D11Resource> = tex_ref.cast() else {
+            return;
+        };
+        if unsafe { d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)) }.is_err() {
+            return;
+        }
+        self.os.texture = texture;
+        self.os.shader_resource_view = shader_resource_view;
+        self.os.alloc_width = width;
+        self.os.alloc_height = height;
+        self.os.alloc_format = dxgi_fmt;
+        self.os.alloc_immutable = is_immutable_cover;
+        // Release CPU backing Vec<u32> ONLY for write-once cover textures that explicitly opted in
+        // (never for mutable Makepad font/color glyph atlases that later call take_vec_u32).
+        if is_immutable_cover {
+            if let TextureFormat::VecBGRAu8_32 { data, .. } = &mut self.format {
+                *data = None;
             }
         }
     }
@@ -1449,9 +1643,24 @@ pub struct CxOsGeometry {
     pub geom_ibuf: D3d11Buffer,
 }
 
+#[inline]
+fn hash_str_128(s: &str) -> (u64, u64, usize) {
+    let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h2: u64 = 0x8422_2325_cbf2_9ce4;
+    for &b in s.as_bytes() {
+        let v = u64::from(b);
+        h1 = (h1 ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+        h2 = h2
+            .rotate_left(7)
+            .wrapping_add(v ^ 0x9e37_79b9_7f4a_7c15)
+            .wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    (h1, h2, s.len())
+}
+
 #[derive(Clone)]
 pub struct CxOsDrawShader {
-    pub hlsl: String,
+    pub hlsl_hash: (u64, u64, usize),
     pub const_table_uniforms: D3d11Buffer,
     pub live_uniforms: D3d11Buffer,
     pub pixel_shader: ID3D11PixelShader,
@@ -1461,7 +1670,7 @@ pub struct CxOsDrawShader {
 
 impl CxOsDrawShader {
     
-    fn new(d3d11_cx: &D3d11Cx, hlsl: String, mapping: &CxDrawShaderMapping) -> Option<Self> {
+    fn new(d3d11_cx: &D3d11Cx, hlsl: &str, hlsl_hash: (u64, u64, usize), mapping: &CxDrawShaderMapping) -> Option<Self> {
         
         fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<ID3DBlob, String> {
             unsafe {
@@ -1631,7 +1840,7 @@ impl CxOsDrawShader {
         drop(ps_blob);
         drop(vs_blob);
         Some(Self {
-            hlsl,
+            hlsl_hash,
             const_table_uniforms,
             live_uniforms,
             pixel_shader: ps.unwrap(),

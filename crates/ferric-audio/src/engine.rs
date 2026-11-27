@@ -18,7 +18,7 @@ use std::thread;
 use std::time::Duration;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::registry::CodecRegistry;
-use symphonia::core::common::Tier;
+use symphonia::core::common::{Limit, Tier};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
@@ -50,6 +50,9 @@ pub struct AudioTelemetry {
     pub(crate) device_lost: AtomicBool,
     /// Incremented by the audio output callback on every render burst to detect silent stalls.
     pub(crate) cb_heartbeat: AtomicU64,
+    /// Set to `true` once paused/stopped playback has finished microfade + ring-buffer drain so
+    /// the host WASAPI stream can pause at 0 Hz CPU until the next play command.
+    pub(crate) idle_silent: AtomicBool,
 }
 
 impl AudioTelemetry {
@@ -162,6 +165,7 @@ type OutputStreamBundle = (cpal::Stream, rtrb::Producer<RingFrame>, u32);
 
 fn build_output_stream_and_producer(
     telemetry: &Arc<AudioTelemetry>,
+    start_playing: bool,
 ) -> AudioResult<OutputStreamBundle> {
     let host = cpal::default_host();
     let device = host
@@ -282,9 +286,11 @@ fn build_output_stream_and_producer(
     }
     .map_err(|e| AudioError::Device(e.to_string()))?;
 
-    stream
-        .play()
-        .map_err(|e| AudioError::Device(e.to_string()))?;
+    if start_playing {
+        stream
+            .play()
+            .map_err(|e| AudioError::Device(e.to_string()))?;
+    }
 
     Ok((stream, producer, out_rate))
 }
@@ -293,6 +299,7 @@ pub struct AudioEngine {
     cmd_tx: Sender<EngineCommand>,
     telemetry: Arc<AudioTelemetry>,
     output_stream: Option<cpal::Stream>,
+    stream_paused: AtomicBool,
     decode_handle: Option<thread::JoinHandle<()>>,
     headless: bool,
     last_recovery_attempt: Option<std::time::Instant>,
@@ -302,7 +309,8 @@ impl AudioEngine {
     /// Start the real-time WASAPI/cpal output stream and dedicated dual-deck decode+DSP OS thread.
     pub fn start(initial_eq: EqConfig) -> AudioResult<Self> {
         let telemetry = Arc::new(AudioTelemetry::default());
-        let (stream, producer, out_rate) = build_output_stream_and_producer(&telemetry)?;
+        telemetry.idle_silent.store(true, Ordering::Relaxed);
+        let (stream, producer, out_rate) = build_output_stream_and_producer(&telemetry, false)?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let thread_telemetry = Arc::clone(&telemetry);
@@ -323,6 +331,7 @@ impl AudioEngine {
             cmd_tx,
             telemetry,
             output_stream: Some(stream),
+            stream_paused: AtomicBool::new(true),
             decode_handle: Some(handle),
             headless: false,
             last_recovery_attempt: None,
@@ -346,6 +355,7 @@ impl AudioEngine {
             cmd_tx,
             telemetry,
             output_stream: None,
+            stream_paused: AtomicBool::new(true),
             decode_handle: handle,
             headless: true,
             last_recovery_attempt: None,
@@ -354,8 +364,21 @@ impl AudioEngine {
 
     /// Detect WASAPI audio device disconnects/stalls (e.g., USB DAC or Bluetooth headset unplugged)
     /// and rebuild the output stream on the active default device without wedging the decode thread.
+    /// Also suspends the WASAPI output stream once paused/stopped audio finishes draining so idle
+    /// CPU drops to 0 Hz.
     pub fn poll_device_recovery(&mut self) -> bool {
-        if self.headless || !self.telemetry.device_lost.load(Ordering::Acquire) {
+        if self.headless {
+            return false;
+        }
+        if !self.stream_paused.load(Ordering::Acquire)
+            && self.telemetry.idle_silent.load(Ordering::Acquire)
+            && !self.telemetry.is_playing.load(Ordering::Acquire)
+            && let Some(stream) = &self.output_stream
+        {
+            let _ = stream.pause();
+            self.stream_paused.store(true, Ordering::Release);
+        }
+        if !self.telemetry.device_lost.load(Ordering::Acquire) {
             return false;
         }
         let now = std::time::Instant::now();
@@ -366,9 +389,11 @@ impl AudioEngine {
         }
         self.last_recovery_attempt = Some(now);
         self.output_stream = None;
-        match build_output_stream_and_producer(&self.telemetry) {
+        let want_play = self.telemetry.is_playing.load(Ordering::Acquire);
+        match build_output_stream_and_producer(&self.telemetry, want_play) {
             Ok((new_stream, new_producer, new_rate)) => {
                 self.output_stream = Some(new_stream);
+                self.stream_paused.store(!want_play, Ordering::Release);
                 self.telemetry.device_lost.store(false, Ordering::Release);
                 let _ = self.cmd_tx.send(EngineCommand::ReplaceOutputRing {
                     producer: new_producer,
@@ -379,12 +404,31 @@ impl AudioEngine {
             Err(_) => {
                 // No output device currently available — pause playback cleanly so UI stays responsive.
                 self.telemetry.is_playing.store(false, Ordering::Release);
+                self.stream_paused.store(true, Ordering::Release);
                 false
             }
         }
     }
 
     pub fn send(&self, cmd: EngineCommand) {
+        let needs_audio_wake = matches!(
+            cmd,
+            EngineCommand::LoadAndPlay(_)
+                | EngineCommand::LoadAndPlayTrack { .. }
+                | EngineCommand::CrossfadeToTrack { .. }
+                | EngineCommand::Play
+                | EngineCommand::TogglePlayPause
+        );
+        if needs_audio_wake {
+            self.telemetry.idle_silent.store(false, Ordering::Release);
+            if self.stream_paused.swap(false, Ordering::AcqRel)
+                && let Some(stream) = &self.output_stream
+                && stream.play().is_err()
+            {
+                self.stream_paused.store(true, Ordering::Release);
+                self.telemetry.device_lost.store(true, Ordering::Release);
+            }
+        }
         let _ = self.cmd_tx.send(cmd);
     }
 
@@ -545,13 +589,11 @@ impl ActiveDeck {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
         }
+        let meta_opts = MetadataOptions::default()
+            .limit_tag_bytes(Limit::Maximum(0))
+            .limit_visual_bytes(Limit::Maximum(0));
         let format = symphonia::default::get_probe()
-            .probe(
-                &hint,
-                mss,
-                FormatOptions::default(),
-                MetadataOptions::default(),
-            )
+            .probe(&hint, mss, FormatOptions::default(), meta_opts)
             .map_err(|e| AudioError::Decode(e.to_string()))?;
 
         let track = format
@@ -1553,28 +1595,41 @@ fn decode_loop(
             let idle_bins = rt.spectrum.decay_idle();
             telemetry.store_spectrum(idle_bins);
             if idle_bins == [0; 8] {
-                // Zero-CPU idle wait: wakes instantaneously (<0.1 ms) on next command instead of polling at 83 Hz.
-                match cmd_rx.recv_timeout(Duration::from_millis(120)) {
+                if !telemetry.idle_silent.load(Ordering::Acquire) {
+                    // Let the 260 ms SPSC output ring finish draining cleanly before pausing WASAPI.
+                    match cmd_rx.recv_timeout(Duration::from_millis(280)) {
+                        Ok(cmd) => {
+                            pending_cmd = Some(cmd);
+                            continue;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            telemetry.idle_silent.store(true, Ordering::Release);
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                // True 0 Hz idle wait: blocks kernel-side until next command arrives (<0.1 ms wakeup).
+                match cmd_rx.recv() {
                     Ok(cmd) => pending_cmd = Some(cmd),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(_) => return,
                 }
             } else {
                 thread::sleep(Duration::from_millis(16));
             }
             continue;
         }
+        telemetry.idle_silent.store(false, Ordering::Relaxed);
 
         let max_frames = if headless {
             512
         } else {
             let slots = producer.slots();
-            if slots < 256 {
+            if slots < 1024 {
                 let hb = telemetry.cb_heartbeat.load(Ordering::Relaxed);
                 if hb == last_hb {
                     stall_ticks = stall_ticks.saturating_add(1);
                     // ~450 ms with zero output callback progress => WASAPI stream silently died.
-                    if stall_ticks >= 150 {
+                    if stall_ticks >= 45 {
                         telemetry.device_lost.store(true, Ordering::Release);
                         stall_ticks = 0;
                     }
@@ -1582,12 +1637,12 @@ fn decode_loop(
                     last_hb = hb;
                     stall_ticks = 0;
                 }
-                thread::sleep(Duration::from_millis(3));
+                thread::sleep(Duration::from_millis(10));
                 continue;
             }
             stall_ticks = 0;
             last_hb = telemetry.cb_heartbeat.load(Ordering::Relaxed);
-            slots.min(1024)
+            slots.min(2048)
         };
 
         // 1. Proactively pre-open and prime Deck B within max(eff_xfade_ms + 8000, 12000) ms of Deck A end.

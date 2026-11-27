@@ -26,11 +26,15 @@ pub (crate) static ACTION_SIGNAL: AtomicBool = AtomicBool::new(false);
 
 impl SignalToUI {
     pub fn set_ui_signal() {
-        UI_SIGNAL.store(true, Ordering::SeqCst)
+        UI_SIGNAL.store(true, Ordering::SeqCst);
+        #[cfg(target_os = "windows")]
+        crate::os::windows::win32_window::wake_ui_signal();
     }
     
     pub fn set_action_signal() {
-        ACTION_SIGNAL.store(true, Ordering::SeqCst)
+        ACTION_SIGNAL.store(true, Ordering::SeqCst);
+        #[cfg(target_os = "windows")]
+        crate::os::windows::win32_window::wake_ui_signal();
     }
     
     pub (crate) fn check_and_clear_ui_signal() -> bool {

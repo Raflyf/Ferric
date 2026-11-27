@@ -22,29 +22,18 @@ live_design! {
         width: Fill,
         height: Fill,
         draw_bg: {
-            texture image: texture2d
             accent: #E86A2C
-            has_image: 0.0
+            zone0: #000000
+            zone1: #000000
+            zone2: #000000
+            zone3: #000000
+            has_zones: 0.0
             phase: 0.0
             mouse_x: 0.5
             mouse_y: 0.5
             hover_amt: 0.0
             acrylic_on: 0.0
             opacity: 1.0
-
-            fn sample_zone(self, center: vec2) -> vec3 {
-                let r = 0.14;
-                let mut acc = sample2d(self.image, clamp(center, vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.24;
-                acc += sample2d(self.image, clamp(center + vec2(r, 0.0), vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.11;
-                acc += sample2d(self.image, clamp(center - vec2(r, 0.0), vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.11;
-                acc += sample2d(self.image, clamp(center + vec2(0.0, r), vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.11;
-                acc += sample2d(self.image, clamp(center - vec2(0.0, r), vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.11;
-                acc += sample2d(self.image, clamp(center + vec2(r * 0.72, r * 0.72), vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.08;
-                acc += sample2d(self.image, clamp(center + vec2(-r * 0.72, r * 0.72), vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.08;
-                acc += sample2d(self.image, clamp(center + vec2(r * 0.72, -r * 0.72), vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.08;
-                acc += sample2d(self.image, clamp(center + vec2(-r * 0.72, -r * 0.72), vec2(0.04, 0.04), vec2(0.96, 0.96))).xyz * 0.08;
-                return acc;
-            }
 
             fn enrich_tone(self, c: vec3) -> vec3 {
                 // Convert raw cover color into a lush, jewel-toned liquid aurora pigment (zero muddy gray/brown)
@@ -66,22 +55,18 @@ live_design! {
                 );
                 let wuv = uv + warp;
 
-                // Extract 4 harmonious liquid palette pigments directly from the cover art (faithful on B&W too!)
+                // 4 harmonious liquid palette pigments precomputed once on CPU (0 texture fetches/pixel!)
                 let acc_pigment = self.enrich_tone(self.accent.xyz);
                 let mut c0 = acc_pigment;
                 let mut c1 = clamp(acc_pigment * 0.76 + vec3(0.05, 0.05, 0.07), 0.0, 1.0);
                 let mut c2 = clamp(acc_pigment * 0.60 + vec3(0.04, 0.05, 0.07), 0.0, 1.0);
                 let mut c3 = clamp(acc_pigment * 0.86 + vec3(0.04, 0.04, 0.05), 0.0, 1.0);
 
-                if (self.has_image > 0.5) {
-                    let s0 = self.enrich_tone(self.sample_zone(vec2(0.24, 0.24)));
-                    let s1 = self.enrich_tone(self.sample_zone(vec2(0.76, 0.26)));
-                    let s2 = self.enrich_tone(self.sample_zone(vec2(0.26, 0.76)));
-                    let s3 = self.enrich_tone(self.sample_zone(vec2(0.76, 0.74)));
-                    c0 = mix(s0, acc_pigment, 0.22);
-                    c1 = mix(s1, acc_pigment * 0.84, 0.18);
-                    c2 = mix(s2, acc_pigment * 0.74, 0.20);
-                    c3 = mix(s3, acc_pigment * 0.88, 0.18);
+                if (self.has_zones > 0.5) {
+                    c0 = mix(self.zone0.xyz, acc_pigment, 0.22);
+                    c1 = mix(self.zone1.xyz, acc_pigment * 0.84, 0.18);
+                    c2 = mix(self.zone2.xyz, acc_pigment * 0.74, 0.20);
+                    c3 = mix(self.zone3.xyz, acc_pigment * 0.88, 0.18);
                 }
 
                 // 4 orbiting Gaussian liquid-mesh color orbs (Apple Music / studio concert-hall atmosphere)
@@ -2320,8 +2305,16 @@ pub struct DrawAmbientStage {
     draw_super: DrawQuad,
     #[live]
     accent: Vec4,
+    #[live]
+    zone0: Vec4,
+    #[live]
+    zone1: Vec4,
+    #[live]
+    zone2: Vec4,
+    #[live]
+    zone3: Vec4,
     #[live(0.0_f32)]
-    has_image: f32,
+    has_zones: f32,
     #[live(0.0_f32)]
     phase: f32,
     #[live(0.5_f32)]
@@ -2336,8 +2329,8 @@ pub struct DrawAmbientStage {
     opacity: f32,
 }
 
-/// Full-bleed blurred album artwork ambient stage with smooth slow drift
-/// and subtle cursor-following light response for immersive fullscreen lyrics.
+/// Full-bleed liquid-aurora ambient stage driven by 4 CPU-extracted cover pigments
+/// (0 GPU texture fetches per pixel) with smooth slow drift and cursor spotlight.
 #[derive(Live, LiveHook, Widget)]
 pub struct FerricAmbientStage {
     #[walk]
@@ -2345,8 +2338,6 @@ pub struct FerricAmbientStage {
     #[redraw]
     #[live]
     draw_bg: DrawAmbientStage,
-    #[rust]
-    texture: Option<Texture>,
     #[rust]
     target_mx: f32,
     #[rust]
@@ -2431,23 +2422,43 @@ impl Widget for FerricAmbientStage {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        if let Some(tex) = &self.texture {
-            self.draw_bg.draw_vars.set_texture(0, tex);
-            self.draw_bg.has_image = 1.0;
-        } else {
-            self.draw_bg.draw_vars.empty_texture(0);
-            self.draw_bg.has_image = 0.0;
-        }
         let _ = self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()
     }
 }
 
 impl FerricAmbientStageRef {
-    pub fn set_texture(&self, cx: &mut Cx, texture: Option<Texture>) {
+    pub fn set_aurora_zones(&self, cx: &mut Cx, zones: Option<[[f32; 3]; 4]>) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.texture = texture;
-            inner.draw_bg.redraw(cx);
+            if let Some(z) = zones {
+                let z0 = vec4(z[0][0], z[0][1], z[0][2], 1.0);
+                let z1 = vec4(z[1][0], z[1][1], z[1][2], 1.0);
+                let z2 = vec4(z[2][0], z[2][1], z[2][2], 1.0);
+                let z3 = vec4(z[3][0], z[3][1], z[3][2], 1.0);
+                let same_rgb = |a: Vec4, b: Vec4| {
+                    (a.x - b.x).abs() + (a.y - b.y).abs() + (a.z - b.z).abs() < 0.008
+                };
+                let same = inner.draw_bg.has_zones > 0.5
+                    && same_rgb(inner.draw_bg.zone0, z0)
+                    && same_rgb(inner.draw_bg.zone1, z1)
+                    && same_rgb(inner.draw_bg.zone2, z2)
+                    && same_rgb(inner.draw_bg.zone3, z3);
+                if !same {
+                    inner.draw_bg.zone0 = z0;
+                    inner.draw_bg.zone1 = z1;
+                    inner.draw_bg.zone2 = z2;
+                    inner.draw_bg.zone3 = z3;
+                    inner.draw_bg.has_zones = 1.0;
+                    if inner.active {
+                        inner.draw_bg.redraw(cx);
+                    }
+                }
+            } else if inner.draw_bg.has_zones > 0.5 {
+                inner.draw_bg.has_zones = 0.0;
+                if inner.active {
+                    inner.draw_bg.redraw(cx);
+                }
+            }
         }
     }
 
@@ -3232,16 +3243,19 @@ impl FerricLyricsViewRef {
 
     pub fn set_style(&self, cx: &mut Cx, accent: Vec4, ui_zoom: f32, light_mode: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            let changed = (inner.accent.x - accent.x).abs() > 0.005
+            let next_zoom = ui_zoom.clamp(0.65, 1.40);
+            let zoom_changed = (inner.ui_zoom - next_zoom).abs() > 0.005;
+            let color_changed = (inner.accent.x - accent.x).abs() > 0.005
                 || (inner.accent.y - accent.y).abs() > 0.005
                 || (inner.accent.z - accent.z).abs() > 0.005
-                || (inner.ui_zoom - ui_zoom).abs() > 0.005
                 || inner.light_mode != light_mode;
             inner.accent = accent;
-            inner.ui_zoom = ui_zoom.clamp(0.65, 1.40);
+            inner.ui_zoom = next_zoom;
             inner.light_mode = light_mode;
-            if changed {
+            if zoom_changed {
                 inner.heights_measured_fs = 0.0;
+            }
+            if zoom_changed || color_changed {
                 inner.area.redraw(cx);
             }
         }

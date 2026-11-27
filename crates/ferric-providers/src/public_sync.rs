@@ -6,18 +6,11 @@ use crate::yt_cleaner::clean_youtube_metadata;
 use crate::{ProviderError, ProviderResult};
 use ferric_core::models::{Playlist, Track, TrackSource};
 use serde_json::Value;
-use std::time::Duration;
 
 const PUBLIC_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
 fn build_http_agent() -> ureq::Agent {
-    let cfg = ureq::Agent::config_builder()
-        .max_redirects(0)
-        .max_redirects_will_error(false)
-        .timeout_global(Some(Duration::from_secs(14)))
-        .http_status_as_error(false)
-        .build();
-    ureq::Agent::new_with_config(cfg)
+    crate::shared_http_agent().clone()
 }
 
 fn is_allowed_public_sync_url(url: &str) -> bool {

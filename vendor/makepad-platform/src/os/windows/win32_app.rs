@@ -64,6 +64,7 @@ use {
                 Graphics::Gdi::{
                     HMONITOR,
                     GetDC,
+                    ReleaseDC,
                     MonitorFromWindow,
                     GetDeviceCaps,
                     MONITOR_DEFAULTTONEAREST,
@@ -470,9 +471,14 @@ impl Win32App {
     }
     
     pub fn start_signal_poll(&mut self) {
-        let slot = self.get_free_timer_slot();
-        let win32_id = unsafe {SetTimer(None, 0, 40 as u32, Some(Self::timer_proc))};
-        self.timers[slot] = Win32Timer::SignalPoll {win32_id: win32_id};
+        // Release builds wake event-driven via `wake_ui_signal()` (`PostMessageW`) at 0 Hz idle;
+        // debug builds keep a relaxed 200ms timer strictly for Makepad live-edit file watching.
+        #[cfg(debug_assertions)]
+        {
+            let slot = self.get_free_timer_slot();
+            let win32_id = unsafe {SetTimer(None, 0, 200 as u32, Some(Self::timer_proc))};
+            self.timers[slot] = Win32Timer::SignalPoll {win32_id: win32_id};
+        }
     }
     
     pub fn stop_resize(&mut self) {
@@ -670,10 +676,6 @@ impl DpiFunctions {
     
     pub fn hwnd_dpi_factor(&self, hwnd: HWND) -> f32 {
         unsafe {
-            let hdc = GetDC(hwnd);
-            if hdc.is_invalid() {
-                panic!("`GetDC` returned null!");
-            }
             let dpi = if let Some(get_dpi_for_window) = self.get_dpi_for_window {
                 // We are on Windows 10 Anniversary Update (1607) or later.
                 match get_dpi_for_window(hwnd) {
@@ -701,8 +703,15 @@ impl DpiFunctions {
                 // We are on Vista or later.
                 if IsProcessDPIAware() == TRUE {
                     // If the process is DPI aware, then scaling must be handled by the application using
-                    // this DPI value.
-                    GetDeviceCaps(hdc, LOGPIXELSX) as u32
+                    // this DPI value. Acquire and immediately release the DC to avoid handle leaks.
+                    let hdc = GetDC(hwnd);
+                    if hdc.is_invalid() {
+                        BASE_DPI
+                    } else {
+                        let px = GetDeviceCaps(hdc, LOGPIXELSX) as u32;
+                        let _ = ReleaseDC(hwnd, hdc);
+                        px
+                    }
                 } else {
                     // If the process is DPI unaware, then scaling is performed by the OS; we thus return
                     // 96 (scale factor 1.0) to prevent the window from being re-scaled by both the

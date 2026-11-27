@@ -604,6 +604,32 @@ pub struct TrackList {
     smooth_frame: NextFrame,
     #[rust]
     smooth_last_t: f64,
+    #[rust]
+    drawn_item_ids: Vec<usize>,
+}
+
+impl TrackListRef {
+    /// Unbind `FerricCoverArt` texture handles across all materialized `PortalList` rows so
+    /// `cx.textures.free_unused_textures()` immediately releases GPU VRAM on tray hide / page leave.
+    pub fn clear_row_textures(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let list = inner.view.portal_list(id!(list));
+            let first = list.first_id();
+            let vis = list.visible_items().max(24);
+            for id in inner.drawn_item_ids.drain(..) {
+                if let Some((_, item)) = list.get_item(id) {
+                    item.ferric_cover_art(id!(art_tile))
+                        .set_texture(cx, None, 1.0);
+                }
+            }
+            for id in first.saturating_sub(4)..first.saturating_add(vis + 8) {
+                if let Some((_, item)) = list.get_item(id) {
+                    item.ferric_cover_art(id!(art_tile))
+                        .set_texture(cx, None, 1.0);
+                }
+            }
+        }
+    }
 }
 
 impl Widget for TrackList {
@@ -845,11 +871,13 @@ impl Widget for TrackList {
                         }
                     }
                 } else {
+                    self.drawn_item_ids.clear();
                     list.set_item_range(cx, 0, count);
                     while let Some(item_id) = list.next_visible_item(cx) {
                         let Some(track) = tracks.get(item_id) else {
                             continue;
                         };
+                        self.drawn_item_ids.push(item_id);
                         let row = list.item(cx, item_id, live_id!(Row));
                         let is_active = active_id.as_deref() == Some(track.id.as_str());
                         let title_col = if is_active { accent } else { text_primary };

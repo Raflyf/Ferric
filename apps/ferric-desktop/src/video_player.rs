@@ -40,16 +40,15 @@ mod imp {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-        GetClientRect, GetMessageW, GetWindowLongPtrW, HWND_TOP, KillTimer, MSG, PostMessageW,
+        GetClientRect, GetMessageW, GetWindowLongPtrW, HWND_TOP, MSG, PostMessageW,
         PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
-        SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE,
-        WM_DESTROY, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_POPUP,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE,
+        WM_DESTROY, WM_SIZE, WNDCLASSW, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_POPUP,
     };
     use windows::core::{Interface, PCWSTR, PWSTR, w};
 
     const WM_WAKE_VIDEO_CMD: u32 = WM_APP + 77;
-    const CMD_POLL_TIMER: usize = 2001;
 
     #[link(name = "gdi32")]
     unsafe extern "system" {
@@ -703,7 +702,6 @@ mod imp {
                 GWLP_USERDATA,
                 Rc::into_raw(Rc::clone(&state)) as isize,
             );
-            let _ = SetTimer(Some(hwnd), CMD_POLL_TIMER, 120, None);
         }
         // Flush any bounds/visibility updates queued while WebView2 was initializing with zero timer lag.
         drain_video_commands(hwnd, &state);
@@ -866,7 +864,7 @@ mod imp {
                     }
                     LRESULT(0)
                 }
-                WM_WAKE_VIDEO_CMD | WM_TIMER => {
+                WM_WAKE_VIDEO_CMD => {
                     if let Some(st) = clone_host_state(hwnd) {
                         drain_video_commands(hwnd, &st);
                     }
@@ -880,7 +878,6 @@ mod imp {
                     LRESULT(0)
                 }
                 WM_DESTROY => {
-                    let _ = KillTimer(Some(hwnd), CMD_POLL_TIMER);
                     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const VideoHostState;
                     if !ptr.is_null() {
                         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);

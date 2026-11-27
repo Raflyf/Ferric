@@ -4,9 +4,10 @@ use ferric_providers::local_scanner::read_embedded_cover_bytes;
 use ferric_providers::ytmusic::{download_artwork_bytes, normalize_ytm_thumbnail_url};
 use makepad_widgets::image_cache::ImageBuffer;
 use makepad_widgets::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,10 +17,10 @@ const MAX_FAILED_ENTRIES: usize = 256;
 /// Single lean sequential decoder thread avoids parallel full-res JPEG/PNG decode RAM spikes
 /// while decoding disk-cached covers rapidly.
 const WORKER_THREADS: usize = 1;
-/// Hard LRU cap: 144 covers x 160x160 `D3D11_USAGE_IMMUTABLE` BGRA (~100 KB each, CPU `Vec<u32>`
-/// freed immediately on upload), exceeding simultaneous Home + Sidebar + Queue slots so LRU eviction
-/// NEVER thrashes or flickers while staying strictly within the <100 MB RAM budget.
-const MAX_CACHED_TEXTURES: usize = 144;
+/// Hard LRU cap for 160x160 grid/sidebar/queue thumbnails (~100 KB each, <= 11.2 MB VRAM total;
+/// CPU `Vec<u32>` freed immediately on D3D11 upload). Hero 256x256 artwork lives in its own
+/// dedicated single slot (`hero_entry`) so high-res covers never accumulate across long sessions.
+const MAX_CACHED_TEXTURES: usize = 112;
 /// Crisp card thumbnail size (area-box downscaled + hardware D3D11 linear filtering: sharp on
 /// 200px Grid/Shelf/Station cards without stair-stepping or memory bloat).
 const THUMB_MAX_DIM: usize = 160;
@@ -31,7 +32,9 @@ pub struct CachedArtwork {
     pub texture: Texture,
     pub aspect: f32,
     pub accent: Vec4,
-    pub high_res: bool,
+    /// Precomputed 4-quadrant liquid aurora pigments (identical to `FerricAmbientStage`'s 9-tap
+    /// sampling + `enrich_tone`, computed once on CPU instead of 36 GPU texture fetches per pixel).
+    pub aurora_zones: [[f32; 3]; 4],
     last_used: u64,
 }
 
@@ -53,10 +56,12 @@ enum ArtworkDone {
         key: String,
         buffer: ImageBuffer,
         accent_rgb: [f32; 3],
+        aurora_zones: [[f32; 3]; 4],
         high_res: bool,
     },
     Failed {
         key: String,
+        high_res: bool,
     },
 }
 
@@ -64,36 +69,51 @@ enum ArtworkDone {
 /// dominant WCAG-safe accent extractor, and GPU texture registry.
 pub struct ArtworkCache {
     entries: HashMap<String, CachedArtwork>,
-    in_flight: HashSet<String>,
+    /// Single dedicated 256x256 high-resolution slot for the active Now Playing / Fullscreen cover.
+    hero_entry: Option<(String, CachedArtwork)>,
+    in_flight: HashSet<(String, bool)>,
     failed: HashMap<String, Instant>,
     pinned_key: Option<String>,
+    paused_flag: Arc<AtomicBool>,
     clock: u64,
-    job_tx: mpsc::Sender<ArtworkJob>,
+    job_queue: Arc<(Mutex<VecDeque<ArtworkJob>>, Condvar)>,
     done_rx: mpsc::Receiver<ArtworkDone>,
 }
 
 impl ArtworkCache {
     pub fn new() -> Self {
-        let (job_tx, job_rx) = mpsc::channel::<ArtworkJob>();
+        let job_queue: Arc<(Mutex<VecDeque<ArtworkJob>>, Condvar)> =
+            Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         let (done_tx, done_rx) = mpsc::channel::<ArtworkDone>();
-        let shared_rx = Arc::new(Mutex::new(job_rx));
+        let paused_flag = Arc::new(AtomicBool::new(false));
         let cache_dir = app_data_dir().join("artwork_cache");
 
         for _ in 0..WORKER_THREADS {
-            let rx = Arc::clone(&shared_rx);
+            let queue = Arc::clone(&job_queue);
             let tx = done_tx.clone();
             let dir = cache_dir.clone();
+            let paused = Arc::clone(&paused_flag);
             thread::spawn(move || {
                 loop {
                     let job = {
-                        let Ok(guard) = rx.lock() else {
+                        let (lock, cvar) = &*queue;
+                        let Ok(mut guard) = lock.lock() else {
                             break;
                         };
-                        match guard.recv() {
-                            Ok(j) => j,
-                            Err(_) => break,
+                        while guard.is_empty() {
+                            match cvar.wait(guard) {
+                                Ok(g) => guard = g,
+                                Err(_) => return,
+                            }
+                        }
+                        match guard.pop_front() {
+                            Some(j) => j,
+                            None => continue,
                         }
                     };
+                    if paused.load(Ordering::Acquire) {
+                        continue;
+                    }
 
                     let (key, max_dim, raw_bytes) = match job {
                         ArtworkJob::Url { key, url, max_dim } => {
@@ -105,20 +125,30 @@ impl ArtworkCache {
                             (key, max_dim, bytes)
                         }
                     };
+                    if paused.load(Ordering::Acquire) {
+                        continue;
+                    }
 
+                    let high_res = max_dim >= HERO_MAX_DIM;
                     let decoded = raw_bytes.and_then(|bytes| decode_and_downscale(&bytes, max_dim));
+                    if paused.load(Ordering::Acquire) {
+                        continue;
+                    }
                     match decoded {
                         Some(buffer) if buffer.width > 0 && buffer.height > 0 => {
                             let accent_rgb = extract_vibrant_accent_rgb(&buffer);
+                            let aurora_zones = extract_aurora_zones(&buffer);
                             let _ = tx.send(ArtworkDone::Loaded {
                                 key,
                                 buffer,
                                 accent_rgb,
-                                high_res: max_dim >= HERO_MAX_DIM,
+                                aurora_zones,
+                                high_res,
                             });
+                            SignalToUI::set_ui_signal();
                         }
                         _ => {
-                            let _ = tx.send(ArtworkDone::Failed { key });
+                            let _ = tx.send(ArtworkDone::Failed { key, high_res });
                         }
                     }
                 }
@@ -127,12 +157,22 @@ impl ArtworkCache {
 
         Self {
             entries: HashMap::with_capacity(MAX_CACHED_TEXTURES + 4),
+            hero_entry: None,
             in_flight: HashSet::new(),
             failed: HashMap::new(),
             pinned_key: None,
+            paused_flag,
             clock: 0,
-            job_tx,
+            job_queue,
             done_rx,
+        }
+    }
+
+    fn enqueue_job(&self, job: ArtworkJob) {
+        let (lock, cvar) = &*self.job_queue;
+        if let Ok(mut guard) = lock.lock() {
+            guard.push_back(job);
+            cvar.notify_one();
         }
     }
 
@@ -187,21 +227,30 @@ impl ArtworkCache {
     }
 
     pub fn request_url_sized(&mut self, raw_url: &str, max_dim: usize) -> Option<String> {
+        if self.paused_flag.load(Ordering::Acquire) {
+            return None;
+        }
         let norm = normalize_ytm_thumbnail_url(raw_url);
         if norm.is_empty() {
             return None;
         }
         self.clock = self.clock.wrapping_add(1);
         let want_hi = max_dim >= HERO_MAX_DIM;
-        if let Some(existing) = self.entries.get_mut(&norm) {
-            existing.last_used = self.clock;
-            if !want_hi || existing.high_res {
+        if want_hi {
+            if let Some((hk, hv)) = &mut self.hero_entry
+                && *hk == norm
+            {
+                hv.last_used = self.clock;
                 return Some(norm);
             }
+        } else if let Some(existing) = self.entries.get_mut(&norm) {
+            existing.last_used = self.clock;
+            return Some(norm);
         }
-        if !self.in_flight.contains(&norm) && !self.is_recently_failed(&norm) {
-            self.in_flight.insert(norm.clone());
-            let _ = self.job_tx.send(ArtworkJob::Url {
+        let inflight_key = (norm.clone(), want_hi);
+        if !self.in_flight.contains(&inflight_key) && !self.is_recently_failed(&norm) {
+            self.in_flight.insert(inflight_key);
+            self.enqueue_job(ArtworkJob::Url {
                 key: norm.clone(),
                 url: norm.clone(),
                 max_dim,
@@ -215,27 +264,36 @@ impl ArtworkCache {
     }
 
     pub fn request_for_track_sized(&mut self, track: &Track, max_dim: usize) -> Option<String> {
+        if self.paused_flag.load(Ordering::Acquire) {
+            return None;
+        }
         let key = Self::key_for_track(track)?;
         self.clock = self.clock.wrapping_add(1);
         let want_hi = max_dim >= HERO_MAX_DIM;
-        if let Some(existing) = self.entries.get_mut(&key) {
-            existing.last_used = self.clock;
-            if !want_hi || existing.high_res {
+        if want_hi {
+            if let Some((hk, hv)) = &mut self.hero_entry
+                && *hk == key
+            {
+                hv.last_used = self.clock;
                 return Some(key);
             }
-        }
-        if self.in_flight.contains(&key) || self.is_recently_failed(&key) {
+        } else if let Some(existing) = self.entries.get_mut(&key) {
+            existing.last_used = self.clock;
             return Some(key);
         }
-        self.in_flight.insert(key.clone());
+        let inflight_key = (key.clone(), want_hi);
+        if self.in_flight.contains(&inflight_key) || self.is_recently_failed(&key) {
+            return Some(key);
+        }
+        self.in_flight.insert(inflight_key);
         if key.starts_with("http://") || key.starts_with("https://") {
-            let _ = self.job_tx.send(ArtworkJob::Url {
+            self.enqueue_job(ArtworkJob::Url {
                 key: key.clone(),
                 url: key.clone(),
                 max_dim,
             });
         } else if let Some(path) = track.path.clone() {
-            let _ = self.job_tx.send(ArtworkJob::LocalFile {
+            self.enqueue_job(ArtworkJob::LocalFile {
                 key: key.clone(),
                 path,
                 max_dim,
@@ -244,8 +302,11 @@ impl ArtworkCache {
         Some(key)
     }
 
-    pub fn poll(&mut self, cx: &mut Cx) -> bool {
+    /// Poll completed artwork decodes. Returns `(any_changed, pinned_hero_changed)`.
+    pub fn poll(&mut self, cx: &mut Cx) -> (bool, bool) {
         let mut changed = false;
+        let mut pinned_changed = false;
+        let mut needs_free = false;
         for _ in 0..24 {
             let Ok(msg) = self.done_rx.try_recv() else {
                 break;
@@ -255,30 +316,44 @@ impl ArtworkCache {
                     key,
                     buffer,
                     accent_rgb,
+                    aurora_zones,
                     high_res,
                 } => {
-                    self.in_flight.remove(&key);
+                    self.in_flight.remove(&(key.clone(), high_res));
                     self.clock = self.clock.wrapping_add(1);
                     let aspect =
                         (buffer.width as f32 / buffer.height.max(1) as f32).clamp(0.25, 4.0);
                     let texture = buffer.into_new_texture(cx);
                     texture.set_release_cpu_after_upload(cx, true);
                     let accent = vec4(accent_rgb[0], accent_rgb[1], accent_rgb[2], 1.0);
-                    self.entries.insert(
-                        key,
-                        CachedArtwork {
-                            texture,
-                            aspect,
-                            accent,
-                            high_res,
-                            last_used: self.clock,
-                        },
-                    );
-                    self.evict_lru_if_needed(cx);
+                    let is_pinned = self.pinned_key.as_deref() == Some(key.as_str());
+                    let item = CachedArtwork {
+                        texture,
+                        aspect,
+                        accent,
+                        aurora_zones,
+                        last_used: self.clock,
+                    };
+                    if high_res {
+                        if self.hero_entry.replace((key, item)).is_some() {
+                            needs_free = true;
+                        }
+                        if is_pinned {
+                            pinned_changed = true;
+                        }
+                    } else {
+                        if self.entries.insert(key, item).is_some() {
+                            needs_free = true;
+                        }
+                        if is_pinned {
+                            pinned_changed = true;
+                        }
+                        self.evict_lru_if_needed(cx);
+                    }
                     changed = true;
                 }
-                ArtworkDone::Failed { key } => {
-                    self.in_flight.remove(&key);
+                ArtworkDone::Failed { key, high_res } => {
+                    self.in_flight.remove(&(key.clone(), high_res));
                     if self.failed.len() >= MAX_FAILED_ENTRIES {
                         self.failed.retain(|_, t| t.elapsed() < FAILED_TTL);
                         if self.failed.len() >= MAX_FAILED_ENTRIES
@@ -295,7 +370,10 @@ impl ArtworkCache {
                 }
             }
         }
-        changed
+        if needs_free {
+            cx.textures.free_unused_textures();
+        }
+        (changed, pinned_changed)
     }
 
     fn evict_lru_if_needed(&mut self, cx: &mut Cx) {
@@ -322,25 +400,58 @@ impl ArtworkCache {
         !self.in_flight.is_empty()
     }
 
-    /// Release every decoded cover texture while hidden in System Tray;
-    /// disk cache stays intact so reopening reloads visible covers instantaneously.
+    /// Release every decoded cover texture while hidden in System Tray and pause background
+    /// artwork decoding so hidden track changes never pile up unread RGBA buffers in `done_rx`.
     pub fn clear_all_for_tray(&mut self, cx: &mut Cx) {
+        self.paused_flag.store(true, Ordering::Release);
+        let (lock, _) = &*self.job_queue;
+        if let Ok(mut guard) = lock.lock() {
+            guard.clear();
+            guard.shrink_to_fit();
+        }
+        self.hero_entry = None;
         self.entries.clear();
         self.entries.shrink_to_fit();
         self.in_flight.clear();
         self.in_flight.shrink_to_fit();
         self.failed.clear();
         self.failed.shrink_to_fit();
+        while self.done_rx.try_recv().is_ok() {}
         cx.textures.free_unused_textures();
     }
 
+    /// Resume artwork decoding when restoring the window from System Tray.
+    pub fn resume_from_tray(&mut self) {
+        let (lock, _) = &*self.job_queue;
+        if let Ok(mut guard) = lock.lock() {
+            guard.clear();
+        }
+        while self.done_rx.try_recv().is_ok() {}
+        self.paused_flag.store(false, Ordering::Release);
+    }
+
     pub fn get(&self, key: &str) -> Option<&CachedArtwork> {
+        self.entries.get(key).or_else(|| {
+            self.hero_entry
+                .as_ref()
+                .and_then(|(k, v)| (k == key).then_some(v))
+        })
+    }
+
+    /// Prefer the 256x256 high-resolution hero entry for the active Now Playing / Fullscreen cover,
+    /// falling back to the 160x160 grid thumbnail until hero decoding finishes.
+    pub fn get_hero(&self, key: &str) -> Option<&CachedArtwork> {
+        if let Some((hk, hv)) = &self.hero_entry
+            && hk == key
+        {
+            return Some(hv);
+        }
         self.entries.get(key)
     }
 
     pub fn get_for_track(&self, track: &Track) -> Option<&CachedArtwork> {
         let key = Self::key_for_track(track)?;
-        self.entries.get(&key)
+        self.get_hero(&key)
     }
 
     pub fn snapshot(&self) -> HashMap<String, CachedArtwork> {
@@ -348,6 +459,7 @@ impl ArtworkCache {
     }
 
     pub fn clear_memory(&mut self) {
+        self.hero_entry = None;
         self.entries.clear();
         self.entries.shrink_to_fit();
         self.failed.clear();
@@ -416,6 +528,76 @@ fn check_image_header_dimensions(bytes: &[u8]) -> bool {
         return false;
     }
     true
+}
+
+/// Decode and area-box downscale PNG/JPEG bytes (also used to keep static app chrome icons lean).
+pub fn decode_and_downscale_image(bytes: &[u8], max_dim: usize) -> Option<ImageBuffer> {
+    decode_and_downscale(bytes, max_dim)
+}
+
+/// Precompute the 4 enriched liquid-aurora pigments once on CPU from decoded cover art.
+/// Matches `FerricAmbientStage`'s 9-tap quadrant sampling + `enrich_tone`, eliminating 36 GPU
+/// texture fetches per pixel at 30 FPS with identical color output.
+pub fn extract_aurora_zones(buffer: &ImageBuffer) -> [[f32; 3]; 4] {
+    let w = buffer.width;
+    let h = buffer.height;
+    if w == 0 || h == 0 || buffer.data.len() < w * h {
+        return [[0.0; 3]; 4];
+    }
+
+    let sample_uv = |u: f32, v: f32| -> [f32; 3] {
+        let cu = u.clamp(0.04, 0.96);
+        let cv = v.clamp(0.04, 0.96);
+        let x = ((cu * (w as f32 - 1.0)).round() as usize).min(w - 1);
+        let y = ((cv * (h as f32 - 1.0)).round() as usize).min(h - 1);
+        let px = buffer.data[y * w + x];
+        [
+            ((px >> 16) & 0xFF) as f32 / 255.0,
+            ((px >> 8) & 0xFF) as f32 / 255.0,
+            (px & 0xFF) as f32 / 255.0,
+        ]
+    };
+
+    let sample_zone = |cx: f32, cy: f32| -> [f32; 3] {
+        let r = 0.14_f32;
+        let taps: [(f32, f32, f32); 9] = [
+            (0.0, 0.0, 0.24),
+            (r, 0.0, 0.11),
+            (-r, 0.0, 0.11),
+            (0.0, r, 0.11),
+            (0.0, -r, 0.11),
+            (r * 0.72, r * 0.72, 0.08),
+            (-r * 0.72, r * 0.72, 0.08),
+            (r * 0.72, -r * 0.72, 0.08),
+            (-r * 0.72, -r * 0.72, 0.08),
+        ];
+        let mut acc = [0.0_f32; 3];
+        for (dx, dy, wt) in taps {
+            let s = sample_uv(cx + dx, cy + dy);
+            acc[0] += s[0] * wt;
+            acc[1] += s[1] * wt;
+            acc[2] += s[2] * wt;
+        }
+        // Match `enrich_tone` in `FerricAmbientStage`
+        let luma = acc[0] * 0.299 + acc[1] * 0.587 + acc[2] * 0.114;
+        let br = (luma + (acc[0] - luma) * 1.68).clamp(0.0, 1.0);
+        let bg = (luma + (acc[1] - luma) * 1.68).clamp(0.0, 1.0);
+        let bb = (luma + (acc[2] - luma) * 1.68).clamp(0.0, 1.0);
+        let peak = br.max(bg).max(bb);
+        let lift = (0.68 / peak.max(0.18)).clamp(0.85, 2.1);
+        [
+            (br * lift).clamp(0.0, 1.0),
+            (bg * lift).clamp(0.0, 1.0),
+            (bb * lift).clamp(0.0, 1.0),
+        ]
+    };
+
+    [
+        sample_zone(0.24, 0.24),
+        sample_zone(0.76, 0.26),
+        sample_zone(0.26, 0.76),
+        sample_zone(0.76, 0.74),
+    ]
 }
 
 fn decode_and_downscale(bytes: &[u8], max_dim: usize) -> Option<ImageBuffer> {

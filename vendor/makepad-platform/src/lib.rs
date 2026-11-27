@@ -70,6 +70,9 @@ pub use makepad_objc_sys;
 #[cfg(target_os = "windows")]
 pub use ::windows as windows;
 
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows"))]
+pub use crate::os::cx_native::{FontData, is_virtual_system_font, try_map_system_fallback_font};
+
 pub use makepad_futures;
  
 pub use {

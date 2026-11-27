@@ -305,7 +305,7 @@ pub fn check_latest_release(
     let deadline = Instant::now() + CHECK_TIMEOUT;
     check_cancelled(cancelled, deadline)?;
 
-    let agent = build_strict_agent(CHECK_TIMEOUT, CHECK_TIMEOUT);
+    let agent = crate::shared_http_agent();
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let resp = agent
         .get(&url)

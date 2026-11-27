@@ -292,25 +292,8 @@ pub fn parse_web_token_json(raw: &str) -> ProviderResult<String> {
     }
 }
 
-static PATHFINDER_HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-
 fn pathfinder_agent() -> ureq::Agent {
-    PATHFINDER_HTTP_AGENT
-        .get_or_init(|| {
-            // `api-partner.spotify.com` intermittently resets IPv6 rustls connections on Windows;
-            // pinning IPv4 matches Spotify's web-player edge and avoids OS 10054 resets.
-            let cfg = ureq::Agent::config_builder()
-                .ip_family(ureq::config::IpFamily::Ipv4Only)
-                .max_redirects(0)
-                .max_redirects_will_error(false)
-                .timeout_connect(Some(Duration::from_secs(8)))
-                .timeout_recv_response(Some(Duration::from_secs(16)))
-                .timeout_global(Some(Duration::from_secs(24)))
-                .http_status_as_error(false)
-                .build();
-            ureq::Agent::new_with_config(cfg)
-        })
-        .clone()
+    crate::shared_http_agent_ipv4().clone()
 }
 
 fn invalidate_cached_client_token() {

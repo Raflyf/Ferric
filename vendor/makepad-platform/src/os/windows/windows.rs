@@ -23,12 +23,46 @@ use {
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         window::CxWindowPool,
-        windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        windows::{
+            core::Interface,
+            Win32::Graphics::{
+                Direct3D11::{ID3D11Device, ID3D11DeviceContext},
+                Dxgi::IDXGIDevice3,
+            },
+        },
     }
 };
 
+fn any_window_rendering_active(d3d11_windows: &[D3d11Window]) -> bool {
+    d3d11_windows.is_empty()
+        || d3d11_windows
+            .iter()
+            .any(|w| w.first_draw || w.win32_window.is_visible_and_not_iconic())
+}
+
 impl Cx {
     
+    pub fn trim_gpu_memory(&self) {
+        if let Some(ctx) = &self.os.d3d11_context {
+            unsafe {
+                ctx.ClearState();
+                ctx.Flush();
+            }
+        }
+        if let Some(dev) = &self.os.d3d11_device {
+            unsafe {
+                if let Ok(dxgi_dev3) = dev.cast::<IDXGIDevice3>() {
+                    dxgi_dev3.Trim();
+                }
+            }
+        }
+    }
+
+    /// Request a 1x1 swapchain shrink on hidden tray windows to release 16-30 MB of iGPU RAM.
+    pub fn shrink_swapchain_for_tray(&mut self) {
+        self.os.pending_tray_shrink = true;
+    }
+
     pub fn event_loop(cx: Rc<RefCell<Cx >>) {
         
         cx.borrow_mut().self_ref = Some(cx.clone());
@@ -38,6 +72,7 @@ impl Cx {
 
         // hack: store ID3D11Device in CxOs, so texture-related operations become possible on the makepad/studio side, yet don't completely destroy the code there
         cx.borrow_mut().os.d3d11_device = Some(d3d11_cx.borrow().device.clone());
+        cx.borrow_mut().os.d3d11_context = Some(d3d11_cx.borrow().context.clone());
 
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
@@ -144,6 +179,14 @@ impl Cx {
                 }
             }
             Win32Event::Paint => {
+                if !any_window_rendering_active(d3d11_windows) {
+                    if !self.os.was_all_hidden {
+                        self.os.was_all_hidden = true;
+                        d3d11_cx.trim_gpu_memory();
+                    }
+                    return EventFlow::Wait;
+                }
+                self.os.was_all_hidden = false;
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(with_win32_app(|app| app.time_now()));
                 }
@@ -243,14 +286,38 @@ impl Cx {
                     self.redraw_all();
                 }
                 self.handle_networking_events();
-                
-                self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
-                
+                if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx) {
+                    return EventFlow::Exit;
+                }
+                if self.os.pending_tray_shrink {
+                    self.os.pending_tray_shrink = false;
+                    for window in d3d11_windows.iter_mut() {
+                        if !window.win32_window.is_visible_and_not_iconic() {
+                            window.shrink_for_tray(d3d11_cx);
+                        }
+                    }
+                }
+                if any_window_rendering_active(d3d11_windows)
+                    && (self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty())
+                {
+                    self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
+                }
                 return EventFlow::Wait;
             }
         }
+
+        if self.os.pending_tray_shrink {
+            self.os.pending_tray_shrink = false;
+            for window in d3d11_windows.iter_mut() {
+                if !window.win32_window.is_visible_and_not_iconic() {
+                    window.shrink_for_tray(d3d11_cx);
+                }
+            }
+        }
         
-        if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
+        if any_window_rendering_active(d3d11_windows)
+            && (self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty())
+        {
             EventFlow::Poll
         } else {
             EventFlow::Wait
@@ -269,6 +336,9 @@ impl Cx {
                 CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        if !window.first_draw && !window.win32_window.is_visible_and_not_iconic() {
+                            continue;
+                        }
                         //let dpi_factor = window.window_geom.dpi_factor;                        
                         window.resize_buffers(&d3d11_cx);
                         self.draw_pass_to_window(*pass_id, !window.is_in_resize, window, d3d11_cx);
@@ -447,6 +517,9 @@ pub struct CxOs {
     pub (crate) start_time: Option<Instant>,
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
+    pub (crate) d3d11_context: Option<ID3D11DeviceContext>,
+    pub (crate) was_all_hidden: bool,
+    pub (crate) pending_tray_shrink: bool,
     pub (crate) network_response: NetworkResponseChannel,
     //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }

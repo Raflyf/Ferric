@@ -254,7 +254,7 @@ impl NavHistory {
         }
         self.entries.truncate(self.cursor + 1);
         self.entries.push(NavEntry { page, detail });
-        if self.entries.len() > 32 {
+        if self.entries.len() > 12 {
             self.entries.remove(0);
         }
         self.cursor = self.entries.len().saturating_sub(1);

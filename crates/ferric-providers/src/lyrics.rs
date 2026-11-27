@@ -5,10 +5,8 @@ use lofty::probe::Probe;
 use lofty::tag::ItemKey;
 use serde::Deserialize;
 use std::path::Path;
-use std::time::Duration;
 
 const FERRIC_LYRICS_USER_AGENT: &str = "Ferric/0.1.0 (https://github.com/Raflyf/Ferric)";
-const LYRICS_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LYRICS_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_PLAIN_DURATION_MS: u64 = 180_000;
 
@@ -218,13 +216,8 @@ struct LyricsOvhResponse {
     lyrics: Option<String>,
 }
 
-fn lyrics_http_agent() -> ureq::Agent {
-    let cfg = ureq::Agent::config_builder()
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .timeout_global(Some(LYRICS_HTTP_TIMEOUT))
-        .build();
-    ureq::Agent::new_with_config(cfg)
+fn lyrics_http_agent() -> &'static ureq::Agent {
+    crate::shared_http_agent()
 }
 
 /// Fetch synced `.lrc` lyrics from open community database `lrclib.net`.

@@ -67,7 +67,6 @@ pub fn activate_oauth_cancel_token() -> Arc<AtomicBool> {
     next
 }
 
-const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
 const BASE64URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -649,12 +648,7 @@ impl LoopbackListener {
 }
 
 fn http_agent() -> ureq::Agent {
-    let cfg = ureq::Agent::config_builder()
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .timeout_global(Some(HTTP_TIMEOUT))
-        .build();
-    ureq::Agent::new_with_config(cfg)
+    crate::shared_http_agent().clone()
 }
 
 fn encode_form_pairs(pairs: &[(&str, &str)]) -> String {

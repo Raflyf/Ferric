@@ -106,6 +106,7 @@ use {
                         SWP_NOACTIVATE,
                         SWP_FRAMECHANGED,
                         IsIconic,
+                        IsWindowVisible,
                         WM_ACTIVATE,
                         WM_NCACTIVATE,
                         WM_NCPAINT,
@@ -303,9 +304,35 @@ where
 //#[derive(Clone)]
 static INITIAL_ACRYLIC_BACKDROP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static SIGNAL_WAKE_HWND: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+static SIGNAL_WAKE_POSTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+const WM_USER_WAKE_SIGNAL: u32 = 0x8000 + 77;
 
 pub fn set_initial_acrylic_backdrop(enabled: bool) {
     INITIAL_ACRYLIC_BACKDROP.store(enabled, std::sync::atomic::Ordering::Release);
+}
+
+/// Coalesced cross-thread wakeup for `SignalToUI` so the Win32 loop stays at 0 Hz when idle.
+pub fn wake_ui_signal() {
+    let raw = SIGNAL_WAKE_HWND.load(std::sync::atomic::Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    if SIGNAL_WAKE_POSTED
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        unsafe {
+            let _ = PostMessageW(HWND(raw), WM_USER_WAKE_SIGNAL, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 pub struct Win32Window {
@@ -365,6 +392,12 @@ impl Win32Window {
             GetModuleHandleW(None).unwrap(),
             None,
         ) };
+        let _ = SIGNAL_WAKE_HWND.compare_exchange(
+            0,
+            hwnd.0,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
 
         // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
         let drop_target: IDropTarget = DropTarget { drag_item: RefCell::new(None),hwnd, }.into();
@@ -489,6 +522,11 @@ impl Win32Window {
         
         let window = &mut (*(user_data as *mut Win32Window));
         match msg {
+            WM_USER_WAKE_SIGNAL => {
+                SIGNAL_WAKE_POSTED.store(false, std::sync::atomic::Ordering::Release);
+                window.do_callback(Win32Event::Signal);
+                return LRESULT(0);
+            }
             WM_ACTIVATE => {
                 let state = wparam.0 & 0xffff;
                 if state == WA_ACTIVE as usize || state == 2 {
@@ -746,6 +784,13 @@ impl Win32Window {
                 }
             },
             WM_DESTROY => { // window actively destroyed
+                let self_raw = hwnd.0 as isize;
+                let _ = SIGNAL_WAKE_HWND.compare_exchange(
+                    self_raw,
+                    0,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 window.do_callback(
                     Win32Event::WindowClosed(WindowClosedEvent {
                         window_id: window.window_id,
@@ -1048,6 +1093,10 @@ impl Win32Window {
         }
     }
     
+    pub fn is_visible_and_not_iconic(&self) -> bool {
+        unsafe { IsWindowVisible(self.hwnd).as_bool() && !IsIconic(self.hwnd).as_bool() }
+    }
+
     pub fn get_inner_size(&self) -> DVec2 {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};

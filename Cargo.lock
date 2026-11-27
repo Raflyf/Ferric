@@ -1256,8 +1256,6 @@ dependencies = [
 [[package]]
 name = "makepad-draw"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de6d007a4364deadfe250732712516c7f9d1e31ebb9484c9051fa6c41bd0ff03"
 dependencies = [
  "ab_glyph_rasterizer",
  "fxhash",

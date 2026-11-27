@@ -2,11 +2,9 @@ use crate::oauth::{SyncedPlaylistBundle, url_encode};
 use crate::{ProviderError, ProviderResult};
 use ferric_core::models::{Playlist, Track, TrackSource};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::time::Duration;
 
 const SUBSONIC_API_VERSION: &str = "1.16.1";
 const SUBSONIC_CLIENT_NAME: &str = "Ferric";
-const SUBSONIC_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SUBSONIC_JSON_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SUBSONIC_PLAYLISTS: usize = 100;
 const MAX_SUBSONIC_PLAYLIST_TRACKS: usize = 5_000;
@@ -568,18 +566,13 @@ pub fn sync_subsonic_catalog(
     let (base, is_https, host, port) = parse_validated_host_port(&creds.base_url)?;
     verify_resolved_subsonic_target(&host, port, is_https)?;
 
-    let cfg = ureq::Agent::config_builder()
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .timeout_global(Some(SUBSONIC_TIMEOUT))
-        .build();
-    let agent = ureq::Agent::new_with_config(cfg);
+    let agent = crate::shared_http_agent();
 
     let search_url = format!(
         "{base}/rest/search3.view?query=&songCount=200&artistCount=0&albumCount=0&{}",
         build_auth_query(creds)
     );
-    let search_body = fetch_subsonic_response(&agent, &search_url)?;
+    let search_body = fetch_subsonic_response(agent, &search_url)?;
     let mut catalog_tracks = Vec::new();
     if let Some(sr) = search_body.search_result3 {
         for song in sr.song {
@@ -590,7 +583,7 @@ pub fn sync_subsonic_catalog(
     }
 
     let playlists_url = format!("{base}/rest/getPlaylists.view?{}", build_auth_query(creds));
-    let playlists_body = fetch_subsonic_response(&agent, &playlists_url)?;
+    let playlists_body = fetch_subsonic_response(agent, &playlists_url)?;
     let summaries = playlists_body
         .playlists
         .map(|p| p.playlist)
@@ -606,7 +599,7 @@ pub fn sync_subsonic_catalog(
             url_encode(&summary.id),
             build_auth_query(creds)
         );
-        let detail_body = fetch_subsonic_response(&agent, &detail_url)?;
+        let detail_body = fetch_subsonic_response(agent, &detail_url)?;
         let Some(detail) = detail_body.playlist else {
             continue;
         };

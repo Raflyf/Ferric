@@ -1001,6 +1001,7 @@ mod win_impl {
     }
 
     fn push_event(ev: TrayEvent) {
+        let should_wake = ev != TrayEvent::WindowMovedOrResized;
         let q = TRAY_EVENTS.get_or_init(|| Mutex::new(Vec::new()));
         if let Ok(mut guard) = q.lock() {
             // Coalesce repeated move/resize events
@@ -1010,6 +1011,9 @@ mod win_impl {
                 return;
             }
             guard.push(ev);
+        }
+        if should_wake {
+            makepad_widgets::SignalToUI::set_ui_signal();
         }
     }
 
@@ -1982,7 +1986,6 @@ mod win_impl {
                         let _ = ShowWindow(hwnd, SW_HIDE);
                         WINDOW_HIDDEN_OR_MIN.store(true, Ordering::Release);
                         HIDDEN_IN_TRAY.store(true, Ordering::Release);
-                        trim_working_set();
                         push_event(TrayEvent::HiddenToTray);
                         return LRESULT(0);
                     }

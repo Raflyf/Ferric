@@ -27,6 +27,9 @@ impl LibraryDb {
         conn.pragma_update(None, "secure_delete", "ON")?;
         conn.pragma_update(None, "journal_size_limit", 16_777_216_i64)?;
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        conn.pragma_update(None, "cache_size", -512_i64)?;
+        conn.pragma_update(None, "mmap_size", 0_i64)?;
+        conn.pragma_update(None, "temp_store", "FILE")?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -720,6 +723,14 @@ impl LibraryDb {
         let _ = self
             .conn
             .execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA shrink_memory;");
+    }
+
+    /// Aggressively truncate WAL, reclaim incremental freelist pages, and flush SQLite page cache
+    /// when minimizing to System Tray.
+    pub fn shrink_memory_aggressive(&self) {
+        let _ = self.conn.execute_batch(
+            "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA incremental_vacuum; PRAGMA shrink_memory;",
+        );
     }
 
     pub fn save_theme(&self, theme: &ThemeConfig) -> CoreResult<()> {

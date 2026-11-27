@@ -27,6 +27,7 @@ pub enum SmtcCommand {
 pub struct SmtcBridge {
     controls: Option<MediaControls>,
     rx: Receiver<SmtcCommand>,
+    last_track_id: String,
     last_title: String,
     last_artist: String,
     last_album: String,
@@ -45,6 +46,7 @@ impl SmtcBridge {
         Self {
             controls,
             rx,
+            last_track_id: String::new(),
             last_title: String::new(),
             last_artist: String::new(),
             last_album: String::new(),
@@ -82,7 +84,13 @@ impl SmtcBridge {
     /// Update SMTC display metadata (title, artist, album, duration, and local-first cover thumbnail).
     pub fn set_metadata_for_track(&mut self, track: &Track) {
         self.try_attach_late();
-        let (cover_url, is_local) = resolve_smtc_cover_url(track);
+        let same_track = self.last_track_id == track.id && self.cover_is_local_file;
+        let (cover_url, is_local) = if same_track {
+            (self.last_cover_url.clone(), true)
+        } else {
+            resolve_smtc_cover_url(track)
+        };
+        self.last_track_id = track.id.clone();
         self.last_title = track.title.clone();
         self.last_artist = track.artist.clone();
         self.last_album = track.album.clone();
@@ -97,7 +105,7 @@ impl SmtcBridge {
     /// Upgrade SMTC cover thumbnail from remote HTTPS URL to a verified local `file://` stream
     /// once the artwork worker finishes caching the active track cover on disk.
     pub fn refresh_cover_if_cached(&mut self, track: &Track) {
-        if self.cover_is_local_file || self.last_title != track.title {
+        if self.cover_is_local_file || self.last_track_id != track.id {
             return;
         }
         let (cover_url, is_local) = resolve_smtc_cover_url(track);
@@ -305,6 +313,7 @@ fn create_platform_controls(tx: mpsc::Sender<SmtcCommand>) -> Option<MediaContro
             };
             if let Some(c) = cmd {
                 let _ = tx.send(c);
+                makepad_widgets::SignalToUI::set_ui_signal();
             }
         })
         .ok()?;

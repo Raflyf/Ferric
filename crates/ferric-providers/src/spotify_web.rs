@@ -1321,6 +1321,465 @@ pub fn fetch_spotify_playlist_by_id(
     Ok(bundle)
 }
 
+fn clean_spotify_playlist_id(raw: &str) -> Option<&str> {
+    let stripped = raw
+        .trim()
+        .strip_prefix("spotify:premium:playlist:")
+        .or_else(|| raw.trim().strip_prefix("spotify:playlist:"))
+        .unwrap_or(raw.trim());
+    if stripped.is_empty()
+        || stripped.len() > 64
+        || !stripped
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return None;
+    }
+    Some(stripped)
+}
+
+fn clean_spotify_track_uri(raw: &str) -> Option<String> {
+    let stripped = raw
+        .trim()
+        .strip_prefix("spotify:track:")
+        .unwrap_or(raw.trim());
+    if stripped.is_empty()
+        || stripped.len() > 64
+        || !stripped.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(format!("spotify:track:{stripped}"))
+}
+
+fn spotify_rest_json(
+    agent: &ureq::Agent,
+    method: &str,
+    url: &str,
+    access_token: &str,
+    client_token: &mut String,
+    body: Option<&Value>,
+) -> Result<Value, SpotifyWebSyncError> {
+    let payload = body
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| SpotifyWebSyncError::FallbackToRest(format!("encode json: {e}")))?;
+
+    for attempt in 0..2 {
+        let resp = match method {
+            "GET" => agent
+                .get(url)
+                .header("Authorization", &format!("Bearer {access_token}"))
+                .header("client-token", client_token.as_str())
+                .header("Accept", "application/json")
+                .header("User-Agent", SPOTIFY_WEB_UA)
+                .header("Origin", "https://open.spotify.com")
+                .header("Referer", "https://open.spotify.com/")
+                .call(),
+            "POST" => agent
+                .post(url)
+                .header("Authorization", &format!("Bearer {access_token}"))
+                .header("client-token", client_token.as_str())
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", SPOTIFY_WEB_UA)
+                .header("Origin", "https://open.spotify.com")
+                .header("Referer", "https://open.spotify.com/")
+                .send(payload.as_deref().unwrap_or("{}").as_bytes()),
+            "PUT" => agent
+                .put(url)
+                .header("Authorization", &format!("Bearer {access_token}"))
+                .header("client-token", client_token.as_str())
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", SPOTIFY_WEB_UA)
+                .header("Origin", "https://open.spotify.com")
+                .header("Referer", "https://open.spotify.com/")
+                .send(payload.as_deref().unwrap_or("{}").as_bytes()),
+            "DELETE" => {
+                if let Some(p) = payload.as_deref() {
+                    agent
+                        .delete(url)
+                        .header("Authorization", &format!("Bearer {access_token}"))
+                        .header("client-token", client_token.as_str())
+                        .header("Accept", "application/json")
+                        .header("Content-Type", "application/json")
+                        .header("User-Agent", SPOTIFY_WEB_UA)
+                        .header("Origin", "https://open.spotify.com")
+                        .header("Referer", "https://open.spotify.com/")
+                        .force_send_body()
+                        .send(p.as_bytes())
+                } else {
+                    agent
+                        .delete(url)
+                        .header("Authorization", &format!("Bearer {access_token}"))
+                        .header("client-token", client_token.as_str())
+                        .header("Accept", "application/json")
+                        .header("User-Agent", SPOTIFY_WEB_UA)
+                        .header("Origin", "https://open.spotify.com")
+                        .header("Referer", "https://open.spotify.com/")
+                        .call()
+                }
+            }
+            _ => {
+                return Err(SpotifyWebSyncError::FallbackToRest(format!(
+                    "unsupported method {method}"
+                )));
+            }
+        }
+        .map_err(|e| SpotifyWebSyncError::FallbackToRest(format!("{method} {url} net: {e}")))?;
+
+        let status = resp.status().as_u16();
+        let bytes = resp
+            .into_body()
+            .into_with_config()
+            .limit(4 * 1024 * 1024)
+            .read_to_vec()
+            .map_err(|e| SpotifyWebSyncError::FallbackToRest(format!("read body: {e}")))?;
+
+        if status == 401 {
+            return Err(SpotifyWebSyncError::AuthExpired);
+        }
+        if status == 403 && attempt == 0 {
+            invalidate_cached_client_token();
+            *client_token = fetch_client_token(agent)?;
+            continue;
+        }
+        if !(200..300).contains(&status) {
+            let snippet: String = String::from_utf8_lossy(&bytes).chars().take(160).collect();
+            return Err(SpotifyWebSyncError::FallbackToRest(format!(
+                "Spotify {method} HTTP {status}: {snippet}"
+            )));
+        }
+        if bytes.is_empty() {
+            return Ok(Value::Null);
+        }
+        return Ok(serde_json::from_slice(&bytes).unwrap_or(Value::Null));
+    }
+
+    Err(SpotifyWebSyncError::FallbackToRest(
+        "Spotify request exhausted retries".to_string(),
+    ))
+}
+
+fn percent_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push_str("%20"),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Resolve a Spotify track URI (`spotify:track:<id>`) for a non-Spotify song by title + artist.
+pub fn search_spotify_track_uri(
+    access_token: &str,
+    title: &str,
+    artist: &str,
+) -> Result<Option<String>, SpotifyWebSyncError> {
+    let q_raw = if artist.trim().is_empty() {
+        title.trim().to_string()
+    } else {
+        format!("{} {}", title.trim(), artist.trim())
+    };
+    if q_raw.is_empty() {
+        return Ok(None);
+    }
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let url = format!(
+        "https://api.spotify.com/v1/search?q={}&type=track&limit=1",
+        percent_encode_query(&q_raw)
+    );
+    let val = spotify_rest_json(&agent, "GET", &url, access_token, &mut client_token, None)?;
+    let uri = val
+        .pointer("/tracks/items/0/uri")
+        .and_then(Value::as_str)
+        .and_then(clean_spotify_track_uri);
+    Ok(uri)
+}
+
+/// Create a new private playlist on the signed-in Spotify account and populate any track URIs.
+/// Returns the canonical Ferric playlist ID (`spotify:playlist:<id>`).
+pub fn create_spotify_playlist(
+    access_token: &str,
+    name: &str,
+    description: &str,
+    track_uris: &[String],
+) -> Result<String, SpotifyWebSyncError> {
+    let clean_name = name.trim();
+    if clean_name.is_empty() {
+        return Err(SpotifyWebSyncError::FallbackToRest(
+            "Playlist name cannot be empty".to_string(),
+        ));
+    }
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let body = json!({
+        "name": clean_name,
+        "description": description.trim(),
+        "public": false
+    });
+
+    let created = match spotify_rest_json(
+        &agent,
+        "POST",
+        "https://api.spotify.com/v1/me/playlists",
+        access_token,
+        &mut client_token,
+        Some(&body),
+    ) {
+        Ok(v) => v,
+        Err(SpotifyWebSyncError::AuthExpired) => return Err(SpotifyWebSyncError::AuthExpired),
+        Err(_) => {
+            let me = spotify_rest_json(
+                &agent,
+                "GET",
+                "https://api.spotify.com/v1/me",
+                access_token,
+                &mut client_token,
+                None,
+            )?;
+            let uid = me
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    SpotifyWebSyncError::FallbackToRest("Spotify user id missing".to_string())
+                })?;
+            let fallback_url = format!(
+                "https://api.spotify.com/v1/users/{}/playlists",
+                percent_encode_query(uid)
+            );
+            spotify_rest_json(
+                &agent,
+                "POST",
+                &fallback_url,
+                access_token,
+                &mut client_token,
+                Some(&body),
+            )?
+        }
+    };
+
+    let pid = created
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(clean_spotify_playlist_id)
+        .ok_or_else(|| {
+            SpotifyWebSyncError::FallbackToRest("Spotify created playlist ID missing".to_string())
+        })?
+        .to_string();
+
+    let clean_uris: Vec<String> = track_uris
+        .iter()
+        .filter_map(|u| clean_spotify_track_uri(u))
+        .collect();
+    for chunk in clean_uris.chunks(100) {
+        let add_url = format!("https://api.spotify.com/v1/playlists/{pid}/tracks");
+        let add_body = json!({ "uris": chunk });
+        let _ = spotify_rest_json(
+            &agent,
+            "POST",
+            &add_url,
+            access_token,
+            &mut client_token,
+            Some(&add_body),
+        )?;
+    }
+
+    Ok(format!("spotify:playlist:{pid}"))
+}
+
+/// Append validated Spotify track URIs to an existing playlist on the user's Spotify account.
+pub fn add_tracks_to_spotify_playlist(
+    access_token: &str,
+    playlist_id: &str,
+    track_uris: &[String],
+) -> Result<(), SpotifyWebSyncError> {
+    let pid = clean_spotify_playlist_id(playlist_id).ok_or_else(|| {
+        SpotifyWebSyncError::FallbackToRest("Invalid Spotify playlist ID".to_string())
+    })?;
+    let clean_uris: Vec<String> = track_uris
+        .iter()
+        .filter_map(|u| clean_spotify_track_uri(u))
+        .collect();
+    if clean_uris.is_empty() {
+        return Ok(());
+    }
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let url = format!("https://api.spotify.com/v1/playlists/{pid}/tracks");
+    for chunk in clean_uris.chunks(100) {
+        let body = json!({ "uris": chunk });
+        let _ = spotify_rest_json(
+            &agent,
+            "POST",
+            &url,
+            access_token,
+            &mut client_token,
+            Some(&body),
+        )?;
+    }
+    Ok(())
+}
+
+/// Remove one or more Spotify track URIs from an existing playlist on the user's Spotify account.
+pub fn remove_tracks_from_spotify_playlist(
+    access_token: &str,
+    playlist_id: &str,
+    track_uris: &[String],
+) -> Result<(), SpotifyWebSyncError> {
+    let pid = clean_spotify_playlist_id(playlist_id).ok_or_else(|| {
+        SpotifyWebSyncError::FallbackToRest("Invalid Spotify playlist ID".to_string())
+    })?;
+    let items: Vec<Value> = track_uris
+        .iter()
+        .filter_map(|u| clean_spotify_track_uri(u))
+        .map(|uri| json!({ "uri": uri }))
+        .collect();
+    if items.is_empty() {
+        return Ok(());
+    }
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let url = format!("https://api.spotify.com/v1/playlists/{pid}/tracks");
+    for chunk in items.chunks(100) {
+        let body = json!({ "tracks": chunk });
+        let _ = spotify_rest_json(
+            &agent,
+            "DELETE",
+            &url,
+            access_token,
+            &mut client_token,
+            Some(&body),
+        )?;
+    }
+    Ok(())
+}
+
+/// Replace all tracks in a Spotify playlist (used when deduplicating a synced Spotify playlist).
+pub fn replace_spotify_playlist_tracks(
+    access_token: &str,
+    playlist_id: &str,
+    track_uris: &[String],
+) -> Result<(), SpotifyWebSyncError> {
+    let pid = clean_spotify_playlist_id(playlist_id).ok_or_else(|| {
+        SpotifyWebSyncError::FallbackToRest("Invalid Spotify playlist ID".to_string())
+    })?;
+    let clean_uris: Vec<String> = track_uris
+        .iter()
+        .filter_map(|u| clean_spotify_track_uri(u))
+        .collect();
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let url = format!("https://api.spotify.com/v1/playlists/{pid}/tracks");
+    let first = &clean_uris[..clean_uris.len().min(100)];
+    let _ = spotify_rest_json(
+        &agent,
+        "PUT",
+        &url,
+        access_token,
+        &mut client_token,
+        Some(&json!({ "uris": first })),
+    )?;
+    if clean_uris.len() > 100 {
+        for chunk in clean_uris[100..].chunks(100) {
+            let _ = spotify_rest_json(
+                &agent,
+                "POST",
+                &url,
+                access_token,
+                &mut client_token,
+                Some(&json!({ "uris": chunk })),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Rename a playlist on the user's Spotify account.
+pub fn rename_spotify_playlist(
+    access_token: &str,
+    playlist_id: &str,
+    new_name: &str,
+) -> Result<(), SpotifyWebSyncError> {
+    let pid = clean_spotify_playlist_id(playlist_id).ok_or_else(|| {
+        SpotifyWebSyncError::FallbackToRest("Invalid Spotify playlist ID".to_string())
+    })?;
+    let clean_name = new_name.trim();
+    if clean_name.is_empty() {
+        return Ok(());
+    }
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let url = format!("https://api.spotify.com/v1/playlists/{pid}");
+    let _ = spotify_rest_json(
+        &agent,
+        "PUT",
+        &url,
+        access_token,
+        &mut client_token,
+        Some(&json!({ "name": clean_name })),
+    )?;
+    Ok(())
+}
+
+/// Unfollow / remove a playlist from the signed-in user's Spotify library.
+pub fn unfollow_spotify_playlist(
+    access_token: &str,
+    playlist_id: &str,
+) -> Result<(), SpotifyWebSyncError> {
+    let pid = clean_spotify_playlist_id(playlist_id).ok_or_else(|| {
+        SpotifyWebSyncError::FallbackToRest("Invalid Spotify playlist ID".to_string())
+    })?;
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let url = format!("https://api.spotify.com/v1/playlists/{pid}/followers");
+    let _ = spotify_rest_json(
+        &agent,
+        "DELETE",
+        &url,
+        access_token,
+        &mut client_token,
+        None,
+    )?;
+    Ok(())
+}
+
+/// Save or remove a track from the user's Spotify Liked Songs.
+pub fn set_spotify_track_liked(
+    access_token: &str,
+    spotify_id: &str,
+    liked: bool,
+) -> Result<(), SpotifyWebSyncError> {
+    let Some(uri) = clean_spotify_track_uri(spotify_id) else {
+        return Ok(());
+    };
+    let clean_id = uri.strip_prefix("spotify:track:").unwrap_or(&uri);
+    let agent = pathfinder_agent();
+    let mut client_token = fetch_client_token(&agent)?;
+    let method = if liked { "PUT" } else { "DELETE" };
+    let _ = spotify_rest_json(
+        &agent,
+        method,
+        "https://api.spotify.com/v1/me/tracks",
+        access_token,
+        &mut client_token,
+        Some(&json!({ "ids": [clean_id] })),
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1329,6 +1788,20 @@ mod tests {
     fn extracts_sp_dc_from_cookie_header() {
         let header = "sp_t=abc; sp_dc=AQBc123XYZ; sp_key=def";
         assert_eq!(extract_sp_dc(header).as_deref(), Some("AQBc123XYZ"));
+        assert_eq!(
+            clean_spotify_playlist_id("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"),
+            Some("37i9dQZF1DXcBWIGoYBM5M")
+        );
+        assert_eq!(clean_spotify_playlist_id("spotify:playlist:../bad"), None);
+        assert_eq!(
+            clean_spotify_track_uri("2plbrEY59IikOBgBGLjaoe").as_deref(),
+            Some("spotify:track:2plbrEY59IikOBgBGLjaoe")
+        );
+        assert_eq!(
+            clean_spotify_track_uri("spotify:track:2plbrEY59IikOBgBGLjaoe").as_deref(),
+            Some("spotify:track:2plbrEY59IikOBgBGLjaoe")
+        );
+        assert_eq!(clean_spotify_track_uri("bad/uri"), None);
     }
 
     #[test]

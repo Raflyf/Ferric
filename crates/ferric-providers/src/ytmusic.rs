@@ -5619,6 +5619,197 @@ fn parse_clock_ms(text: &str) -> Option<u64> {
     }
 }
 
+fn clean_ytm_playlist_id(raw: &str) -> Option<&str> {
+    let stripped = raw
+        .trim()
+        .strip_prefix("ytm:pl:")
+        .or_else(|| raw.trim().strip_prefix("yt:playlist:"))
+        .unwrap_or(raw.trim());
+    let no_vl = stripped.strip_prefix("VL").unwrap_or(stripped);
+    if no_vl.is_empty()
+        || no_vl.eq_ignore_ascii_case("LM")
+        || no_vl.len() > 128
+        || !no_vl
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    Some(no_vl)
+}
+
+/// Create a private playlist directly on the signed-in YouTube Music account via InnerTube
+/// `playlist/create`, returning Ferric's canonical synced ID (`ytm:pl:VL<id>`).
+pub fn create_ytm_playlist(
+    session: &YtmSession,
+    title: &str,
+    description: &str,
+    video_ids: &[String],
+) -> ProviderResult<String> {
+    if !session.is_signed_in() {
+        return Err(ProviderError::Http(
+            "Sign in to YouTube Music to save playlists to your account".to_string(),
+        ));
+    }
+    let clean_title = title.trim();
+    if clean_title.is_empty() {
+        return Err(ProviderError::Metadata(
+            "Playlist title cannot be empty".to_string(),
+        ));
+    }
+    let clean_vids: Vec<&str> = video_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|v| is_valid_video_id(v))
+        .take(100)
+        .collect();
+    let mut body = json!({
+        "context": web_remix_context(session),
+        "title": clean_title,
+        "description": description.trim(),
+        "privacyStatus": "PRIVATE",
+    });
+    if !clean_vids.is_empty() {
+        body["videoIds"] = json!(clean_vids);
+    }
+    let resp = post_ytm_json_fast("playlist/create", &body, session)?;
+    let pid = resp
+        .get("playlistId")
+        .and_then(Value::as_str)
+        .and_then(clean_ytm_playlist_id)
+        .ok_or_else(|| {
+            ProviderError::Metadata("YouTube Music did not return a playlistId".to_string())
+        })?;
+    Ok(format!("ytm:pl:VL{pid}"))
+}
+
+/// Append one or more video IDs to an existing playlist on the signed-in YouTube Music account.
+pub fn add_videos_to_ytm_playlist(
+    session: &YtmSession,
+    playlist_id: &str,
+    video_ids: &[String],
+) -> ProviderResult<()> {
+    if !session.is_signed_in() {
+        return Err(ProviderError::Http(
+            "YouTube Music sign-in required".to_string(),
+        ));
+    }
+    let Some(pid) = clean_ytm_playlist_id(playlist_id) else {
+        return Err(ProviderError::Metadata(
+            "Invalid YouTube playlist ID".to_string(),
+        ));
+    };
+    let actions: Vec<Value> = video_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|v| is_valid_video_id(v))
+        .map(|vid| {
+            json!({
+                "action": "ACTION_ADD_VIDEO",
+                "addedVideoId": vid,
+            })
+        })
+        .collect();
+    if actions.is_empty() {
+        return Ok(());
+    }
+    for chunk in actions.chunks(50) {
+        let body = json!({
+            "context": web_remix_context(session),
+            "playlistId": pid,
+            "actions": chunk,
+        });
+        let _ = post_ytm_json_fast("browse/edit_playlist", &body, session)?;
+    }
+    Ok(())
+}
+
+/// Remove a video from an existing playlist on the signed-in YouTube Music account.
+pub fn remove_video_from_ytm_playlist(
+    session: &YtmSession,
+    playlist_id: &str,
+    video_id: &str,
+) -> ProviderResult<()> {
+    if !session.is_signed_in() || !is_valid_video_id(video_id) {
+        return Ok(());
+    }
+    let Some(pid) = clean_ytm_playlist_id(playlist_id) else {
+        return Ok(());
+    };
+    let body = json!({
+        "context": web_remix_context(session),
+        "playlistId": pid,
+        "actions": [{
+            "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID",
+            "removedVideoId": video_id,
+        }],
+    });
+    let _ = post_ytm_json_fast("browse/edit_playlist", &body, session)?;
+    Ok(())
+}
+
+/// Rename a playlist on the signed-in YouTube Music account.
+pub fn rename_ytm_playlist(
+    session: &YtmSession,
+    playlist_id: &str,
+    new_name: &str,
+) -> ProviderResult<()> {
+    if !session.is_signed_in() || new_name.trim().is_empty() {
+        return Ok(());
+    }
+    let Some(pid) = clean_ytm_playlist_id(playlist_id) else {
+        return Ok(());
+    };
+    let body = json!({
+        "context": web_remix_context(session),
+        "playlistId": pid,
+        "actions": [{
+            "action": "ACTION_SET_PLAYLIST_NAME",
+            "playlistName": new_name.trim(),
+        }],
+    });
+    let _ = post_ytm_json_fast("browse/edit_playlist", &body, session)?;
+    Ok(())
+}
+
+/// Delete a playlist from the signed-in YouTube Music account.
+pub fn delete_ytm_playlist(session: &YtmSession, playlist_id: &str) -> ProviderResult<()> {
+    if !session.is_signed_in() {
+        return Ok(());
+    }
+    let Some(pid) = clean_ytm_playlist_id(playlist_id) else {
+        return Ok(());
+    };
+    let body = json!({
+        "context": web_remix_context(session),
+        "playlistId": pid,
+    });
+    let _ = post_ytm_json_fast("playlist/delete", &body, session)?;
+    Ok(())
+}
+
+/// Like or unlike a track on the signed-in YouTube Music account.
+pub fn set_ytm_track_liked(
+    session: &YtmSession,
+    video_id: &str,
+    liked: bool,
+) -> ProviderResult<()> {
+    if !session.is_signed_in() || !is_valid_video_id(video_id) {
+        return Ok(());
+    }
+    let endpoint = if liked {
+        "like/like"
+    } else {
+        "like/removelike"
+    };
+    let body = json!({
+        "context": web_remix_context(session),
+        "target": { "videoId": video_id },
+    });
+    let _ = post_ytm_json_fast(endpoint, &body, session)?;
+    Ok(())
+}
+
 fn is_valid_video_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 32
@@ -5635,6 +5826,16 @@ mod tests {
     fn sha1_matches_rfc3174_nist_vector() {
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
         assert_eq!(sha1_hex(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(
+            clean_ytm_playlist_id("ytm:pl:VLPLabc_123"),
+            Some("PLabc_123")
+        );
+        assert_eq!(
+            clean_ytm_playlist_id("yt:playlist:PLxyz-9"),
+            Some("PLxyz-9")
+        );
+        assert_eq!(clean_ytm_playlist_id("ytm:pl:VLLM"), None);
+        assert_eq!(clean_ytm_playlist_id("ytm:pl:../bad"), None);
     }
 
     #[test]

@@ -390,6 +390,111 @@ impl LibraryDb {
         Ok(())
     }
 
+    /// Replace all ordered track references of an existing playlist atomically (used by Deduplicate).
+    pub fn replace_playlist_tracks(
+        &mut self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> CoreResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+            params![playlist_id],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+            )?;
+            for (pos, track_id) in track_ids.iter().enumerate() {
+                stmt.execute(params![playlist_id, pos as i64, track_id])?;
+            }
+        }
+        tx.execute(
+            "UPDATE playlists SET updated_at = strftime('%s','now') WHERE id = ?1",
+            params![playlist_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically promote a local playlist (`local:pl:...`) to its newly created cloud account ID
+    /// (`spotify:playlist:<id>` or `ytm:pl:VL<id>`) while preserving `created_at`, artwork, and tracks.
+    pub fn migrate_playlist_id(
+        &mut self,
+        old_id: &str,
+        new_id: &str,
+        new_source: TrackSource,
+    ) -> CoreResult<bool> {
+        if old_id == new_id || old_id.is_empty() || new_id.is_empty() {
+            return Ok(false);
+        }
+        struct PlaylistMigrationRow {
+            name: String,
+            etag: Option<String>,
+            description: String,
+            thumbnail_url: Option<String>,
+            created_at: i64,
+        }
+        let tx = self.conn.transaction()?;
+        let row = tx
+            .query_row(
+                "SELECT name, etag, description, thumbnail_url, created_at FROM playlists WHERE id = ?1",
+                [old_id],
+                |r| {
+                    Ok(PlaylistMigrationRow {
+                        name: r.get(0)?,
+                        etag: r.get(1)?,
+                        description: r.get(2)?,
+                        thumbnail_url: r.get(3)?,
+                        created_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(PlaylistMigrationRow {
+            name,
+            etag,
+            description,
+            thumbnail_url,
+            created_at,
+        }) = row
+        else {
+            return Ok(false);
+        };
+        tx.execute(
+            r#"
+            INSERT INTO playlists (id, name, source, etag, description, thumbnail_url, updated_at, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'), ?7)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                source = excluded.source,
+                description = excluded.description,
+                thumbnail_url = COALESCE(excluded.thumbnail_url, playlists.thumbnail_url),
+                updated_at = strftime('%s','now')
+            "#,
+            params![
+                new_id,
+                name,
+                new_source.as_badge(),
+                etag,
+                description,
+                thumbnail_url,
+                created_at,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+            [new_id],
+        )?;
+        tx.execute(
+            "UPDATE playlist_tracks SET playlist_id = ?1 WHERE playlist_id = ?2",
+            params![new_id, old_id],
+        )?;
+        tx.execute("DELETE FROM playlists WHERE id = ?1", [old_id])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn add_track_to_playlist(&mut self, playlist_id: &str, track_id: &str) -> CoreResult<()> {
         let tx = self.conn.transaction()?;
         let next_pos: i64 = tx.query_row(
@@ -1353,5 +1458,60 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, "local:pl:second");
         assert_eq!(listed[1].id, "local:pl:first");
+    }
+
+    #[test]
+    fn migrate_playlist_id_promotes_local_playlist_to_cloud_account_atomically() {
+        let mut db = LibraryDb::open_in_memory().expect("db");
+        let t1 = Track {
+            id: "sp:track:1".to_string(),
+            title: "Song A".to_string(),
+            artist: "Artist A".to_string(),
+            album: "Album A".to_string(),
+            duration_ms: 180_000,
+            path: None,
+            source: TrackSource::Spotify,
+            codec: "OPUS".to_string(),
+            sample_rate: 48_000,
+            bit_depth: 16,
+            bitrate_kbps: 144,
+            isrc: None,
+            spotify_id: Some("111AAA".to_string()),
+            youtube_video_id: None,
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked: false,
+        };
+        db.upsert_tracks(std::slice::from_ref(&t1)).expect("tracks");
+        let pl = Playlist {
+            id: "local:pl:tmp123".to_string(),
+            name: "Late Night".to_string(),
+            source: TrackSource::Local,
+            etag: None,
+            track_count: 1,
+            description: "Cloud sync test".to_string(),
+            thumbnail_url: None,
+        };
+        db.upsert_playlist(&pl, &[t1.id.clone(), t1.id.clone()])
+            .expect("upsert");
+        db.replace_playlist_tracks(&pl.id, std::slice::from_ref(&t1.id))
+            .expect("replace");
+        let moved = db
+            .migrate_playlist_id(
+                "local:pl:tmp123",
+                "spotify:playlist:abc999",
+                TrackSource::Spotify,
+            )
+            .expect("migrate");
+        assert!(moved);
+        let all = db.list_playlists().expect("list");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "spotify:playlist:abc999");
+        assert_eq!(all[0].source, TrackSource::Spotify);
+        let tracks = db
+            .list_playlist_tracks("spotify:playlist:abc999")
+            .expect("tracks");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, t1.id);
     }
 }

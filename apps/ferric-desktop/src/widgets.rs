@@ -2372,6 +2372,7 @@ impl Widget for FerricAmbientStage {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::MouseMove(mm) = event
             && self.active
+            && self.playing
         {
             let rect = self.draw_bg.area().rect(cx);
             if rect.size.x > 10.0 && rect.size.y > 10.0 && rect.contains(mm.abs) {

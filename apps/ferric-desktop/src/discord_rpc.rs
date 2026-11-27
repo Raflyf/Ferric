@@ -46,6 +46,7 @@ pub struct DiscordTrackSnapshot {
     pub artist: String,
     pub album: String,
     pub cover_url: Option<String>,
+    pub listen_button: Option<(String, String)>,
     pub position_ms: u64,
     pub duration_ms: u64,
     pub is_playing: bool,
@@ -168,6 +169,20 @@ fn normalize_cover_url(url: &str) -> Option<String> {
         return Some(format!("{}=w512-h512-l90-rj", &trimmed[..eq_idx]));
     }
     Some(trimmed.to_string())
+}
+
+fn is_allowed_discord_button_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.len() > 512
+        || trimmed
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '"' | '\\' | '<' | '>'))
+        || trimmed.contains("..")
+    {
+        return false;
+    }
+    trimmed.starts_with("https://open.spotify.com/track/")
+        || trimmed.starts_with("https://music.youtube.com/watch?v=")
 }
 
 fn truncate_discord_field(s: &str, max_chars: usize) -> String {
@@ -308,6 +323,19 @@ pub fn build_set_activity_payload(
         json!(if track.is_playing { "Ferric" } else { "Paused" }),
     );
     activity.insert("assets".to_string(), Value::Object(assets));
+
+    if cfg.show_listen_button
+        && let Some((label, url)) = &track.listen_button
+        && is_allowed_discord_button_url(url)
+    {
+        let btn_label = truncate_discord_field(label, 32);
+        if !btn_label.is_empty() {
+            activity.insert(
+                "buttons".to_string(),
+                json!([{ "label": btn_label, "url": url.trim() }]),
+            );
+        }
+    }
 
     json!({
         "cmd": "SET_ACTIVITY",
@@ -599,6 +627,7 @@ mod tests {
             status_format: DiscordStatusFormat::ArtistTitle,
             show_when_paused: false,
             show_cover_art: true,
+            show_listen_button: true,
             hide_details: false,
         };
         let snap = DiscordTrackSnapshot {
@@ -606,11 +635,23 @@ mod tests {
             artist: "The Walters".to_string(),
             album: "Songs for Dads".to_string(),
             cover_url: Some("https://lh3.googleusercontent.com/abc=w60-h60-l90-rj".to_string()),
+            listen_button: Some((
+                "Listen on Spotify".to_string(),
+                "https://open.spotify.com/track/2plbrEY59IikOBgBGLjaoe".to_string(),
+            )),
             position_ms: 30_000,
             duration_ms: 160_000,
             is_playing: true,
         };
         let payload = build_set_activity_payload(&cfg, Some(&snap), 999, 1, 1_750_000_000);
+        assert_eq!(
+            payload["args"]["activity"]["buttons"][0]["label"],
+            "Listen on Spotify"
+        );
+        assert_eq!(
+            payload["args"]["activity"]["buttons"][0]["url"],
+            "https://open.spotify.com/track/2plbrEY59IikOBgBGLjaoe"
+        );
         assert_eq!(payload["args"]["activity"]["type"], 2);
         assert_eq!(payload["args"]["activity"]["status_display_type"], 1);
         assert_eq!(payload["args"]["activity"]["details"], "I Love You So");
@@ -665,12 +706,53 @@ mod tests {
             artist: "Artist".to_string(),
             album: "Album".to_string(),
             cover_url: None,
+            listen_button: None,
             position_ms: 10_000,
             duration_ms: 100_000,
             is_playing: false,
         };
         let payload = build_set_activity_payload(&cfg, Some(&snap), 1, 2, 1_750_000_000);
         assert!(payload["args"]["activity"].is_null());
+    }
+
+    #[test]
+    fn discord_listen_button_respects_toggle_privacy_and_url_allowlist() {
+        let snap = DiscordTrackSnapshot {
+            title: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            cover_url: None,
+            listen_button: Some((
+                "Listen on YouTube Music".to_string(),
+                "https://music.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
+            )),
+            position_ms: 5_000,
+            duration_ms: 180_000,
+            is_playing: true,
+        };
+        let off_cfg = DiscordRpcSettings {
+            enabled: true,
+            show_listen_button: false,
+            ..Default::default()
+        };
+        let off_payload = build_set_activity_payload(&off_cfg, Some(&snap), 1, 3, 1_750_000_000);
+        assert!(off_payload["args"]["activity"].get("buttons").is_none());
+
+        let evil_snap = DiscordTrackSnapshot {
+            listen_button: Some((
+                "Click".to_string(),
+                "https://evil.example/phish".to_string(),
+            )),
+            ..snap
+        };
+        let on_cfg = DiscordRpcSettings {
+            enabled: true,
+            show_listen_button: true,
+            ..Default::default()
+        };
+        let evil_payload =
+            build_set_activity_payload(&on_cfg, Some(&evil_snap), 1, 4, 1_750_000_000);
+        assert!(evil_payload["args"]["activity"].get("buttons").is_none());
     }
 
     #[test]

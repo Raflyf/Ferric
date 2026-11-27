@@ -17,10 +17,11 @@ use crate::shell::{
 };
 use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::state::{
-    BgMessage, CollectionGroup, DetailViewState, LibraryFilter, MainPage, NavEntry, NavHistory,
-    PlaylistSortOrder, PlaylistSourceFilter, SearchFilter, SettingsTab, SleepTimerMode, SortField,
-    StationTracksPayload, StreamReadyPayload, build_album_groups, build_artist_groups, clip_text,
-    collection_share_url, dir_size_bytes, format_bytes_mb, format_collection_csv,
+    BgMessage, CollectionGroup, DetailSortOrder, DetailViewState, LibraryFilter, MainPage,
+    NavEntry, NavHistory, PlaylistSortOrder, PlaylistSourceFilter, SearchFilter, SettingsTab,
+    SleepTimerMode, SortField, StationTracksPayload, StreamReadyPayload, build_album_groups,
+    build_artist_groups, clip_text, cmp_ascii_icase, collection_share_url, contains_ascii_icase,
+    deduplicate_tracks_in_order, dir_size_bytes, format_bytes_mb, format_collection_csv,
     format_collection_tracklist, track_primary_link, track_youtube_link,
 };
 use crate::track_list::{TrackListAction, TrackListScope, TrackListWidgetRefExt};
@@ -28,7 +29,7 @@ use crate::video_player::{NativeVideoPlayer, VideoViewportRect};
 use crate::widgets::*;
 use crate::{startup_load_demo, startup_page_override, startup_play_first};
 use ferric_audio::demo_synth::ensure_demo_tracks;
-use ferric_audio::engine::{AudioEngine, EngineCommand};
+use ferric_audio::engine::{AudioEngine, EngineCommand, list_output_devices};
 use ferric_core::app_data_dir;
 use ferric_core::db::LibraryDb;
 use ferric_core::eq::EqConfig;
@@ -54,7 +55,10 @@ use ferric_providers::public_sync::{
     parse_youtube_target,
 };
 use ferric_providers::spotify_web::{
-    fetch_spotify_playlist_by_id, fetch_spotify_recommended_stations,
+    add_tracks_to_spotify_playlist, create_spotify_playlist, fetch_spotify_playlist_by_id,
+    fetch_spotify_recommended_stations, remove_tracks_from_spotify_playlist,
+    rename_spotify_playlist, replace_spotify_playlist_tracks, search_spotify_track_uri,
+    set_spotify_track_liked, unfollow_spotify_playlist,
 };
 use ferric_providers::subsonic::{SubsonicCredentials, sync_subsonic_catalog};
 use ferric_providers::updater::{
@@ -63,11 +67,13 @@ use ferric_providers::updater::{
 };
 use ferric_providers::ytmusic::{
     RecommendedStation, VideoStreamOption, YtmCardKind, YtmHomeTasteProfile, YtmRichHome,
-    YtmRichSearch, YtmSession, YtmShelfCard, build_algorithmic_recommended_stations_rotated,
+    YtmRichSearch, YtmSession, YtmShelfCard, add_videos_to_ytm_playlist,
+    build_algorithmic_recommended_stations_rotated, create_ytm_playlist, delete_ytm_playlist,
     expand_recommended_station_tracks, fetch_account_library, fetch_browse_detail,
     fetch_home_continuation, fetch_radio_up_next_for_track, fetch_rich_home, fetch_rich_search,
-    normalize_ytm_thumbnail_url, resolve_and_cache_audio_stream_with_quality,
-    resolve_best_video_id_for_track, resolve_music_video_streams,
+    normalize_ytm_thumbnail_url, remove_video_from_ytm_playlist, rename_ytm_playlist,
+    resolve_and_cache_audio_stream_with_quality, resolve_best_video_id_for_track,
+    resolve_music_video_streams, set_ytm_track_liked,
 };
 use ferric_sync::{
     ActiveSpeakerLease, LanDiscoveryBeacon, PairingPayload, QrMatrix, detect_local_lan_ip,
@@ -2512,6 +2518,8 @@ live_design! {
                                                 width: Fill, height: Fit, margin: { top: 2 }, flow: Right, spacing: 6,
                                                 detail_copy_list_btn = <FerricBtn> { height: 26, text: "Copy Tracklist" }
                                                 detail_open_source_btn = <FerricBtn> { visible: false, height: 26, text: "Open Source" }
+                                                detail_cloud_push_btn = <FerricBtn> { visible: false, height: 26, text: "Sync to Account" }
+                                                detail_dedup_btn = <FerricBtn> { visible: false, height: 26, text: "Deduplicate" }
                                                 detail_export_btn = <FerricBtn> { height: 26, text: "Export M3U" }
                                                 detail_export_csv_btn = <FerricBtn> { height: 26, text: "Export CSV" }
                                                 detail_delete_btn = <FerricBtn> {
@@ -2522,18 +2530,19 @@ live_design! {
                                                 }
                                             }
                                             detail_tools_row = <View> {
-                                                width: Fill, height: Fit, margin: { top: 2 }, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                width: Fill, height: Fit, margin: { top: 2 }, flow: Right, align: { y: 0.5 }, spacing: 6,
                                                 detail_filter_input = <FerricInput> {
-                                                    width: 210,
+                                                    width: 195,
                                                     height: 26,
                                                     empty_text: "Filter songs in list..."
                                                     draw_text: { text_style: <THEME_FONT_REGULAR> { font_size: 8.4, line_spacing: 1.0 } }
                                                 }
+                                                detail_sort_btn = <FerricBtn> { height: 26, text: "Sort: Default" }
                                                 detail_rename_row = <View> {
                                                     visible: false,
                                                     width: Fit, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
                                                     detail_rename_input = <FerricInput> {
-                                                        width: 170,
+                                                        width: 155,
                                                         height: 26,
                                                         empty_text: "Rename playlist..."
                                                         draw_text: { text_style: <THEME_FONT_REGULAR> { font_size: 8.4, line_spacing: 1.0 } }
@@ -2660,6 +2669,33 @@ live_design! {
                                     tab_playback = <View> {
                                         visible: false,
                                         width: Fill, height: Fit, flow: Down, spacing: 10,
+
+                                        card_pb_device = <FerricCard> {
+                                            flow: Down, spacing: 8,
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                lbl_t_pb_dev = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Audio Output Device (WASAPI)" }
+                                                pb_device_active_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.6 } }, text: "Active: System Default" }
+                                            }
+                                            lbl_m_pb_dev = <Label> {
+                                                width: Fill,
+                                                draw_text: { wrap: Word, color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.4 } }
+                                                text: "Switch between headphones, speakers, USB DAC, or Bluetooth output live without restarting playback. Automatically falls back to Windows default if unplugged."
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                pb_device_cycle_btn = <FerricBtn> { height: 26, text: "Output: System Default" }
+                                                pb_device_refresh_btn = <FerricBtn> { height: 26, text: "Refresh Devices" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, spacing: 5,
+                                                pb_dev_default = <FerricChipBtn> { height: 24, text: "System Default", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
+                                                pb_dev_0 = <FerricChipBtn> { visible: false, height: 24, text: "" }
+                                                pb_dev_1 = <FerricChipBtn> { visible: false, height: 24, text: "" }
+                                                pb_dev_2 = <FerricChipBtn> { visible: false, height: 24, text: "" }
+                                                pb_dev_3 = <FerricChipBtn> { visible: false, height: 24, text: "" }
+                                            }
+                                        }
 
                                         card_pb_xfade = <FerricCard> {
                                             flow: Down, spacing: 9,
@@ -3059,6 +3095,11 @@ live_design! {
                                             }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
+                                                lbl_t_disc_btn = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Show 'Listen on Spotify / YouTube' button" }
+                                                discord_button_toggle = <FerricToggle> { is_on: true }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
                                                 lbl_t_disc_hide = <Label> { width: Fill, draw_text: { color: #DCDCE6, text_style: <THEME_FONT_REGULAR> { font_size: 9.0 } }, text: "Hide track details (Privacy mode)" }
                                                 discord_hide_details_toggle = <FerricToggle> { is_on: false }
                                             }
@@ -3109,7 +3150,7 @@ live_design! {
                                         card_st_keys = <FerricCard> {
                                             flow: Down, spacing: 5,
                                             lbl_t_st_keys = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Keyboard Shortcuts" }
-                                            lbl_m_st_keys = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Space: Play / Pause  ·  Ctrl+K: Focus Search  ·  Ctrl+P: Powerbar  ·  Ctrl+F: Search Page  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down / Mouse Wheel: Volume" }
+                                            lbl_m_st_keys = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Space: Play / Pause  ·  Ctrl+K: Focus Search  ·  Ctrl+P: Powerbar  ·  Ctrl+Shift+C: Copy Song Link  ·  Ctrl+F: Search Page  ·  Ctrl+Q: Queue  ·  Ctrl+L: Lyrics  ·  Ctrl+ / Ctrl- / Ctrl+0: UI Zoom  ·  Ctrl+,: Settings  ·  F11: Fullscreen  ·  Alt+Left/Right: Back/Forward  ·  Shift+Left/Right: Prev/Next  ·  Ctrl+Up/Down / Mouse Wheel: Volume" }
                                         }
                                     }
 
@@ -3234,11 +3275,11 @@ live_design! {
                                 spacing: 6,
                                 draw_bg: { base_col: #09090D }
 
-                                // Right Sidebar Header Tabs: [Queue] [Lyrics] + [Radio] [Refresh] [Clear]
+                                // Right Sidebar Header Tabs: [Queue] [Lyrics] + [Radio] [Save] [Copy] [Refresh] [Clear]
                                 <View> {
-                                    width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 4,
-                                    rs_tab_queue = <FerricChipBtn> { height: 24, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
-                                    rs_tab_lyrics = <FerricChipBtn> { height: 24, text: "Lyrics" }
+                                    width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 3,
+                                    rs_tab_queue = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
+                                    rs_tab_lyrics = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Lyrics" }
                                     <View> { width: Fill, height: 1 }
                                     rs_radio_btn = <FerricIconBtn> {
                                         width: 24, height: 24,
@@ -3247,6 +3288,14 @@ live_design! {
                                             svg_path: "M3.24 6.15C2.51 6.43 2 7.17 2 8V20C2 21.1 2.89 22 4 22H20C21.11 22 22 21.1 22 20V8C22 6.89 21.11 6 20 6H8.3L16.56 2.66L15.88 1L3.24 6.15ZM7 20C5.34 20 4 18.66 4 17C4 15.34 5.34 14 7 14C8.66 14 10 15.34 10 17C10 18.66 8.66 20 7 20ZM20 12H18V10H16V12H4V8H20V12Z"
                                             color: #E86A2C
                                         }
+                                    }
+                                    rs_save_queue_btn = <FerricIconBtn> {
+                                        width: 24, height: 24,
+                                        draw_icon: { svg_path: "M14 10H3V12H14V10ZM14 6H3V8H14V6ZM18 14V10H16V14H12V16H16V20H18V16H22V14H18ZM3 16H10V14H3V16Z" }
+                                    }
+                                    rs_copy_queue_btn = <FerricIconBtn> {
+                                        width: 24, height: 24,
+                                        draw_icon: { svg_path: "M16 1H4C2.9 1 2 1.9 2 3V17H4V3H16V1ZM19 5H8C6.9 5 6 5.9 6 7V21C6 22.1 6.9 23 8 23H19C20.1 23 21 22.1 21 21V7C21 5.9 20.1 5 19 5ZM19 21H8V7H19V21Z" }
                                     }
                                     rs_refresh_queue_btn = <FerricIconBtn> {
                                         width: 24, height: 24,
@@ -3382,12 +3431,17 @@ live_design! {
                                         draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 9.6, line_spacing: 1.0 } }
                                         text: "Ready to play"
                                     }
-                                    np_artist_lbl = <Label> {
+                                    np_artist_hit = <View> {
                                         width: Fill,
-                                        flow: Right,
-                                        padding: 0,
-                                        draw_text: { color: #A2A6B8, text_style: <THEME_FONT_REGULAR> { font_size: 8.3, line_spacing: 1.0 } }
-                                        text: "Pick a song to play"
+                                        height: Fit,
+                                        cursor: Hand,
+                                        np_artist_lbl = <Label> {
+                                            width: Fill,
+                                            flow: Right,
+                                            padding: 0,
+                                            draw_text: { color: #A2A6B8, text_style: <THEME_FONT_REGULAR> { font_size: 8.3, line_spacing: 1.0 } }
+                                            text: "Pick a song to play"
+                                        }
                                     }
                                 }
                                 np_like_btn = <FerricIconBtn> {
@@ -3878,7 +3932,7 @@ live_design! {
                         draw_bg: { color: #000000A8 }
 
                         card_cmdk = <FerricCard> {
-                            width: 480,
+                            width: 510,
                             padding: 14,
                             flow: Down,
                             spacing: 10,
@@ -3907,6 +3961,13 @@ live_design! {
                                 cmdk_google_btn = <FerricBtn> { height: 26, text: "Google Login" }
                                 cmdk_fs_btn = <FerricBtn> { height: 26, text: "Fullscreen" }
                                 cmdk_demo_btn = <FerricBtn> { height: 26, text: "Offline Demo" }
+                            }
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, spacing: 5,
+                                cmdk_copy_link_btn = <FerricBtn> { height: 26, text: "Copy Song Link" }
+                                cmdk_copy_pl_btn = <FerricBtn> { height: 26, text: "Copy Playlist Link" }
+                                cmdk_save_q_btn = <FerricBtn> { height: 26, text: "Save Queue" }
+                                cmdk_about_btn = <FerricBtn> { height: 26, text: "About & Updates" }
                             }
                         }
                     }
@@ -4220,6 +4281,18 @@ pub struct App {
     detail_tracks: Rc<Vec<Track>>,
     #[rust]
     detail_filter_query: String,
+    #[rust]
+    detail_sort_order: DetailSortOrder,
+    #[rust]
+    output_devices: Vec<String>,
+    #[rust]
+    session_save_dirty_at: Option<Instant>,
+    #[rust]
+    last_fs_viz_playing: Option<bool>,
+    #[rust]
+    last_tick_pos_ms: u64,
+    #[rust]
+    last_tick_dur_ms: u64,
     #[rust]
     queue: PlayQueue,
     #[rust]
@@ -5653,7 +5726,8 @@ impl App {
         self.queue.repeat = self.session_state.repeat;
         self.db = db;
 
-        let audio = AudioEngine::start(self.eq.clone())
+        self.output_devices = list_output_devices();
+        let audio = AudioEngine::start_with_device(self.eq.clone(), self.dsp.output_device.clone())
             .unwrap_or_else(|_| AudioEngine::start_headless(self.eq.clone()));
         audio.send(EngineCommand::SetDspSettings(self.dsp.clone()));
         audio.send(EngineCommand::SetVolume(self.session_state.volume));
@@ -5865,6 +5939,7 @@ impl App {
             && let Some(det) = entry.detail
         {
             self.detail_filter_query.clear();
+            self.detail_sort_order = DetailSortOrder::Original;
             self.ui
                 .text_input(id!(detail_filter_input))
                 .set_text(cx, "");
@@ -7199,6 +7274,7 @@ impl App {
             id!(discord_enable_toggle),
             id!(discord_paused_toggle),
             id!(discord_cover_toggle),
+            id!(discord_button_toggle),
             id!(discord_hide_details_toggle),
             id!(auto_update_toggle),
         ] {
@@ -7214,6 +7290,7 @@ impl App {
             id!(eq_preamp_lbl),
             id!(connect_lan_ip_lbl),
             id!(about_version_lbl),
+            id!(pb_device_active_lbl),
             id!(xfade_val_lbl),
             id!(fadein_val_lbl),
             id!(detail_kind_lbl),
@@ -7373,12 +7450,12 @@ impl App {
                 .collect(),
         };
 
-        let q_filter = self.songs_filter_query.trim().to_ascii_lowercase();
+        let q_filter = self.songs_filter_query.trim();
         if !q_filter.is_empty() {
             list.retain(|t| {
-                t.title.to_ascii_lowercase().contains(&q_filter)
-                    || t.artist.to_ascii_lowercase().contains(&q_filter)
-                    || t.album.to_ascii_lowercase().contains(&q_filter)
+                contains_ascii_icase(&t.title, q_filter)
+                    || contains_ascii_icase(&t.artist, q_filter)
+                    || contains_ascii_icase(&t.album, q_filter)
             });
         }
 
@@ -7389,43 +7466,38 @@ impl App {
 
         match self.sort_field {
             SortField::Recent => {
-                let recents = &self.session_state.recent_track_ids;
+                let recent_rank: HashMap<&str, usize> = self
+                    .session_state
+                    .recent_track_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| (id.as_str(), i))
+                    .collect();
                 list.sort_by(|a, b| {
-                    let ra = recents
-                        .iter()
-                        .position(|id| id == &a.id)
+                    let ra = recent_rank
+                        .get(a.id.as_str())
+                        .copied()
                         .unwrap_or(usize::MAX);
-                    let rb = recents
-                        .iter()
-                        .position(|id| id == &b.id)
+                    let rb = recent_rank
+                        .get(b.id.as_str())
+                        .copied()
                         .unwrap_or(usize::MAX);
                     ra.cmp(&rb)
                         .then_with(|| b.liked.cmp(&a.liked))
                         .then_with(|| {
                             (b.source == TrackSource::Local).cmp(&(a.source == TrackSource::Local))
                         })
-                        .then_with(|| {
-                            a.title
-                                .to_ascii_lowercase()
-                                .cmp(&b.title.to_ascii_lowercase())
-                        })
+                        .then_with(|| cmp_ascii_icase(&a.title, &b.title))
                 });
             }
             SortField::Artist => list.sort_by(|a, b| {
-                a.artist
-                    .to_ascii_lowercase()
-                    .cmp(&b.artist.to_ascii_lowercase())
-                    .then_with(|| a.title.cmp(&b.title))
+                cmp_ascii_icase(&a.artist, &b.artist)
+                    .then_with(|| cmp_ascii_icase(&a.title, &b.title))
             }),
-            SortField::Title => list.sort_by(|a, b| {
-                a.title
-                    .to_ascii_lowercase()
-                    .cmp(&b.title.to_ascii_lowercase())
-            }),
+            SortField::Title => list.sort_by(|a, b| cmp_ascii_icase(&a.title, &b.title)),
             SortField::Album => list.sort_by(|a, b| {
-                a.album
-                    .to_ascii_lowercase()
-                    .cmp(&b.album.to_ascii_lowercase())
+                cmp_ascii_icase(&a.album, &b.album)
+                    .then_with(|| cmp_ascii_icase(&a.title, &b.title))
             }),
             SortField::Duration => list.sort_by_key(|t| std::cmp::Reverse(t.duration_ms)),
         }
@@ -9024,6 +9096,11 @@ impl App {
             && self.playlists.iter().any(|p| p.id == self.detail_state.id);
         let has_tracks = !self.detail_state.tracks.is_empty();
         let has_share_url = self.detail_share_link().is_some();
+        let can_push_cloud = is_saved_pl
+            && self.detail_state.id.starts_with("local:pl:")
+            && self
+                .preferred_cloud_write_target(&self.detail_state.tracks)
+                .is_some();
         self.ui
             .button(id!(detail_save_pl_btn))
             .set_visible(cx, !is_saved_pl && !self.detail_state.loading && has_tracks);
@@ -9033,6 +9110,12 @@ impl App {
         self.ui
             .button(id!(detail_open_source_btn))
             .set_visible(cx, has_share_url);
+        self.ui
+            .button(id!(detail_cloud_push_btn))
+            .set_visible(cx, can_push_cloud);
+        self.ui
+            .button(id!(detail_dedup_btn))
+            .set_visible(cx, is_saved_pl && self.detail_state.tracks.len() >= 2);
         self.ui
             .button(id!(detail_copy_list_btn))
             .set_visible(cx, has_tracks);
@@ -9045,6 +9128,12 @@ impl App {
         self.ui
             .text_input(id!(detail_filter_input))
             .set_visible(cx, has_tracks);
+        self.ui
+            .button(id!(detail_sort_btn))
+            .set_visible(cx, has_tracks);
+        self.ui
+            .button(id!(detail_sort_btn))
+            .set_text(cx, self.detail_sort_order.label());
         self.ui
             .view(id!(detail_rename_row))
             .set_visible(cx, is_saved_pl);
@@ -9112,10 +9201,10 @@ impl App {
             self.all_tracks = db.list_tracks("").unwrap_or_default();
             self.playlists = db.list_playlists().unwrap_or_default();
         }
-        self.detail_state.id = pl_id;
+        self.detail_state.id = pl_id.clone();
         self.detail_state.kind = YtmCardKind::Playlist;
         self.detail_state.is_radio_station = false;
-        self.detail_state.description = desc;
+        self.detail_state.description = desc.clone();
         self.detail_state.thumbnail_url = thumb;
         if let Some(hist) = &mut self.nav_history {
             hist.update_current_detail(&self.detail_state);
@@ -9123,6 +9212,7 @@ impl App {
         self.refresh_detail_hero(cx);
         self.rebuild_library_views(cx);
         self.refresh_playlists_grid(cx);
+        self.spawn_cloud_create_playlist(pl_id, name.clone(), desc, tracks);
         self.show_toast(
             cx,
             &format!("Saved '{}' to Playlists ({} songs)", name, track_ids.len()),
@@ -9131,6 +9221,7 @@ impl App {
 
     fn open_recommended_station(&mut self, cx: &mut Cx, station: RecommendedStation) {
         self.detail_filter_query.clear();
+        self.detail_sort_order = DetailSortOrder::Original;
         self.ui
             .text_input(id!(detail_filter_input))
             .set_text(cx, "");
@@ -9284,6 +9375,7 @@ impl App {
 
     fn open_local_detail(&mut self, cx: &mut Cx, group: CollectionGroup) {
         self.detail_filter_query.clear();
+        self.detail_sort_order = DetailSortOrder::Original;
         self.ui
             .text_input(id!(detail_filter_input))
             .set_text(cx, "");
@@ -9350,6 +9442,7 @@ impl App {
             let _ = cache.request_url(url);
         }
         self.detail_filter_query.clear();
+        self.detail_sort_order = DetailSortOrder::Original;
         self.ui
             .text_input(id!(detail_filter_input))
             .set_text(cx, "");
@@ -9604,8 +9697,12 @@ impl App {
             .ferric_toggle(id!(discord_cover_toggle))
             .set_active(cx, self.discord_settings.show_cover_art);
         self.ui
+            .ferric_toggle(id!(discord_button_toggle))
+            .set_active(cx, self.discord_settings.show_listen_button);
+        self.ui
             .ferric_toggle(id!(discord_hide_details_toggle))
             .set_active(cx, self.discord_settings.hide_details);
+        self.refresh_output_device_ui(cx);
         self.ui
             .text_input(id!(discord_client_id_input))
             .set_text(cx, &self.discord_settings.client_id);
@@ -9718,6 +9815,7 @@ impl App {
             id!(card_acct_spotify_web),
             id!(card_acct_import),
             id!(card_acct_sub),
+            id!(card_pb_device),
             id!(card_pb_xfade),
             id!(card_pb_quality),
             id!(card_pb_behavior),
@@ -10137,9 +10235,14 @@ impl App {
             id!(detail_queue_btn),
             id!(detail_copy_list_btn),
             id!(detail_open_source_btn),
+            id!(detail_cloud_push_btn),
+            id!(detail_dedup_btn),
+            id!(detail_sort_btn),
             id!(detail_export_btn),
             id!(detail_export_csv_btn),
             id!(detail_rename_btn),
+            id!(pb_device_cycle_btn),
+            id!(pb_device_refresh_btn),
             id!(yt_sync_btn),
             id!(yt_logout_btn),
             id!(guest_refresh_btn),
@@ -10224,6 +10327,10 @@ impl App {
             id!(cmdk_google_btn),
             id!(cmdk_fs_btn),
             id!(cmdk_demo_btn),
+            id!(cmdk_copy_link_btn),
+            id!(cmdk_copy_pl_btn),
+            id!(cmdk_save_q_btn),
+            id!(cmdk_about_btn),
             id!(tm_close_btn),
             id!(tm_play_next_btn),
             id!(tm_add_queue_btn),
@@ -10437,6 +10544,8 @@ impl App {
             id!(pl_prev_btn),
             id!(pl_next_btn),
             id!(rs_radio_btn),
+            id!(rs_save_queue_btn),
+            id!(rs_copy_queue_btn),
             id!(rs_refresh_queue_btn),
             id!(rs_clear_btn),
             id!(np_like_btn),
@@ -10575,6 +10684,7 @@ impl App {
             id!(discord_enable_toggle),
             id!(discord_paused_toggle),
             id!(discord_cover_toggle),
+            id!(discord_button_toggle),
             id!(discord_hide_details_toggle),
             id!(auto_update_toggle),
         ] {
@@ -10644,6 +10754,7 @@ impl App {
             id!(lbl_t_acct_spotify_web),
             id!(lbl_t_acct_import),
             id!(lbl_t_acct_sub),
+            id!(lbl_t_pb_dev),
             id!(lbl_t_pb_xfade),
             id!(lbl_t_pb_fadein),
             id!(lbl_t_pb_qual),
@@ -10682,6 +10793,7 @@ impl App {
             id!(lbl_t_disc_fmt),
             id!(lbl_t_disc_paused),
             id!(lbl_t_disc_cover),
+            id!(lbl_t_disc_btn),
             id!(lbl_t_disc_hide),
             id!(lbl_t_disc_id),
             id!(lbl_t_st_cache),
@@ -10719,6 +10831,7 @@ impl App {
             id!(oauth_status_lbl),
             id!(lbl_m_spotify_web),
             id!(spotify_web_status_lbl),
+            id!(lbl_m_pb_dev),
             id!(lbl_m_pb_curve),
             id!(eq_status_lbl),
             id!(eq_f0),
@@ -10794,6 +10907,7 @@ impl App {
         }
 
         self.apply_adaptive_accent_live(cx);
+        self.refresh_output_device_ui(cx);
         if save_db && let Some(db) = &self.db {
             let _ = db.save_theme(&self.theme);
         }
@@ -10847,17 +10961,13 @@ impl App {
             rpc.configure(self.discord_settings.clone());
             if let Some(cur) = self.queue.current() {
                 let snap = self.audio.as_ref().map(|a| a.telemetry());
-                rpc.update_playback(Some(DiscordTrackSnapshot {
-                    title: cur.title.clone(),
-                    artist: cur.artist.clone(),
-                    album: cur.album.clone(),
-                    cover_url: cur.thumbnail_url.clone(),
-                    position_ms: snap.as_ref().map_or(0, |s| s.position_ms),
-                    duration_ms: snap
-                        .as_ref()
+                rpc.update_playback(Some(Self::build_discord_snapshot(
+                    cur,
+                    snap.as_ref().map_or(0, |s| s.position_ms),
+                    snap.as_ref()
                         .map_or(cur.duration_ms, |s| s.duration_ms.max(cur.duration_ms)),
-                    is_playing: snap.as_ref().is_some_and(|s| s.is_playing),
-                }));
+                    snap.as_ref().is_some_and(|s| s.is_playing),
+                )));
             }
         }
         self.sync_controls_from_state(cx);
@@ -11236,12 +11346,13 @@ impl App {
             && let Some(db) = &self.db
             && let Ok(updated) = db.list_playlist_tracks(playlist_id)
         {
-            self.detail_state.tracks = updated.clone();
-            self.detail_tracks = Rc::new(updated);
+            self.detail_state.tracks = updated;
+            self.rebuild_detail_tracks_view();
             self.refresh_detail_hero(cx);
         }
         self.refresh_playlists_grid(cx);
         self.rebuild_library_views(cx);
+        self.spawn_cloud_add_track(playlist_id.to_string(), track.clone());
         self.show_toast(
             cx,
             &format!(
@@ -11322,11 +11433,12 @@ impl App {
                 let _ = db.remove_track_from_playlist(&pl_id, &target.id);
                 self.playlists = db.list_playlists().unwrap_or_default();
                 let updated = db.list_playlist_tracks(&pl_id).unwrap_or_default();
-                self.detail_state.tracks = updated.clone();
-                self.detail_tracks = Rc::new(updated);
+                self.detail_state.tracks = updated;
+                self.rebuild_detail_tracks_view();
             }
             self.refresh_detail_hero(cx);
             self.refresh_playlists_grid(cx);
+            self.spawn_cloud_remove_track(pl_id, target.clone());
             self.show_toast(cx, &format!("Removed '{title}' from playlist"));
             return;
         }
@@ -11385,7 +11497,7 @@ impl App {
             self.search_tracks = Rc::new(next_search);
         } else if self.active_page == MainPage::Detail {
             self.detail_state.tracks.retain(|t| t.id != target.id);
-            self.detail_tracks = Rc::new(self.detail_state.tracks.clone());
+            self.rebuild_detail_tracks_view();
             self.refresh_detail_hero(cx);
         }
         self.sync_next_deck_to_engine();
@@ -11450,6 +11562,521 @@ impl App {
         );
     }
 
+    fn build_discord_snapshot(
+        track: &Track,
+        position_ms: u64,
+        duration_ms: u64,
+        is_playing: bool,
+    ) -> DiscordTrackSnapshot {
+        let listen_button =
+            track_primary_link(track).map(|(platform, url)| (format!("Listen on {platform}"), url));
+        DiscordTrackSnapshot {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            cover_url: track.thumbnail_url.clone(),
+            listen_button,
+            position_ms,
+            duration_ms,
+            is_playing,
+        }
+    }
+
+    fn mark_session_dirty(&mut self) {
+        self.session_save_dirty_at = Some(Instant::now() + Duration::from_millis(400));
+    }
+
+    fn flush_session_state_now(&mut self) {
+        if self.session_save_dirty_at.take().is_some()
+            && let Some(db) = &self.db
+        {
+            let _ = db.save_session_state(&self.session_state);
+        }
+    }
+
+    fn refresh_output_device_ui(&self, cx: &mut Cx) {
+        let active_name = self
+            .audio
+            .as_ref()
+            .map_or("System Default", AudioEngine::active_device_name);
+        let pref = self.dsp.output_device.as_deref();
+        self.ui
+            .label(id!(pb_device_active_lbl))
+            .set_text(cx, &format!("Active: {}", clip_text(active_name, 38)));
+        self.ui.button(id!(pb_device_cycle_btn)).set_text(
+            cx,
+            &format!(
+                "Output: {}",
+                clip_text(pref.unwrap_or("System Default"), 34)
+            ),
+        );
+        self.style_chip_btn(cx, id!(pb_dev_default), pref.is_none());
+        for (i, cid) in [id!(pb_dev_0), id!(pb_dev_1), id!(pb_dev_2), id!(pb_dev_3)]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(dev_name) = self.output_devices.get(i) {
+                self.ui.button(cid).set_visible(cx, true);
+                self.ui.button(cid).set_text(cx, &clip_text(dev_name, 22));
+                let is_sel = pref.is_some_and(|p| p.eq_ignore_ascii_case(dev_name));
+                self.style_chip_btn(cx, cid, is_sel);
+            } else {
+                self.ui.button(cid).set_visible(cx, false);
+            }
+        }
+    }
+
+    fn select_output_device(&mut self, cx: &mut Cx, preferred: Option<String>) {
+        let cleaned = preferred
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        self.dsp.output_device = cleaned.clone();
+        if let Some(db) = &self.db {
+            let _ = db.save_playback_dsp(&self.dsp);
+        }
+        let msg = if let Some(audio) = &mut self.audio {
+            match audio.switch_output_device(cleaned) {
+                Ok(active) => format!("Audio output: {}", clip_text(&active, 38)),
+                Err(err) => format!("Audio output switch failed: {err}"),
+            }
+        } else {
+            "Audio output preference saved".to_string()
+        };
+        self.refresh_output_device_ui(cx);
+        self.show_toast(cx, &msg);
+    }
+
+    fn active_spotify_write_token(&self) -> Option<String> {
+        if self.accounts.spotify_web_connected
+            && !self.accounts.spotify_web_access_token.trim().is_empty()
+        {
+            return Some(self.accounts.spotify_web_access_token.trim().to_string());
+        }
+        if self.accounts.spotify_connected && !self.accounts.spotify_access_token.trim().is_empty()
+        {
+            return Some(self.accounts.spotify_access_token.trim().to_string());
+        }
+        None
+    }
+
+    fn preferred_cloud_write_target(&self, tracks: &[Track]) -> Option<TrackSource> {
+        let has_sp = self.active_spotify_write_token().is_some();
+        let has_yt = self.current_ytm_session().is_signed_in();
+        match (has_sp, has_yt) {
+            (false, false) => None,
+            (true, false) => Some(TrackSource::Spotify),
+            (false, true) => Some(TrackSource::YouTubeMusic),
+            (true, true) => {
+                let yt_count = tracks
+                    .iter()
+                    .filter(|t| t.source == TrackSource::YouTubeMusic && t.spotify_id.is_none())
+                    .count();
+                let sp_count = tracks
+                    .iter()
+                    .filter(|t| t.source == TrackSource::Spotify || t.spotify_id.is_some())
+                    .count();
+                if yt_count > sp_count {
+                    Some(TrackSource::YouTubeMusic)
+                } else {
+                    Some(TrackSource::Spotify)
+                }
+            }
+        }
+    }
+
+    fn spawn_cloud_create_playlist(
+        &self,
+        local_id: String,
+        name: String,
+        description: String,
+        tracks: Vec<Track>,
+    ) {
+        let Some(target) = self.preferred_cloud_write_target(&tracks) else {
+            return;
+        };
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        match target {
+            TrackSource::Spotify => {
+                let Some(token) = self.active_spotify_write_token() else {
+                    return;
+                };
+                thread::spawn(move || {
+                    let mut uris = Vec::with_capacity(tracks.len());
+                    let mut skipped = 0usize;
+                    let mut search_lookups = 0usize;
+                    for t in &tracks {
+                        if let Some(sid) = t
+                            .spotify_id
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            uris.push(sid.to_string());
+                        } else if search_lookups < 25 {
+                            search_lookups += 1;
+                            match search_spotify_track_uri(&token, &t.title, &t.artist) {
+                                Ok(Some(found)) => uris.push(found),
+                                _ => skipped += 1,
+                            }
+                        } else {
+                            skipped += 1;
+                        }
+                    }
+                    match create_spotify_playlist(&token, &name, &description, &uris) {
+                        Ok(remote_id) => {
+                            let _ = tx.send(BgMessage::CloudPlaylistCreated {
+                                local_id,
+                                remote_id,
+                                source: TrackSource::Spotify,
+                                provider_label: "Spotify",
+                                name,
+                                pushed_tracks: uris.len(),
+                                skipped_tracks: skipped,
+                            });
+                        }
+                        Err(ferric_providers::spotify_web::SpotifyWebSyncError::AuthExpired) => {
+                            let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(
+                                "Saved locally (Spotify session expired; sign in again to sync to account)".to_string(),
+                            ));
+                        }
+                        Err(
+                            ferric_providers::spotify_web::SpotifyWebSyncError::FallbackToRest(err),
+                        ) => {
+                            let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(format!(
+                                "Saved locally (Spotify sync failed: {})",
+                                clip_text(&err, 60)
+                            )));
+                        }
+                    }
+                });
+            }
+            TrackSource::YouTubeMusic => {
+                let session = self.current_ytm_session();
+                if !session.is_signed_in() {
+                    return;
+                }
+                thread::spawn(move || {
+                    let mut vids = Vec::with_capacity(tracks.len());
+                    let mut skipped = 0usize;
+                    let mut lookups = 0usize;
+                    for t in &tracks {
+                        if let Some(vid) = t
+                            .youtube_video_id
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            vids.push(vid.to_string());
+                        } else if lookups < 25 {
+                            lookups += 1;
+                            let q = format!("{} {}", t.artist, t.title);
+                            if let Ok(found) =
+                                ferric_providers::ytmusic::search_music(&session, &q, 3)
+                                && let Some(vid) =
+                                    found.first().and_then(|x| x.youtube_video_id.clone())
+                            {
+                                vids.push(vid);
+                            } else {
+                                skipped += 1;
+                            }
+                        } else {
+                            skipped += 1;
+                        }
+                    }
+                    match create_ytm_playlist(&session, &name, &description, &vids) {
+                        Ok(remote_id) => {
+                            let _ = tx.send(BgMessage::CloudPlaylistCreated {
+                                local_id,
+                                remote_id,
+                                source: TrackSource::YouTubeMusic,
+                                provider_label: "YouTube Music",
+                                name,
+                                pushed_tracks: vids.len(),
+                                skipped_tracks: skipped,
+                            });
+                        }
+                        Err(err) => {
+                            let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(format!(
+                                "Saved locally (YouTube sync failed: {})",
+                                clip_text(&err.to_string(), 60)
+                            )));
+                        }
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn spawn_cloud_add_track(&self, playlist_id: String, track: Track) {
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        if playlist_id.starts_with("spotify:playlist:")
+            || playlist_id.starts_with("spotify:premium:playlist:")
+        {
+            let Some(token) = self.active_spotify_write_token() else {
+                return;
+            };
+            thread::spawn(move || {
+                let uri = track
+                    .spotify_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        search_spotify_track_uri(&token, &track.title, &track.artist)
+                            .ok()
+                            .flatten()
+                    });
+                let Some(uri) = uri else {
+                    let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(
+                        "Added locally (no matching Spotify track ID found)".to_string(),
+                    ));
+                    return;
+                };
+                match add_tracks_to_spotify_playlist(&token, &playlist_id, &[uri]) {
+                    Ok(()) => {}
+                    Err(ferric_providers::spotify_web::SpotifyWebSyncError::AuthExpired) => {
+                        let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(
+                            "Added locally (Spotify session expired; sign in again to sync)"
+                                .to_string(),
+                        ));
+                    }
+                    Err(ferric_providers::spotify_web::SpotifyWebSyncError::FallbackToRest(e)) => {
+                        let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(format!(
+                            "Added locally (Spotify write failed: {})",
+                            clip_text(&e, 54)
+                        )));
+                    }
+                }
+            });
+        } else if playlist_id.starts_with("ytm:pl:") || playlist_id.starts_with("yt:playlist:") {
+            let session = self.current_ytm_session();
+            if !session.is_signed_in() {
+                return;
+            }
+            thread::spawn(move || {
+                let vid = track
+                    .youtube_video_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        let q = format!("{} {}", track.artist, track.title);
+                        ferric_providers::ytmusic::search_music(&session, &q, 3)
+                            .ok()
+                            .and_then(|v| v.first().and_then(|x| x.youtube_video_id.clone()))
+                    });
+                let Some(vid) = vid else {
+                    return;
+                };
+                if let Err(err) = add_videos_to_ytm_playlist(&session, &playlist_id, &[vid]) {
+                    let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(format!(
+                        "Added locally (YouTube sync failed: {})",
+                        clip_text(&err.to_string(), 54)
+                    )));
+                }
+            });
+        }
+    }
+
+    fn spawn_cloud_remove_track(&self, playlist_id: String, track: Track) {
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        if playlist_id.starts_with("spotify:playlist:")
+            || playlist_id.starts_with("spotify:premium:playlist:")
+        {
+            let Some(token) = self.active_spotify_write_token() else {
+                return;
+            };
+            let Some(sid) = track.spotify_id.filter(|s| !s.trim().is_empty()) else {
+                return;
+            };
+            thread::spawn(move || {
+                if let Err(ferric_providers::spotify_web::SpotifyWebSyncError::AuthExpired) =
+                    remove_tracks_from_spotify_playlist(&token, &playlist_id, &[sid])
+                {
+                    let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(
+                        "Removed locally (Spotify session expired; sign in again)".to_string(),
+                    ));
+                }
+            });
+        } else if playlist_id.starts_with("ytm:pl:") || playlist_id.starts_with("yt:playlist:") {
+            let session = self.current_ytm_session();
+            let Some(vid) = track.youtube_video_id.filter(|s| !s.trim().is_empty()) else {
+                return;
+            };
+            if session.is_signed_in() {
+                thread::spawn(move || {
+                    let _ = remove_video_from_ytm_playlist(&session, &playlist_id, &vid);
+                });
+            }
+        }
+    }
+
+    fn spawn_cloud_rename_playlist(&self, playlist_id: String, new_name: String) {
+        let Some(tx) = self.bg_tx.clone() else {
+            return;
+        };
+        if playlist_id.starts_with("spotify:playlist:")
+            || playlist_id.starts_with("spotify:premium:playlist:")
+        {
+            let Some(token) = self.active_spotify_write_token() else {
+                return;
+            };
+            thread::spawn(move || {
+                if let Err(ferric_providers::spotify_web::SpotifyWebSyncError::AuthExpired) =
+                    rename_spotify_playlist(&token, &playlist_id, &new_name)
+                {
+                    let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(
+                        "Renamed locally (Spotify session expired; sign in again)".to_string(),
+                    ));
+                }
+            });
+        } else if playlist_id.starts_with("ytm:pl:") || playlist_id.starts_with("yt:playlist:") {
+            let session = self.current_ytm_session();
+            if session.is_signed_in() {
+                thread::spawn(move || {
+                    let _ = rename_ytm_playlist(&session, &playlist_id, &new_name);
+                });
+            }
+        }
+    }
+
+    fn spawn_cloud_delete_playlist(&self, playlist_id: String) {
+        if playlist_id.starts_with("spotify:playlist:")
+            || playlist_id.starts_with("spotify:premium:playlist:")
+        {
+            if let Some(token) = self.active_spotify_write_token() {
+                thread::spawn(move || {
+                    let _ = unfollow_spotify_playlist(&token, &playlist_id);
+                });
+            }
+        } else if playlist_id.starts_with("ytm:pl:") || playlist_id.starts_with("yt:playlist:") {
+            let session = self.current_ytm_session();
+            if session.is_signed_in() {
+                thread::spawn(move || {
+                    let _ = delete_ytm_playlist(&session, &playlist_id);
+                });
+            }
+        }
+    }
+
+    fn spawn_cloud_like_track(&self, track: Track, liked: bool) {
+        if let Some(sid) = track.spotify_id.filter(|s| !s.trim().is_empty())
+            && let Some(token) = self.active_spotify_write_token()
+        {
+            thread::spawn(move || {
+                let _ = set_spotify_track_liked(&token, &sid, liked);
+            });
+        } else if let Some(vid) = track.youtube_video_id.filter(|s| !s.trim().is_empty()) {
+            let session = self.current_ytm_session();
+            if session.is_signed_in() {
+                thread::spawn(move || {
+                    let _ = set_ytm_track_liked(&session, &vid, liked);
+                });
+            }
+        }
+    }
+
+    fn collect_queue_tracks(&self) -> Vec<Track> {
+        let mut out = Vec::new();
+        if let Some(cur) = self.queue.current() {
+            out.push(cur.clone());
+        }
+        for t in self.queue.peek_upcoming(100) {
+            if !out.iter().any(|x| x.id == t.id) {
+                out.push(t.clone());
+            }
+        }
+        out
+    }
+
+    fn save_queue_as_playlist(&mut self, cx: &mut Cx) {
+        let tracks = self.collect_queue_tracks();
+        if tracks.is_empty() {
+            self.show_toast(cx, "Queue is empty");
+            return;
+        }
+        let ctx = self.queue_context.trim();
+        let name = if ctx.is_empty() || ctx.eq_ignore_ascii_case("Queue") {
+            "Saved Queue".to_string()
+        } else {
+            format!("Queue - {}", clip_text(ctx, 28))
+        };
+        let pl_id = format!("local:pl:{}", csprng_hex(6));
+        let track_ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
+        let thumb = tracks.first().and_then(|t| t.thumbnail_url.clone());
+        let pl = Playlist {
+            id: pl_id.clone(),
+            name: name.clone(),
+            source: TrackSource::Local,
+            etag: None,
+            track_count: tracks.len(),
+            description: "Saved from Ferric Queue".to_string(),
+            thumbnail_url: thumb,
+        };
+        if let Some(db) = &mut self.db {
+            let _ = db.upsert_tracks(&tracks);
+            let _ = db.upsert_playlist(&pl, &track_ids);
+            self.all_tracks = db.list_tracks("").unwrap_or_default();
+            self.playlists = db.list_playlists().unwrap_or_default();
+        }
+        self.refresh_playlists_grid(cx);
+        self.rebuild_library_views(cx);
+        self.spawn_cloud_create_playlist(
+            pl_id,
+            name.clone(),
+            "Saved from Ferric Queue".to_string(),
+            tracks.clone(),
+        );
+        self.show_toast(cx, &format!("Saved '{}' ({} songs)", name, tracks.len()));
+    }
+
+    fn copy_queue_tracklist(&mut self, cx: &mut Cx) {
+        let tracks = self.collect_queue_tracks();
+        if tracks.is_empty() {
+            self.show_toast(cx, "Queue is empty");
+            return;
+        }
+        let title = if self.queue_context.trim().is_empty() {
+            "Ferric Queue"
+        } else {
+            self.queue_context.trim()
+        };
+        let txt = format_collection_tracklist(title, None, &tracks);
+        let _ = copy_text_to_clipboard(&txt);
+        self.show_toast(
+            cx,
+            &format!("Copied queue ({} songs) to clipboard", tracks.len()),
+        );
+    }
+
+    fn open_artist_for_name(&mut self, cx: &mut Cx, artist: &str) {
+        let trimmed = artist.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("Pick a song to play") {
+            return;
+        }
+        if let Some(g) = self
+            .artist_groups
+            .iter()
+            .find(|g| g.title.eq_ignore_ascii_case(trimmed))
+            .cloned()
+        {
+            self.open_local_detail(cx, g);
+        } else {
+            self.spawn_rich_search(cx, trimmed.to_string());
+        }
+    }
+
     fn detail_share_link(&self) -> Option<(&'static str, String)> {
         if let Some(url) = self.detail_state.share_url.as_deref()
             && !url.trim().is_empty()
@@ -11465,23 +12092,37 @@ impl App {
     }
 
     fn rebuild_detail_tracks_view(&mut self) {
-        let q = self.detail_filter_query.trim().to_ascii_lowercase();
-        if q.is_empty() {
-            self.detail_tracks = Rc::new(self.detail_state.tracks.clone());
+        let q = self.detail_filter_query.trim();
+        let mut list: Vec<Track> = if q.is_empty() {
+            self.detail_state.tracks.clone()
         } else {
-            let filtered: Vec<Track> = self
-                .detail_state
+            self.detail_state
                 .tracks
                 .iter()
                 .filter(|t| {
-                    t.title.to_ascii_lowercase().contains(&q)
-                        || t.artist.to_ascii_lowercase().contains(&q)
-                        || t.album.to_ascii_lowercase().contains(&q)
+                    contains_ascii_icase(&t.title, q)
+                        || contains_ascii_icase(&t.artist, q)
+                        || contains_ascii_icase(&t.album, q)
                 })
                 .cloned()
-                .collect();
-            self.detail_tracks = Rc::new(filtered);
+                .collect()
+        };
+        match self.detail_sort_order {
+            DetailSortOrder::Original => {}
+            DetailSortOrder::Title => {
+                list.sort_by(|a, b| cmp_ascii_icase(&a.title, &b.title));
+            }
+            DetailSortOrder::Artist => {
+                list.sort_by(|a, b| {
+                    cmp_ascii_icase(&a.artist, &b.artist)
+                        .then_with(|| cmp_ascii_icase(&a.title, &b.title))
+                });
+            }
+            DetailSortOrder::Duration => {
+                list.sort_by_key(|t| std::cmp::Reverse(t.duration_ms));
+            }
         }
+        self.detail_tracks = Rc::new(list);
     }
 
     fn copy_track_share_link(&mut self, cx: &mut Cx, track: &Track) {
@@ -11844,6 +12485,7 @@ impl App {
             );
         }
         self.rebuild_library_views(cx);
+        self.spawn_cloud_like_track(saved, next_liked);
         next_liked
     }
 
@@ -11863,15 +12505,12 @@ impl App {
             smtc.sync_playback(true, 0, track.duration_ms);
         }
         if let Some(rpc) = &mut self.discord_rpc {
-            rpc.update_playback(Some(DiscordTrackSnapshot {
-                title: track.title.clone(),
-                artist: track.artist.clone(),
-                album: track.album.clone(),
-                cover_url: track.thumbnail_url.clone(),
-                position_ms: 0,
-                duration_ms: track.duration_ms,
-                is_playing: true,
-            }));
+            rpc.update_playback(Some(Self::build_discord_snapshot(
+                track,
+                0,
+                track.duration_ms,
+                true,
+            )));
         }
 
         self.lyrics_offset_ms = 0;
@@ -13162,6 +13801,12 @@ impl App {
             }
         }
         self.tick_counter = self.tick_counter.wrapping_add(1);
+        if self
+            .session_save_dirty_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.flush_session_state_now();
+        }
 
         // 0b. Poll System Tray & Win32 subclass events
         for tray_ev in win32_poll_tray_events() {
@@ -13169,6 +13814,7 @@ impl App {
                 TrayEvent::Minimized => {
                     // Taskbar minimize: pause hidden 60 FPS animations without dropping VRAM cover cache
                     // or paging out DirectComposition so unminimizing restores Acrylic blur instantaneously.
+                    self.flush_session_state_now();
                     self.window_hidden_or_minimized = true;
                     if self.video_open {
                         self.close_native_video_stage_inner(cx, false);
@@ -13197,6 +13843,7 @@ impl App {
                     Self::trim_gpu_memory_now(cx);
                 }
                 TrayEvent::HiddenToTray => {
+                    self.flush_session_state_now();
                     self.window_hidden_or_minimized = true;
                     self.ui_dirty_while_hidden = true;
                     if self.video_open {
@@ -13323,6 +13970,7 @@ impl App {
                     }
                 }
                 TrayEvent::QuitApp => {
+                    self.flush_session_state_now();
                     self.close_native_video_stage(cx);
                     win32_force_quit();
                     cx.quit();
@@ -14070,6 +14718,76 @@ impl App {
                         self.show_toast(cx, "Could not load station tracks; retry shortly");
                     }
                 }
+                BgMessage::CloudPlaylistCreated {
+                    local_id,
+                    remote_id,
+                    source,
+                    provider_label,
+                    name,
+                    pushed_tracks,
+                    skipped_tracks,
+                } => {
+                    if let Some(db) = &mut self.db {
+                        let _ = db.migrate_playlist_id(&local_id, &remote_id, source);
+                        self.playlists = db.list_playlists().unwrap_or_default();
+                    } else if let Some(pl) = self.playlists.iter_mut().find(|p| p.id == local_id) {
+                        pl.id = remote_id.clone();
+                        pl.source = source;
+                    }
+                    let mut pin_updated = false;
+                    for pid in &mut self.session_state.pinned_ids {
+                        if *pid == local_id {
+                            *pid = remote_id.clone();
+                            pin_updated = true;
+                        }
+                    }
+                    if pin_updated {
+                        self.mark_session_dirty();
+                    }
+                    if self.detail_state.id == local_id {
+                        self.detail_state.id = remote_id.clone();
+                        self.detail_state.share_url =
+                            collection_share_url(&remote_id, YtmCardKind::Playlist).map(|(_, u)| u);
+                        if let Some(hist) = &mut self.nav_history {
+                            hist.update_current_detail(&self.detail_state);
+                        }
+                        self.refresh_detail_hero(cx);
+                    }
+                    if !window_hidden {
+                        self.refresh_playlists_grid(cx);
+                        self.rebuild_library_views(cx);
+                        let msg = if pushed_tracks == 0 && skipped_tracks == 0 {
+                            format!(
+                                "Synced '{}' to {} account",
+                                clip_text(&name, 26),
+                                provider_label
+                            )
+                        } else if skipped_tracks == 0 {
+                            format!(
+                                "Synced '{}' to {} ({} songs)",
+                                clip_text(&name, 24),
+                                provider_label,
+                                pushed_tracks
+                            )
+                        } else {
+                            format!(
+                                "Synced '{}' to {} ({} synced, {} local-only)",
+                                clip_text(&name, 20),
+                                provider_label,
+                                pushed_tracks,
+                                skipped_tracks
+                            )
+                        };
+                        self.show_toast(cx, &msg);
+                    } else {
+                        self.ui_dirty_while_hidden = true;
+                    }
+                }
+                BgMessage::CloudPlaylistMutationNotice(msg) => {
+                    if !window_hidden {
+                        self.show_toast(cx, &msg);
+                    }
+                }
                 BgMessage::StreamReady(payload) => {
                     let StreamReadyPayload {
                         track_id,
@@ -14302,6 +15020,7 @@ impl App {
                             let updates_dir = app_data_dir().join("updates");
                             match launch_verified_installer(&path, &updates_dir, &sha256) {
                                 Ok(()) => {
+                                    self.flush_session_state_now();
                                     self.close_native_video_stage(cx);
                                     win32_force_quit();
                                     cx.quit();
@@ -14590,15 +15309,12 @@ impl App {
                 self.last_discord_playing = Some(snap.is_playing);
                 if let Some(cur) = self.queue.current() {
                     if let Some(rpc) = &mut self.discord_rpc {
-                        rpc.update_playback(Some(DiscordTrackSnapshot {
-                            title: cur.title.clone(),
-                            artist: cur.artist.clone(),
-                            album: cur.album.clone(),
-                            cover_url: cur.thumbnail_url.clone(),
-                            position_ms: snap.position_ms,
-                            duration_ms: snap.duration_ms.max(cur.duration_ms),
-                            is_playing: snap.is_playing,
-                        }));
+                        rpc.update_playback(Some(Self::build_discord_snapshot(
+                            cur,
+                            snap.position_ms,
+                            snap.duration_ms.max(cur.duration_ms),
+                            snap.is_playing,
+                        )));
                     }
                 } else if let Some(rpc) = &mut self.discord_rpc {
                     rpc.update_playback(None);
@@ -14638,39 +15354,48 @@ impl App {
             self.sync_tick_timer_rate(cx, desired_open);
 
             if snap.duration_ms > 0 {
-                let ratio = (snap.position_ms as f64 / snap.duration_ms as f64).clamp(0.0, 1.0);
-                let pos_txt = format_compact_time_ms(snap.position_ms);
-                self.ui
-                    .ferric_bar_slider(id!(seek_slider))
-                    .set_value(cx, ratio);
-                let dur_txt = if self.show_remaining_time {
-                    format!(
-                        "-{}",
-                        format_compact_time_ms(snap.duration_ms.saturating_sub(snap.position_ms))
-                    )
-                } else {
-                    format_compact_time_ms(snap.duration_ms)
-                };
-                if pos_txt != self.last_pos_txt {
-                    self.last_pos_txt = pos_txt.clone();
-                    self.ui.label(id!(pos_lbl)).set_text(cx, &pos_txt);
-                    if self.fullscreen_open {
-                        self.ui.label(id!(fs_pos_lbl)).set_text(cx, &pos_txt);
-                    }
-                }
-                if dur_txt != self.last_dur_txt {
-                    self.last_dur_txt = dur_txt.clone();
-                    self.ui.button(id!(dur_btn)).set_text(cx, &dur_txt);
-                    if self.fullscreen_open {
-                        self.ui.label(id!(fs_dur_lbl)).set_text(cx, &dur_txt);
-                    }
-                }
-                if self.fullscreen_open {
+                let time_changed = self.last_tick_pos_ms != snap.position_ms
+                    || self.last_tick_dur_ms != snap.duration_ms
+                    || self.last_dur_txt.is_empty();
+                if snap.is_playing || time_changed {
+                    self.last_tick_pos_ms = snap.position_ms;
+                    self.last_tick_dur_ms = snap.duration_ms;
+                    let ratio = (snap.position_ms as f64 / snap.duration_ms as f64).clamp(0.0, 1.0);
+                    let pos_txt = format_compact_time_ms(snap.position_ms);
                     self.ui
-                        .ferric_bar_slider(id!(fs_seek_slider))
+                        .ferric_bar_slider(id!(seek_slider))
                         .set_value(cx, ratio);
+                    let dur_txt = if self.show_remaining_time {
+                        format!(
+                            "-{}",
+                            format_compact_time_ms(
+                                snap.duration_ms.saturating_sub(snap.position_ms)
+                            )
+                        )
+                    } else {
+                        format_compact_time_ms(snap.duration_ms)
+                    };
+                    if pos_txt != self.last_pos_txt {
+                        self.last_pos_txt = pos_txt.clone();
+                        self.ui.label(id!(pos_lbl)).set_text(cx, &pos_txt);
+                        if self.fullscreen_open {
+                            self.ui.label(id!(fs_pos_lbl)).set_text(cx, &pos_txt);
+                        }
+                    }
+                    if dur_txt != self.last_dur_txt {
+                        self.last_dur_txt = dur_txt.clone();
+                        self.ui.button(id!(dur_btn)).set_text(cx, &dur_txt);
+                        if self.fullscreen_open {
+                            self.ui.label(id!(fs_dur_lbl)).set_text(cx, &dur_txt);
+                        }
+                    }
+                    if self.fullscreen_open {
+                        self.ui
+                            .ferric_bar_slider(id!(fs_seek_slider))
+                            .set_value(cx, ratio);
+                    }
+                    self.update_lyrics_display(cx, snap.position_ms);
                 }
-                self.update_lyrics_display(cx, snap.position_ms);
             }
 
             self.ui
@@ -14717,6 +15442,7 @@ impl App {
             if snap.is_playing {
                 let norm = |i: usize| (snap.spectrum_bins[i] as f32 / 1_000.0).clamp(0.05, 1.0);
                 if self.fullscreen_open {
+                    self.last_fs_viz_playing = Some(true);
                     self.canvas_phase = (self.canvas_phase + 0.14) % 628.0;
                     self.ui.view(id!(np_canvas)).apply_over(
                         cx,
@@ -14745,6 +15471,19 @@ impl App {
                     }
                 }
             } else {
+                if self.last_fs_viz_playing != Some(false) {
+                    self.last_fs_viz_playing = Some(false);
+                    self.ui.view(id!(np_canvas)).apply_over(
+                        cx,
+                        live! {
+                            draw_bg: {
+                                mode: 1.0,
+                                s0: 0.05, s1: 0.05, s2: 0.05, s3: 0.05,
+                                s4: 0.05, s5: 0.05, s6: 0.05, s7: 0.05
+                            }
+                        },
+                    );
+                }
                 self.ui
                     .ferric_cover_art(id!(np_art))
                     .set_state(cx, false, 0.3, accent, false);
@@ -15433,8 +16172,9 @@ impl App {
                 .trim()
                 .to_string();
             if !name.is_empty() {
+                let local_id = format!("local:pl:{}", csprng_hex(6));
                 let pl = Playlist {
-                    id: format!("local:pl:{}", fastrand::u32(..)),
+                    id: local_id.clone(),
                     name: name.clone(),
                     source: TrackSource::Local,
                     etag: None,
@@ -15451,6 +16191,12 @@ impl App {
                 self.ui.text_input(id!(pl_new_input)).set_text(cx, "");
                 self.rebuild_library_views(cx);
                 self.refresh_playlists_grid(cx);
+                self.spawn_cloud_create_playlist(
+                    local_id,
+                    name.clone(),
+                    "Custom playlist".to_string(),
+                    Vec::new(),
+                );
                 self.show_toast(cx, &format!("Created playlist '{name}'"));
             }
         }
@@ -15561,27 +16307,25 @@ impl App {
             }
         }
 
-        // Detail Page Buttons
-        if self.ui.button(id!(detail_play_btn)).clicked(actions)
-            && let Some(first) = self.detail_state.tracks.first().cloned()
-        {
-            self.queue_context = self.detail_state.title.clone();
-            self.queue
-                .set_tracks(self.detail_state.tracks.clone(), Some(0));
-            self.play_track(cx, first);
+        // Detail Page Buttons (Play / Shuffle / + Queue respect active filter & sort!)
+        if self.ui.button(id!(detail_play_btn)).clicked(actions) {
+            let visible_tracks = (*self.detail_tracks).clone();
+            if let Some(first) = visible_tracks.first().cloned() {
+                self.queue_context = self.detail_state.title.clone();
+                self.queue.set_tracks(visible_tracks, Some(0));
+                self.play_track(cx, first);
+            }
         }
         if self.ui.button(id!(detail_shuffle_btn)).clicked(actions)
-            && !self.detail_state.tracks.is_empty()
+            && !self.detail_tracks.is_empty()
         {
-            let start_idx = fastrand::usize(..self.detail_state.tracks.len());
+            let visible_tracks = (*self.detail_tracks).clone();
+            let start_idx = fastrand::usize(..visible_tracks.len());
             self.queue_context = self.detail_state.title.clone();
-            self.queue
-                .set_tracks(self.detail_state.tracks.clone(), Some(start_idx));
+            self.queue.set_tracks(visible_tracks, Some(start_idx));
             self.queue.set_shuffle(true);
             self.session_state.shuffle = true;
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
+            self.mark_session_dirty();
             self.sync_controls_from_state(cx);
             if let Some(first) = self.queue.current().cloned() {
                 self.play_track(cx, first);
@@ -15590,8 +16334,24 @@ impl App {
         if self.ui.button(id!(detail_save_pl_btn)).clicked(actions) {
             self.save_detail_as_playlist(cx);
         }
+        if self.ui.button(id!(detail_cloud_push_btn)).clicked(actions)
+            && self.detail_state.id.starts_with("local:pl:")
+        {
+            let desc = if !self.detail_state.description.trim().is_empty() {
+                self.detail_state.description.clone()
+            } else {
+                self.detail_state.subtitle.clone()
+            };
+            self.spawn_cloud_create_playlist(
+                self.detail_state.id.clone(),
+                self.detail_state.title.clone(),
+                desc,
+                self.detail_state.tracks.clone(),
+            );
+            self.show_toast(cx, "Syncing playlist to your signed-in account...");
+        }
         if self.ui.button(id!(detail_radio_btn)).clicked(actions)
-            && let Some(first) = self.detail_state.tracks.first().cloned()
+            && let Some(first) = self.detail_tracks.first().cloned()
         {
             self.queue_context = format!("{} radio", first.title);
             self.queue.set_tracks(vec![first.clone()], Some(0));
@@ -15605,9 +16365,7 @@ impl App {
         if self.ui.button(id!(detail_pin_btn)).clicked(actions) && !self.detail_state.id.is_empty()
         {
             let pinned = self.session_state.toggle_pin(&self.detail_state.id);
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
+            self.mark_session_dirty();
             self.refresh_detail_hero(cx);
             self.rebuild_library_views(cx);
             self.show_toast(
@@ -15619,13 +16377,58 @@ impl App {
                 },
             );
         }
-        if self.ui.button(id!(detail_queue_btn)).clicked(actions)
-            && !self.detail_state.tracks.is_empty()
+        if self.ui.button(id!(detail_queue_btn)).clicked(actions) && !self.detail_tracks.is_empty()
         {
-            let added = self.queue.append_tracks(self.detail_state.tracks.clone());
+            let added = self.queue.append_tracks((*self.detail_tracks).clone());
             self.sync_next_deck_to_engine();
             self.refresh_right_sidebar(cx);
             self.show_toast(cx, &format!("Added {added} songs to Up next"));
+        }
+        if self.ui.button(id!(detail_dedup_btn)).clicked(actions)
+            && self.detail_state.kind == YtmCardKind::Playlist
+            && !self.detail_state.id.is_empty()
+        {
+            let (deduped, removed) = deduplicate_tracks_in_order(&self.detail_state.tracks);
+            if removed == 0 {
+                self.show_toast(cx, "No duplicate songs found in this playlist");
+            } else {
+                let pl_id = self.detail_state.id.clone();
+                let ids: Vec<String> = deduped.iter().map(|t| t.id.clone()).collect();
+                if let Some(db) = &mut self.db {
+                    let _ = db.replace_playlist_tracks(&pl_id, &ids);
+                    self.playlists = db.list_playlists().unwrap_or_default();
+                }
+                self.detail_state.tracks = deduped.clone();
+                self.rebuild_detail_tracks_view();
+                self.refresh_detail_hero(cx);
+                self.refresh_playlists_grid(cx);
+                self.rebuild_library_views(cx);
+                if (pl_id.starts_with("spotify:playlist:")
+                    || pl_id.starts_with("spotify:premium:playlist:"))
+                    && let Some(token) = self.active_spotify_write_token()
+                    && let Some(tx) = self.bg_tx.clone()
+                {
+                    let uris: Vec<String> = deduped
+                        .iter()
+                        .filter_map(|t| t.spotify_id.clone())
+                        .filter(|s| !s.trim().is_empty())
+                        .collect();
+                    if !uris.is_empty() {
+                        thread::spawn(move || {
+                            if let Err(
+                                ferric_providers::spotify_web::SpotifyWebSyncError::AuthExpired,
+                            ) = replace_spotify_playlist_tracks(&token, &pl_id, &uris)
+                            {
+                                let _ = tx.send(BgMessage::CloudPlaylistMutationNotice(
+                                    "Deduplicated locally (Spotify session expired; sign in again)"
+                                        .to_string(),
+                                ));
+                            }
+                        });
+                    }
+                }
+                self.show_toast(cx, &format!("Removed {removed} duplicate song(s)"));
+            }
         }
         if self.ui.button(id!(detail_copy_link_btn)).clicked(actions) {
             if let Some((platform, url)) = self.detail_share_link() {
@@ -15682,6 +16485,14 @@ impl App {
             self.rebuild_detail_tracks_view();
             self.ui.redraw(cx);
         }
+        if self.ui.button(id!(detail_sort_btn)).clicked(actions) {
+            self.detail_sort_order = self.detail_sort_order.next();
+            self.rebuild_detail_tracks_view();
+            self.ui
+                .button(id!(detail_sort_btn))
+                .set_text(cx, self.detail_sort_order.label());
+            self.ui.redraw(cx);
+        }
         let rename_submitted = self
             .ui
             .text_input(id!(detail_rename_input))
@@ -15707,6 +16518,7 @@ impl App {
                 self.refresh_detail_hero(cx);
                 self.refresh_playlists_grid(cx);
                 self.rebuild_library_views(cx);
+                self.spawn_cloud_rename_playlist(pl_id, next_name.clone());
                 self.show_toast(cx, &format!("Renamed playlist to '{next_name}'"));
             }
         }
@@ -15721,12 +16533,11 @@ impl App {
                 self.playlists = db.list_playlists().unwrap_or_default();
             }
             self.session_state.pinned_ids.retain(|id| id != &pl_id);
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
+            self.mark_session_dirty();
             if let Some(hist) = &mut self.nav_history {
                 hist.prune_detail_id(&pl_id);
             }
+            self.spawn_cloud_delete_playlist(pl_id);
             self.refresh_playlists_grid(cx);
             self.rebuild_library_views(cx);
             self.navigate_to(cx, MainPage::Playlists, false);
@@ -15912,6 +16723,12 @@ impl App {
                 }
             }
         }
+        if self.ui.button(id!(rs_save_queue_btn)).clicked(actions) {
+            self.save_queue_as_playlist(cx);
+        }
+        if self.ui.button(id!(rs_copy_queue_btn)).clicked(actions) {
+            self.copy_queue_tracklist(cx);
+        }
         if self.ui.button(id!(rs_clear_btn)).clicked(actions) {
             if let Some(cur) = self.queue.current().cloned() {
                 self.queue.set_tracks(vec![cur], Some(0));
@@ -16017,6 +16834,11 @@ impl App {
         {
             self.copy_track_share_link(cx, &cur);
         }
+        if view_clicked(&self.ui.view(id!(np_artist_hit)), actions)
+            && let Some(cur) = self.queue.current().cloned()
+        {
+            self.open_artist_for_name(cx, &cur.artist);
+        }
 
         // 7. BOTTOM PLAYER BAR & FULLSCREEN OVERLAY
         if self.ui.ferric_cover_art(id!(np_art)).clicked(actions)
@@ -16086,9 +16908,7 @@ impl App {
             let next_shuf = !self.queue.shuffle;
             self.queue.set_shuffle(next_shuf);
             self.session_state.shuffle = next_shuf;
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
+            self.mark_session_dirty();
             self.sync_next_deck_to_engine();
             self.sync_controls_from_state(cx);
             self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
@@ -16103,9 +16923,7 @@ impl App {
         {
             self.queue.repeat = self.queue.repeat.next();
             self.session_state.repeat = self.queue.repeat;
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
+            self.mark_session_dirty();
             self.sync_next_deck_to_engine();
             self.sync_controls_from_state(cx);
             self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
@@ -16212,9 +17030,7 @@ impl App {
             if let Some(audio) = &self.audio {
                 audio.send(EngineCommand::SetVolume(vol as f32));
             }
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
+            self.mark_session_dirty();
         }
         if self
             .ui
@@ -16234,9 +17050,7 @@ impl App {
             if let Some(audio) = &self.audio {
                 audio.send(EngineCommand::SetVolume(self.session_state.volume));
             }
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
+            self.mark_session_dirty();
             self.sync_controls_from_state(cx);
             self.ui
                 .ferric_volume_btn(id!(vol_mute_btn))
@@ -16394,6 +17208,45 @@ impl App {
             self.cmdk_open = false;
             self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
             self.load_and_play_demo_suite(cx);
+        }
+        if self.ui.button(id!(cmdk_copy_link_btn)).clicked(actions) {
+            self.cmdk_open = false;
+            self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
+            if let Some(cur) = self.queue.current().cloned() {
+                self.copy_track_share_link(cx, &cur);
+            } else {
+                self.show_toast(cx, "No song is currently playing");
+            }
+        }
+        if self.ui.button(id!(cmdk_copy_pl_btn)).clicked(actions) {
+            self.cmdk_open = false;
+            self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
+            if let Some((platform, url)) = self.detail_share_link() {
+                let _ = copy_text_to_clipboard(&url);
+                self.show_toast(
+                    cx,
+                    &format!(
+                        "Copied {platform} link: {}",
+                        clip_text(&self.detail_state.title, 26)
+                    ),
+                );
+            } else {
+                self.show_toast(
+                    cx,
+                    "Open a Spotify or YouTube playlist first to copy its link",
+                );
+            }
+        }
+        if self.ui.button(id!(cmdk_save_q_btn)).clicked(actions) {
+            self.cmdk_open = false;
+            self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
+            self.save_queue_as_playlist(cx);
+        }
+        if self.ui.button(id!(cmdk_about_btn)).clicked(actions) {
+            self.cmdk_open = false;
+            self.ui.view(id!(cmdk_modal)).set_visible(cx, false);
+            self.navigate_to(cx, MainPage::Settings, true);
+            self.switch_settings_tab(cx, SettingsTab::About);
         }
 
         // 9. SETTINGS TABS & ALL SETTINGS CONTROLS
@@ -16579,6 +17432,48 @@ impl App {
         }
 
         // Playback & Fade-In Tab
+        if self.ui.button(id!(pb_device_refresh_btn)).clicked(actions) {
+            self.output_devices = list_output_devices();
+            self.refresh_output_device_ui(cx);
+            self.show_toast(
+                cx,
+                &format!("Found {} audio output device(s)", self.output_devices.len()),
+            );
+        }
+        if self.ui.button(id!(pb_device_cycle_btn)).clicked(actions) {
+            if self.output_devices.is_empty() {
+                self.output_devices = list_output_devices();
+            }
+            let next_dev = match self.dsp.output_device.as_deref() {
+                None => self.output_devices.first().cloned(),
+                Some(cur) => {
+                    let pos = self
+                        .output_devices
+                        .iter()
+                        .position(|d| d.eq_ignore_ascii_case(cur));
+                    match pos {
+                        Some(idx) if idx + 1 < self.output_devices.len() => {
+                            Some(self.output_devices[idx + 1].clone())
+                        }
+                        _ => None,
+                    }
+                }
+            };
+            self.select_output_device(cx, next_dev);
+        }
+        if self.ui.button(id!(pb_dev_default)).clicked(actions) {
+            self.select_output_device(cx, None);
+        }
+        for (i, cid) in [id!(pb_dev_0), id!(pb_dev_1), id!(pb_dev_2), id!(pb_dev_3)]
+            .into_iter()
+            .enumerate()
+        {
+            if self.ui.button(cid).clicked(actions)
+                && let Some(dev_name) = self.output_devices.get(i).cloned()
+            {
+                self.select_output_device(cx, Some(dev_name));
+            }
+        }
         if let Some(sec) = self
             .ui
             .ferric_bar_slider(id!(xfade_slider))
@@ -17154,6 +18049,14 @@ impl App {
         }
         if let Some(on) = self
             .ui
+            .ferric_toggle(id!(discord_button_toggle))
+            .toggled(actions)
+        {
+            self.discord_settings.show_listen_button = on;
+            self.apply_discord_settings(cx);
+        }
+        if let Some(on) = self
+            .ui
             .ferric_toggle(id!(discord_hide_details_toggle))
             .toggled(actions)
         {
@@ -17429,16 +18332,7 @@ impl App {
             } else if self.ui.button(id!(tm_artist_btn)).clicked(actions) {
                 let artist = target.artist.clone();
                 self.close_track_menu(cx);
-                if let Some(g) = self
-                    .artist_groups
-                    .iter()
-                    .find(|g| g.title.eq_ignore_ascii_case(&artist))
-                    .cloned()
-                {
-                    self.open_local_detail(cx, g);
-                } else if !artist.trim().is_empty() {
-                    self.spawn_rich_search(cx, artist);
-                }
+                self.open_artist_for_name(cx, &artist);
             } else if self.ui.button(id!(tm_album_btn)).clicked(actions) {
                 let album = target.album.clone();
                 let query = if album.is_empty()
@@ -17537,8 +18431,9 @@ impl App {
                         .trim()
                         .to_string();
                     if !name.is_empty() {
+                        let local_id = format!("local:pl:{}", csprng_hex(6));
                         let pl = Playlist {
-                            id: format!("local:pl:{}", fastrand::u32(..)),
+                            id: local_id.clone(),
                             name: name.clone(),
                             source: TrackSource::Local,
                             etag: None,
@@ -17554,6 +18449,12 @@ impl App {
                         }
                         self.refresh_playlists_grid(cx);
                         self.rebuild_library_views(cx);
+                        self.spawn_cloud_create_playlist(
+                            local_id,
+                            name.clone(),
+                            "Custom playlist".to_string(),
+                            vec![target.clone()],
+                        );
                         self.close_track_menu(cx);
                         self.show_toast(
                             cx,
@@ -17706,9 +18607,7 @@ impl AppMain for App {
                 if let Some(audio) = &self.audio {
                     audio.send(EngineCommand::SetVolume(self.session_state.volume));
                 }
-                if let Some(db) = &self.db {
-                    let _ = db.save_session_state(&self.session_state);
-                }
+                self.mark_session_dirty();
                 self.sync_controls_from_state(cx);
                 if was_muted != now_muted {
                     self.ui
@@ -17847,9 +18746,7 @@ impl AppMain for App {
                 if let Some(a) = &self.audio {
                     a.send(EngineCommand::SetVolume(self.session_state.volume));
                 }
-                if let Some(db) = &self.db {
-                    let _ = db.save_session_state(&self.session_state);
-                }
+                self.mark_session_dirty();
                 self.sync_controls_from_state(cx);
                 return;
             }
@@ -17861,9 +18758,7 @@ impl AppMain for App {
                 if let Some(a) = &self.audio {
                     a.send(EngineCommand::SetVolume(self.session_state.volume));
                 }
-                if let Some(db) = &self.db {
-                    let _ = db.save_session_state(&self.session_state);
-                }
+                self.mark_session_dirty();
                 self.sync_controls_from_state(cx);
                 return;
             }
@@ -17924,9 +18819,7 @@ impl AppMain for App {
                     if let Some(audio) = &self.audio {
                         audio.send(EngineCommand::SetVolume(self.session_state.volume));
                     }
-                    if let Some(db) = &self.db {
-                        let _ = db.save_session_state(&self.session_state);
-                    }
+                    self.mark_session_dirty();
                     self.sync_controls_from_state(cx);
                     self.ui
                         .ferric_volume_btn(id!(vol_mute_btn))
@@ -17940,9 +18833,7 @@ impl AppMain for App {
                     let next_s = !self.session_state.shuffle;
                     self.session_state.shuffle = next_s;
                     self.queue.set_shuffle(next_s);
-                    if let Some(db) = &self.db {
-                        let _ = db.save_session_state(&self.session_state);
-                    }
+                    self.mark_session_dirty();
                     self.sync_next_deck_to_engine();
                     self.sync_controls_from_state(cx);
                     self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
@@ -17959,9 +18850,7 @@ impl AppMain for App {
                     };
                     self.session_state.repeat = next_r;
                     self.queue.repeat = next_r;
-                    if let Some(db) = &self.db {
-                        let _ = db.save_session_state(&self.session_state);
-                    }
+                    self.mark_session_dirty();
                     self.sync_next_deck_to_engine();
                     self.sync_controls_from_state(cx);
                     self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
@@ -18213,6 +19102,12 @@ fn rgba_vec4(hex: &str) -> Vec4 {
 
 fn rgba_to_vec4(c: [f32; 4]) -> Vec4 {
     vec4(c[0], c[1], c[2], c[3])
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.flush_session_state_now();
+    }
 }
 
 app_main!(App);

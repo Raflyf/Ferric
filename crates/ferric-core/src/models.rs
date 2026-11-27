@@ -205,6 +205,8 @@ pub struct PlaybackDspSettings {
     pub video_quality: VideoQuality,
     #[serde(default)]
     pub close_to_tray: bool,
+    #[serde(default)]
+    pub output_device: Option<String>,
 }
 
 impl Default for PlaybackDspSettings {
@@ -222,6 +224,7 @@ impl Default for PlaybackDspSettings {
             audio_quality: AudioQuality::High,
             video_quality: VideoQuality::P720,
             close_to_tray: false,
+            output_device: None,
         }
     }
 }
@@ -233,6 +236,12 @@ impl PlaybackDspSettings {
         } else {
             1.0
         };
+        let output_device = self
+            .output_device
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+            .map(ToOwned::to_owned);
         Self {
             crossfade_ms: self.crossfade_ms.min(12_000),
             fade_in_play_ms: self.fade_in_play_ms.min(2_000),
@@ -246,6 +255,7 @@ impl PlaybackDspSettings {
             audio_quality: self.audio_quality,
             video_quality: self.video_quality,
             close_to_tray: self.close_to_tray,
+            output_device,
         }
     }
 }
@@ -324,6 +334,8 @@ pub struct DiscordRpcSettings {
     pub show_when_paused: bool,
     #[serde(default = "default_true")]
     pub show_cover_art: bool,
+    #[serde(default = "default_true")]
+    pub show_listen_button: bool,
     pub hide_details: bool,
 }
 
@@ -335,6 +347,7 @@ impl Default for DiscordRpcSettings {
             status_format: DiscordStatusFormat::ArtistTitle,
             show_when_paused: false,
             show_cover_art: true,
+            show_listen_button: true,
             hide_details: false,
         }
     }

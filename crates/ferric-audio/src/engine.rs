@@ -161,16 +161,62 @@ fn pop_epoch_frame(
 }
 
 type RingFrame = (u32, [f32; 2]);
-type OutputStreamBundle = (cpal::Stream, rtrb::Producer<RingFrame>, u32);
+type OutputStreamBundle = (cpal::Stream, rtrb::Producer<RingFrame>, u32, String);
 
-fn build_output_stream_and_producer(
-    telemetry: &Arc<AudioTelemetry>,
-    start_playing: bool,
-) -> AudioResult<OutputStreamBundle> {
+/// Enumerate available audio output device names on the host (deduplicated, sorted).
+pub fn list_output_devices() -> Vec<String> {
     let host = cpal::default_host();
+    let Ok(devices) = host.output_devices() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for dev in devices {
+        if let Ok(desc) = dev.description() {
+            let name = desc.name().trim().to_string();
+            if !name.is_empty() && !names.iter().any(|existing: &String| existing == &name) {
+                names.push(name);
+            }
+        }
+    }
+    names.sort_by_key(|a| a.to_ascii_lowercase());
+    names
+}
+
+fn select_output_device(
+    host: &cpal::Host,
+    preferred_name: Option<&str>,
+) -> AudioResult<(cpal::Device, String)> {
+    if let Some(target) = preferred_name.map(str::trim).filter(|s| !s.is_empty())
+        && let Ok(devices) = host.output_devices()
+    {
+        for dev in devices {
+            if let Ok(desc) = dev.description()
+                && desc.name().trim().eq_ignore_ascii_case(target)
+            {
+                let resolved = desc.name().trim().to_string();
+                return Ok((dev, resolved));
+            }
+        }
+    }
     let device = host
         .default_output_device()
         .ok_or(AudioError::NoOutputDevice)?;
+    let active_name = device
+        .description()
+        .ok()
+        .map(|d| d.name().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "System Default".to_string());
+    Ok((device, active_name))
+}
+
+fn build_output_stream_and_producer(
+    telemetry: &Arc<AudioTelemetry>,
+    preferred_device: Option<&str>,
+    start_playing: bool,
+) -> AudioResult<OutputStreamBundle> {
+    let host = cpal::default_host();
+    let (device, active_name) = select_output_device(&host, preferred_device)?;
     let default_cfg = device
         .default_output_config()
         .map_err(|e| AudioError::Device(e.to_string()))?;
@@ -292,7 +338,7 @@ fn build_output_stream_and_producer(
             .map_err(|e| AudioError::Device(e.to_string()))?;
     }
 
-    Ok((stream, producer, out_rate))
+    Ok((stream, producer, out_rate, active_name))
 }
 
 pub struct AudioEngine {
@@ -302,15 +348,32 @@ pub struct AudioEngine {
     stream_paused: AtomicBool,
     decode_handle: Option<thread::JoinHandle<()>>,
     headless: bool,
+    preferred_device: Option<String>,
+    active_device_name: String,
     last_recovery_attempt: Option<std::time::Instant>,
 }
 
 impl AudioEngine {
-    /// Start the real-time WASAPI/cpal output stream and dedicated dual-deck decode+DSP OS thread.
+    /// Start the real-time WASAPI/cpal output stream on the system default device.
     pub fn start(initial_eq: EqConfig) -> AudioResult<Self> {
+        Self::start_with_device(initial_eq, None)
+    }
+
+    /// Start the real-time WASAPI/cpal output stream on `preferred_device` (falling back to the
+    /// system default device when `None` or unavailable) and dedicated dual-deck decode+DSP thread.
+    pub fn start_with_device(
+        initial_eq: EqConfig,
+        preferred_device: Option<String>,
+    ) -> AudioResult<Self> {
         let telemetry = Arc::new(AudioTelemetry::default());
         telemetry.idle_silent.store(true, Ordering::Relaxed);
-        let (stream, producer, out_rate) = build_output_stream_and_producer(&telemetry, false)?;
+        let cleaned_pref = preferred_device
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        let (stream, producer, out_rate, active_device_name) =
+            build_output_stream_and_producer(&telemetry, cleaned_pref.as_deref(), false)?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let thread_telemetry = Arc::clone(&telemetry);
@@ -334,6 +397,8 @@ impl AudioEngine {
             stream_paused: AtomicBool::new(true),
             decode_handle: Some(handle),
             headless: false,
+            preferred_device: cleaned_pref,
+            active_device_name,
             last_recovery_attempt: None,
         })
     }
@@ -358,12 +423,68 @@ impl AudioEngine {
             stream_paused: AtomicBool::new(true),
             decode_handle: handle,
             headless: true,
+            preferred_device: None,
+            active_device_name: "Headless (No Audio Device)".to_string(),
             last_recovery_attempt: None,
         }
     }
 
+    /// Currently active host audio output device name.
+    #[must_use]
+    pub fn active_device_name(&self) -> &str {
+        &self.active_device_name
+    }
+
+    /// Configured preferred device (`None` means Windows System Default).
+    #[must_use]
+    pub fn preferred_device(&self) -> Option<&str> {
+        self.preferred_device.as_deref()
+    }
+
+    /// Hot-switch the live WASAPI output stream to a specific device name (`None` = System Default)
+    /// without restarting the application or losing playback position.
+    pub fn switch_output_device(
+        &mut self,
+        preferred_device: Option<String>,
+    ) -> AudioResult<String> {
+        let cleaned_pref = preferred_device
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        self.preferred_device = cleaned_pref;
+        if self.headless {
+            return Ok(self.active_device_name.clone());
+        }
+        let want_play = self.telemetry.is_playing.load(Ordering::Acquire);
+        // Drop old stream first so exclusive/shared WASAPI sessions release cleanly before re-opening.
+        self.output_stream = None;
+        match build_output_stream_and_producer(
+            &self.telemetry,
+            self.preferred_device.as_deref(),
+            want_play,
+        ) {
+            Ok((new_stream, new_producer, new_rate, active_name)) => {
+                self.output_stream = Some(new_stream);
+                self.stream_paused.store(!want_play, Ordering::Release);
+                self.telemetry.device_lost.store(false, Ordering::Release);
+                self.active_device_name = active_name.clone();
+                let _ = self.cmd_tx.send(EngineCommand::ReplaceOutputRing {
+                    producer: new_producer,
+                    out_rate: new_rate,
+                });
+                Ok(active_name)
+            }
+            Err(err) => {
+                self.telemetry.is_playing.store(false, Ordering::Release);
+                self.stream_paused.store(true, Ordering::Release);
+                Err(err)
+            }
+        }
+    }
+
     /// Detect WASAPI audio device disconnects/stalls (e.g., USB DAC or Bluetooth headset unplugged)
-    /// and rebuild the output stream on the active default device without wedging the decode thread.
+    /// and rebuild the output stream on the preferred or default device without wedging decode.
     /// Also suspends the WASAPI output stream once paused/stopped audio finishes draining so idle
     /// CPU drops to 0 Hz.
     pub fn poll_device_recovery(&mut self) -> bool {
@@ -390,11 +511,16 @@ impl AudioEngine {
         self.last_recovery_attempt = Some(now);
         self.output_stream = None;
         let want_play = self.telemetry.is_playing.load(Ordering::Acquire);
-        match build_output_stream_and_producer(&self.telemetry, want_play) {
-            Ok((new_stream, new_producer, new_rate)) => {
+        match build_output_stream_and_producer(
+            &self.telemetry,
+            self.preferred_device.as_deref(),
+            want_play,
+        ) {
+            Ok((new_stream, new_producer, new_rate, active_name)) => {
                 self.output_stream = Some(new_stream);
                 self.stream_paused.store(!want_play, Ordering::Release);
                 self.telemetry.device_lost.store(false, Ordering::Release);
+                self.active_device_name = active_name;
                 let _ = self.cmd_tx.send(EngineCommand::ReplaceOutputRing {
                     producer: new_producer,
                     out_rate: new_rate,

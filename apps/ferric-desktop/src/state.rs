@@ -166,6 +166,111 @@ impl SortField {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DetailSortOrder {
+    #[default]
+    Original,
+    Title,
+    Artist,
+    Duration,
+}
+
+impl DetailSortOrder {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Original => Self::Title,
+            Self::Title => Self::Artist,
+            Self::Artist => Self::Duration,
+            Self::Duration => Self::Original,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Sort: Default",
+            Self::Title => "Sort: Title",
+            Self::Artist => "Sort: Artist",
+            Self::Duration => "Sort: Duration",
+        }
+    }
+}
+
+/// Zero-allocation ASCII case-insensitive substring check for hot filter paths.
+#[inline]
+#[must_use]
+pub fn contains_ascii_icase(haystack: &str, needle: &str) -> bool {
+    let nb = needle.as_bytes();
+    if nb.is_empty() {
+        return true;
+    }
+    let hb = haystack.as_bytes();
+    if nb.len() > hb.len() {
+        return false;
+    }
+    hb.windows(nb.len()).any(|win| {
+        win.iter()
+            .zip(nb.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
+/// Zero-allocation ASCII case-insensitive lexicographical comparison for sorting tracks.
+#[inline]
+#[must_use]
+pub fn cmp_ascii_icase(a: &str, b: &str) -> std::cmp::Ordering {
+    for (ba, bb) in a.bytes().zip(b.bytes()) {
+        let ord = ba.to_ascii_lowercase().cmp(&bb.to_ascii_lowercase());
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Remove duplicate tracks from a playlist while preserving original order.
+/// Uses `HashSet` membership (`O(N)`) matching canonical ID, Spotify ID, YouTube ID, or `artist|title`.
+#[must_use]
+pub fn deduplicate_tracks_in_order(tracks: &[Track]) -> (Vec<Track>, usize) {
+    use std::collections::HashSet;
+    let mut seen_ids: HashSet<String> = HashSet::with_capacity(tracks.len());
+    let mut out = Vec::with_capacity(tracks.len());
+    let mut removed = 0usize;
+    for t in tracks {
+        let mut keys: Vec<String> = Vec::with_capacity(4);
+        keys.push(format!("id:{}", t.id));
+        if let Some(sp) = t
+            .spotify_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            keys.push(format!("sp:{sp}"));
+        }
+        if let Some(yt) = t
+            .youtube_video_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            keys.push(format!("yt:{yt}"));
+        }
+        let norm_title = t.title.trim().to_ascii_lowercase();
+        let norm_artist = t.artist.trim().to_ascii_lowercase();
+        if !norm_title.is_empty() {
+            keys.push(format!("meta:{norm_artist}|{norm_title}"));
+        }
+        if keys.iter().any(|k| seen_ids.contains(k)) {
+            removed += 1;
+            continue;
+        }
+        for k in keys {
+            seen_ids.insert(k);
+        }
+        out.push(t.clone());
+    }
+    (out, removed)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SleepTimerMode {
     #[default]
     Off,
@@ -433,6 +538,16 @@ pub enum BgMessage {
         station_id: String,
         error: String,
     },
+    CloudPlaylistCreated {
+        local_id: String,
+        remote_id: String,
+        source: TrackSource,
+        provider_label: &'static str,
+        name: String,
+        pushed_tracks: usize,
+        skipped_tracks: usize,
+    },
+    CloudPlaylistMutationNotice(String),
 }
 
 fn resolved_track_thumb(track: &Track) -> Option<String> {
@@ -912,8 +1027,9 @@ pub fn format_collection_csv(tracks: &[Track]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        PlaylistSortOrder, PlaylistSourceFilter, collection_share_url, format_collection_csv,
-        format_collection_tracklist, track_primary_link, track_youtube_link,
+        DetailSortOrder, PlaylistSortOrder, PlaylistSourceFilter, cmp_ascii_icase,
+        collection_share_url, contains_ascii_icase, deduplicate_tracks_in_order,
+        format_collection_csv, format_collection_tracklist, track_primary_link, track_youtube_link,
     };
     use ferric_core::models::{Playlist, Track, TrackSource};
     use ferric_providers::ytmusic::YtmCardKind;
@@ -1076,5 +1192,19 @@ mod tests {
         );
         assert!(txt.contains("K (1 songs)"));
         assert!(txt.contains("1. Lady Gaga, Bruno Mars - Die With A Smile"));
+
+        assert!(contains_ascii_icase("Die With A Smile", "with a"));
+        assert!(!contains_ascii_icase("Die With A Smile", "nope"));
+        assert_eq!(
+            cmp_ascii_icase("bruno mars", "Bruno Mars"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(DetailSortOrder::Original.next(), DetailSortOrder::Title);
+
+        let mut dup_track = sp_track.clone();
+        dup_track.id = "yt:video:kPa7bsKwL-c".to_string();
+        let (deduped, removed) = deduplicate_tracks_in_order(&[sp_track, dup_track]);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(removed, 1);
     }
 }

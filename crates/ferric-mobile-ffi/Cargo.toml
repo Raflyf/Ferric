@@ -1,0 +1,35 @@
+[package]
+name = "ferric-mobile-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "ferric_mobile_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+bindgen-cli = ["uniffi/cli"]
+
+[dependencies]
+thiserror.workspace = true
+uniffi.workspace = true
+ferric-core = { path = "../ferric-core" }
+ferric-audio = { path = "../ferric-audio" }
+ferric-controller = { path = "../ferric-controller" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
+ndk-context.workspace = true
+
+[dev-dependencies]
+fastrand.workspace = true
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["bindgen-cli"]

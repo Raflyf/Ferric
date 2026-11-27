@@ -1,5 +1,5 @@
 use crate::google_login::GoogleLoginOutcome;
-use ferric_core::models::{Playlist, Track};
+use ferric_core::models::{Playlist, Track, TrackSource};
 use ferric_providers::lyrics::SyncedLyrics;
 use ferric_providers::updater::{DownloadEvent, ReleaseInfo};
 use ferric_providers::ytmusic::{
@@ -192,6 +192,7 @@ pub struct DetailViewState {
     pub kind: YtmCardKind,
     pub is_radio_station: bool,
     pub thumbnail_url: Option<String>,
+    pub share_url: Option<String>,
     pub loading: bool,
     pub tracks: Vec<Track>,
 }
@@ -206,6 +207,7 @@ impl Default for DetailViewState {
             kind: YtmCardKind::Playlist,
             is_radio_station: false,
             thumbnail_url: None,
+            share_url: None,
             loading: false,
             tracks: Vec::new(),
         }
@@ -719,10 +721,202 @@ pub fn format_bytes_mb(bytes: u64) -> String {
     }
 }
 
+fn clean_url_id(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 128
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return None;
+    }
+    Some(trimmed)
+}
+
+/// Canonical external web URL for a playlist, album, artist, or radio station.
+/// Returns `(platform_label, url)` suitable for sharing or pasting into Discord music bots.
+pub fn collection_share_url(id: &str, kind: YtmCardKind) -> Option<(&'static str, String)> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    for prefix in [
+        "spotify:playlist:",
+        "spotify:premium:playlist:",
+        "spotify:station:",
+        "station:spotify:",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix)
+            && let Some(clean) = clean_url_id(rest)
+        {
+            return Some((
+                "Spotify",
+                format!("https://open.spotify.com/playlist/{clean}"),
+            ));
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("spotify:album:")
+        && let Some(clean) = clean_url_id(rest)
+    {
+        return Some(("Spotify", format!("https://open.spotify.com/album/{clean}")));
+    }
+    if let Some(rest) = trimmed.strip_prefix("spotify:artist:")
+        && let Some(clean) = clean_url_id(rest)
+    {
+        return Some((
+            "Spotify",
+            format!("https://open.spotify.com/artist/{clean}"),
+        ));
+    }
+    if let Some(rest) = trimmed.strip_prefix("yt:playlist:")
+        && let Some(clean) = clean_url_id(rest)
+    {
+        return Some((
+            "YouTube Music",
+            format!("https://music.youtube.com/playlist?list={clean}"),
+        ));
+    }
+    let browse = trimmed.strip_prefix("ytm:pl:").unwrap_or(trimmed);
+    if let Some(rest) = browse.strip_prefix("VL") {
+        if rest.eq_ignore_ascii_case("LM") {
+            return None;
+        }
+        if let Some(clean) = clean_url_id(rest) {
+            return Some((
+                "YouTube Music",
+                format!("https://music.youtube.com/playlist?list={clean}"),
+            ));
+        }
+    }
+    if (browse.starts_with("PL") || browse.starts_with("OLAK") || browse.starts_with("RD"))
+        && let Some(clean) = clean_url_id(browse)
+    {
+        return Some((
+            "YouTube Music",
+            format!("https://music.youtube.com/playlist?list={clean}"),
+        ));
+    }
+    if browse.starts_with("MPRE")
+        && let Some(clean) = clean_url_id(browse)
+    {
+        return Some((
+            "YouTube Music",
+            format!("https://music.youtube.com/browse/{clean}"),
+        ));
+    }
+    if (browse.starts_with("UC") || kind == YtmCardKind::Artist)
+        && browse.starts_with("UC")
+        && let Some(clean) = clean_url_id(browse)
+    {
+        return Some((
+            "YouTube Music",
+            format!("https://music.youtube.com/channel/{clean}"),
+        ));
+    }
+    None
+}
+
+/// Primary direct track URL for sharing or pasting into Discord music bots.
+pub fn track_primary_link(track: &Track) -> Option<(&'static str, String)> {
+    let spotify_clean = track.spotify_id.as_deref().and_then(|raw| {
+        let stripped = raw.trim().strip_prefix("spotify:track:").unwrap_or(raw);
+        clean_url_id(stripped)
+    });
+    let yt_clean = track.youtube_video_id.as_deref().and_then(clean_url_id);
+
+    if track.source == TrackSource::Spotify
+        && let Some(sp) = spotify_clean
+    {
+        return Some(("Spotify", format!("https://open.spotify.com/track/{sp}")));
+    }
+    if let Some(vid) = yt_clean {
+        return Some((
+            "YouTube Music",
+            format!("https://music.youtube.com/watch?v={vid}"),
+        ));
+    }
+    if let Some(sp) = spotify_clean {
+        return Some(("Spotify", format!("https://open.spotify.com/track/{sp}")));
+    }
+    None
+}
+
+/// Secondary direct YouTube Music URL for tracks that also have a Spotify ID.
+pub fn track_youtube_link(track: &Track) -> Option<String> {
+    let vid = track.youtube_video_id.as_deref().and_then(clean_url_id)?;
+    Some(format!("https://music.youtube.com/watch?v={vid}"))
+}
+
+/// Format a clean numbered tracklist for pasting into Discord, chat, or notes.
+pub fn format_collection_tracklist(
+    title: &str,
+    share_url: Option<&str>,
+    tracks: &[Track],
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(96 + tracks.len() * 48);
+    let _ = writeln!(out, "{} ({} songs)", title.trim(), tracks.len());
+    if let Some(url) = share_url
+        && !url.trim().is_empty()
+    {
+        let _ = writeln!(out, "{url}");
+    }
+    if !tracks.is_empty() {
+        out.push('\n');
+    }
+    for (idx, t) in tracks.iter().enumerate() {
+        let artist = t.artist.replace(['\r', '\n'], " ");
+        let song = t.title.replace(['\r', '\n'], " ");
+        if artist.trim().is_empty() {
+            let _ = writeln!(out, "{}. {}", idx + 1, song.trim());
+        } else {
+            let _ = writeln!(out, "{}. {} - {}", idx + 1, artist.trim(), song.trim());
+        }
+    }
+    out
+}
+
+fn csv_escape_field(raw: &str) -> String {
+    let clean = raw.replace(['\r', '\n'], " ");
+    if clean.contains([',', '"']) {
+        format!("\"{}\"", clean.replace('"', "\"\""))
+    } else {
+        clean
+    }
+}
+
+/// Export tracks as RFC 4180 CSV with direct Spotify / YouTube Music URLs.
+pub fn format_collection_csv(tracks: &[Track]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64 + tracks.len() * 112);
+    out.push_str("Title,Artist,Album,Duration,Source,URL\n");
+    for t in tracks {
+        let dur_s = t.duration_ms / 1000;
+        let dur = format!("{}:{:02}", dur_s / 60, dur_s % 60);
+        let url = track_primary_link(t).map_or_else(String::new, |(_, u)| u);
+        let _ = writeln!(
+            out,
+            "{},{},{},{},{},{}",
+            csv_escape_field(&t.title),
+            csv_escape_field(&t.artist),
+            csv_escape_field(&t.album),
+            dur,
+            t.source.as_badge(),
+            csv_escape_field(&url),
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PlaylistSortOrder, PlaylistSourceFilter};
-    use ferric_core::models::{Playlist, TrackSource};
+    use super::{
+        PlaylistSortOrder, PlaylistSourceFilter, collection_share_url, format_collection_csv,
+        format_collection_tracklist, track_primary_link, track_youtube_link,
+    };
+    use ferric_core::models::{Playlist, Track, TrackSource};
+    use ferric_providers::ytmusic::YtmCardKind;
 
     fn make_pl(id: &str, source: TrackSource) -> Playlist {
         Playlist {
@@ -786,5 +980,101 @@ mod tests {
         assert_eq!(az[0].name, "AURORA Radio");
         assert_eq!(az[1].name, "Bruno Mars");
         assert_eq!(az[2].name, "YOASOBI Radio");
+    }
+
+    #[test]
+    fn share_urls_handle_spotify_youtube_and_reject_unsafe_ids() {
+        assert_eq!(
+            collection_share_url(
+                "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M",
+                YtmCardKind::Playlist
+            ),
+            Some((
+                "Spotify",
+                "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M".to_string()
+            ))
+        );
+        assert_eq!(
+            collection_share_url("spotify:premium:playlist:abc123", YtmCardKind::Playlist),
+            Some((
+                "Spotify",
+                "https://open.spotify.com/playlist/abc123".to_string()
+            ))
+        );
+        assert_eq!(
+            collection_share_url("ytm:pl:VLPL12345_abc", YtmCardKind::Playlist),
+            Some((
+                "YouTube Music",
+                "https://music.youtube.com/playlist?list=PL12345_abc".to_string()
+            ))
+        );
+        assert_eq!(
+            collection_share_url("yt:playlist:PL999-xyz", YtmCardKind::Playlist),
+            Some((
+                "YouTube Music",
+                "https://music.youtube.com/playlist?list=PL999-xyz".to_string()
+            ))
+        );
+        assert_eq!(
+            collection_share_url("MPREb_abc123", YtmCardKind::Album),
+            Some((
+                "YouTube Music",
+                "https://music.youtube.com/browse/MPREb_abc123".to_string()
+            ))
+        );
+        assert_eq!(
+            collection_share_url("ytm:pl:VLLM", YtmCardKind::Playlist),
+            None
+        );
+        assert_eq!(
+            collection_share_url("local:pl:42", YtmCardKind::Playlist),
+            None
+        );
+        assert_eq!(
+            collection_share_url("spotify:playlist:../evil", YtmCardKind::Playlist),
+            None
+        );
+
+        let sp_track = Track {
+            id: "sp:1".to_string(),
+            title: "Die With A Smile".to_string(),
+            artist: "Lady Gaga, Bruno Mars".to_string(),
+            album: "Single".to_string(),
+            duration_ms: 251_000,
+            path: None,
+            source: TrackSource::Spotify,
+            codec: "OPUS".to_string(),
+            sample_rate: 48_000,
+            bit_depth: 16,
+            bitrate_kbps: 144,
+            isrc: None,
+            spotify_id: Some("2plbrEY59IikOBgBGLjaoe".to_string()),
+            youtube_video_id: Some("kPa7bsKwL-c".to_string()),
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked: false,
+        };
+        assert_eq!(
+            track_primary_link(&sp_track),
+            Some((
+                "Spotify",
+                "https://open.spotify.com/track/2plbrEY59IikOBgBGLjaoe".to_string()
+            ))
+        );
+        assert_eq!(
+            track_youtube_link(&sp_track),
+            Some("https://music.youtube.com/watch?v=kPa7bsKwL-c".to_string())
+        );
+
+        let csv = format_collection_csv(std::slice::from_ref(&sp_track));
+        assert!(csv.contains("\"Lady Gaga, Bruno Mars\""));
+        assert!(csv.contains("https://open.spotify.com/track/2plbrEY59IikOBgBGLjaoe"));
+        let txt = format_collection_tracklist(
+            "K",
+            Some("https://open.spotify.com/playlist/abc123"),
+            std::slice::from_ref(&sp_track),
+        );
+        assert!(txt.contains("K (1 songs)"));
+        assert!(txt.contains("1. Lady Gaga, Bruno Mars - Die With A Smile"));
     }
 }

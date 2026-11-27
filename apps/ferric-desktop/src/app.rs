@@ -8,8 +8,8 @@ use crate::google_login::{
 };
 use crate::shell::{
     TrayEvent, copy_text_to_clipboard, launch_verified_installer, open_allowed_url,
-    open_github_url, win32_client_rect_screen, win32_close_active_window, win32_force_quit,
-    win32_install_window_hooks, win32_is_active_window_maximized,
+    open_github_url, reveal_file_in_explorer, win32_client_rect_screen, win32_close_active_window,
+    win32_force_quit, win32_install_window_hooks, win32_is_active_window_maximized,
     win32_is_window_hidden_or_minimized, win32_main_hwnd_raw, win32_minimize_active_window,
     win32_poll_tray_events, win32_set_close_to_tray, win32_set_native_acrylic,
     win32_toggle_maximize_active_window, win32_trim_working_set, win32_update_taskbar_playback,
@@ -20,7 +20,8 @@ use crate::state::{
     BgMessage, CollectionGroup, DetailViewState, LibraryFilter, MainPage, NavEntry, NavHistory,
     PlaylistSortOrder, PlaylistSourceFilter, SearchFilter, SettingsTab, SleepTimerMode, SortField,
     StationTracksPayload, StreamReadyPayload, build_album_groups, build_artist_groups, clip_text,
-    dir_size_bytes, format_bytes_mb,
+    collection_share_url, dir_size_bytes, format_bytes_mb, format_collection_csv,
+    format_collection_tracklist, track_primary_link, track_youtube_link,
 };
 use crate::track_list::{TrackListAction, TrackListScope, TrackListWidgetRefExt};
 use crate::video_player::{NativeVideoPlayer, VideoViewportRect};
@@ -2503,26 +2504,42 @@ live_design! {
                                                 detail_shuffle_btn = <FerricBtn> { height: 28, text: "Shuffle" }
                                                 detail_save_pl_btn = <FerricBtn> { visible: false, height: 28, text: "+ Save Playlist" }
                                                 detail_radio_btn = <FerricBtn> { height: 28, text: "Start Radio" }
+                                                detail_copy_link_btn = <FerricBtn> { visible: false, height: 28, text: "Copy Link" }
                                                 detail_pin_btn = <FerricBtn> { height: 28, text: "Pin" }
                                                 detail_queue_btn = <FerricBtn> { height: 28, text: "+ Queue" }
-                                                detail_export_btn = <FerricBtn> { height: 28, text: "Export M3U" }
+                                            }
+                                            <View> {
+                                                width: Fill, height: Fit, margin: { top: 2 }, flow: Right, spacing: 6,
+                                                detail_copy_list_btn = <FerricBtn> { height: 26, text: "Copy Tracklist" }
+                                                detail_open_source_btn = <FerricBtn> { visible: false, height: 26, text: "Open Source" }
+                                                detail_export_btn = <FerricBtn> { height: 26, text: "Export M3U" }
+                                                detail_export_csv_btn = <FerricBtn> { height: 26, text: "Export CSV" }
                                                 detail_delete_btn = <FerricBtn> {
                                                     visible: false,
-                                                    height: 28,
+                                                    height: 26,
                                                     text: "Delete"
                                                     draw_text: { color: #FF7885, color_hover: #FFA3AC }
                                                 }
                                             }
-                                            detail_rename_row = <View> {
-                                                visible: false,
-                                                width: Fill, height: Fit, margin: { top: 4 }, flow: Right, align: { y: 0.5 }, spacing: 6,
-                                                detail_rename_input = <FerricInput> {
-                                                    width: 220,
+                                            detail_tools_row = <View> {
+                                                width: Fill, height: Fit, margin: { top: 2 }, flow: Right, align: { y: 0.5 }, spacing: 8,
+                                                detail_filter_input = <FerricInput> {
+                                                    width: 210,
                                                     height: 26,
-                                                    empty_text: "Rename playlist..."
-                                                    draw_text: { text_style: <THEME_FONT_REGULAR> { font_size: 8.5, line_spacing: 1.0 } }
+                                                    empty_text: "Filter songs in list..."
+                                                    draw_text: { text_style: <THEME_FONT_REGULAR> { font_size: 8.4, line_spacing: 1.0 } }
                                                 }
-                                                detail_rename_btn = <FerricBtn> { height: 26, text: "Rename" }
+                                                detail_rename_row = <View> {
+                                                    visible: false,
+                                                    width: Fit, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                                    detail_rename_input = <FerricInput> {
+                                                        width: 170,
+                                                        height: 26,
+                                                        empty_text: "Rename playlist..."
+                                                        draw_text: { text_style: <THEME_FONT_REGULAR> { font_size: 8.4, line_spacing: 1.0 } }
+                                                    }
+                                                    detail_rename_btn = <FerricBtn> { height: 26, text: "Rename" }
+                                                }
                                             }
                                         }
                                     }
@@ -3340,13 +3357,13 @@ live_design! {
                         // 3. CENTERED 2-ROW AMBIENT BOTTOM PLAYER BAR (74px, GEOMETRIC SYMMETRY)
                         // ============================================================
                         bottom_bar = <AmbientBottomBar> {
-                            // Left: 44x44 Cover Art + Title/Artist + Heart + Add Playlist
+                            // Left: 44x44 Cover Art + Title/Artist + Heart + Add Playlist + Copy Link
                             bottom_left_grp = <View> {
                                 width: 280,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
-                                spacing: 10,
+                                spacing: 8,
 
                                 np_art = <FerricCoverArt> {
                                     width: 44,
@@ -3384,6 +3401,13 @@ live_design! {
                                     width: 24, height: 24,
                                     draw_icon: {
                                         svg_path: "M19 13H13V19H11V13H5V11H11V5H13V11H19V13Z"
+                                        color: #707382
+                                    }
+                                }
+                                np_copy_link_btn = <FerricIconBtn> {
+                                    width: 24, height: 24,
+                                    draw_icon: {
+                                        svg_path: "M3.9 12C3.9 10.29 5.29 8.9 7 8.9H11V7H7C4.24 7 2 9.24 2 12C2 14.76 4.24 17 7 17H11V15.1H7C5.29 15.1 3.9 13.71 3.9 12ZM8 13H16V11H8V13ZM17 7H13V8.9H17C18.71 8.9 20.1 10.29 20.1 12C20.1 13.71 18.71 15.1 17 15.1H13V17H17C19.76 17 22 14.76 22 12C22 9.24 19.76 7 17 7Z"
                                         color: #707382
                                     }
                                 }
@@ -3974,7 +3998,7 @@ live_design! {
                         draw_bg: { color: #000000A4 }
 
                         card_track_menu = <FerricCard> {
-                            width: 440,
+                            width: 480,
                             padding: 16,
                             flow: Down,
                             spacing: 10,
@@ -4002,7 +4026,15 @@ live_design! {
                                 tm_like_btn = <FerricBtn> { height: 26, text: "Like" }
                                 tm_artist_btn = <FerricBtn> { height: 26, text: "Go to Artist" }
                                 tm_album_btn = <FerricBtn> { height: 26, text: "Go to Album" }
-                                tm_copy_btn = <FerricBtn> { height: 26, text: "Copy Info" }
+                                tm_lyrics_btn = <FerricBtn> { height: 26, text: "Lyrics" }
+                            }
+
+                            <View> {
+                                width: Fill, height: Fit, flow: Right, spacing: 6,
+                                tm_copy_link_btn = <FerricBtn> { height: 26, text: "Copy Link" }
+                                tm_copy_btn = <FerricBtn> { height: 26, text: "Copy Title" }
+                                tm_copy_alt_link_btn = <FerricBtn> { visible: false, height: 26, text: "Copy YT Link" }
+                                tm_open_source_btn = <FerricBtn> { height: 26, text: "Open Source" }
                             }
 
                             tm_div_1 = <FerricDividerH> {}
@@ -4186,6 +4218,8 @@ pub struct App {
     detail_state: DetailViewState,
     #[rust]
     detail_tracks: Rc<Vec<Track>>,
+    #[rust]
+    detail_filter_query: String,
     #[rust]
     queue: PlayQueue,
     #[rust]
@@ -5830,6 +5864,10 @@ impl App {
         if entry.page == MainPage::Detail
             && let Some(det) = entry.detail
         {
+            self.detail_filter_query.clear();
+            self.ui
+                .text_input(id!(detail_filter_input))
+                .set_text(cx, "");
             self.detail_tracks = Rc::new(det.tracks.clone());
             self.detail_state = det;
             self.refresh_detail_hero(cx);
@@ -7205,6 +7243,7 @@ impl App {
             id!(songs_filter_input),
             id!(search_page_input),
             id!(pl_new_input),
+            id!(detail_filter_input),
             id!(detail_rename_input),
             id!(quick_sync_input),
             id!(sub_url_input),
@@ -8983,13 +9022,29 @@ impl App {
             .set_text(cx, if is_pinned { "Pinned" } else { "Pin" });
         let is_saved_pl = self.detail_state.kind == YtmCardKind::Playlist
             && self.playlists.iter().any(|p| p.id == self.detail_state.id);
-        self.ui.button(id!(detail_save_pl_btn)).set_visible(
-            cx,
-            !is_saved_pl && !self.detail_state.loading && !self.detail_state.tracks.is_empty(),
-        );
+        let has_tracks = !self.detail_state.tracks.is_empty();
+        let has_share_url = self.detail_share_link().is_some();
+        self.ui
+            .button(id!(detail_save_pl_btn))
+            .set_visible(cx, !is_saved_pl && !self.detail_state.loading && has_tracks);
+        self.ui
+            .button(id!(detail_copy_link_btn))
+            .set_visible(cx, has_share_url);
+        self.ui
+            .button(id!(detail_open_source_btn))
+            .set_visible(cx, has_share_url);
+        self.ui
+            .button(id!(detail_copy_list_btn))
+            .set_visible(cx, has_tracks);
         self.ui
             .button(id!(detail_delete_btn))
             .set_visible(cx, is_saved_pl);
+        self.ui
+            .view(id!(detail_tools_row))
+            .set_visible(cx, is_saved_pl || has_tracks);
+        self.ui
+            .text_input(id!(detail_filter_input))
+            .set_visible(cx, has_tracks);
         self.ui
             .view(id!(detail_rename_row))
             .set_visible(cx, is_saved_pl);
@@ -9000,7 +9055,10 @@ impl App {
         }
         self.ui
             .button(id!(detail_export_btn))
-            .set_visible(cx, !self.detail_state.tracks.is_empty());
+            .set_visible(cx, has_tracks);
+        self.ui
+            .button(id!(detail_export_csv_btn))
+            .set_visible(cx, has_tracks);
         self.bind_cover_art_url(
             cx,
             self.ui.ferric_cover_art(id!(detail_art)),
@@ -9072,6 +9130,17 @@ impl App {
     }
 
     fn open_recommended_station(&mut self, cx: &mut Cx, station: RecommendedStation) {
+        self.detail_filter_query.clear();
+        self.ui
+            .text_input(id!(detail_filter_input))
+            .set_text(cx, "");
+        let station_share_url = station
+            .spotify_playlist_id
+            .as_deref()
+            .and_then(|pid| {
+                collection_share_url(&format!("spotify:playlist:{pid}"), YtmCardKind::Playlist)
+            })
+            .map(|(_, u)| u);
         if let Some(url) = station.center_art_url.as_deref()
             && let Some(cache) = &mut self.artwork
         {
@@ -9088,6 +9157,7 @@ impl App {
                 kind: YtmCardKind::Playlist,
                 is_radio_station: true,
                 thumbnail_url: station.center_art_url,
+                share_url: station_share_url,
                 loading: false,
                 tracks: station.cached_tracks,
             };
@@ -9106,6 +9176,7 @@ impl App {
             kind: YtmCardKind::Playlist,
             is_radio_station: true,
             thumbnail_url: station.center_art_url.clone(),
+            share_url: station_share_url,
             loading: true,
             tracks: Vec::new(),
         };
@@ -9212,6 +9283,10 @@ impl App {
     }
 
     fn open_local_detail(&mut self, cx: &mut Cx, group: CollectionGroup) {
+        self.detail_filter_query.clear();
+        self.ui
+            .text_input(id!(detail_filter_input))
+            .set_text(cx, "");
         self.request_artwork_for_tracks(&group.tracks);
         self.detail_tracks = Rc::new(group.tracks.clone());
         self.detail_state = DetailViewState {
@@ -9222,6 +9297,7 @@ impl App {
             kind: group.kind,
             is_radio_station: false,
             thumbnail_url: group.thumbnail_url,
+            share_url: None,
             loading: false,
             tracks: group.tracks,
         };
@@ -9273,6 +9349,10 @@ impl App {
         {
             let _ = cache.request_url(url);
         }
+        self.detail_filter_query.clear();
+        self.ui
+            .text_input(id!(detail_filter_input))
+            .set_text(cx, "");
         self.detail_tracks = Rc::new(Vec::new());
         self.detail_state = DetailViewState {
             id: bid.clone(),
@@ -9282,6 +9362,7 @@ impl App {
             kind: card.kind,
             is_radio_station: false,
             thumbnail_url: card.thumbnail_url,
+            share_url: None,
             loading: true,
             tracks: Vec::new(),
         };
@@ -9964,6 +10045,7 @@ impl App {
             id!(songs_filter_input),
             id!(search_page_input),
             id!(pl_new_input),
+            id!(detail_filter_input),
             id!(detail_rename_input),
             id!(quick_sync_input),
             id!(sub_url_input),
@@ -10050,9 +10132,13 @@ impl App {
             id!(detail_shuffle_btn),
             id!(detail_save_pl_btn),
             id!(detail_radio_btn),
+            id!(detail_copy_link_btn),
             id!(detail_pin_btn),
             id!(detail_queue_btn),
+            id!(detail_copy_list_btn),
+            id!(detail_open_source_btn),
             id!(detail_export_btn),
+            id!(detail_export_csv_btn),
             id!(detail_rename_btn),
             id!(yt_sync_btn),
             id!(yt_logout_btn),
@@ -10145,7 +10231,11 @@ impl App {
             id!(tm_like_btn),
             id!(tm_artist_btn),
             id!(tm_album_btn),
+            id!(tm_lyrics_btn),
+            id!(tm_copy_link_btn),
             id!(tm_copy_btn),
+            id!(tm_copy_alt_link_btn),
+            id!(tm_open_source_btn),
             id!(update_whats_new_btn),
             id!(update_popup_close_btn),
         ] {
@@ -10351,6 +10441,7 @@ impl App {
             id!(rs_clear_btn),
             id!(np_like_btn),
             id!(np_add_pl_btn),
+            id!(np_copy_link_btn),
             id!(shuffle_btn),
             id!(prev_btn),
             id!(next_btn),
@@ -11010,6 +11101,7 @@ impl App {
             id!(search_page_input),
             id!(songs_filter_input),
             id!(pl_new_input),
+            id!(detail_filter_input),
             id!(detail_rename_input),
             id!(quick_sync_input),
             id!(sub_url_input),
@@ -11053,6 +11145,44 @@ impl App {
             "Remove from Library"
         };
         self.ui.button(id!(tm_remove_btn)).set_text(cx, remove_lbl);
+
+        let primary_link = track_primary_link(&track);
+        let alt_yt_link = if primary_link.as_ref().is_some_and(|(p, _)| *p == "Spotify") {
+            track_youtube_link(&track)
+        } else {
+            None
+        };
+        self.ui
+            .button(id!(tm_copy_link_btn))
+            .set_visible(cx, primary_link.is_some());
+        if let Some((platform, _)) = &primary_link {
+            let lbl = if *platform == "Spotify" {
+                "Copy Spotify Link"
+            } else {
+                "Copy YT Link"
+            };
+            self.ui.button(id!(tm_copy_link_btn)).set_text(cx, lbl);
+        }
+        self.ui
+            .button(id!(tm_copy_alt_link_btn))
+            .set_visible(cx, alt_yt_link.is_some());
+        let open_btn = self.ui.button(id!(tm_open_source_btn));
+        if track.path.is_some() {
+            open_btn.set_visible(cx, true);
+            open_btn.set_text(cx, "Show File");
+        } else if let Some((platform, _)) = &primary_link {
+            open_btn.set_visible(cx, true);
+            open_btn.set_text(
+                cx,
+                if *platform == "Spotify" {
+                    "Open Spotify"
+                } else {
+                    "Open YouTube"
+                },
+            );
+        } else {
+            open_btn.set_visible(cx, false);
+        }
 
         for (i, pid) in [
             id!(tm_pl_0),
@@ -11320,6 +11450,60 @@ impl App {
         );
     }
 
+    fn detail_share_link(&self) -> Option<(&'static str, String)> {
+        if let Some(url) = self.detail_state.share_url.as_deref()
+            && !url.trim().is_empty()
+        {
+            let platform = if url.starts_with("https://open.spotify.com/") {
+                "Spotify"
+            } else {
+                "YouTube Music"
+            };
+            return Some((platform, url.to_string()));
+        }
+        collection_share_url(&self.detail_state.id, self.detail_state.kind)
+    }
+
+    fn rebuild_detail_tracks_view(&mut self) {
+        let q = self.detail_filter_query.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            self.detail_tracks = Rc::new(self.detail_state.tracks.clone());
+        } else {
+            let filtered: Vec<Track> = self
+                .detail_state
+                .tracks
+                .iter()
+                .filter(|t| {
+                    t.title.to_ascii_lowercase().contains(&q)
+                        || t.artist.to_ascii_lowercase().contains(&q)
+                        || t.album.to_ascii_lowercase().contains(&q)
+                })
+                .cloned()
+                .collect();
+            self.detail_tracks = Rc::new(filtered);
+        }
+    }
+
+    fn copy_track_share_link(&mut self, cx: &mut Cx, track: &Track) {
+        if let Some((platform, url)) = track_primary_link(track) {
+            let _ = copy_text_to_clipboard(&url);
+            self.show_toast(
+                cx,
+                &format!("Copied {platform} link: {}", clip_text(&track.title, 28)),
+            );
+        } else {
+            let query = format!("{} - {}", track.artist, track.title);
+            let _ = copy_text_to_clipboard(&query);
+            self.show_toast(
+                cx,
+                &format!(
+                    "Copied title (local track): {}",
+                    clip_text(&track.title, 24)
+                ),
+            );
+        }
+    }
+
     fn export_detail_m3u(&mut self, cx: &mut Cx) {
         if self.detail_state.tracks.is_empty() {
             return;
@@ -11356,14 +11540,8 @@ impl App {
                     if !path_line.is_empty() {
                         let _ = writeln!(out, "{path_line}");
                     }
-                } else if let Some(vid) = &t.youtube_video_id {
-                    let vid_clean: String = vid
-                        .chars()
-                        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-                        .collect();
-                    if !vid_clean.is_empty() {
-                        let _ = writeln!(out, "https://music.youtube.com/watch?v={vid_clean}");
-                    }
+                } else if let Some((_, url)) = track_primary_link(t) {
+                    let _ = writeln!(out, "{url}");
                 }
             }
             match std::fs::write(&dest, out) {
@@ -11372,6 +11550,44 @@ impl App {
                 }
                 Err(err) => {
                     self.show_toast(cx, &format!("Playlist export failed: {err}"));
+                }
+            }
+        }
+    }
+
+    fn export_detail_csv(&mut self, cx: &mut Cx) {
+        if self.detail_state.tracks.is_empty() {
+            return;
+        }
+        let safe_name: String = self
+            .detail_state
+            .title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let default_file = format!("{}.csv", safe_name.trim());
+        if let Some(dest) = rfd::FileDialog::new()
+            .set_title("Export Playlist (.csv)")
+            .set_file_name(&default_file)
+            .add_filter("CSV Spreadsheet", &["csv"])
+            .save_file()
+        {
+            let out = format_collection_csv(&self.detail_state.tracks);
+            match std::fs::write(&dest, out) {
+                Ok(()) => {
+                    self.show_toast(
+                        cx,
+                        &format!("Exported '{}' (.csv)", self.detail_state.title),
+                    );
+                }
+                Err(err) => {
+                    self.show_toast(cx, &format!("CSV export failed: {err}"));
                 }
             }
         }
@@ -13461,9 +13677,11 @@ impl App {
                             kind: detail.kind,
                             is_radio_station: false,
                             thumbnail_url: detail.thumbnail_url,
+                            share_url: None,
                             loading: false,
                             tracks: detail.tracks,
                         };
+                        self.rebuild_detail_tracks_view();
                         if let Some(hist) = &mut self.nav_history {
                             hist.update_current_detail(&self.detail_state);
                         }
@@ -13825,8 +14043,8 @@ impl App {
                         {
                             let _ = cache.request_url(url);
                         }
-                        self.detail_tracks = Rc::new(tracks.clone());
                         self.detail_state.tracks = tracks;
+                        self.rebuild_detail_tracks_view();
                         if !subtitle.trim().is_empty() {
                             self.detail_state.subtitle = subtitle;
                         }
@@ -15409,8 +15627,60 @@ impl App {
             self.refresh_right_sidebar(cx);
             self.show_toast(cx, &format!("Added {added} songs to Up next"));
         }
+        if self.ui.button(id!(detail_copy_link_btn)).clicked(actions) {
+            if let Some((platform, url)) = self.detail_share_link() {
+                let _ = copy_text_to_clipboard(&url);
+                self.show_toast(
+                    cx,
+                    &format!(
+                        "Copied {platform} link: {}",
+                        clip_text(&self.detail_state.title, 26)
+                    ),
+                );
+            } else {
+                self.show_toast(cx, "Local playlist has no online URL; use Copy Tracklist");
+            }
+        }
+        if self.ui.button(id!(detail_copy_list_btn)).clicked(actions)
+            && !self.detail_state.tracks.is_empty()
+        {
+            let share_url = self.detail_share_link().map(|(_, u)| u);
+            let txt = format_collection_tracklist(
+                &self.detail_state.title,
+                share_url.as_deref(),
+                &self.detail_state.tracks,
+            );
+            let _ = copy_text_to_clipboard(&txt);
+            self.show_toast(
+                cx,
+                &format!(
+                    "Copied tracklist ({} songs) to clipboard",
+                    self.detail_state.tracks.len()
+                ),
+            );
+        }
+        if self.ui.button(id!(detail_open_source_btn)).clicked(actions)
+            && let Some((platform, url)) = self.detail_share_link()
+        {
+            match open_allowed_url(&url) {
+                Ok(()) => self.show_toast(cx, &format!("Opened in {platform}")),
+                Err(err) => self.show_toast(cx, &err),
+            }
+        }
         if self.ui.button(id!(detail_export_btn)).clicked(actions) {
             self.export_detail_m3u(cx);
+        }
+        if self.ui.button(id!(detail_export_csv_btn)).clicked(actions) {
+            self.export_detail_csv(cx);
+        }
+        if let Some(q) = self
+            .ui
+            .text_input(id!(detail_filter_input))
+            .changed(actions)
+        {
+            self.detail_filter_query = q;
+            self.rebuild_detail_tracks_view();
+            self.ui.redraw(cx);
         }
         let rename_submitted = self
             .ui
@@ -15741,6 +16011,11 @@ impl App {
             && let Some(cur) = self.queue.current().cloned()
         {
             self.open_track_menu(cx, cur);
+        }
+        if self.ui.button(id!(np_copy_link_btn)).clicked(actions)
+            && let Some(cur) = self.queue.current().cloned()
+        {
+            self.copy_track_share_link(cx, &cur);
         }
 
         // 7. BOTTOM PLAYER BAR & FULLSCREEN OVERLAY
@@ -17185,18 +17460,43 @@ impl App {
                 } else {
                     self.spawn_rich_search(cx, query);
                 }
-            } else if self.ui.button(id!(tm_copy_btn)).clicked(actions) {
-                let info = if let Some(vid) = &target.youtube_video_id {
-                    format!(
-                        "{} - {} (https://music.youtube.com/watch?v={vid})",
-                        target.artist, target.title
-                    )
-                } else {
-                    format!("{} - {}", target.artist, target.title)
-                };
-                let _ = copy_text_to_clipboard(&info);
+            } else if self.ui.button(id!(tm_lyrics_btn)).clicked(actions) {
                 self.close_track_menu(cx);
-                self.show_toast(cx, "Copied track info to clipboard");
+                let is_current = self.queue.current().is_some_and(|cur| cur.id == target.id);
+                if !is_current {
+                    self.play_track(cx, target);
+                }
+                self.set_right_sidebar(cx, true, true);
+            } else if self.ui.button(id!(tm_copy_link_btn)).clicked(actions) {
+                self.copy_track_share_link(cx, &target);
+                self.close_track_menu(cx);
+            } else if self.ui.button(id!(tm_copy_alt_link_btn)).clicked(actions) {
+                if let Some(yt_url) = track_youtube_link(&target) {
+                    let _ = copy_text_to_clipboard(&yt_url);
+                    self.show_toast(
+                        cx,
+                        &format!("Copied YouTube link: {}", clip_text(&target.title, 26)),
+                    );
+                }
+                self.close_track_menu(cx);
+            } else if self.ui.button(id!(tm_open_source_btn)).clicked(actions) {
+                self.close_track_menu(cx);
+                if let Some(path) = target.path.as_deref() {
+                    match reveal_file_in_explorer(path) {
+                        Ok(()) => self.show_toast(cx, "Opened file location in Explorer"),
+                        Err(err) => self.show_toast(cx, &err),
+                    }
+                } else if let Some((platform, url)) = track_primary_link(&target) {
+                    match open_allowed_url(&url) {
+                        Ok(()) => self.show_toast(cx, &format!("Opened in {platform}")),
+                        Err(err) => self.show_toast(cx, &err),
+                    }
+                }
+            } else if self.ui.button(id!(tm_copy_btn)).clicked(actions) {
+                let title_line = format!("{} - {}", target.artist, target.title);
+                let _ = copy_text_to_clipboard(&title_line);
+                self.close_track_menu(cx);
+                self.show_toast(cx, "Copied Artist - Title to clipboard");
             } else if self.ui.button(id!(tm_remove_btn)).clicked(actions) {
                 self.close_track_menu(cx);
                 self.remove_track_contextually(cx, &target);
@@ -17483,6 +17783,23 @@ impl AppMain for App {
             }
             if ke.modifiers.control && ke.key_code == KeyCode::Comma {
                 self.navigate_to(cx, MainPage::Settings, true);
+                return;
+            }
+            if ke.modifiers.control && ke.modifiers.shift && ke.key_code == KeyCode::KeyC {
+                if let Some(cur) = self.queue.current().cloned() {
+                    self.copy_track_share_link(cx, &cur);
+                } else if self.active_page == MainPage::Detail
+                    && let Some((platform, url)) = self.detail_share_link()
+                {
+                    let _ = copy_text_to_clipboard(&url);
+                    self.show_toast(
+                        cx,
+                        &format!(
+                            "Copied {platform} link: {}",
+                            clip_text(&self.detail_state.title, 26)
+                        ),
+                    );
+                }
                 return;
             }
             if ke.modifiers.control && ke.key_code == KeyCode::KeyE {

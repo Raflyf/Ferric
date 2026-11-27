@@ -1,10 +1,18 @@
 use std::path::Path;
 
-/// Allowed external HTTPS origins that Ferric may open in the system browser (OAuth & GitHub Releases only).
+/// Allowed external HTTPS origins that Ferric may open in the system browser.
 const ALLOWED_HTTPS_PREFIXES: &[&str] = &[
     "https://github.com/Raflyf/Ferric/",
     "https://accounts.spotify.com/",
     "https://developer.spotify.com/",
+    "https://open.spotify.com/track/",
+    "https://open.spotify.com/playlist/",
+    "https://open.spotify.com/album/",
+    "https://open.spotify.com/artist/",
+    "https://music.youtube.com/watch?v=",
+    "https://music.youtube.com/playlist?list=",
+    "https://music.youtube.com/browse/",
+    "https://music.youtube.com/channel/",
     "https://accounts.google.com/",
     "https://console.cloud.google.com/",
     "https://discord.com/developers/applications/",
@@ -2333,6 +2341,42 @@ pub fn win32_force_quit() {
     win_impl::force_quit();
 }
 
+/// Open Windows File Explorer with a verified local audio file selected (no shell interpolation).
+pub fn reveal_file_in_explorer(path: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|_| "Local audio file was not found on disk".to_string())?;
+    if !meta.file_type().is_file() {
+        return Err("Refused to open non-regular or symlinked path".to_string());
+    }
+    let canonical =
+        std::fs::canonicalize(path).map_err(|_| "Could not resolve local file path".to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let raw_path = canonical.to_string_lossy();
+        let display_path = raw_path.strip_prefix(r"\\?\").unwrap_or(&raw_path);
+        if display_path.chars().any(|c| c.is_control() || c == '"') {
+            return Err("Refused unsafe characters in file path".to_string());
+        }
+        let sys_root = std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        let explorer = sys_root.join("explorer.exe");
+        std::process::Command::new(explorer)
+            .raw_arg(format!("/select,\"{display_path}\""))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open Explorer: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = canonical;
+        Ok(())
+    }
+}
+
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -2416,6 +2460,10 @@ mod tests {
             "https://livelydesk.vercel.app/ferric",
             "https://yapp.ink/raflyf",
             "https://saweria.co/BuyMatcha",
+            "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+            "https://open.spotify.com/track/2plbrEY59IikOBgBGLjaoe",
+            "https://music.youtube.com/playlist?list=PL12345",
+            "https://music.youtube.com/watch?v=kPa7bsKwL-c",
         ] {
             assert!(is_safe_external_url(ok_url), "expected allowed: {ok_url}");
         }
@@ -2424,6 +2472,8 @@ mod tests {
             "https://livelydesk.vercel.app/other",
             "https://yapp.ink/other",
             "https://saweria.co/other",
+            "https://open.spotify.com/user/evil",
+            "https://music.youtube.com/evil",
             "https://github.com/Raflyf/Ferric/../../evil",
             "https://evil.example/https://github.com/Raflyf/Ferric",
         ] {

@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-audio"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "biquad",
  "cpal",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "directories",
  "fastrand",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-desktop"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "fastrand",
  "ferric-audio",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-providers"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aho-corasick",
  "fastrand",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-sync"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ferric-core",
  "postcard",

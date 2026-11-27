@@ -46,14 +46,14 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 
 ## Features
 
-- **Spotify sign-in and library sync (Free & Premium):** Log in directly inside **Settings > Accounts** with any Spotify Free or Premium account (no API key or Client ID setup required) to sync your Liked Songs, personal and followed playlists, and personalized Recommended Stations into Ferric. Tokens and session cookies are encrypted at rest with Windows DPAPI (`CryptProtectData`).
-- **Unified local and online libraries:** Scan local audio folders (`FLAC`, `MP3`, `AAC`/`M4A`, `ALAC`, `Ogg Vorbis`, `Opus`, `WAV`, `AIFF`), browse YouTube Music Home, Search, and Smart Radio, sign in to YouTube Music or OpenSubsonic/Navidrome, and import public playlist URLs or `.m3u`/`.csv` files.
-- **Pure-Rust dual-deck audio engine:** Gapless album playback, configurable auto-crossfade (`0–12 s`) with 140 Hz Bass-Swap Automix, S-Curve Velvet, and Equal-Power curves, 10-band parametric Biquad EQ with 24 built-in AutoEq profiles and Equalizer APO `.txt` import/export, ReplayGain, Mono downmix, Sleep Timer, and one-click bottom-bar Playback Speed (`0.75x` / `1.0x` / `1.25x` / `1.5x`).
+- **Two-way Spotify & YouTube Music account sync:** Log in directly inside **Settings > Accounts** with Spotify (Free & Premium, no API key or Client ID required) or YouTube Music to sync your Liked Songs, personal and followed playlists, and Recommended Stations. Playlist creations, edits, renames, deletions, and likes are automatically pushed back to your signed-in account so your library persists across sign-outs and reinstalls. Tokens and cookies are encrypted at rest with Windows DPAPI (`CryptProtectData`).
+- **Unified local and online libraries:** Scan local audio folders (`FLAC`, `MP3`, `AAC`/`M4A`, `ALAC`, `Ogg Vorbis`, `Opus`, `WAV`, `AIFF`), browse YouTube Music Home, Search, and Smart Radio, connect OpenSubsonic/Navidrome, sort/deduplicate/filter playlists, save or copy the live Queue, and import public playlist URLs or `.m3u`/`.csv` files.
+- **Pure-Rust dual-deck audio engine & live WASAPI output switching:** Gapless album playback, configurable auto-crossfade (`0-12 s`) with 140 Hz Bass-Swap Automix, S-Curve Velvet, and Equal-Power curves, live WASAPI output device selector and hot-swap in **Settings > Playback**, 10-band parametric Biquad EQ with 24 built-in AutoEq profiles and Equalizer APO `.txt` import/export, ReplayGain, Mono downmix, Sleep Timer, and one-click bottom-bar Playback Speed (`0.75x` / `1.0x` / `1.25x` / `1.5x`).
 - **Synced lyrics, Fullscreen Lyrics, and docked video clips:** 4-stage lyrics waterfall (local `.lrc` sidecar, embedded tags, `LRCLIB`, `Lyrics.ovh`), timing offset controls (`-0.5s` / `+0.5s`), Fullscreen Lyrics aurora stage, and optional docked HD music video clips.
 - **Four themes with Windows 11 Acrylic and adaptive cover colors:** Switch between `AMOLED Black` (default), `Native Acrylic`, `Obsidian Studio`, and `Warm Cream Light`. Customize glass opacity and tint with a GPU HSV picker, or let Adaptive Artwork Accent and Adaptive Acrylic Tint harmonize automatically with the playing cover while maintaining WCAG AA contrast.
 - **Native Windows 11 integration:** Full Windows SMTC metadata, cover art, live timeline position, and seek support for Quick Settings and third-party overlays (Nusa Pro, NotchPixel, ModernFlyouts), plus taskbar thumbnail buttons (`Prev` / `Play-Pause` / `Next`) and a device-theme-aware dark/light system tray menu.
-- **Low-overhead GPU and tray residency:** Prefers the integrated GPU on hybrid laptops so discrete GPUs stay asleep, releases CPU cover buffers after GPU upload, and trims working set when minimized to the system tray.
-- **Optional Discord Rich Presence and Ferric Connect:** Zero-dependency local Discord IPC (`Listening to Ferric`) and LAN QR pairing discovery (active only while the Connect tab is open).
+- **Low-overhead GPU and tray residency:** Prefers the integrated GPU on hybrid laptops so discrete GPUs stay asleep, releases CPU cover buffers after GPU upload, skips paused idle redraws, uses zero-allocation filtering/sorting, and trims working set when minimized to the system tray.
+- **Optional Discord Rich Presence and Ferric Connect:** Zero-dependency local Discord IPC (`Listening to Ferric`) with an optional `Listen on Spotify / YouTube Music` button, plus LAN QR pairing discovery (active only while the Connect tab is open).
 - **Local credential protection and clean uninstall:** Stored tokens, cookies, and passwords are encrypted with Windows DPAPI (`CryptProtectData`); full MSI uninstallation removes `%LOCALAPPDATA%\LivelyDesk\Ferric` and app residue while upgrades preserve your database and settings.
 
 ## Resource use
@@ -90,8 +90,8 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 
 | Package | Best for |
 | :--- | :--- |
-| [Windows installer (`ferricsetup-v0.1.1.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.1.msi>) | Per-user installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
-| [Portable ZIP (`Ferric-v0.1.1-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.1-windows-x86_64.zip>) | Running without installation |
+| [Windows installer (`ferricsetup-v0.1.2.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.2.msi>) | Per-user installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
+| [Portable ZIP (`Ferric-v0.1.2-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.2-windows-x86_64.zip>) | Running without installation |
 | [SHA-256 checksums (`SHA256SUMS.txt`)](<https://github.com/Raflyf/Ferric/releases/latest/download/SHA256SUMS.txt>) | Verifying installer and portable archive integrity before running |
 
 **Requirements:** Windows 10 or Windows 11 on a 64-bit (`x86_64`) PC. No administrator rights are required. Native Windows Acrylic backdrop works best on Windows 11.
@@ -130,7 +130,7 @@ Optional support via [Buy me a coffee](<https://yapp.ink/raflyf>) or [Saweria](<
 
 ## Code signing policy
 
-Ferric releases (including `v0.1.1`) are currently **unsigned** (no Authenticode code-signing certificate is active). Windows Defender SmartScreen may show an unknown-publisher warning on new releases. All official installers, portable archives, and `SHA256SUMS.txt` manifests are compiled transparently from public source via [GitHub Actions](<.github/workflows/release.yml>). Always download from [GitHub Releases](<https://github.com/Raflyf/Ferric/releases>), verify SHA-256 digests before installing, and keep Windows security protections enabled.
+Ferric releases (including `v0.1.2`) are currently **unsigned** (no Authenticode code-signing certificate is active). Windows Defender SmartScreen may show an unknown-publisher warning on new releases. All official installers, portable archives, and `SHA256SUMS.txt` manifests are compiled transparently from public source via [GitHub Actions](<.github/workflows/release.yml>). Always download from [GitHub Releases](<https://github.com/Raflyf/Ferric/releases>), verify SHA-256 digests before installing, and keep Windows security protections enabled.
 
 ## Privacy policy
 

@@ -4,6 +4,25 @@ All notable changes to Ferric are documented in this file.
 
 ---
 
+## v0.1.2 (2026-11-27)
+
+### Added
+
+- **Two-Way Cloud Account Playlist & Like Sync (Spotify & YouTube Music):** Creating playlists (`+ Create`, `Save Playlist`, `Save Queue`, Track Menu `+ Create`), adding or removing tracks, renaming or deleting playlists, deduplicating Spotify playlists, and toggling Liked Songs now synchronize automatically back to your signed-in Spotify or YouTube Music account so changes persist across sign-outs, uninstalls, and other devices. Existing local playlists can also be pushed to your signed-in account with one click via **Sync to Account**.
+- **WASAPI Audio Output Device Selector + Live Hot-Switch:** Choose `System Default` or switch live between headphones, speakers, USB DACs, and Bluetooth outputs inside **Settings > Playback** (`Refresh`, cycle button, and device chips) without restarting playback or losing song position, with automatic fallback to `System Default` if a device is disconnected.
+- **Discord Rich Presence Listen Button:** Added an optional **Show Listen Button** toggle inside **Settings > Integrations** (enabled by default, automatically omitted under **Hide Track Details**) that attaches a `Listen on Spotify` or `Listen on YouTube Music` link button verified against a strict HTTPS allowlist.
+- **Right Sidebar Queue Tools & Clickable Bottom-Bar Artist:** Save the active song and upcoming queue straight to a playlist (`Save Queue`) or copy the queue tracklist (`Copy Queue`), and click the artist name in the bottom player bar to open the artist detail page or search.
+- **Playlist Detail Sort, Deduplicate & Filtered Playback:** Playlist Detail **Play**, **Shuffle**, and **+ Queue** now follow active text filtering and sort order, alongside dedicated **Sort** (`Original`, `Title`, `Artist`, `Duration`) and O(N) **Deduplicate** controls.
+- **Expanded Powerbar (`Ctrl+P`) & Shortcut Documentation:** Added `Copy Song Link`, `Copy Playlist Link`, `Save Queue`, and `About & Updates` quick actions plus `Ctrl+Shift+C` shortcut documentation in **Settings > Storage**.
+
+### Improved
+
+- **Workspace-Wide Zero-Allocation Search, Filter & Sort:** Added a shared `ferric_core::text` module (`find_ascii_icase`, `contains_ascii_icase`, `starts_with_ascii_icase`, `ends_with_ascii_icase`, `cmp_ascii_icase`) and replaced temporary `.to_ascii_lowercase()` heap allocations across library filters, instant search, playlist/album/artist sorting, AutoEq lookup, lyrics scoring, Spotify/YouTube parsers, updater host checks, and WASAPI device sorting, paired with O(1) `HashMap` lookup for `Recent` sorting.
+- **Debounced Session State Persistence & Flush Guarantees:** Coalesced rapid volume slider, wheel, mute, shuffle, and repeat writes into a 400 ms debounce window while guaranteeing immediate SQLite flush on minimize, hide-to-tray, updater launch, tray quit, and app exit (`Drop`).
+- **Paused Fullscreen Lyrics Idle CPU/GPU Reduction:** Stopped 60 FPS hover redraws on paused ambient backdrops, flattened the visualizer once when pausing, and skipped redundant seek slider/lyrics UI updates when paused with unchanged timestamps.
+
+---
+
 ## v0.1.1 (2026-11-27)
 
 ### Added

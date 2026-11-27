@@ -3192,7 +3192,7 @@ live_design! {
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
                                                     lbl_t_ab_name = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 14.5 } }, text: "Ferric" }
-                                                    about_version_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.2 } }, text: "v0.1.1 · Windows x64" }
+                                                    about_version_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.2 } }, text: "v0.1.2 · Windows x64" }
                                                 }
                                                 lbl_m_ab_tagline = <Label> {
                                                     width: Fill,

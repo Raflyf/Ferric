@@ -3,7 +3,7 @@ package dev.livelydesk.ferric.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -59,10 +59,14 @@ import coil3.compose.AsyncImage
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.theme.FerricOrange
 import dev.livelydesk.ferric.ui.theme.HairlineBorder
+import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.LocalHazeState
 import dev.livelydesk.ferric.ui.theme.ObsidianElevated
 import dev.livelydesk.ferric.ui.theme.ObsidianSurface
 import dev.livelydesk.ferric.ui.theme.TextPrimary
 import dev.livelydesk.ferric.ui.theme.TextSecondary
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
+import kotlin.math.abs
 import uniffi.ferric_mobile_ffi.FfiPlaylist
 import uniffi.ferric_mobile_ffi.FfiTrack
 import uniffi.ferric_mobile_ffi.FfiTrackSource
@@ -239,36 +243,54 @@ fun MiniPlayerBar(
     onTogglePlayPause: () -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
+    onOpenFullPlayer: () -> Unit,
     onOpenQueue: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val palette = LocalFerricPalette.current
+    val hazeState = LocalHazeState.current
     val cur = state.currentTrack
-    var dragSum by remember { mutableFloatStateOf(0f) }
+    var dragX by remember { mutableFloatStateOf(0f) }
+    var dragY by remember { mutableFloatStateOf(0f) }
     val progress = if (state.durationMs > 0L) {
         (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
     } else {
         0f
     }
 
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = ObsidianElevated,
-        border = BorderStroke(1.dp, HairlineBorder),
+    Box(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 10.dp, vertical = 6.dp)
+            .ferricGlassSurface(
+                palette = palette,
+                hazeState = hazeState,
+                cornerRadius = if (palette.isLiquidGlass) 18.dp else 14.dp,
+            )
             .pointerInput(cur?.id) {
-                detectHorizontalDragGestures(
+                detectDragGestures(
                     onDragEnd = {
-                        if (dragSum < -72f) onNext()
-                        else if (dragSum > 72f) onPrev()
-                        dragSum = 0f
+                        if (dragY < -56f && abs(dragY) > abs(dragX)) {
+                            onOpenFullPlayer()
+                        } else if (dragX < -72f) {
+                            onNext()
+                        } else if (dragX > 72f) {
+                            onPrev()
+                        }
+                        dragX = 0f
+                        dragY = 0f
                     },
-                    onDragCancel = { dragSum = 0f },
-                    onHorizontalDrag = { _, dragAmount -> dragSum += dragAmount },
+                    onDragCancel = {
+                        dragX = 0f
+                        dragY = 0f
+                    },
+                    onDrag = { _, dragAmount ->
+                        dragX += dragAmount.x
+                        dragY += dragAmount.y
+                    },
                 )
             }
-            .clickable(onClick = onOpenQueue),
+            .clickable(onClick = onOpenFullPlayer),
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Row(
@@ -288,15 +310,15 @@ fun MiniPlayerBar(
                     Text(
                         text = cur?.title ?: "Ready to play",
                         style = MaterialTheme.typography.titleMedium,
-                        color = TextPrimary,
+                        color = palette.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
                         text = cur?.let { "${it.artist} · ${state.activeOutputRoute}" }
-                            ?: "Swipe or pick a track",
+                            ?: "Swipe up for Player · left/right to skip",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
+                        color = palette.textSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -305,19 +327,19 @@ fun MiniPlayerBar(
                     Icon(
                         imageVector = Icons.Rounded.SkipPrevious,
                         contentDescription = "Previous",
-                        tint = TextPrimary,
+                        tint = palette.textPrimary,
                     )
                 }
                 Surface(
                     shape = CircleShape,
-                    color = FerricOrange,
+                    color = palette.accent,
                     modifier = Modifier.size(40.dp),
                 ) {
                     IconButton(onClick = onTogglePlayPause) {
                         Icon(
                             imageVector = if (state.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                             contentDescription = if (state.isPlaying) "Pause" else "Play",
-                            tint = ObsidianSurface,
+                            tint = if (palette.isLight) androidx.compose.ui.graphics.Color.White else ObsidianSurface,
                         )
                     }
                 }
@@ -325,14 +347,14 @@ fun MiniPlayerBar(
                     Icon(
                         imageVector = Icons.Rounded.SkipNext,
                         contentDescription = "Next",
-                        tint = TextPrimary,
+                        tint = palette.textPrimary,
                     )
                 }
                 IconButton(onClick = onOpenQueue) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.QueueMusic,
                         contentDescription = "Queue",
-                        tint = TextSecondary,
+                        tint = palette.textSecondary,
                     )
                 }
             }
@@ -341,8 +363,8 @@ fun MiniPlayerBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(2.5.dp),
-                color = FerricOrange,
-                trackColor = HairlineBorder,
+                color = palette.accent,
+                trackColor = palette.border,
             )
         }
     }

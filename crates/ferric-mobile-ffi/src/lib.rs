@@ -3,14 +3,17 @@
 #[cfg(target_os = "android")]
 mod android_jni;
 pub mod m2_types;
+pub mod m3_types;
 
 pub use m2_types::*;
+pub use m3_types::*;
 
 use ferric_audio::content::{ContentOpener, register_content_opener};
 use ferric_audio::engine::TelemetrySnapshot;
 use ferric_controller::events::ControllerEventSink;
 use ferric_controller::types::{
-    AccountStatusSnapshot, CollectionDetailSnapshot, HomeSnapshot, SearchSnapshot,
+    AccountStatusSnapshot, CollectionDetailSnapshot, HomeSnapshot, LyricsSnapshot, SearchSnapshot,
+    VideoStreamsSnapshot,
 };
 use ferric_controller::{ControllerConfig, ControllerError, FerricController};
 use ferric_core::eq::{EqBand, EqConfig, EqFilterKind};
@@ -615,6 +618,8 @@ pub trait FfiEventSink: Send + Sync {
     fn on_search_results(&self, results: FfiSearchResults);
     fn on_detail_loaded(&self, detail: FfiCollectionDetail);
     fn on_accounts_changed(&self, status: FfiAccountStatus);
+    fn on_lyrics_loaded(&self, lyrics: FfiLyricsState);
+    fn on_video_streams_loaded(&self, video: FfiVideoStreamsState);
     fn on_spotify_auth_expired(&self);
     fn on_toast(&self, message: String);
 }
@@ -700,6 +705,14 @@ impl ControllerEventSink for EventSinkBridge {
 
     fn on_accounts_changed(&self, status: AccountStatusSnapshot) {
         self.0.on_accounts_changed(status.into());
+    }
+
+    fn on_lyrics_loaded(&self, lyrics: LyricsSnapshot) {
+        self.0.on_lyrics_loaded(lyrics.into());
+    }
+
+    fn on_video_streams_loaded(&self, video: VideoStreamsSnapshot) {
+        self.0.on_video_streams_loaded(video.into());
     }
 
     fn on_spotify_auth_expired(&self) {
@@ -1250,6 +1263,60 @@ impl FerricMobileCore {
     pub fn logout_subsonic(&self) -> Result<(), FfiError> {
         self.controller.logout_subsonic()?;
         Ok(())
+    }
+
+    // --- M3 Synced Lyrics, Video Clip, EQ/AutoEq/APO & Theme Studio ---
+
+    pub fn load_lyrics(&self, track: FfiTrack) {
+        self.controller.load_lyrics(track.into());
+    }
+
+    pub fn nudge_lyrics_offset_ms(&self, delta_ms: i64) -> i64 {
+        self.controller.nudge_lyrics_offset_ms(delta_ms)
+    }
+
+    pub fn resolve_video_streams(&self, track: FfiTrack) {
+        self.controller.resolve_video_streams(track.into());
+    }
+
+    pub fn list_eq_presets(&self) -> Vec<String> {
+        self.controller.list_eq_presets()
+    }
+
+    pub fn apply_eq_preset(&self, preset_name: String) -> Result<FfiEqConfig, FfiError> {
+        Ok(self.controller.apply_eq_preset(&preset_name)?.into())
+    }
+
+    pub fn search_autoeq(&self, query: String) -> Vec<FfiAutoEqProfile> {
+        self.controller
+            .search_autoeq(&query)
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    pub fn apply_autoeq_profile(&self, profile_name: String) -> Result<FfiEqConfig, FfiError> {
+        Ok(self.controller.apply_autoeq_profile(&profile_name)?.into())
+    }
+
+    pub fn import_eq_apo(&self, apo_text: String) -> Result<FfiEqConfig, FfiError> {
+        Ok(self.controller.import_eq_apo(&apo_text)?.into())
+    }
+
+    pub fn export_eq_apo(&self) -> String {
+        self.controller.export_eq_apo()
+    }
+
+    pub fn apply_theme_preset(&self, preset_name: String) -> Result<FfiThemeConfig, FfiError> {
+        Ok(self.controller.apply_theme_preset(&preset_name)?.into())
+    }
+
+    pub fn export_theme_json(&self) -> Result<String, FfiError> {
+        Ok(self.controller.export_theme_json()?)
+    }
+
+    pub fn import_theme_json(&self, raw_json: String) -> Result<FfiThemeConfig, FfiError> {
+        Ok(self.controller.import_theme_json(&raw_json)?.into())
     }
 
     pub fn shutdown(&self) {

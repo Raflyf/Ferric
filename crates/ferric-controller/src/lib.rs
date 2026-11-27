@@ -4,11 +4,12 @@ pub mod accounts;
 pub mod events;
 pub mod home;
 pub mod library;
+pub mod media_tools;
 pub mod types;
 
 use crate::accounts::active_ytm_session;
 use crate::events::ControllerEventSink;
-use crate::types::HomeSnapshot;
+use crate::types::{HomeSnapshot, LyricsSnapshot};
 use ferric_audio::engine::{AudioEngine, EngineCommand, TelemetrySnapshot};
 use ferric_core::db::LibraryDb;
 use ferric_core::eq::EqConfig;
@@ -86,6 +87,10 @@ struct ControllerState {
     search_gen: u64,
     detail_gen: u64,
     prefetch_gen: u64,
+    lyrics_gen: u64,
+    video_gen: u64,
+    lyrics_offset_ms: i64,
+    lyrics_cache: LyricsSnapshot,
 }
 
 /// Thread-safe headless Ferric controller owning SQLite persistence, PlayQueue, lazy `AudioEngine`,
@@ -170,6 +175,10 @@ impl FerricController {
                 search_gen: 0,
                 detail_gen: 0,
                 prefetch_gen: 0,
+                lyrics_gen: 0,
+                video_gen: 0,
+                lyrics_offset_ms: 0,
+                lyrics_cache: LyricsSnapshot::default(),
             }),
             audio: Mutex::new(None),
             wake_lock: Mutex::new(false),

@@ -1,7 +1,7 @@
 use ferric_mobile_ffi::{
     FerricMobileCore, FfiAccountStatus, FfiBackgroundMode, FfiCollectionDetail, FfiContentOpener,
-    FfiError, FfiEventSink, FfiHomeState, FfiLocalScanEntry, FfiSearchResults, FfiSecretCipher,
-    FfiTelemetry, FfiTrack,
+    FfiError, FfiEventSink, FfiHomeState, FfiLocalScanEntry, FfiLyricsState, FfiSearchResults,
+    FfiSecretCipher, FfiTelemetry, FfiTrack, FfiVideoStreamsState,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,6 +41,8 @@ impl FfiEventSink for TestSink {
     fn on_search_results(&self, _results: FfiSearchResults) {}
     fn on_detail_loaded(&self, _detail: FfiCollectionDetail) {}
     fn on_accounts_changed(&self, _status: FfiAccountStatus) {}
+    fn on_lyrics_loaded(&self, _lyrics: FfiLyricsState) {}
+    fn on_video_streams_loaded(&self, _video: FfiVideoStreamsState) {}
     fn on_spotify_auth_expired(&self) {}
     fn on_toast(&self, _message: String) {}
 }
@@ -113,6 +115,28 @@ fn mobile_ffi_seeds_plays_and_persists_liquid_glass_theme() {
     assert_eq!(hits.len(), 1);
     assert!(core.toggle_like(hits[0].id.clone()).expect("like"));
     assert!(!core.get_account_status().spotify_connected);
+
+    // M3: EQ presets, 24 AutoEq profiles, APO export/import, Theme Studio JSON roundtrip, Lyrics offset
+    assert_eq!(core.search_autoeq(String::new()).len(), 24);
+    let xm5 = core
+        .apply_autoeq_profile("Sony WH-1000XM5".to_string())
+        .expect("autoeq");
+    assert_eq!(xm5.bands.len(), 10);
+    let apo = core.export_eq_apo();
+    assert!(apo.contains("Preamp:"));
+    let reimported = core.import_eq_apo(apo).expect("reimport apo");
+    assert_eq!(reimported.bands.len(), 10);
+
+    let glass = core
+        .apply_theme_preset("Liquid Glass".to_string())
+        .expect("liquid glass");
+    assert_eq!(glass.player_layout, "liquid_glass");
+    let theme_json = core.export_theme_json().expect("export theme");
+    assert!(theme_json.contains("NativeAcrylic"));
+    let imported_theme = core.import_theme_json(theme_json).expect("import theme");
+    assert_eq!(imported_theme.name, "Liquid Glass");
+    assert_eq!(core.nudge_lyrics_offset_ms(500), 500);
+    assert_eq!(core.nudge_lyrics_offset_ms(-1000), -500);
 
     core.shutdown();
     let _ = std::fs::remove_dir_all(&root);

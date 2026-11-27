@@ -113,12 +113,16 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
 
     implementation(libs.androidx.media3.common)
+    implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.session)
+    implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.mediarouter)
     implementation(libs.androidx.documentfile)
+    implementation(libs.androidx.palette.ktx)
     implementation(libs.androidx.webkit)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+    implementation(libs.haze)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.guava)
 

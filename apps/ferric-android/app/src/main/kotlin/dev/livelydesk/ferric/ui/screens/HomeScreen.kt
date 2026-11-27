@@ -1,6 +1,5 @@
 package dev.livelydesk.ferric.ui.screens
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,9 +16,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountCircle
+import androidx.compose.material.icons.rounded.Equalizer
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shuffle
@@ -30,7 +30,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -42,12 +41,9 @@ import androidx.compose.ui.unit.dp
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.TrackRow
-import dev.livelydesk.ferric.ui.theme.FerricOrange
-import dev.livelydesk.ferric.ui.theme.HairlineBorder
-import dev.livelydesk.ferric.ui.theme.ObsidianElevated
-import dev.livelydesk.ferric.ui.theme.ObsidianSurface
-import dev.livelydesk.ferric.ui.theme.TextPrimary
-import dev.livelydesk.ferric.ui.theme.TextSecondary
+import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.LocalHazeState
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import java.util.Calendar
 import uniffi.ferric_mobile_ffi.FfiCardKind
 import uniffi.ferric_mobile_ffi.FfiShelfCard
@@ -70,6 +66,8 @@ fun HomeScreen(
     onRefresh: () -> Unit,
     onSelectMood: (Int?) -> Unit,
     onOpenAccounts: () -> Unit,
+    onOpenEqualizer: () -> Unit,
+    onOpenThemeStudio: () -> Unit,
     onOpenOutputSwitcher: () -> Unit,
     onPlayQueue: (List<FfiTrack>, Int, String) -> Unit,
     onShuffleQueue: (List<FfiTrack>, String) -> Unit,
@@ -82,6 +80,7 @@ fun HomeScreen(
     onCopyTrackLink: (FfiTrack) -> Unit,
     onOpenArtist: (String) -> Unit,
 ) {
+    val palette = LocalFerricPalette.current
     val greeting = remember { timeGreeting() }
     val home = state.homeState
     val quickPicks = if (home.quickPicks.isNotEmpty()) home.quickPicks else state.tracks.take(10)
@@ -104,26 +103,40 @@ fun HomeScreen(
                     Text(
                         text = "FERRIC",
                         style = MaterialTheme.typography.labelSmall,
-                        color = FerricOrange,
+                        color = palette.accent,
                     )
                     Text(
                         text = greeting,
                         style = MaterialTheme.typography.headlineMedium,
-                        color = TextPrimary,
+                        color = palette.textPrimary,
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onRefresh) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh Home", tint = TextPrimary)
+                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh Home", tint = palette.textPrimary)
+                    }
+                    IconButton(onClick = onOpenEqualizer) {
+                        Icon(
+                            Icons.Rounded.Equalizer,
+                            contentDescription = "Equalizer and DSP",
+                            tint = if (state.eqConfig?.enabled == true) palette.accent else palette.textPrimary,
+                        )
+                    }
+                    IconButton(onClick = onOpenThemeStudio) {
+                        Icon(
+                            Icons.Rounded.Palette,
+                            contentDescription = "Theme Studio",
+                            tint = if (palette.isLiquidGlass) palette.accent else palette.textPrimary,
+                        )
                     }
                     IconButton(onClick = onOpenOutputSwitcher) {
-                        Icon(Icons.Rounded.Speaker, contentDescription = "Audio Output", tint = TextPrimary)
+                        Icon(Icons.Rounded.Speaker, contentDescription = "Audio Output", tint = palette.textPrimary)
                     }
                     IconButton(onClick = onOpenAccounts) {
                         Icon(
                             imageVector = Icons.Rounded.AccountCircle,
                             contentDescription = "Accounts",
-                            tint = if (anyConnected) FerricOrange else TextPrimary,
+                            tint = if (anyConnected) palette.accent else palette.textPrimary,
                         )
                     }
                 }
@@ -132,8 +145,8 @@ fun HomeScreen(
                 Spacer(Modifier.height(6.dp))
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth().height(2.dp),
-                    color = FerricOrange,
-                    trackColor = ObsidianElevated,
+                    color = palette.accent,
+                    trackColor = palette.elevated,
                 )
             }
         }
@@ -148,10 +161,10 @@ fun HomeScreen(
                             onClick = { onSelectMood(null) },
                             label = { Text("All") },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = FerricOrange,
-                                selectedLabelColor = ObsidianSurface,
-                                containerColor = ObsidianElevated,
-                                labelColor = TextPrimary,
+                                selectedContainerColor = palette.accent,
+                                selectedLabelColor = palette.canvas,
+                                containerColor = palette.elevated,
+                                labelColor = palette.textPrimary,
                             ),
                         )
                     }
@@ -162,10 +175,10 @@ fun HomeScreen(
                             onClick = { onSelectMood(idx) },
                             label = { Text(chip.title) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = FerricOrange,
-                                selectedLabelColor = ObsidianSurface,
-                                containerColor = ObsidianElevated,
-                                labelColor = TextPrimary,
+                                selectedContainerColor = palette.accent,
+                                selectedLabelColor = palette.canvas,
+                                containerColor = palette.elevated,
+                                labelColor = palette.textPrimary,
                             ),
                         )
                     }
@@ -182,19 +195,19 @@ fun HomeScreen(
                 Text(
                     text = "Quick picks",
                     style = MaterialTheme.typography.titleLarge,
-                    color = TextPrimary,
+                    color = palette.textPrimary,
                 )
                 if (quickPicks.isNotEmpty()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = { onPlayQueue(quickPicks, 0, "Quick Picks") }) {
-                            Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = FerricOrange, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = palette.accent, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Play", color = FerricOrange)
+                            Text("Play", color = palette.accent)
                         }
                         TextButton(onClick = { onShuffleQueue(quickPicks, "Quick Picks") }) {
-                            Icon(Icons.Rounded.Shuffle, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Rounded.Shuffle, contentDescription = null, tint = palette.textSecondary, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Shuffle", color = TextSecondary)
+                            Text("Shuffle", color = palette.textSecondary)
                         }
                     }
                 }
@@ -221,7 +234,7 @@ fun HomeScreen(
                     Text(
                         text = "Recommended Stations",
                         style = MaterialTheme.typography.titleLarge,
-                        color = TextPrimary,
+                        color = palette.textPrimary,
                     )
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(home.stations, key = { it.id }) { station ->
@@ -241,7 +254,7 @@ fun HomeScreen(
                     Text(
                         text = shelf.title,
                         style = MaterialTheme.typography.titleLarge,
-                        color = TextPrimary,
+                        color = palette.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -293,42 +306,41 @@ private fun StationCardItem(
     station: FfiStationCard,
     onClick: () -> Unit,
 ) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = ObsidianSurface,
-        border = BorderStroke(1.dp, HairlineBorder),
+    val palette = LocalFerricPalette.current
+    val haze = LocalHazeState.current
+    Column(
         modifier = Modifier
             .width(156.dp)
-            .clickable(onClick = onClick),
+            .ferricGlassSurface(palette, haze)
+            .clickable(onClick = onClick)
+            .padding(10.dp),
     ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            ArtworkThumb(
-                url = station.thumbnailUrl,
-                size = 136.dp,
-                cornerRadius = 10.dp,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = if (station.isSpotify) "SPOTIFY RADIO" else "FERRIC RADIO",
-                style = MaterialTheme.typography.labelSmall,
-                color = FerricOrange,
-                maxLines = 1,
-            )
-            Text(
-                text = station.title,
-                style = MaterialTheme.typography.titleMedium,
-                color = TextPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = station.subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextSecondary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        ArtworkThumb(
+            url = station.thumbnailUrl,
+            size = 136.dp,
+            cornerRadius = 10.dp,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = if (station.isSpotify) "SPOTIFY RADIO" else "FERRIC RADIO",
+            style = MaterialTheme.typography.labelSmall,
+            color = palette.accent,
+            maxLines = 1,
+        )
+        Text(
+            text = station.title,
+            style = MaterialTheme.typography.titleMedium,
+            color = palette.textPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = station.subtitle,
+            style = MaterialTheme.typography.bodyMedium,
+            color = palette.textSecondary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -337,37 +349,36 @@ private fun ShelfCardItem(
     card: FfiShelfCard,
     onClick: () -> Unit,
 ) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = ObsidianSurface,
-        border = BorderStroke(1.dp, HairlineBorder),
+    val palette = LocalFerricPalette.current
+    val haze = LocalHazeState.current
+    Column(
         modifier = Modifier
             .width(148.dp)
-            .clickable(onClick = onClick),
+            .ferricGlassSurface(palette, haze)
+            .clickable(onClick = onClick)
+            .padding(10.dp),
     ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            ArtworkThumb(
-                url = card.thumbnailUrl,
-                size = 128.dp,
-                cornerRadius = if (card.kind == FfiCardKind.ARTIST) 64.dp else 10.dp,
-            )
-            Spacer(Modifier.height(8.dp))
+        ArtworkThumb(
+            url = card.thumbnailUrl,
+            size = 128.dp,
+            cornerRadius = if (card.kind == FfiCardKind.ARTIST) 64.dp else 10.dp,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = card.title,
+            style = MaterialTheme.typography.titleMedium,
+            color = palette.textPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (card.subtitle.isNotBlank()) {
             Text(
-                text = card.title,
-                style = MaterialTheme.typography.titleMedium,
-                color = TextPrimary,
+                text = card.subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = palette.textSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (card.subtitle.isNotBlank()) {
-                Text(
-                    text = card.subtitle,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
         }
     }
 }

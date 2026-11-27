@@ -9,8 +9,10 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 fastrand.workspace = true
+lofty.workspace = true
 ferric-core = { path = "../ferric-core" }
 ferric-audio = { path = "../ferric-audio" }
 ferric-providers = { path = "../ferric-providers" }

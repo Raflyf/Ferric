@@ -1,6 +1,6 @@
 //! Shared immutable snapshots and input DTOs produced/consumed by [`crate::FerricController`].
 
-use ferric_core::models::{Track, TrackSource};
+use ferric_core::models::{Track, TrackSource, VideoQuality};
 use ferric_providers::ytmusic::{
     RecommendedStation, YtmCardKind, YtmHomeShelf, YtmMoodChip, YtmShelfCard,
 };
@@ -196,4 +196,47 @@ pub struct LocalScanEntry {
     pub sample_rate: u32,
     pub bit_depth: u16,
     pub bitrate_kbps: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LyricLineSnapshot {
+    pub timestamp_ms: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LyricsSnapshot {
+    pub track_id: String,
+    pub lines: Vec<LyricLineSnapshot>,
+    pub source_name: String,
+    pub is_synced: bool,
+    pub offset_ms: i64,
+    pub is_loading: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoStreamOptionSnapshot {
+    pub quality: VideoQuality,
+    pub label: String,
+    pub width: u32,
+    pub height: u32,
+    pub bitrate_kbps: u32,
+    pub url: String,
+    pub mime: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VideoStreamsSnapshot {
+    pub track_id: String,
+    pub video_id: String,
+    pub is_official_mv: bool,
+    pub options: Vec<VideoStreamOptionSnapshot>,
+    pub is_loading: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoEqProfileSnapshot {
+    pub name: String,
+    pub category: String,
+    pub preamp_db: f32,
 }

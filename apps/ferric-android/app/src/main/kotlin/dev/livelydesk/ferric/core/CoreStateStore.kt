@@ -6,6 +6,8 @@ import dev.livelydesk.ferric.auth.SilentSpotifyRefresher
 import dev.livelydesk.ferric.auth.WebCookieCleaner
 import dev.livelydesk.ferric.local.LocalMediaScanner
 import dev.livelydesk.ferric.playback.OutputRouteHelper
+import dev.livelydesk.ferric.ui.theme.CoverShadeColors
+import dev.livelydesk.ferric.ui.theme.CoverShadeExtractor
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,18 +22,24 @@ import uniffi.ferric_mobile_ffi.FerricMobileCore
 import uniffi.ferric_mobile_ffi.FfiAccountStatus
 import uniffi.ferric_mobile_ffi.FfiAlbumSummary
 import uniffi.ferric_mobile_ffi.FfiArtistSummary
+import uniffi.ferric_mobile_ffi.FfiAutoEqProfile
 import uniffi.ferric_mobile_ffi.FfiCardKind
 import uniffi.ferric_mobile_ffi.FfiCollectionDetail
 import uniffi.ferric_mobile_ffi.FfiDetailSort
+import uniffi.ferric_mobile_ffi.FfiDspSettings
+import uniffi.ferric_mobile_ffi.FfiEqConfig
 import uniffi.ferric_mobile_ffi.FfiEventSink
 import uniffi.ferric_mobile_ffi.FfiHomeState
+import uniffi.ferric_mobile_ffi.FfiLyricsState
 import uniffi.ferric_mobile_ffi.FfiPlaylist
 import uniffi.ferric_mobile_ffi.FfiPlaylistSort
 import uniffi.ferric_mobile_ffi.FfiPlaylistSourceFilter
 import uniffi.ferric_mobile_ffi.FfiRepeatMode
 import uniffi.ferric_mobile_ffi.FfiSearchResults
 import uniffi.ferric_mobile_ffi.FfiTelemetry
+import uniffi.ferric_mobile_ffi.FfiThemeConfig
 import uniffi.ferric_mobile_ffi.FfiTrack
+import uniffi.ferric_mobile_ffi.FfiVideoStreamsState
 
 data class PlaybackUiState(
     val tracks: List<FfiTrack> = emptyList(),
@@ -74,6 +82,27 @@ data class PlaybackUiState(
         subsonicConnected = false,
         subsonicUrl = "",
         subsonicUsername = "",
+    ),
+    val themeConfig: FfiThemeConfig? = null,
+    val coverShade: CoverShadeColors = CoverShadeColors(),
+    val eqConfig: FfiEqConfig? = null,
+    val eqPresets: List<String> = emptyList(),
+    val autoEqProfiles: List<FfiAutoEqProfile> = emptyList(),
+    val dspSettings: FfiDspSettings? = null,
+    val lyricsState: FfiLyricsState = FfiLyricsState(
+        trackId = "",
+        lines = emptyList(),
+        sourceName = "",
+        isSynced = false,
+        offsetMs = 0L,
+        isLoading = false,
+    ),
+    val videoStreams: FfiVideoStreamsState = FfiVideoStreamsState(
+        trackId = "",
+        videoId = "",
+        isOfficialMv = false,
+        options = emptyList(),
+        isLoading = false,
     ),
     val currentTrack: FfiTrack? = null,
     val upNext: List<FfiTrack> = emptyList(),
@@ -126,6 +155,9 @@ class CoreStateStore(private val appContext: Context) {
     @Volatile
     private var core: FerricMobileCore? = null
 
+    @Volatile
+    private var lastExtractedArtUrl: String? = null
+
     private val _uiState = MutableStateFlow(
         PlaybackUiState(
             activeOutputRoute = OutputRouteHelper.activeOutputLabel(appContext),
@@ -151,7 +183,23 @@ class CoreStateStore(private val appContext: Context) {
         }
 
         override fun onNowPlayingChanged(track: FfiTrack?) {
+            val prevId = _uiState.value.currentTrack?.id
             _uiState.update { PlaybackStateReducer.applyNowPlaying(it, track) }
+            if (track != null && track.id != prevId) {
+                extractCoverShadeAsync(track.thumbnailUrl)
+                // Reset stale video streams when track changes; lyrics load on demand or if open.
+                _uiState.update {
+                    it.copy(
+                        videoStreams = FfiVideoStreamsState(
+                            trackId = track.id,
+                            videoId = track.youtubeVideoId.orEmpty(),
+                            isOfficialMv = false,
+                            options = emptyList(),
+                            isLoading = false,
+                        ),
+                    )
+                }
+            }
         }
 
         override fun onQueueChanged(upNext: List<FfiTrack>) {
@@ -179,6 +227,14 @@ class CoreStateStore(private val appContext: Context) {
             _uiState.update { it.copy(accountStatus = status) }
         }
 
+        override fun onLyricsLoaded(lyrics: FfiLyricsState) {
+            _uiState.update { it.copy(lyricsState = lyrics) }
+        }
+
+        override fun onVideoStreamsLoaded(video: FfiVideoStreamsState) {
+            _uiState.update { it.copy(videoStreams = video) }
+        }
+
         override fun onSpotifyAuthExpired() {
             silentSpotifyRefresher.triggerRefresh()
         }
@@ -188,10 +244,15 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
-    /**
-     * Initialize Rust SQLite + library lazily without opening an Android audio stream yet,
-     * then kick off non-blocking Home discovery load.
-     */
+    private fun extractCoverShadeAsync(artUrl: String?) {
+        if (artUrl == lastExtractedArtUrl) return
+        lastExtractedArtUrl = artUrl
+        scope.launch {
+            val colors = CoverShadeExtractor.extract(appContext, artUrl)
+            _uiState.update { it.copy(coverShade = colors) }
+        }
+    }
+
     fun bootstrapLibrary() {
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
@@ -200,10 +261,20 @@ class CoreStateStore(private val appContext: Context) {
                 refreshLibraryInternal()
                 val accounts = handle.getAccountStatus()
                 val recentSearches = handle.recentSearches()
+                val theme = handle.getTheme()
+                val eq = handle.getEq()
+                val eqPresets = handle.listEqPresets()
+                val autoEq = handle.searchAutoeq("")
+                val dsp = handle.getDsp()
                 _uiState.update {
                     it.copy(
                         accountStatus = accounts,
                         recentSearches = recentSearches,
+                        themeConfig = theme,
+                        eqConfig = eq,
+                        eqPresets = eqPresets,
+                        autoEqProfiles = autoEq,
+                        dspSettings = dsp,
                         isReady = true,
                     )
                 }
@@ -351,9 +422,7 @@ class CoreStateStore(private val appContext: Context) {
 
     fun jumpToUpcoming(offset: Int) {
         if (offset < 0) return
-        scope.launch {
-            runCatching { getOrCreateCore()?.jumpToUpcoming(offset.toUInt()) }
-        }
+        scope.launch { runCatching { getOrCreateCore()?.jumpToUpcoming(offset.toUInt()) } }
     }
 
     fun moveQueueItemUp(offset: Int) {
@@ -393,12 +462,124 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    // --- M3 Synced Lyrics, Video Clip, EQ / AutoEq / APO & Theme Studio ---
+
+    fun loadLyricsForCurrent() {
+        val track = _uiState.value.currentTrack ?: return
+        scope.launch { getOrCreateCore()?.loadLyrics(track) }
+    }
+
+    fun nudgeLyricsOffsetMs(deltaMs: Long) {
+        scope.launch { getOrCreateCore()?.nudgeLyricsOffsetMs(deltaMs) }
+    }
+
+    fun resolveVideoForCurrent() {
+        val track = _uiState.value.currentTrack ?: return
+        scope.launch { getOrCreateCore()?.resolveVideoStreams(track) }
+    }
+
+    fun updateEq(eq: FfiEqConfig) {
+        _uiState.update { it.copy(eqConfig = eq) }
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.setEq(eq) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun applyEqPreset(name: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.applyEqPreset(name) }
+                .onSuccess { cfg -> _uiState.update { it.copy(eqConfig = cfg) } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun searchAutoEq(query: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            val matches = handle.searchAutoeq(query)
+            _uiState.update { it.copy(autoEqProfiles = matches) }
+        }
+    }
+
+    fun applyAutoEqProfile(profileName: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.applyAutoeqProfile(profileName) }
+                .onSuccess { cfg -> _uiState.update { it.copy(eqConfig = cfg) } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun importEqApo(apoText: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.importEqApo(apoText) }
+                .onSuccess { cfg -> _uiState.update { it.copy(eqConfig = cfg) } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun exportEqApo(onReady: (String) -> Unit) {
+        scope.launch {
+            val text = getOrCreateCore()?.exportEqApo().orEmpty()
+            if (text.isNotEmpty()) {
+                withContext(Dispatchers.Main) { onReady(text) }
+            }
+        }
+    }
+
+    fun updateDsp(dsp: FfiDspSettings) {
+        _uiState.update { it.copy(dspSettings = dsp) }
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.setDsp(dsp) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun updateTheme(theme: FfiThemeConfig) {
+        _uiState.update { it.copy(themeConfig = theme) }
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.setTheme(theme) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun applyThemePreset(name: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.applyThemePreset(name) }
+                .onSuccess { cfg -> _uiState.update { it.copy(themeConfig = cfg) } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun exportThemeJson(onReady: (String) -> Unit) {
+        scope.launch {
+            val json = runCatching { getOrCreateCore()?.exportThemeJson() }.getOrNull().orEmpty()
+            if (json.isNotEmpty()) {
+                withContext(Dispatchers.Main) { onReady(json) }
+            }
+        }
+    }
+
+    fun importThemeJson(rawJson: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.importThemeJson(rawJson) }
+                .onSuccess { cfg -> _uiState.update { it.copy(themeConfig = cfg) } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
     // --- Home & Search ---
 
     fun loadHome(forceRefresh: Boolean, moodIdx: Int? = null) {
-        scope.launch {
-            getOrCreateCore()?.loadHome(forceRefresh, moodIdx?.toUInt())
-        }
+        scope.launch { getOrCreateCore()?.loadHome(forceRefresh, moodIdx?.toUInt()) }
     }
 
     fun openStation(stationId: String) {

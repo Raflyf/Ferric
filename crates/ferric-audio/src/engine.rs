@@ -402,7 +402,7 @@ impl AudioEngine {
                 true
             }
             Err(_) => {
-                // No output device currently available — pause playback cleanly so UI stays responsive.
+                // No output device currently available; pause playback cleanly so UI stays responsive.
                 self.telemetry.is_playing.store(false, Ordering::Release);
                 self.stream_paused.store(true, Ordering::Release);
                 false

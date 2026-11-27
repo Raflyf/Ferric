@@ -313,7 +313,7 @@ live_design! {
     pub THEME_COLOR_WARNING = (THEME_COLOR_MID),
     pub THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
 
-    // TYPOGRAPHY — bundled official Inter v4.1 static TTFs (Regular / Medium / SemiBold / Bold)
+    // TYPOGRAPHY: bundled official Inter v4.1 static TTFs (Regular / Medium / SemiBold / Bold)
     // paired with zero-bloat runtime OS font fallbacks (Japanese Yu Gothic, Korean Malgun Gothic,
     // Chinese Microsoft YaHei, Thai Leelawadee UI) resolved once and shared via Rc<Font>.
     pub THEME_FONT_SIZE_CODE = 8.5

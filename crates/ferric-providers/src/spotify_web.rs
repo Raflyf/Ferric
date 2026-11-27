@@ -508,7 +508,7 @@ pub fn verify_spotify_premium_account(access_token: &str) -> ProviderResult<Stri
                         }
                         SpotifyTierVerdict::NotPremium(tier) => {
                             return Err(ProviderError::Http(format!(
-                                "Spotify Premium required — this account is on Spotify Free ({tier}). Use 'Spotify Web Sign-In' below for Free accounts."
+                                "Spotify Premium required: this account is on Spotify Free ({tier}). Use 'Spotify Account (Free & Premium)' to sign in."
                             )));
                         }
                         SpotifyTierVerdict::Unknown => {
@@ -537,7 +537,7 @@ pub fn verify_spotify_premium_account(access_token: &str) -> ProviderResult<Stri
         Ok((display_name, product)) => match classify_spotify_premium(product.as_deref(), None) {
             SpotifyTierVerdict::Premium => Ok(display_name),
             SpotifyTierVerdict::NotPremium(tier) => Err(ProviderError::Http(format!(
-                "Spotify Premium required — this account is on Spotify Free ({tier}). Use 'Spotify Web Sign-In' below for Free accounts."
+                "Spotify Premium required: this account is on Spotify Free ({tier}). Use 'Spotify Account (Free & Premium)' to sign in."
             ))),
             SpotifyTierVerdict::Unknown => Err(ProviderError::Http(
                 "Could not verify Spotify Premium subscription status from your account profile. Direct OAuth sign-in requires Spotify Premium; use 'Spotify Web Sign-In' below for Free accounts."

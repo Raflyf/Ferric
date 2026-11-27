@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn release_parser_filters_drafts_prereleases_and_older_versions() {
         let newer = parse_latest_release(
-            r###"{"tag_name":"v0.2.0","draft":false,"prerelease":false,"body":"## Added\n- Better Liquid Glass caustics"}"###,
+            r###"{"tag_name":"v0.2.0","draft":false,"prerelease":false,"body":"## Added\n- Better Native Acrylic visuals"}"###,
             "0.1.0",
         )
         .expect("parse newer")
@@ -548,7 +548,7 @@ mod tests {
             newer.release_url,
             "https://github.com/Raflyf/Ferric/releases/tag/v0.2.0"
         );
-        assert!(newer.summary.contains("Better Liquid Glass caustics"));
+        assert!(newer.summary.contains("Better Native Acrylic visuals"));
 
         assert_eq!(
             parse_latest_release(

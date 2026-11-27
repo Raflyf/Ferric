@@ -310,8 +310,8 @@ mod imp {
 
         const fn window_title(self) -> PCWSTR {
             match self {
-                Self::GoogleYtm => w!("Sign in to YouTube Music — Ferric"),
-                Self::Spotify => w!("Sign in to Spotify — Ferric"),
+                Self::GoogleYtm => w!("Sign in to YouTube Music - Ferric"),
+                Self::Spotify => w!("Sign in to Spotify - Ferric"),
             }
         }
     }

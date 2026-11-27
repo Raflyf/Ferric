@@ -1,4 +1,4 @@
-# Design System & Visual Direction (`DESIGN.md`) — Ferric Desktop
+# Design System & Visual Direction (`DESIGN.md`) - Ferric Desktop
 
 - **Versi Dokumen:** 3.2.0 (Diselaraskan dengan UI Produksi Aktual `v0.1.0`)
 - **Tanggal Pembaruan:** 26 November 2026

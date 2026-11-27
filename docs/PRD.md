@@ -2,7 +2,7 @@
 
 - **Versi Dokumen:** 2.2.0 (Diselaraskan dengan Implementasi Produksi Pre-Release `v0.1.0`)
 - **Tanggal Pembaruan:** 26 November 2026
-- **Status Proyek:** **Windows Desktop `v0.1.0` Siap Rilis (Feature-Complete & Security-Hardened)** — seluruh fitur inti, mesin audio dual-deck, tampilan default AMOLED Black & cold-start Native Acrylic dengan **Adaptive Acrylic Tint**, kebijakan DX11 hemat-RAM (prioritas Integrated GPU -> fallback GPU utama / WARP CPU tanpa membangunkan dGPU), animasi GPU 60 FPS (Fullscreen Lyrics 2-fase & Cover-to-Video morph), Recommended Stations + Home exploration kaya, font internasional OS tanpa bloat, filter lirik LRCLIB + auto-heal, SMTC penuh (thumbnail + timeline + seek), menu tray dark/light mengikuti sistem, Discord Rich Presence, Taskbar thumbnail controls, keamanan DPAPI/WebView2/Win32, pengerasan PE anti-RE, dan paket installer MSI dengan **clean uninstall sampai akar** sudah berjalan dan terverifikasi; menunggu persetujuan eksplisit pengguna untuk menandai rilis `v0.1.0`. Ekspansi Android Mobile menjadi fase pasca-`v0.1.0`.
+- **Status Proyek:** **Windows Desktop `v0.1.0` Siap Rilis (Feature-Complete & Security-Hardened)** - seluruh fitur inti, mesin audio dual-deck, tampilan default AMOLED Black & cold-start Native Acrylic dengan **Adaptive Acrylic Tint**, kebijakan DX11 hemat-RAM (prioritas Integrated GPU -> fallback GPU utama / WARP CPU tanpa membangunkan dGPU), animasi GPU 60 FPS (Fullscreen Lyrics 2-fase & Cover-to-Video morph), Recommended Stations + Home exploration kaya, font internasional OS tanpa bloat, filter lirik LRCLIB + auto-heal, SMTC penuh (thumbnail + timeline + seek), menu tray dark/light mengikuti sistem, Discord Rich Presence, Taskbar thumbnail controls, keamanan DPAPI/WebView2/Win32, pengerasan PE anti-RE, dan paket installer MSI dengan **clean uninstall sampai akar** sudah berjalan dan terverifikasi; menunggu persetujuan eksplisit pengguna untuk menandai rilis `v0.1.0`. Ekspansi Android Mobile menjadi fase pasca-`v0.1.0`.
 - **Target Platform Saat Ini:** Windows 10/11 (`x86_64`, MSI per-user & Portable ZIP)
 - **Target Platform Lanjutan:** Android 8.0–16+ (`arm64-v8a`) berbagi crate inti `ferric-core`, `ferric-audio`, `ferric-providers`, dan `ferric-sync`
 - **Bahasa & Runtime:** 100% Native Rust (Edition 2024) + `makepad-widgets 1.0.0` (DirectX 11 + DirectComposition)
@@ -108,13 +108,13 @@ Lokasi berkas: `%LOCALAPPDATA%\LivelyDesk\Ferric\data\ferric.db` (`PRAGMA journa
 
 | Tabel | Kunci Utama & Fungsi Aktual (`crates/ferric-core/src/db.rs`) |
 | :--- | :--- |
-| `tracks` | `id` — metadata lagu, `file_path`, `source`, `codec`, `sample_rate`, `bit_depth`, `bitrate_kbps`, `isrc`, `spotify_id`, `youtube_video_id`, `thumbnail_url`, `replay_gain_db`, `liked`, `added_at` |
-| `playlists` | `id` — `name`, `source`, `etag`, `description`, `thumbnail_url`, `created_at` (ms, urutan terbaru di atas), `updated_at` |
-| `playlist_tracks` | `(playlist_id, position)` — relasi urutan `track_id` di dalam playlist |
-| `music_folders` | `path` — daftar folder lokal yang dipantau/dipindai |
-| `app_settings` | `key` — JSON untuk `theme`, `eq`, `playback_dsp`, `accounts` (rahasia terenkripsi `dpapi:v1:`), `updates`, `session_resume`, `discord_rpc`, dan flag migrasi (`migration_pruned_ephemeral_v2`) |
-| `lyrics_cache` | `track_key` — cache lirik `.lrc` offline (dengan *auto-heal* bila entri lama terdeteksi tercemar fan-sub multi-bahasa/mojibake) |
-| `paired_devices` | `device_id` — daftar perangkat pasangan Ferric Connect |
+| `tracks` | `id` - metadata lagu, `file_path`, `source`, `codec`, `sample_rate`, `bit_depth`, `bitrate_kbps`, `isrc`, `spotify_id`, `youtube_video_id`, `thumbnail_url`, `replay_gain_db`, `liked`, `added_at` |
+| `playlists` | `id` - `name`, `source`, `etag`, `description`, `thumbnail_url`, `created_at` (ms, urutan terbaru di atas), `updated_at` |
+| `playlist_tracks` | `(playlist_id, position)` - relasi urutan `track_id` di dalam playlist |
+| `music_folders` | `path` - daftar folder lokal yang dipantau/dipindai |
+| `app_settings` | `key` - JSON untuk `theme`, `eq`, `playback_dsp`, `accounts` (rahasia terenkripsi `dpapi:v1:`), `updates`, `session_resume`, `discord_rpc`, dan flag migrasi (`migration_pruned_ephemeral_v2`) |
+| `lyrics_cache` | `track_key` - cache lirik `.lrc` offline (dengan *auto-heal* bila entri lama terdeteksi tercemar fan-sub multi-bahasa/mojibake) |
+| `paired_devices` | `device_id` - daftar perangkat pasangan Ferric Connect |
 
 ---
 
@@ -124,7 +124,7 @@ Lokasi berkas: `%LOCALAPPDATA%\LivelyDesk\Ferric\data\ferric.db` (`PRAGMA journa
 - Seluruh perbaikan visual, animasi 60 FPS, cold-start Acrylic, font internasional OS, kebersihan lirik LRCLIB, keamanan, dan PE hardening sudah tuntas dan terverifikasi live pada `5c81b11`.
 - Menunggu konfirmasi akhir pengguna untuk menandai dan memublikasikan git tag `v0.1.0` ke GitHub Releases.
 
-### B. Rencana Pasca-`v0.1.0` (Belum Diimplementasikan — Jangan Dicampur dengan Status `v0.1.0`)
+### B. Rencana Pasca-`v0.1.0` (Belum Diimplementasikan - Jangan Dicampur dengan Status `v0.1.0`)
 - **Ferric Connect Full Transport:** Mengaktifkan transport jarak jauh lintas jaringan (QUIC P2P / handoff output aktif penuh) di atas framing `postcard` dan `LanDiscoveryBeacon` yang sudah tersedia di `ferric-sync`.
 - **Android Mobile App (`apps/ferric-mobile`):** Klien Android native Makepad (`arm64-v8a`) + `MediaSessionService` tipis dengan `oboe` (`PowerSaving`) yang berbagi crate `ferric-core`, `ferric-audio`, `ferric-providers`, dan `ferric-sync`.
 - **Sinkronisasi Lintas Perangkat:** Sinkronisasi tema, profil EQ, dan streaming pustaka lokal PC -> HP.

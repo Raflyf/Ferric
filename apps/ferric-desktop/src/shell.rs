@@ -810,9 +810,9 @@ mod win_impl {
     /// with the Windows device dark/light theme via `uxtheme.dll` ordinals #135 & #136.
     fn sync_win32_popup_menu_theme() {
         let mode: i32 = if windows_device_uses_light_theme() {
-            3 // ForceLight — matches Windows Light Taskbar/System theme
+            3 // ForceLight: matches Windows Light Taskbar/System theme
         } else {
-            2 // ForceDark — native Windows 11 Dark Mode menu matching dark taskbar
+            2 // ForceDark: native Windows 11 Dark Mode menu matching dark taskbar
         };
         // SAFETY: Loads system `uxtheme.dll` strictly from System32 and invokes well-known
         // `SetPreferredAppMode` (#135) and `FlushMenuThemes` (#136) if exported.
@@ -949,7 +949,7 @@ mod win_impl {
             return;
         }
         // SAFETY: Enables true per-pixel Windows 11 DWM Acrylic directly behind Ferric's
-        // premultiplied DirectComposition swapchain — zero WS_EX_LAYERED text dimming.
+        // premultiplied DirectComposition swapchain (zero WS_EX_LAYERED text dimming).
         unsafe {
             let dark: i32 = if is_light { 0 } else { 1 };
             let _ = DwmSetWindowAttribute(
@@ -1155,7 +1155,7 @@ mod win_impl {
                 );
             }
             if CLOSE_TO_TRAY.load(Ordering::Acquire) {
-                ensure_tray_icon(hwnd, "Ferric — Music Player");
+                ensure_tray_icon(hwnd, "Ferric - Music Player");
             }
             apply_window_icon(hwnd);
             sync_win32_popup_menu_theme();
@@ -1583,7 +1583,7 @@ mod win_impl {
         CLOSE_TO_TRAY.store(enabled, Ordering::Release);
         if let Some(hwnd) = active_process_hwnd() {
             if enabled {
-                ensure_tray_icon(hwnd, "Ferric — Music Player");
+                ensure_tray_icon(hwnd, "Ferric - Music Player");
             } else {
                 remove_tray_icon(hwnd);
             }
@@ -2001,7 +2001,7 @@ mod win_impl {
                 WM_CLOSE => {
                     if CLOSE_TO_TRAY.load(Ordering::Acquire) && !FORCE_QUIT.load(Ordering::Acquire)
                     {
-                        ensure_tray_icon(hwnd, "Ferric — Playing in background");
+                        ensure_tray_icon(hwnd, "Ferric - Playing in background");
                         let _ = ShowWindow(hwnd, SW_HIDE);
                         WINDOW_HIDDEN_OR_MIN.store(true, Ordering::Release);
                         HIDDEN_IN_TRAY.store(true, Ordering::Release);

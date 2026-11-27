@@ -73,6 +73,7 @@ use {
                         ShowWindow,
                         PostMessageW,
                         GetWindowRect,
+                        GetCursorPos,
                         DestroyWindow,
                         SetWindowPos,
                         GetWindowPlacement,
@@ -268,7 +269,14 @@ use {
                 },
                 Graphics::{
                     Dwm::DwmExtendFrameIntoClientArea,
-                    Gdi::ScreenToClient,
+                    Gdi::{
+                        GetMonitorInfoW,
+                        MonitorFromPoint,
+                        MonitorFromWindow,
+                        MONITORINFO,
+                        MONITOR_DEFAULTTOPRIMARY,
+                        ScreenToClient,
+                    },
                 },
             },
         },
@@ -347,6 +355,7 @@ pub struct Win32Window {
     pub ignore_wmsize: usize,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
+    pub initial_position_default: bool,
 }
 
 impl Win32Window {
@@ -357,6 +366,7 @@ impl Win32Window {
     pub fn new(window_id: WindowId,title: &str, position: Option<DVec2>) -> Win32Window {
 
         let title = encode_wide(title);
+        let initial_position_default = position.is_none();
         
         let style = WS_CAPTION
             | WS_SIZEBOX
@@ -414,6 +424,7 @@ impl Win32Window {
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
+            initial_position_default,
         }
     }
 
@@ -484,6 +495,50 @@ impl Win32Window {
             );
         }
 
+        if self.initial_position_default {
+            self.center_outer_size_in_work_area(size);
+        } else {
+            self.set_outer_size(size);
+        }
+    }
+
+    fn center_outer_size_in_work_area(&self, size: DVec2) {
+        unsafe {
+            let mut pt = POINT { x: 0, y: 0 };
+            let hmon = if GetCursorPos(&mut pt).is_ok() {
+                MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY)
+            } else {
+                MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTOPRIMARY)
+            };
+            let mut mi = MONITORINFO {
+                cbSize: mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                let rc = mi.rcWork;
+                let work_w = (rc.right - rc.left).max(1);
+                let work_h = (rc.bottom - rc.top).max(1);
+                // Place window onto target monitor first so DPI reflects that monitor before sizing.
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    HWND(0),
+                    rc.left,
+                    rc.top,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let dpi = self.get_dpi_factor().max(0.5);
+                let max_w = (work_w - 32).max(work_w.min(640));
+                let max_h = (work_h - 32).max(work_h.min(480));
+                let w = ((size.x * dpi).round() as i32).clamp(320, max_w);
+                let h = ((size.y * dpi).round() as i32).clamp(240, max_h);
+                let x = rc.left + (work_w - w) / 2;
+                let y = rc.top + (work_h - h) / 2;
+                let _ = MoveWindow(self.hwnd, x, y, w, h, FALSE);
+                return;
+            }
+        }
         self.set_outer_size(size);
     }
     

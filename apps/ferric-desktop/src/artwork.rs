@@ -630,7 +630,7 @@ fn decode_and_downscale(bytes: &[u8], max_dim: usize) -> Option<ImageBuffer> {
 
 /// High-quality aspect-preserving area/box-filter downscaler over packed BGRA `u32` pixels.
 /// Integrates every source pixel inside each destination pixel footprint with exact fractional
-/// edge weights — eliminates aliasing and blocky stair-steps on high-contrast graphic covers.
+/// edge weights; eliminates aliasing and blocky stair-steps on high-contrast graphic covers.
 fn downscale_area_box(src: &ImageBuffer, max_dim: usize) -> ImageBuffer {
     let sw = src.width.max(1);
     let sh = src.height.max(1);

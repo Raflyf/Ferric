@@ -63,7 +63,7 @@ pub fn clean_youtube_metadata(raw_title: &str, channel_title: &str) -> CleanedYo
         };
     }
 
-    for sep in [" - ", " – ", " — "] {
+    for sep in [" - ", " \u{2013} ", " \u{2014} "] {
         if let Some((left, right)) = collapsed.split_once(sep) {
             let left_clean = trim_edge_punct(left);
             let right_clean = trim_edge_punct(right);
@@ -90,7 +90,12 @@ pub fn clean_youtube_metadata(raw_title: &str, channel_title: &str) -> CleanedYo
 }
 
 fn trim_edge_punct(s: &str) -> &str {
-    s.trim_matches(|c: char| matches!(c, ' ' | '-' | '–' | '—' | '|' | ':' | '•' | '/'))
+    s.trim_matches(|c: char| {
+        matches!(
+            c,
+            ' ' | '-' | '\u{2013}' | '\u{2014}' | '|' | ':' | '•' | '/'
+        )
+    })
 }
 
 fn collapse_whitespace(s: &str) -> String {

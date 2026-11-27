@@ -820,7 +820,7 @@ fn get_spotify_bearer_json<T: for<'de> Deserialize<'de>>(
             })?;
 
         if status == 429 {
-            // If Spotify asks for a long cooldown (>35s), do not stall the worker silently —
+            // If Spotify asks for a long cooldown (>35s), do not stall the worker silently:
             // record cooldown, preserve partial sync progress, and tell the user clearly.
             if let Some(secs) = retry_after
                 && secs > MAX_INLINE_WAIT_SECS

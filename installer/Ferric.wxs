@@ -14,7 +14,7 @@
         InstallScope="perUser"
         Platform="x64"
         Description="Ferric $(var.AppVersion) Setup"
-        Comments="Ferric — Hi-Fi Desktop Music Player" />
+        Comments="Ferric - Hi-Fi Desktop Music Player" />
 
     <MajorUpgrade
         AllowSameVersionUpgrades="yes"

@@ -2446,7 +2446,7 @@ static RADIO_FRESH_TICK: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 
 fn normalize_core_title(title: &str) -> String {
     let mut base = title.trim();
-    for sep in ["(", "[", "|", " - ", " – ", " — "] {
+    for sep in ["(", "[", "|", " - ", " \u{2013} ", " \u{2014} "] {
         if let Some((head, _)) = base.split_once(sep) {
             let trimmed = head.trim();
             if !trimmed.is_empty() {
@@ -3171,7 +3171,7 @@ pub fn build_algorithmic_recommended_stations_rotated(
         let w = 120_i32.saturating_sub((idx as i32) * 2).max(24);
         absorb_track(&mut artist_nodes, t, w);
     }
-    // Signal 2: Full library (scan ALL tracks — never truncate alphabetically!)
+    // Signal 2: Full library (scan ALL tracks; never truncate alphabetically!)
     for t in library_tracks {
         let w = if t.liked { 38 } else { 14 };
         absorb_track(&mut artist_nodes, t, w);
@@ -3694,7 +3694,7 @@ pub fn fetch_rich_search(
     let mut cards = Vec::new();
     let mut seen_cards = HashSet::new();
 
-    // 1. Official Songs results first — always carry verified Artist, Album, and exact Duration
+    // 1. Official Songs results first (always carry verified Artist, Album, and exact Duration)
     if let Some(ref songs_root) = songs_opt {
         collect_music_items(songs_root, "Single", cap, &mut seen_vids, &mut tracks);
     }
@@ -4391,7 +4391,7 @@ fn search_official_music_video_candidates(
     if query.is_empty() {
         return Vec::new();
     }
-    // YouTube Music "Videos" search tab filter — surfaces `MUSIC_VIDEO_TYPE_OMV` official music videos
+    // YouTube Music "Videos" search tab filter: surfaces `MUSIC_VIDEO_TYPE_OMV` official music videos
     let body = json!({
         "query": query,
         "params": "EgWKAQIQAWoKEAMQBBAJEAoQBQ%3D%3D",

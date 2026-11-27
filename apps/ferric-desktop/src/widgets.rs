@@ -501,7 +501,7 @@ live_design! {
                 let c = self.rect_size * 0.5;
                 let u = min(self.rect_size.x, self.rect_size.y) / 28.0;
 
-                // Button pill (calm smooth mute/unmute transition — zero shake or bounce)
+                // Button pill (calm smooth mute/unmute transition, zero shake or bounce)
                 let sdf_bg = Sdf2d::viewport(p);
                 let inset = 1.0 + self.down * 0.25;
                 sdf_bg.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, 6.0 * u);

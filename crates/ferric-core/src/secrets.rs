@@ -382,7 +382,7 @@ pub fn unprotect_secret_checked(stored: &str) -> UnprotectOutcome {
             }
         }
     } else {
-        // Legacy plaintext entry — return in-memory value and flag for automatic DPAPI upgrade.
+        // Legacy plaintext entry: return in-memory value and flag for automatic DPAPI upgrade.
         UnprotectOutcome {
             plaintext: stored.to_string(),
             needs_migration: cfg!(target_os = "windows"),

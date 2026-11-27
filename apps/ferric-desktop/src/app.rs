@@ -2582,7 +2582,7 @@ live_design! {
                                             oauth_status_lbl = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #F5A473, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }
-                                                text: "Guest Mode active — YouTube Music streaming ready."
+                                                text: "Guest Mode active. YouTube Music streaming ready."
                                             }
                                         }
 
@@ -2607,7 +2607,7 @@ live_design! {
                                             spotify_web_status_lbl = <Label> {
                                                 width: Fill,
                                                 draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.5 } }
-                                                text: "Not signed in — connect any Spotify Free or Premium account, or import public Spotify links below."
+                                                text: "Not signed in. Connect any Spotify Free or Premium account, or import public Spotify links below."
                                             }
                                         }
 
@@ -3058,7 +3058,7 @@ live_design! {
                                                 lbl_m_disc_hint = <Label> {
                                                     width: Fill,
                                                     draw_text: { wrap: Word, color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 8.2 } }
-                                                    text: "Ferric's official Discord Application ID is built in — simply enable 'Show on Discord' above. Leave blank for automatic connection, or paste a custom ID to override."
+                                                    text: "Ferric's official Discord Application ID is built in: simply enable 'Show on Discord' above. Leave blank for automatic connection, or paste a custom ID to override."
                                                 }
                                             }
                                         }
@@ -3139,7 +3139,7 @@ live_design! {
                                                 lbl_m_ab_tagline = <Label> {
                                                     width: Fill,
                                                     draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }
-                                                    text: "Native Rust desktop music player for local lossless libraries, YouTube Music, and Spotify — with synced lyrics, 10-band EQ, and Windows 11 Acrylic."
+                                                    text: "Native Rust desktop music player for local lossless libraries, YouTube Music, and Spotify, with synced lyrics, 10-band EQ, and Windows 11 Acrylic."
                                                 }
                                                 lbl_m_ab_meta = <Label> {
                                                     width: Fill,
@@ -3206,7 +3206,7 @@ live_design! {
                             right_divider = <FerricDividerV> {}
 
                             // ============================================================
-                            // DOCKED RIGHT SIDEBAR (260px — Queue & Spring Synced Lyrics)
+                            // DOCKED RIGHT SIDEBAR (260px: Queue & Spring Synced Lyrics)
                             // ============================================================
                             right_sidebar = <FerricSurface> {
                                 visible: true,
@@ -3389,7 +3389,7 @@ live_design! {
                                 }
                             }
 
-                            // Center (Stacked 2-Row Transport + Wide Scrubber — Dead-Center Symmetry)
+                            // Center (Stacked 2-Row Transport + Wide Scrubber, Dead-Center Symmetry)
                             <View> {
                                 width: Fill,
                                 height: Fill,
@@ -8879,7 +8879,7 @@ impl App {
             }
         }
 
-        // Filtered search cards (Albums / Artists / Playlists) — priority artwork fetch
+        // Filtered search cards (Albums / Artists / Playlists): priority artwork fetch
         let filtered_cards: Vec<YtmShelfCard> = self
             .search_result
             .cards
@@ -11174,7 +11174,7 @@ impl App {
         if let Some(rpc) = &mut self.discord_rpc {
             rpc.update_playback(None);
         }
-        win32_update_tray_tooltip("Ferric — Music Player");
+        win32_update_tray_tooltip("Ferric - Music Player");
         win32_update_taskbar_playback("", "", false);
         self.refresh_discord_preview(cx);
         self.apply_adaptive_accent_live(cx);
@@ -11639,7 +11639,7 @@ impl App {
             let _ = db.save_session_state(&self.session_state);
         }
 
-        win32_update_tray_tooltip(&format!("Ferric — {} · {}", track.title, track.artist));
+        win32_update_tray_tooltip(&format!("Ferric - {} · {}", track.title, track.artist));
         win32_update_taskbar_playback(&track.title, &track.artist, true);
 
         if let Some(smtc) = &mut self.smtc {
@@ -11661,7 +11661,7 @@ impl App {
         self.lyrics_offset_ms = 0;
 
         // While hidden in System Tray / minimized, skip ALL GPU UI mutations, artwork decode bursts,
-        // and hidden redraws — defer UI sync to `TrayEvent::ShowWindow` and trim transient working set.
+        // and hidden redraws: defer UI sync to `TrayEvent::ShowWindow` and trim transient working set.
         if self.window_hidden_or_minimized || win32_is_window_hidden_or_minimized() {
             self.ui_dirty_while_hidden = true;
             self.tray_second_trim_at = Some(Instant::now() + Duration::from_millis(1_800));
@@ -13354,11 +13354,11 @@ impl App {
                         self.ui
                             .label(id!(home_status_lbl))
                             .set_text(cx, &format!("{pick_n} songs · {shelf_n} shelves"));
-                        self.show_toast(cx, "YouTube Music timed out — showing cached feed");
+                        self.show_toast(cx, "YouTube Music timed out; showing cached feed");
                     } else {
                         self.ui
                             .label(id!(home_status_lbl))
-                            .set_text(cx, "Connection timed out — click Retry");
+                            .set_text(cx, "Connection timed out. Click Retry");
                     }
                     self.ui
                         .label(id!(oauth_status_lbl))
@@ -13693,7 +13693,7 @@ impl App {
                     let status_lbl = id!(spotify_web_status_lbl);
                     let status_msg = if rl_skipped > 0 {
                         format!(
-                            "Spotify: {} · {liked_n} liked & {total_spotify_pl} playlists saved ({rl_skipped} deferred by HTTP 429 — wait ~1 min and press Sync again to finish).",
+                            "Spotify: {} · {liked_n} liked & {total_spotify_pl} playlists saved ({rl_skipped} deferred by HTTP 429; wait ~1 min and press Sync again to finish).",
                             report.display_name
                         )
                     } else if etag_skipped > 0 {
@@ -13849,7 +13849,7 @@ impl App {
                         self.detail_state.loading = false;
                         self.detail_state.subtitle = format!("Station load failed: {error}");
                         self.refresh_detail_hero(cx);
-                        self.show_toast(cx, "Could not load station tracks — retry shortly");
+                        self.show_toast(cx, "Could not load station tracks; retry shortly");
                     }
                 }
                 BgMessage::StreamReady(payload) => {
@@ -16174,7 +16174,7 @@ impl App {
             self.rebuild_library_views(cx);
             self.refresh_playlists_grid(cx);
             self.spawn_ytm_rich_home(cx, 0, None, true);
-            self.show_toast(cx, "Signed out — Guest Mode active");
+            self.show_toast(cx, "Signed out. Guest Mode active");
         }
         if self.ui.button(id!(spotify_web_login_btn)).clicked(actions) {
             self.start_spotify_web_login(cx);
@@ -16719,7 +16719,7 @@ impl App {
             self.show_toast(
                 cx,
                 if on {
-                    "Adaptive Acrylic Tint enabled — follows playing cover"
+                    "Adaptive Acrylic Tint enabled: follows playing cover"
                 } else {
                     "Adaptive Acrylic Tint disabled (using manual glass tint)"
                 },
@@ -16832,7 +16832,7 @@ impl App {
                 self.apply_theme_live(cx);
                 self.show_toast(cx, &format!("Custom Acrylic tint applied: {formatted}"));
             } else {
-                self.show_toast(cx, "Invalid hex color — use #RRGGBB (e.g. #2B140A)");
+                self.show_toast(cx, "Invalid hex color: use #RRGGBB (e.g. #2B140A)");
             }
         }
 
@@ -16850,7 +16850,7 @@ impl App {
                     if !effective_client_id(&self.discord_settings).is_empty() {
                         "Discord Rich Presence enabled"
                     } else {
-                        "Discord RPC enabled — paste your Discord Application ID"
+                        "Discord RPC enabled. Paste your Discord Application ID"
                     }
                 } else {
                     "Discord Rich Presence disabled"
@@ -16903,9 +16903,9 @@ impl App {
                 self.show_toast(
                     cx,
                     if trimmed.is_empty() {
-                        "Using built-in Ferric Discord Application ID — connecting..."
+                        "Using built-in Ferric Discord Application ID. Connecting..."
                     } else {
-                        "Custom Discord Application ID saved — connecting..."
+                        "Custom Discord Application ID saved. Connecting..."
                     },
                 );
             } else {

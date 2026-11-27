@@ -1,4 +1,4 @@
-# Panduan Handoff & Pemeliharaan (`AGENT_HANDOFF.md`) — Ferric
+# Panduan Handoff & Pemeliharaan (`AGENT_HANDOFF.md`) - Ferric
 
 - **Versi Dokumen:** 2.2.0 (Pre-Release `v0.1.0` Ready-for-Tag)
 - **Tanggal Pembaruan:** 26 November 2026
@@ -18,12 +18,12 @@
 ## 2. Peta Dokumen & Kode Sumber Kunci
 
 ### Dokumen
-- [README.md](../README.md) — ringkasan produk, kapabilitas, keamanan/PE hardening, dan perintah build.
-- [CHANGELOG.md](../CHANGELOG.md) — riwayat perubahan terverifikasi pre-`v0.1.0`.
-- [PRD.md](./PRD.md) — cakupan fitur aktual, metrik live terukur, keamanan, batasan resmi Spotify, skema SQLite, dan roadmap pasca-`v0.1.0`.
-- [DESIGN.md](./DESIGN.md) — 4 preset tema (default AMOLED Black + Burnt Orange `#E86A2C`), GPU HSV picker, WCAG Adaptive Contrast, font OS internasional, koreografi 60 FPS, dan pintasan keyboard.
-- [SYNC_AND_AUDIO_SPEC.md](./SYNC_AND_AUDIO_SPEC.md) — detail implementasi `ferric-audio`, `ferric-providers`, `ferric-sync`, cold-start DWM Acrylic, DPAPI, mitigasi Win32, WebView2 sandbox, Discord RPC, dan PE hardening.
-- [RESEARCH_AND_RE_FINDINGS.md](./RESEARCH_AND_RE_FINDINGS.md) — alasan stack Rust, temuan teknis Win32/font/keamanan, dan benchmark aktual.
+- [README.md](../README.md) - ringkasan produk, kapabilitas, keamanan/PE hardening, dan perintah build.
+- [CHANGELOG.md](../CHANGELOG.md) - riwayat perubahan terverifikasi pre-`v0.1.0`.
+- [PRD.md](./PRD.md) - cakupan fitur aktual, metrik live terukur, keamanan, batasan resmi Spotify, skema SQLite, dan roadmap pasca-`v0.1.0`.
+- [DESIGN.md](./DESIGN.md) - 4 preset tema (default AMOLED Black + Burnt Orange `#E86A2C`), GPU HSV picker, WCAG Adaptive Contrast, font OS internasional, koreografi 60 FPS, dan pintasan keyboard.
+- [SYNC_AND_AUDIO_SPEC.md](./SYNC_AND_AUDIO_SPEC.md) - detail implementasi `ferric-audio`, `ferric-providers`, `ferric-sync`, cold-start DWM Acrylic, DPAPI, mitigasi Win32, WebView2 sandbox, Discord RPC, dan PE hardening.
+- [RESEARCH_AND_RE_FINDINGS.md](./RESEARCH_AND_RE_FINDINGS.md) - alasan stack Rust, temuan teknis Win32/font/keamanan, dan benchmark aktual.
 
 ### Kode Sumber Utama
 | Berkas | Tanggung Jawab |

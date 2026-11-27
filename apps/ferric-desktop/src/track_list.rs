@@ -919,7 +919,7 @@ impl Widget for TrackList {
                             },
                         );
                         // `title_lbl` and `artist_lbl` are nested inside `info_col`, so direct `row.apply_over`
-                        // skips them in Makepad 1.0 — style them directly for Warm Cream Light & UI Zoom.
+                        // skips them in Makepad 1.0; style them directly for Warm Cream Light & UI Zoom.
                         row.label(id!(title_lbl)).apply_over(
                             cx,
                             live! { draw_text: { color: (title_col), text_style: { font_size: (title_fs) } } },
@@ -995,7 +995,7 @@ impl Widget for TrackList {
                             let _ = write!(&mut self.row_scratch_a, "{mins}:{secs:02}");
                             row.label(id!(dur_lbl)).set_text(cx, &self.row_scratch_a);
                         } else {
-                            row.label(id!(dur_lbl)).set_text(cx, "—");
+                            row.label(id!(dur_lbl)).set_text(cx, "-");
                         }
                         row.draw_all(cx, scope);
                     }

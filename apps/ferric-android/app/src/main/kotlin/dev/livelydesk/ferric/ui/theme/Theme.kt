@@ -13,7 +13,6 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -207,9 +206,9 @@ fun Modifier.ferricGlassSurface(
     palette: FerricVisualPalette,
     hazeState: HazeState?,
     cornerRadius: Dp = palette.cornerRadiusDp,
-): Modifier = composed {
+): Modifier {
     val shape = RoundedCornerShape(cornerRadius)
-    if (palette.isLiquidGlass) {
+    return if (palette.isLiquidGlass) {
         val specularBorder = Brush.verticalGradient(
             colors = listOf(
                 Color.White.copy(alpha = if (palette.isLight) 0.55f else 0.24f),

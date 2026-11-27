@@ -44,6 +44,7 @@ impl FfiEventSink for TestSink {
     fn on_lyrics_loaded(&self, _lyrics: FfiLyricsState) {}
     fn on_video_streams_loaded(&self, _video: FfiVideoStreamsState) {}
     fn on_connect_state_changed(&self, _state: FfiConnectState) {}
+    fn on_download_progress(&self, _track_id: String, _percent: u8) {}
     fn on_spotify_auth_expired(&self) {}
     fn on_toast(&self, _message: String) {}
 }
@@ -148,6 +149,13 @@ fn mobile_ffi_seeds_plays_and_persists_liquid_glass_theme() {
     assert!(qr.uri.starts_with("ferric://pair?"));
     assert!(qr.size >= 21);
     assert_eq!(qr.modules.len(), (qr.size * qr.size) as usize);
+
+    // M5: Storage stats & offline download APIs
+    let st = core.get_storage_stats().expect("storage stats");
+    assert_eq!(st.offline_track_count, 0);
+    assert!(st.database_bytes > 0);
+    assert_eq!(core.clear_audio_cache(), 0);
+    assert_eq!(core.clear_artwork_cache(), 0);
 
     core.shutdown();
     let _ = std::fs::remove_dir_all(&root);

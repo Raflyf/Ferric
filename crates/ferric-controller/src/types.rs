@@ -240,3 +240,13 @@ pub struct AutoEqProfileSnapshot {
     pub category: String,
     pub preamp_db: f32,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StorageStatsSnapshot {
+    pub offline_track_count: usize,
+    pub offline_bytes: u64,
+    pub stream_cache_bytes: u64,
+    pub stream_cache_files: usize,
+    pub artwork_cache_bytes: u64,
+    pub database_bytes: u64,
+}

@@ -22,6 +22,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.DownloadForOffline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FilterList
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -64,12 +65,16 @@ fun DetailScreen(
     detail: FfiCollectionDetail,
     detailSort: FfiDetailSort,
     currentTrackId: String?,
+    offlineTrackIds: Set<String>,
     onBack: () -> Unit,
     onPlayQueue: (List<FfiTrack>, Int, String) -> Unit,
     onShuffleQueue: (List<FfiTrack>, String) -> Unit,
     onCycleSort: () -> Unit,
     onDeduplicate: () -> Unit,
     onSyncToAccount: () -> Unit,
+    onDownloadPlaylist: () -> Unit,
+    onDownloadTrack: (FfiTrack) -> Unit,
+    onDeleteOfflineTrack: (String) -> Unit,
     onCopyShareLink: () -> Unit,
     onCopyTracklist: () -> Unit,
     onExportCsv: () -> Unit,
@@ -203,6 +208,15 @@ fun DetailScreen(
                                 Text("Sort: $sortLabel", color = TextPrimary)
                             }
                         }
+                        if (detail.tracks.isNotEmpty()) {
+                            item(key = "act_download") {
+                                OutlinedButton(onClick = onDownloadPlaylist, border = BorderStroke(1.dp, FerricOrange)) {
+                                    Icon(Icons.Rounded.DownloadForOffline, contentDescription = null, tint = FerricOrange, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Download", color = FerricOrange)
+                                }
+                            }
+                        }
                         if (detail.isEditablePlaylist) {
                             item(key = "act_dedup") {
                                 OutlinedButton(onClick = onDeduplicate, border = BorderStroke(1.dp, HairlineBorder)) {
@@ -259,6 +273,9 @@ fun DetailScreen(
                     onAddToPlaylist = { onAddToPlaylist(track) },
                     onCopyLink = { onCopyTrackLink(track) },
                     onOpenArtist = { onOpenArtist(track.artist) },
+                    isOfflineDownloaded = track.id in offlineTrackIds,
+                    onDownloadOffline = { onDownloadTrack(track) },
+                    onDeleteOffline = { onDeleteOfflineTrack(track.id) },
                     onRemoveFromPlaylist = if (detail.isEditablePlaylist) {
                         { onRemoveFromPlaylist(track.id) }
                     } else {

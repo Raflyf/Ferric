@@ -21,6 +21,7 @@ pub trait ControllerEventSink: Send + Sync {
     fn on_lyrics_loaded(&self, _lyrics: LyricsSnapshot) {}
     fn on_video_streams_loaded(&self, _video: VideoStreamsSnapshot) {}
     fn on_connect_state_changed(&self, _state: ConnectSnapshot) {}
+    fn on_download_progress(&self, _track_id: String, _percent: u8) {}
     fn on_spotify_auth_expired(&self) {}
     fn on_toast(&self, _message: String) {}
 }

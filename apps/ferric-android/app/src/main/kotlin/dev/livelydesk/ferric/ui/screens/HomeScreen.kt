@@ -23,6 +23,7 @@ import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -69,6 +70,7 @@ fun HomeScreen(
     onOpenEqualizer: () -> Unit,
     onOpenThemeStudio: () -> Unit,
     onOpenConnect: () -> Unit,
+    onOpenSettings: () -> Unit,
     onPlayQueue: (List<FfiTrack>, Int, String) -> Unit,
     onShuffleQueue: (List<FfiTrack>, String) -> Unit,
     onOpenStation: (String) -> Unit,
@@ -142,6 +144,13 @@ fun HomeScreen(
                             imageVector = Icons.Rounded.AccountCircle,
                             contentDescription = "Accounts",
                             tint = if (anyConnected) palette.accent else palette.textPrimary,
+                        )
+                    }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(
+                            imageVector = Icons.Rounded.Settings,
+                            contentDescription = "Settings",
+                            tint = palette.textPrimary,
                         )
                     }
                 }

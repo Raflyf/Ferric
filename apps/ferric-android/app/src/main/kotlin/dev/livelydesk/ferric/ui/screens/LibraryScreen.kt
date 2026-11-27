@@ -61,6 +61,7 @@ private enum class LibraryTab(val label: String) {
     ALBUMS("Albums"),
     ARTISTS("Artists"),
     LIKED("Liked"),
+    OFFLINE("Offline"),
     RECENTS("Recents"),
     LOCAL("Local"),
 }
@@ -84,6 +85,8 @@ fun LibraryScreen(
     onAddToQueue: (FfiTrack) -> Unit,
     onAddToPlaylist: (FfiTrack) -> Unit,
     onCopyTrackLink: (FfiTrack) -> Unit,
+    onDownloadOffline: (FfiTrack) -> Unit,
+    onDeleteOffline: (String) -> Unit,
 ) {
     var activeTab by rememberSaveable { mutableStateOf(LibraryTab.PLAYLISTS) }
 
@@ -249,6 +252,7 @@ fun LibraryScreen(
 
             LibraryTab.SONGS -> {
                 itemsIndexed(state.tracks, key = { idx, t -> "song_${idx}_${t.id}" }) { idx, track ->
+                    val isOff = track.id in state.offlineTrackIds
                     TrackRow(
                         track = track,
                         isActive = state.currentTrack?.id == track.id,
@@ -259,6 +263,9 @@ fun LibraryScreen(
                         onAddToPlaylist = { onAddToPlaylist(track) },
                         onCopyLink = { onCopyTrackLink(track) },
                         onOpenArtist = { onOpenArtist(track.artist) },
+                        isOfflineDownloaded = isOff,
+                        onDownloadOffline = { onDownloadOffline(track) },
+                        onDeleteOffline = { onDeleteOffline(track.id) },
                     )
                 }
             }
@@ -340,6 +347,45 @@ fun LibraryScreen(
                             onAddToPlaylist = { onAddToPlaylist(track) },
                             onCopyLink = { onCopyTrackLink(track) },
                             onOpenArtist = { onOpenArtist(track.artist) },
+                        )
+                    }
+                }
+            }
+
+            LibraryTab.OFFLINE -> {
+                if (state.offlineTracks.isEmpty()) {
+                    item(key = "offline_empty") {
+                        Text(
+                            "No offline downloads yet. Tap the menu on any song or Download inside a playlist to save music for airplane mode.",
+                            color = TextSecondary,
+                        )
+                    }
+                } else {
+                    item(key = "offline_play_all") {
+                        Button(
+                            onClick = { onPlayQueue(state.offlineTracks, 0, "Offline Downloads") },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = FerricOrange,
+                                contentColor = ObsidianSurface,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Play All Offline (${state.offlineTracks.size})")
+                        }
+                    }
+                    itemsIndexed(state.offlineTracks, key = { idx, t -> "off_${idx}_${t.id}" }) { idx, track ->
+                        TrackRow(
+                            track = track,
+                            isActive = state.currentTrack?.id == track.id,
+                            onPlay = { onPlayQueue(state.offlineTracks, idx, "Offline Downloads") },
+                            onToggleLike = { onToggleLike(track.id) },
+                            onPlayNext = { onPlayNext(track) },
+                            onAddToQueue = { onAddToQueue(track) },
+                            onAddToPlaylist = { onAddToPlaylist(track) },
+                            onCopyLink = { onCopyTrackLink(track) },
+                            onOpenArtist = { onOpenArtist(track.artist) },
+                            isOfflineDownloaded = true,
+                            onDeleteOffline = { onDeleteOffline(track.id) },
                         )
                     }
                 }

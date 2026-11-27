@@ -72,6 +72,9 @@ import dev.livelydesk.ferric.ui.screens.HomeScreen
 import dev.livelydesk.ferric.ui.screens.LibraryScreen
 import dev.livelydesk.ferric.ui.screens.QueueSheet
 import dev.livelydesk.ferric.ui.screens.SearchScreen
+import dev.livelydesk.ferric.ui.screens.SettingsSheet
+import dev.livelydesk.ferric.ui.screens.ShareCardSheet
+import dev.livelydesk.ferric.ui.screens.StatsSheet
 import dev.livelydesk.ferric.ui.screens.ThemeStudioSheet
 import dev.livelydesk.ferric.ui.theme.FerricTheme
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
@@ -152,6 +155,9 @@ private fun FerricMainShell(
     var showConnectSheet by rememberSaveable { mutableStateOf(false) }
     var showEqSheet by rememberSaveable { mutableStateOf(false) }
     var showThemeSheet by rememberSaveable { mutableStateOf(false) }
+    var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
+    var showStatsSheet by rememberSaveable { mutableStateOf(false) }
+    var showShareCardSheet by rememberSaveable { mutableStateOf(false) }
     var showCreatePlaylistDialog by rememberSaveable { mutableStateOf(false) }
     var newPlaylistName by rememberSaveable { mutableStateOf("") }
     var pendingTrackForPlaylist by remember { mutableStateOf<FfiTrack?>(null) }
@@ -292,6 +298,7 @@ private fun FerricMainShell(
                 onOpenEqualizer = { showEqSheet = true },
                 onOpenThemeStudio = { showThemeSheet = true },
                 onOpenConnect = { showConnectSheet = true },
+                onOpenShareCard = { showShareCardSheet = true },
                 onOpenOutputSwitcher = onOpenOutputSwitcher,
                 onLoadLyrics = { store.loadLyricsForCurrent() },
                 onNudgeLyricsOffset = { delta -> store.nudgeLyricsOffsetMs(delta) },
@@ -363,12 +370,16 @@ private fun FerricMainShell(
                             detail = detail,
                             detailSort = state.detailSort,
                             currentTrackId = state.currentTrack?.id,
+                            offlineTrackIds = state.offlineTrackIds,
                             onBack = { store.closeDetail() },
                             onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
                             onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
                             onCycleSort = { store.cycleDetailSort() },
                             onDeduplicate = { store.deduplicatePlaylist(detail.id) },
                             onSyncToAccount = { store.pushLocalPlaylistToCloud(detail.id) },
+                            onDownloadPlaylist = { store.downloadPlaylistOffline(detail.id) },
+                            onDownloadTrack = { t -> store.downloadTrackOffline(t) },
+                            onDeleteOfflineTrack = { id -> store.deleteOfflineTrack(id) },
                             onCopyShareLink = {
                                 detail.shareUrl?.let { copyToClipboard("Ferric Link", it) }
                             },
@@ -407,6 +418,7 @@ private fun FerricMainShell(
                                 onOpenEqualizer = { showEqSheet = true },
                                 onOpenThemeStudio = { showThemeSheet = true },
                                 onOpenConnect = { showConnectSheet = true },
+                                onOpenSettings = { showSettingsSheet = true },
                                 onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
                                 onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
                                 onOpenStation = { id -> store.openStation(id) },
@@ -490,6 +502,8 @@ private fun FerricMainShell(
                                         if (link != null) copyToClipboard("Track Link", link)
                                     }
                                 },
+                                onDownloadOffline = { t -> store.downloadTrackOffline(t) },
+                                onDeleteOffline = { id -> store.deleteOfflineTrack(id) },
                             )
                         }
                     }
@@ -592,6 +606,47 @@ private fun FerricMainShell(
                     exportDocLauncher.launch("ferric-android.ferric-theme.json")
                 }
             },
+        )
+    }
+
+    if (showSettingsSheet) {
+        SettingsSheet(
+            state = state,
+            onRefreshStorageAndStats = { store.refreshStorageAndStats() },
+            onDismiss = { showSettingsSheet = false },
+            onOpenAccounts = { showAccountsSheet = true },
+            onOpenConnect = { showConnectSheet = true },
+            onOpenThemeStudio = { showThemeSheet = true },
+            onOpenEqualizer = { showEqSheet = true },
+            onOpenOutputSwitcher = onOpenOutputSwitcher,
+            onOpenStats = { showStatsSheet = true },
+            onScanLocalMusic = {
+                val hasPerm = ContextCompat.checkSelfPermission(
+                    context,
+                    audioPermission,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasPerm) store.scanDeviceMediaStore() else audioPermissionLauncher.launch(audioPermission)
+            },
+            onPickSafFolder = { safFolderLauncher.launch(null) },
+            onClearAudioCache = { store.clearAudioCache() },
+            onClearArtworkCache = { store.clearArtworkCache() },
+            onDeleteAllOffline = { store.deleteAllOfflineDownloads() },
+        )
+    }
+
+    if (showStatsSheet) {
+        StatsSheet(
+            stats = state.listeningStats,
+            onRefresh = { store.refreshStorageAndStats() },
+            onDismiss = { showStatsSheet = false },
+        )
+    }
+
+    if (showShareCardSheet && state.currentTrack != null) {
+        ShareCardSheet(
+            state = state,
+            onDismiss = { showShareCardSheet = false },
+            onMessage = { msg -> store.postToast(msg) },
         )
     }
 

@@ -10,7 +10,9 @@ import dev.livelydesk.ferric.local.LocalMediaScanner
 import dev.livelydesk.ferric.playback.OutputRouteHelper
 import dev.livelydesk.ferric.ui.theme.CoverShadeColors
 import dev.livelydesk.ferric.ui.theme.CoverShadeExtractor
+import dev.livelydesk.ferric.widget.FerricWidgetUpdater
 import java.io.File
+import java.util.TimeZone
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +37,7 @@ import uniffi.ferric_mobile_ffi.FfiDspSettings
 import uniffi.ferric_mobile_ffi.FfiEqConfig
 import uniffi.ferric_mobile_ffi.FfiEventSink
 import uniffi.ferric_mobile_ffi.FfiHomeState
+import uniffi.ferric_mobile_ffi.FfiListeningStats
 import uniffi.ferric_mobile_ffi.FfiLyricsState
 import uniffi.ferric_mobile_ffi.FfiPlaylist
 import uniffi.ferric_mobile_ffi.FfiPlaylistSort
@@ -42,6 +45,7 @@ import uniffi.ferric_mobile_ffi.FfiPlaylistSourceFilter
 import uniffi.ferric_mobile_ffi.FfiQrCode
 import uniffi.ferric_mobile_ffi.FfiRepeatMode
 import uniffi.ferric_mobile_ffi.FfiSearchResults
+import uniffi.ferric_mobile_ffi.FfiStorageStats
 import uniffi.ferric_mobile_ffi.FfiTelemetry
 import uniffi.ferric_mobile_ffi.FfiThemeConfig
 import uniffi.ferric_mobile_ffi.FfiTrack
@@ -52,6 +56,11 @@ data class PlaybackUiState(
     val likedTracks: List<FfiTrack> = emptyList(),
     val recentTracks: List<FfiTrack> = emptyList(),
     val localTracks: List<FfiTrack> = emptyList(),
+    val offlineTracks: List<FfiTrack> = emptyList(),
+    val offlineTrackIds: Set<String> = emptySet(),
+    val downloadProgress: Map<String, Int> = emptyMap(),
+    val storageStats: FfiStorageStats? = null,
+    val listeningStats: FfiListeningStats? = null,
     val playlists: List<FfiPlaylist> = emptyList(),
     val albums: List<FfiAlbumSummary> = emptyList(),
     val artists: List<FfiArtistSummary> = emptyList(),
@@ -231,12 +240,17 @@ class CoreStateStore(private val appContext: Context) {
 
     private val eventSink = object : FfiEventSink {
         override fun onPlaybackTelemetry(telemetry: FfiTelemetry) {
+            val prevPlaying = _uiState.value.isPlaying
             _uiState.update { PlaybackStateReducer.applyTelemetry(it, telemetry) }
+            if (prevPlaying != telemetry.isPlaying) {
+                FerricWidgetUpdater.updateAll(appContext, _uiState.value)
+            }
         }
 
         override fun onNowPlayingChanged(track: FfiTrack?) {
             val prevId = _uiState.value.currentTrack?.id
             _uiState.update { PlaybackStateReducer.applyNowPlaying(it, track) }
+            FerricWidgetUpdater.updateAll(appContext, _uiState.value)
             if (track != null && track.id != prevId) {
                 extractCoverShadeAsync(track.thumbnailUrl)
                 // Reset stale video streams when track changes; lyrics load on demand or if open.
@@ -296,6 +310,15 @@ class CoreStateStore(private val appContext: Context) {
                     tcpPort = state.localTcpPort.toInt(),
                     roomTagsHex = state.roomTagsHex,
                 )
+            }
+        }
+
+        override fun onDownloadProgress(trackId: String, percent: UByte) {
+            val pct = percent.toInt().coerceIn(0, 100)
+            _uiState.update { prev ->
+                val nextMap = prev.downloadProgress.toMutableMap()
+                if (pct >= 100) nextMap.remove(trackId) else nextMap[trackId] = pct
+                prev.copy(downloadProgress = nextMap)
             }
         }
 
@@ -1073,6 +1096,71 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    // --- M5 Offline Downloads, Storage & Listening Stats ---
+
+    fun downloadTrackOffline(track: FfiTrack) {
+        scope.launch {
+            _uiState.update { it.copy(statusMessage = "Downloading '${track.title}'...") }
+            getOrCreateCore()?.downloadTrack(track)
+        }
+    }
+
+    fun downloadPlaylistOffline(playlistId: String) {
+        scope.launch {
+            _uiState.update { it.copy(statusMessage = "Downloading playlist for offline playback...") }
+            runCatching { getOrCreateCore()?.downloadPlaylist(playlistId) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun deleteOfflineTrack(trackId: String) {
+        scope.launch {
+            runCatching { getOrCreateCore()?.deleteOfflineTrack(trackId) }
+            refreshStorageAndStats()
+        }
+    }
+
+    fun deleteAllOfflineDownloads() {
+        scope.launch {
+            runCatching { getOrCreateCore()?.deleteAllOfflineDownloads() }
+            refreshStorageAndStats()
+        }
+    }
+
+    fun clearAudioCache() {
+        scope.launch {
+            getOrCreateCore()?.clearAudioCache()
+            refreshStorageAndStats()
+        }
+    }
+
+    fun clearArtworkCache() {
+        scope.launch {
+            getOrCreateCore()?.clearArtworkCache()
+            runCatching { File(appContext.cacheDir, "artwork_cache").deleteRecursively() }
+            refreshStorageAndStats()
+        }
+    }
+
+    fun refreshStorageAndStats() {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            val storage = runCatching { handle.getStorageStats() }.getOrNull()
+            val tzOffsetSecs = (TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000L)
+            val stats = runCatching { handle.getListeningStats(tzOffsetSecs) }.getOrNull()
+            _uiState.update {
+                it.copy(
+                    storageStats = storage ?: it.storageStats,
+                    listeningStats = stats ?: it.listeningStats,
+                )
+            }
+        }
+    }
+
+    fun postToast(message: String) {
+        _uiState.update { it.copy(statusMessage = message) }
+    }
+
     fun refreshOutputRoute() {
         val label = OutputRouteHelper.activeOutputLabel(appContext)
         _uiState.update { it.copy(activeOutputRoute = label) }
@@ -1102,6 +1190,8 @@ class CoreStateStore(private val appContext: Context) {
         val liked = runCatching { handle.listLikedSongs() }.getOrDefault(emptyList())
         val recent = runCatching { handle.listRecentSongs() }.getOrDefault(emptyList())
         val local = runCatching { handle.listLocalSongs() }.getOrDefault(emptyList())
+        val offline = runCatching { handle.listOfflineTracks() }.getOrDefault(emptyList())
+        val offlineIds = runCatching { handle.listOfflineTrackIds().toSet() }.getOrDefault(emptySet())
         val playlists = runCatching { handle.listPlaylistsFiltered(filter, sort) }.getOrDefault(emptyList())
         val albums = runCatching { handle.listAlbums() }.getOrDefault(emptyList())
         val artists = runCatching { handle.listArtists() }.getOrDefault(emptyList())
@@ -1113,6 +1203,8 @@ class CoreStateStore(private val appContext: Context) {
                 likedTracks = liked,
                 recentTracks = recent,
                 localTracks = local,
+                offlineTracks = offline,
+                offlineTrackIds = offlineIds,
                 playlists = playlists,
                 albums = albums,
                 artists = artists,
@@ -1120,5 +1212,6 @@ class CoreStateStore(private val appContext: Context) {
                 upNext = upNext,
             )
         }
+        FerricWidgetUpdater.updateAll(appContext, _uiState.value)
     }
 }

@@ -124,6 +124,9 @@ fun TrackRow(
     onCopyLink: () -> Unit,
     onOpenArtist: () -> Unit,
     onRemoveFromPlaylist: (() -> Unit)? = null,
+    isOfflineDownloaded: Boolean = false,
+    onDownloadOffline: (() -> Unit)? = null,
+    onDeleteOffline: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -159,7 +162,12 @@ fun TrackRow(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "${track.artist} · ${sourceBadgeLabel(track.source)}",
+                    text = buildString {
+                        append(track.artist)
+                        append(" · ")
+                        append(sourceBadgeLabel(track.source))
+                        if (isOfflineDownloaded) append(" · Offline")
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondary,
                     maxLines = 1,
@@ -223,6 +231,24 @@ fun TrackRow(
                             onCopyLink()
                         },
                     )
+                    if (!isOfflineDownloaded && onDownloadOffline != null) {
+                        DropdownMenuItem(
+                            text = { Text("Download Offline", color = TextPrimary) },
+                            onClick = {
+                                menuExpanded = false
+                                onDownloadOffline()
+                            },
+                        )
+                    }
+                    if (isOfflineDownloaded && onDeleteOffline != null) {
+                        DropdownMenuItem(
+                            text = { Text("Remove Offline Download", color = FerricOrange) },
+                            onClick = {
+                                menuExpanded = false
+                                onDeleteOffline()
+                            },
+                        )
+                    }
                     if (onRemoveFromPlaylist != null) {
                         DropdownMenuItem(
                             text = { Text("Remove from Playlist", color = FerricOrange) },

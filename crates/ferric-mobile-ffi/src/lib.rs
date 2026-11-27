@@ -5,10 +5,12 @@ mod android_jni;
 pub mod m2_types;
 pub mod m3_types;
 pub mod m4_types;
+pub mod m5_types;
 
 pub use m2_types::*;
 pub use m3_types::*;
 pub use m4_types::*;
+pub use m5_types::*;
 
 use ferric_audio::content::{ContentOpener, register_content_opener};
 use ferric_audio::engine::TelemetrySnapshot;
@@ -623,6 +625,7 @@ pub trait FfiEventSink: Send + Sync {
     fn on_lyrics_loaded(&self, lyrics: FfiLyricsState);
     fn on_video_streams_loaded(&self, video: FfiVideoStreamsState);
     fn on_connect_state_changed(&self, state: FfiConnectState);
+    fn on_download_progress(&self, track_id: String, percent: u8);
     fn on_spotify_auth_expired(&self);
     fn on_toast(&self, message: String);
 }
@@ -720,6 +723,10 @@ impl ControllerEventSink for EventSinkBridge {
 
     fn on_connect_state_changed(&self, state: ferric_sync::ConnectSnapshot) {
         self.0.on_connect_state_changed(state.into());
+    }
+
+    fn on_download_progress(&self, track_id: String, percent: u8) {
+        self.0.on_download_progress(track_id, percent);
     }
 
     fn on_spotify_auth_expired(&self) {
@@ -1408,6 +1415,52 @@ impl FerricMobileCore {
             size: u32::try_from(size).unwrap_or(0),
             modules,
         }
+    }
+
+    // --- M5 Offline Downloads & Storage Diagnostics ---
+
+    pub fn download_track(&self, track: FfiTrack) {
+        self.controller.download_track(track.into());
+    }
+
+    pub fn download_playlist(&self, playlist_id: String) -> Result<(), FfiError> {
+        self.controller.download_playlist(playlist_id)?;
+        Ok(())
+    }
+
+    pub fn list_offline_track_ids(&self) -> Result<Vec<String>, FfiError> {
+        Ok(self.controller.list_offline_track_ids()?)
+    }
+
+    pub fn list_offline_tracks(&self) -> Result<Vec<FfiTrack>, FfiError> {
+        Ok(self
+            .controller
+            .list_offline_tracks()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn delete_offline_track(&self, track_id: String) -> Result<(), FfiError> {
+        self.controller.delete_offline_track(&track_id)?;
+        Ok(())
+    }
+
+    pub fn delete_all_offline_downloads(&self) -> Result<u32, FfiError> {
+        let removed = self.controller.delete_all_offline_downloads()?;
+        Ok(u32::try_from(removed).unwrap_or(u32::MAX))
+    }
+
+    pub fn get_storage_stats(&self) -> Result<FfiStorageStats, FfiError> {
+        Ok(self.controller.get_storage_stats()?.into())
+    }
+
+    pub fn clear_audio_cache(&self) -> u64 {
+        self.controller.clear_audio_cache()
+    }
+
+    pub fn clear_artwork_cache(&self) -> u64 {
+        self.controller.clear_artwork_cache()
     }
 
     pub fn shutdown(&self) {

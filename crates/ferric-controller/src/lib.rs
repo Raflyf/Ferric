@@ -6,6 +6,7 @@ pub mod events;
 pub mod home;
 pub mod library;
 pub mod media_tools;
+pub mod offline;
 pub mod types;
 
 use crate::accounts::active_ytm_session;

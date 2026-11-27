@@ -118,6 +118,7 @@ fun FullPlayerScreen(
     onOpenEqualizer: () -> Unit,
     onOpenThemeStudio: () -> Unit,
     onOpenConnect: () -> Unit,
+    onOpenShareCard: () -> Unit,
     onOpenOutputSwitcher: () -> Unit,
     onLoadLyrics: () -> Unit,
     onNudgeLyricsOffset: (Long) -> Unit,
@@ -273,6 +274,7 @@ fun FullPlayerScreen(
                             onSeek = onSeek,
                             onNudgeOffset = onNudgeLyricsOffset,
                             onRetry = onLoadLyrics,
+                            onOpenShareCard = onOpenShareCard,
                         )
                     }
                 }
@@ -484,6 +486,7 @@ private fun SyncedLyricsStage(
     onSeek: (Long) -> Unit,
     onNudgeOffset: (Long) -> Unit,
     onRetry: () -> Unit,
+    onOpenShareCard: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
     val lyrics = state.lyricsState
@@ -537,6 +540,11 @@ private fun SyncedLyricsStage(
                     border = BorderStroke(1.dp, palette.border),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 ) { Text("+0.5s", color = palette.textPrimary) }
+                OutlinedButton(
+                    onClick = onOpenShareCard,
+                    border = BorderStroke(1.dp, palette.accent),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) { Text("Share Card", color = palette.accent) }
             }
         }
 

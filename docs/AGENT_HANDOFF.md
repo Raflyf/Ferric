@@ -1,9 +1,9 @@
 # Panduan Handoff & Pemeliharaan (`AGENT_HANDOFF.md`) - Ferric
 
-- **Versi Dokumen:** 2.2.0 (Pre-Release `v0.1.0` Ready-for-Tag)
-- **Tanggal Pembaruan:** 26 November 2026
+- **Versi Dokumen:** 2.3.0 (Rilis `v0.1.2` + Backlog `v0.1.3`)
+- **Tanggal Pembaruan:** 27 November 2026
 - **Repositori:** `https://github.com/Raflyf/Ferric.git` (branch `main`)
-- **Kode Terverifikasi Live Terakhir:** Pre-release `v0.1.0` full security, GPU/VRAM, SMTC, Acrylic & clean-uninstall audit
+- **Rilis Terakhir:** `v0.1.2` (tag `v0.1.2`, commit `217620c`)
 - **Binary Terpasang:** `%LOCALAPPDATA%\Programs\Ferric\ferric.exe`
 - **Database Pengguna:** `%LOCALAPPDATA%\LivelyDesk\Ferric\data\ferric.db`
 
@@ -76,3 +76,14 @@
    ```
 2. Pada GitHub Actions (`ci-desktop.yml`), setiap push kode ke `main` menjalankan seluruh gerbang yang sama plus paket Portable ZIP dan `SHA256SUMS.txt`. *(Catatan: `docs/**` dan `**.md` berada di `paths-ignore`.)*
 3. Publikasi GitHub Release hanya berjalan saat tag `v*` di-push secara eksplisit melalui `.github/workflows/release.yml`.
+
+---
+
+## 5. Backlog / Catatan untuk Rilis Berikutnya (`v0.1.3`+)
+
+1. **Discord RPC `last_track_key` deduplikasi (`apps/ferric-desktop/src/discord_rpc.rs` baris 64-115):**
+   - Masalah: `DiscordRpcBridge::update_playback` saat ini hanya membandingkan `(title, artist, is_playing, start_s)` di `last_track_key` dan belum menyertakan `listen_button` maupun `cover_url`.
+   - Dampak: jika sebuah lagu mulai diputar sebelum `youtube_video_id` selesai di-resolve (`StreamReady`), payload pertama terkirim tanpa `buttons`, lalu update kedua yang sudah membawa URL lagu ter-skip oleh cache deduplikasi sehingga tombol `Listen on Spotify / YouTube Music` baru muncul saat lagu di-seek, pause/resume, atau ganti lagu.
+   - Perbaikan yang perlu dilakukan: sertakan `listen_button` dan `cover_url` pada `last_track_key` + tambahkan unit test deduplikasi saat `listen_button` berubah dari `None` ke `Some(...)`.
+2. **Catatan UI di `Settings > Integrations` (`apps/ferric-desktop/src/app.rs`):**
+   - Tambahkan keterangan singkat di bawah toggle `Show Listen Button` bahwa Discord Desktop menyembunyikan tombol custom Rich Presence pada tampilan profil sendiri, sehingga tombol hanya terlihat oleh pengguna lain / teman.

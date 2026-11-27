@@ -6,14 +6,31 @@ import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
+import android.view.WindowManager
 import androidx.annotation.RequiresApi
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
@@ -25,7 +42,6 @@ import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.asComposeRenderEffect
@@ -38,37 +54,107 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogWindowProvider
+import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Shared hardware backdrop capture state for real-time optical Liquid Glass.
- * Records the live scrolling screen layer once per frame into a GPU [GraphicsLayer] so floating
- * glass capsules (dock, mini-player, pills, player controls) optically blur, vibrate, refract,
- * and chromatically disperse whatever artwork or text glides directly behind them.
+ * Rendering fidelity tier for optical Liquid Glass:
+ * - [HERO_LENS]: full AGSL convex-lens bevel refraction + RGB chromatic dispersion + angular chrome
+ *   specular rim, sampling the shared 0.28x screen blur layer (ideal for dock, mini-player, and
+ *   player chrome).
+ * - [FROSTED_PANEL]: zero-FBO shared-blur panel sampling the same pre-blurred backdrop directly with
+ *   luminous frosted white wash + directional chrome border (0 extra GPU layers per card/button).
+ */
+enum class GlassTier {
+    HERO_LENS,
+    FROSTED_PANEL,
+}
+
+/**
+ * Shared single-pass hardware backdrop capture state for real-time optical Liquid Glass.
+ * Records the parent screen once per frame into [graphicsLayer] and executes ONE shared downscaled
+ * Gaussian blur + bright vibrancy pass into [blurredLayer] (~1 MB VRAM at 0.28x resolution), so
+ * every floating capsule, card, chip, and button samples blurred content at near-zero marginal GPU cost.
  */
 @Stable
 class FerricBackdropState(
     val graphicsLayer: GraphicsLayer,
+    val blurredLayer: GraphicsLayer,
 ) {
+    val blurScale: Float = 0.28f
     var rootOffset: Offset = Offset.Zero
     var hasRecorded: Boolean = false
+    var contentSize: IntSize = IntSize.Zero
+    var blurDirty: Boolean = true
+    var hasBlurred: Boolean = false
+    var blurredSize: IntSize = IntSize.Zero
+    private var lastBlurPx: Float = -1f
+    private var lastIsLight: Boolean = false
+    private var sharedBlurEffect: androidx.compose.ui.graphics.RenderEffect? = null
+
+    fun ensureBlurred(
+        blurPx: Float,
+        isLight: Boolean,
+        density: Density,
+        layoutDirection: LayoutDirection,
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            !hasRecorded ||
+            contentSize.width < 4 ||
+            contentSize.height < 4
+        ) {
+            return false
+        }
+        val scaledBlur = (blurPx * blurScale).coerceIn(2f, 22f)
+        val bw = (contentSize.width * blurScale).roundToInt().coerceAtLeast(1)
+        val bh = (contentSize.height * blurScale).roundToInt().coerceAtLeast(1)
+        val targetSize = IntSize(bw, bh)
+        if (!hasBlurred ||
+            blurDirty ||
+            blurredSize != targetSize ||
+            sharedBlurEffect == null ||
+            abs(lastBlurPx - scaledBlur) > 0.4f ||
+            lastIsLight != isLight
+        ) {
+            lastBlurPx = scaledBlur
+            lastIsLight = isLight
+            blurredSize = targetSize
+            val fx = buildDecoupledBlurEffect(scaledBlur, isLight)
+            sharedBlurEffect = fx
+            blurredLayer.clip = false
+            blurredLayer.renderEffect = fx
+            blurredLayer.record(density = density, layoutDirection = layoutDirection, size = targetSize) {
+                scale(scaleX = blurScale, scaleY = blurScale, pivot = Offset.Zero) {
+                    drawLayer(graphicsLayer)
+                }
+            }
+            blurDirty = false
+            hasBlurred = true
+        }
+        return hasBlurred
+    }
 }
 
 val LocalBackdropState = compositionLocalOf<FerricBackdropState?> { null }
 
 @Composable
 fun rememberFerricBackdropState(): FerricBackdropState {
-    val layer = rememberGraphicsLayer()
-    return remember(layer) { FerricBackdropState(layer) }
+    val rawLayer = rememberGraphicsLayer()
+    val blurLayer = rememberGraphicsLayer()
+    return remember(rawLayer, blurLayer) { FerricBackdropState(rawLayer, blurLayer) }
 }
 
 /**
  * Captures the underlying scrollable surface into [backdrop] so sibling overlays above it can
- * render genuine optical Liquid Glass refraction over live scrolling content.
+ * render genuine optical Liquid Glass refraction and frosted blur with a single shared blur pass.
  */
 fun Modifier.ferricBackdropSource(
     backdrop: FerricBackdropState,
@@ -83,10 +169,13 @@ fun Modifier.ferricBackdropSource(
                 backdrop.graphicsLayer.record {
                     this@drawWithContent.drawContent()
                 }
+                backdrop.contentSize = IntSize(
+                    size.width.roundToInt().coerceAtLeast(1),
+                    size.height.roundToInt().coerceAtLeast(1),
+                )
                 backdrop.hasRecorded = true
+                backdrop.blurDirty = true
                 drawLayer(backdrop.graphicsLayer)
-            } else if (!enabled) {
-                drawContent()
             } else {
                 drawContent()
             }
@@ -157,7 +246,7 @@ half4 main(float2 coord) {
 }
 """
 
-// Directional optical glass specular rim lighting AGSL shader (top-left bright rim + bottom-right counter bounce).
+// Directional optical glass specular rim lighting AGSL shader (bright white catchlight + silver bounce).
 private const val SPECULAR_RIM_AGSL = """
 uniform float2 halfSize;
 uniform float minHalf;
@@ -184,8 +273,8 @@ half4 main(float2 coord) {
     float d = dot(g, lightDir);
     float intensity = pow(abs(d), falloff);
     float4 rim = d >= 0.0 ? topColor : bottomColor;
-    float baseRim = 0.14;
-    float a = clamp(rim.a * (baseRim + intensity * 0.86), 0.0, 1.0);
+    float baseRim = 0.18;
+    float a = clamp(rim.a * (baseRim + intensity * 0.82), 0.0, 1.0);
     return half4(rim.rgb * a, a);
 }
 """
@@ -193,16 +282,11 @@ half4 main(float2 coord) {
 private class GlassCache {
     var elementOffset: Offset = Offset.Zero
     var lastSize: IntSize = IntSize.Zero
-    var lastBlurPx: Float = -1f
     var lastRadiusPx: Float = -1f
     var lastRefractionHeightPx: Float = -1f
     var lastRefractionAmountPx: Float = -1f
     var lastLightMode: Boolean = false
     var lastDispersion: Float = -1f
-    var lastAccent: Color = Color.Unspecified
-    var lastGlassOpacity: Float = -1f
-    var lastGlassTint: Color = Color.Unspecified
-    var cachedBlurEffect: androidx.compose.ui.graphics.RenderEffect? = null
     var cachedRefractEffect: androidx.compose.ui.graphics.RenderEffect? = null
     var refractionShader: Any? = null
     var rimShader: Any? = null
@@ -214,12 +298,13 @@ private class GlassCache {
 
 @RequiresApi(Build.VERSION_CODES.S)
 private fun buildVibrancyEffect(isLight: Boolean): RenderEffect {
-    val sat = if (isLight) 1.24f else 1.40f
+    val sat = if (isLight) 1.24f else 1.32f
     val matrix = ColorMatrix().apply {
         setSaturation(sat)
     }
-    val gain = if (isLight) 1.04f else 1.08f
-    val bias = if (isLight) 6f else 4f
+    // Lift blurred dark regions into a soft luminous pearlescent glow while keeping white typography crisp.
+    val gain = if (isLight) 1.05f else 1.20f
+    val bias = if (isLight) 8f else 22f
     val lift = ColorMatrix(
         floatArrayOf(
             gain, 0f, 0f, 0f, bias,
@@ -234,7 +319,7 @@ private fun buildVibrancyEffect(isLight: Boolean): RenderEffect {
 
 @RequiresApi(Build.VERSION_CODES.S)
 private fun buildDecoupledBlurEffect(blurPx: Float, isLight: Boolean): androidx.compose.ui.graphics.RenderEffect {
-    val clampedBlur = blurPx.coerceIn(2f, 46f)
+    val clampedBlur = blurPx.coerceIn(2f, 28f)
     val blur = RenderEffect.createBlurEffect(clampedBlur, clampedBlur, Shader.TileMode.CLAMP)
     val vibrancy = buildVibrancyEffect(isLight)
     return RenderEffect.createChainEffect(blur, vibrancy).asComposeRenderEffect()
@@ -273,7 +358,6 @@ private fun buildApi33RimBrush(
     heightPx: Float,
     radiusPx: Float,
     isLight: Boolean,
-    accentHint: Color,
 ): ShaderBrush {
     val shader = (cache.rimShader as? RuntimeShader)
         ?: RuntimeShader(SPECULAR_RIM_AGSL).also { cache.rimShader = it }
@@ -283,41 +367,35 @@ private fun buildApi33RimBrush(
     shader.setFloatUniform("halfSize", halfW, halfH)
     shader.setFloatUniform("minHalf", minHalf)
     shader.setFloatUniform("cornerRadius", radiusPx.coerceAtMost(minHalf))
-    // Top-left directional specular light (classic iOS 26 / Auralys glass bevel angle).
     shader.setFloatUniform("lightDir", -0.56f, -0.83f)
-    shader.setFloatUniform("falloff", 1.55f)
+    shader.setFloatUniform("falloff", 1.45f)
     if (isLight) {
-        shader.setFloatUniform("topColor", 1.0f, 1.0f, 1.0f, 0.88f)
-        shader.setFloatUniform("bottomColor", 0.30f, 0.32f, 0.38f, 0.24f)
+        shader.setFloatUniform("topColor", 1.0f, 1.0f, 1.0f, 0.90f)
+        shader.setFloatUniform("bottomColor", 0.32f, 0.34f, 0.42f, 0.28f)
     } else {
-        // Luminous white-chrome upper rim + subtly warm lower bounce rim.
-        val br = (0.78f + accentHint.red * 0.22f).coerceIn(0f, 1f)
-        val bg = (0.80f + accentHint.green * 0.20f).coerceIn(0f, 1f)
-        val bb = (0.85f + accentHint.blue * 0.15f).coerceIn(0f, 1f)
-        shader.setFloatUniform("topColor", 1.0f, 1.0f, 1.0f, 0.54f)
-        shader.setFloatUniform("bottomColor", br, bg, bb, 0.24f)
+        shader.setFloatUniform("topColor", 1.0f, 1.0f, 1.0f, 0.78f)
+        shader.setFloatUniform("bottomColor", 0.92f, 0.95f, 1.0f, 0.38f)
     }
     return ShaderBrush(shader).also { cache.cachedRimBrush = it }
 }
 
 /**
- * Genuine GPU-accelerated Liquid Glass capsule modifier.
+ * Luminous frosted optical Liquid Glass modifier backed by shared screen-space Gaussian blur.
  *
- * - On Android 13+ (API 33+) with an active [LocalBackdropState]: renders live vibrancy boost +
- *   optical Gaussian blur + convex-lens AGSL bevel refraction + subtle RGB chromatic dispersion +
- *   directional specular glass rim over the scrolling backdrop underneath.
- * - On Android 12 (API 31-32): hardware `RenderEffect` blur + vibrancy + directional specular rim.
- * - On Android 9-11 (API 28-30) or when `alwaysGlass == false` outside Liquid Glass theme:
- *   clean frosted surface with specular rim.
+ * When [tier] is [GlassTier.HERO_LENS], adds a single-layer AGSL convex-lens bevel + chromatic
+ * dispersion pass over the shared pre-blurred backdrop. When [tier] is [GlassTier.FROSTED_PANEL],
+ * samples the shared blurred backdrop directly with zero extra offscreen GPU FBO allocations.
  */
 fun Modifier.ferricLiquidGlass(
     cornerRadius: Dp = 28.dp,
-    blurRadius: Dp = 14.dp,
-    refractionHeight: Dp = 18.dp,
-    refractionAmount: Dp = 14.dp,
+    blurRadius: Dp = 15.dp,
+    refractionHeight: Dp = 16.dp,
+    refractionAmount: Dp = 13.dp,
     chromaticDispersion: Float = 0.55f,
     tintAlpha: Float? = null,
     alwaysGlass: Boolean = false,
+    tier: GlassTier = GlassTier.HERO_LENS,
+    accentGlow: Color = Color.Unspecified,
 ): Modifier = composed {
     val palette = LocalFerricPalette.current
     val backdrop = LocalBackdropState.current
@@ -331,43 +409,68 @@ fun Modifier.ferricLiquidGlass(
             .border(width = 1.dp, color = palette.border, shape = shape)
     }
 
-    val blurLayer = rememberGraphicsLayer()
-    val glassLayer = rememberGraphicsLayer()
+    val isHero = tier == GlassTier.HERO_LENS
+    val glassLayer = if (isHero) rememberGraphicsLayer() else null
     val cache = remember { GlassCache() }
     val shape = RoundedCornerShape(cornerRadius)
     val opacityNorm = palette.glassOpacity.coerceIn(0.15f, 0.95f)
-    val effectiveTintAlpha = tintAlpha ?: if (palette.isLight) {
-        (opacityNorm * 0.88f).coerceIn(0.12f, 0.88f)
+
+    // Balanced pearlescent white frosted wash over a subtle dark contrast anchor so pills & cards
+    // look bright, milky silvery-glass while underlying art gleams through and white text stays crisp.
+    val anchorAlpha = if (palette.isLight) {
+        0f
     } else {
-        (opacityNorm * 0.80f).coerceIn(0.08f, 0.80f)
+        val base = 0.12f + opacityNorm * 0.15f
+        if (isHero) (base * 0.85f).coerceIn(0.06f, 0.22f) else base.coerceIn(0.10f, 0.28f)
     }
-    val tintColor = if (palette.isLight) {
-        Color.White.copy(alpha = effectiveTintAlpha)
+    val anchorColor = Color(
+        red = 0.08f + palette.glassTint.red * 0.14f,
+        green = 0.10f + palette.glassTint.green * 0.14f,
+        blue = 0.15f + palette.glassTint.blue * 0.14f,
+        alpha = anchorAlpha,
+    )
+
+    val whiteFrostAlpha = if (palette.isLight) {
+        (tintAlpha ?: (0.58f + opacityNorm * 0.30f)).coerceIn(0.32f, 0.88f)
     } else {
-        palette.glassTint.copy(alpha = effectiveTintAlpha)
+        val base = 0.13f + opacityNorm * 0.21f
+        val heroAdj = if (isHero) (base + 0.03f) else base
+        (tintAlpha?.let { (it * 0.55f).coerceIn(0.08f, 0.36f) } ?: heroAdj).coerceIn(0.10f, 0.36f)
     }
-    val sheenBrush = remember(palette.isLight) {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color.White.copy(alpha = if (palette.isLight) 0.34f else 0.12f),
-                Color.Transparent,
-                Color.Black.copy(alpha = if (palette.isLight) 0.04f else 0.14f),
-            ),
-        )
+    val whiteFrostColor = Color(0xFFF6F9FF).copy(alpha = whiteFrostAlpha)
+
+    val sheenBrush = remember(palette.isLight, accentGlow) {
+        if (accentGlow != Color.Unspecified) {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.26f),
+                    accentGlow.copy(alpha = 0.14f),
+                    Color.White.copy(alpha = 0.14f),
+                ),
+            )
+        } else {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = if (palette.isLight) 0.42f else 0.28f),
+                    Color.White.copy(alpha = if (palette.isLight) 0.12f else 0.04f),
+                    Color.White.copy(alpha = if (palette.isLight) 0.20f else 0.14f),
+                ),
+            )
+        }
     }
-    val fallbackRimBrush = remember(palette.isLight, palette.border) {
+    val rimStrokeBrush = remember(palette.isLight, accentGlow) {
         Brush.linearGradient(
             colors = if (palette.isLight) {
                 listOf(
-                    Color.White.copy(alpha = 0.85f),
-                    Color.White.copy(alpha = 0.28f),
-                    Color(0xFF1F222A).copy(alpha = 0.14f),
+                    Color.White.copy(alpha = 0.88f),
+                    Color.White.copy(alpha = 0.35f),
+                    Color(0xFF1F222A).copy(alpha = 0.16f),
                 )
             } else {
                 listOf(
-                    Color.White.copy(alpha = 0.44f),
-                    Color.White.copy(alpha = 0.10f),
-                    Color.White.copy(alpha = 0.22f),
+                    Color.White.copy(alpha = 0.64f),
+                    Color.White.copy(alpha = 0.18f),
+                    (if (accentGlow != Color.Unspecified) accentGlow else Color.White).copy(alpha = 0.34f),
                 )
             },
         )
@@ -385,13 +488,9 @@ fun Modifier.ferricLiquidGlass(
                 return@drawWithContent
             }
             val intSize = IntSize(w.roundToInt().coerceAtLeast(1), h.roundToInt().coerceAtLeast(1))
-            val halfW = (intSize.width / 2).coerceAtLeast(1)
-            val halfH = (intSize.height / 2).coerceAtLeast(1)
-            val halfSize = IntSize(halfW, halfH)
             val radiusPx = min(cornerRadius.toPx(), min(w, h) * 0.5f)
-            val opacityBlurScale = (0.35f + palette.glassOpacity.coerceIn(0.15f, 0.95f) * 1.15f)
-            val blurPx = (blurRadius.toPx() * opacityBlurScale).coerceIn(2f, 52f)
-            val halfBlurPx = (blurPx * 0.5f).coerceIn(1.5f, 26f)
+            val opacityBlurScale = (0.45f + opacityNorm * 0.95f)
+            val blurPx = (blurRadius.toPx() * opacityBlurScale).coerceIn(4f, 44f)
             val refHeightPx = refractionHeight.toPx()
             val refAmountPx = refractionAmount.toPx()
 
@@ -407,117 +506,112 @@ fun Modifier.ferricLiquidGlass(
                 cache.cachedPathRadius = radiusPx
             }
 
-            val canSampleBackdrop = backdrop != null &&
-                backdrop.hasRecorded &&
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            val hasSharedBlur = backdrop?.ensureBlurred(
+                blurPx = blurPx,
+                isLight = palette.isLight,
+                density = this@drawWithContent,
+                layoutDirection = layoutDirection,
+            ) == true
 
-            if (canSampleBackdrop) {
+            if (hasSharedBlur && backdrop != null) {
                 val dx = cache.elementOffset.x - backdrop.rootOffset.x
                 val dy = cache.elementOffset.y - backdrop.rootOffset.y
+                val invScale = 1f / backdrop.blurScale
 
-                val needsRebuild = cache.cachedBlurEffect == null ||
-                    cache.lastSize != intSize ||
-                    cache.lastBlurPx != halfBlurPx ||
-                    cache.lastRadiusPx != radiusPx ||
-                    cache.lastRefractionHeightPx != refHeightPx ||
-                    cache.lastRefractionAmountPx != refAmountPx ||
-                    cache.lastLightMode != palette.isLight ||
-                    cache.lastDispersion != chromaticDispersion ||
-                    cache.lastAccent != palette.accent ||
-                    cache.lastGlassOpacity != palette.glassOpacity ||
-                    cache.lastGlassTint != palette.glassTint
-
-                if (needsRebuild) {
-                    cache.lastSize = intSize
-                    cache.lastBlurPx = halfBlurPx
-                    cache.lastRadiusPx = radiusPx
-                    cache.lastRefractionHeightPx = refHeightPx
-                    cache.lastRefractionAmountPx = refAmountPx
-                    cache.lastLightMode = palette.isLight
-                    cache.lastDispersion = chromaticDispersion
-                    cache.lastAccent = palette.accent
-                    cache.lastGlassOpacity = palette.glassOpacity
-                    cache.lastGlassTint = palette.glassTint
-                    cache.cachedBlurEffect = buildDecoupledBlurEffect(halfBlurPx, palette.isLight)
-                    cache.cachedRefractEffect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && refAmountPx > 0.5f) {
-                        buildDecoupledRefractionEffect(
-                            cache = cache,
-                            widthPx = w,
-                            heightPx = h,
-                            radiusPx = radiusPx,
-                            refractionHeightPx = refHeightPx,
-                            refractionAmountPx = refAmountPx,
-                            dispersion = chromaticDispersion,
-                        )
-                    } else {
-                        null
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (isHero && glassLayer != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val needsRebuild = cache.cachedRefractEffect == null ||
+                        cache.lastSize != intSize ||
+                        cache.lastRadiusPx != radiusPx ||
+                        cache.lastRefractionHeightPx != refHeightPx ||
+                        cache.lastRefractionAmountPx != refAmountPx ||
+                        cache.lastLightMode != palette.isLight ||
+                        cache.lastDispersion != chromaticDispersion
+                    if (needsRebuild) {
+                        cache.lastSize = intSize
+                        cache.lastRadiusPx = radiusPx
+                        cache.lastRefractionHeightPx = refHeightPx
+                        cache.lastRefractionAmountPx = refAmountPx
+                        cache.lastLightMode = palette.isLight
+                        cache.lastDispersion = chromaticDispersion
+                        cache.cachedRefractEffect = if (refAmountPx > 0.5f) {
+                            buildDecoupledRefractionEffect(
+                                cache = cache,
+                                widthPx = w,
+                                heightPx = h,
+                                radiusPx = radiusPx,
+                                refractionHeightPx = refHeightPx,
+                                refractionAmountPx = refAmountPx,
+                                dispersion = chromaticDispersion,
+                            )
+                        } else {
+                            null
+                        }
                         buildApi33RimBrush(
                             cache = cache,
                             widthPx = w,
                             heightPx = h,
                             radiusPx = radiusPx,
                             isLight = palette.isLight,
-                            accentHint = palette.accent,
                         )
                     }
-                }
 
-                // Step 1: 0.5x downsampled Gaussian blur + vibrancy cuts GPU fill-rate & VRAM by 75%.
-                val scaleXUp = w / halfW.toFloat()
-                val scaleYUp = h / halfH.toFloat()
-                blurLayer.clip = true
-                blurLayer.renderEffect = cache.cachedBlurEffect
-                blurLayer.record(size = halfSize) {
-                    scale(scaleX = 0.5f, scaleY = 0.5f, pivot = Offset.Zero) {
-                        translate(left = -dx, top = -dy) {
-                            drawLayer(backdrop.graphicsLayer)
-                        }
-                    }
-                }
-
-                clipPath(cache.cachedPath) {
                     val refractFx = cache.cachedRefractEffect
-                    if (refractFx != null) {
-                        glassLayer.clip = true
-                        glassLayer.renderEffect = refractFx
-                        glassLayer.record(size = intSize) {
-                            scale(scaleX = scaleXUp, scaleY = scaleYUp, pivot = Offset.Zero) {
-                                drawLayer(blurLayer)
+                    clipPath(cache.cachedPath) {
+                        if (refractFx != null) {
+                            glassLayer.clip = true
+                            glassLayer.renderEffect = refractFx
+                            glassLayer.record(size = intSize) {
+                                translate(left = -dx, top = -dy) {
+                                    scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
+                                        drawLayer(backdrop.blurredLayer)
+                                    }
+                                }
+                            }
+                            drawLayer(glassLayer)
+                        } else {
+                            translate(left = -dx, top = -dy) {
+                                scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
+                                    drawLayer(backdrop.blurredLayer)
+                                }
                             }
                         }
-                        drawLayer(glassLayer)
-                    } else {
-                        scale(scaleX = scaleXUp, scaleY = scaleYUp, pivot = Offset.Zero) {
-                            drawLayer(blurLayer)
-                        }
+                        if (anchorAlpha > 0.005f) drawRect(color = anchorColor)
+                        drawRect(color = whiteFrostColor)
+                        drawRect(brush = sheenBrush)
                     }
-                    // Subtle optical wash scaled dynamically by Theme Studio Glass Frost Opacity.
-                    drawRect(color = tintColor)
-                    // Delicate cached inner sheen (zero per-frame brush allocation).
-                    drawRect(brush = sheenBrush)
+                } else {
+                    // FROSTED_PANEL tier: zero offscreen FBO allocations per widget!
+                    clipPath(cache.cachedPath) {
+                        translate(left = -dx, top = -dy) {
+                            scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
+                                drawLayer(backdrop.blurredLayer)
+                            }
+                        }
+                        if (anchorAlpha > 0.005f) drawRect(color = anchorColor)
+                        drawRect(color = whiteFrostColor)
+                        drawRect(brush = sheenBrush)
+                    }
                 }
             } else {
-                // API 28-30 or unrecorded fallback: clean frosted translucent surface.
+                // Fallback translucent frosted glass (widgets / unrecorded surfaces / API 28-30).
                 clipPath(cache.cachedPath) {
-                    drawRect(
-                        color = if (palette.isLight) {
-                            Color.White.copy(alpha = 0.84f)
-                        } else {
-                            palette.glassTint.copy(alpha = 0.84f)
-                        },
-                    )
+                    if (palette.isLight) {
+                        drawRect(color = Color.White.copy(alpha = 0.84f))
+                    } else {
+                        drawRect(color = Color(0xFF1F2534).copy(alpha = 0.66f))
+                        drawRect(color = Color.White.copy(alpha = 0.16f))
+                        drawRect(brush = sheenBrush)
+                    }
                 }
             }
 
-            // Crisp directional optical specular rim border.
-            val rimStrokePx = 1.25.dp.toPx()
+            // Crisp luminous directional chrome glass rim border.
+            val rimStrokePx = (if (isHero) 1.25.dp else 1.0.dp).toPx()
             val inset = rimStrokePx * 0.5f
-            val rimBrush = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                cache.cachedRimBrush ?: fallbackRimBrush
+            val rimBrush = if (isHero && hasSharedBlur && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                cache.cachedRimBrush ?: rimStrokeBrush
             } else {
-                fallbackRimBrush
+                rimStrokeBrush
             }
             drawRoundRect(
                 brush = rimBrush,
@@ -530,10 +624,149 @@ fun Modifier.ferricLiquidGlass(
                 style = Stroke(width = rimStrokePx),
             )
 
-            // Draw foreground icons/text razor-sharp on top of the optical glass.
             clipPath(cache.cachedPath) {
                 this@drawWithContent.drawContent()
             }
         }
         .clip(shape)
+}
+
+/**
+ * Translucent Liquid Glass modal bottom sheet container with hardware compositor blur behind the
+ * dialog window (API 31+) and an internal [FerricBackdropState] so every card, button, and chip
+ * inside the sheet renders as luminous Liquid Glass instead of an opaque dark block.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FerricModalBottomSheet(
+    onDismissRequest: () -> Unit,
+    modifier: Modifier = Modifier,
+    sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    coverShade: CoverShadeColors = CoverShadeColors(),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val palette = LocalFerricPalette.current
+    if (!palette.isLiquidGlass) {
+        ModalBottomSheet(
+            onDismissRequest = onDismissRequest,
+            modifier = modifier,
+            sheetState = sheetState,
+            containerColor = palette.surface,
+            content = content,
+        )
+        return
+    }
+
+    val sheetBackdrop = rememberFerricBackdropState()
+    val opacityNorm = palette.glassOpacity.coerceIn(0.15f, 0.95f)
+    val sheetBgAlpha = (0.38f + opacityNorm * 0.24f).coerceIn(0.34f, 0.66f)
+    val sheetShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismissRequest,
+        modifier = modifier,
+        sheetState = sheetState,
+        containerColor = Color.Transparent,
+        scrimColor = Color.Black.copy(alpha = 0.24f),
+        dragHandle = null,
+    ) {
+        val view = LocalView.current
+        SideEffect {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val window = (view.parent as? DialogWindowProvider)?.window
+                if (window != null) {
+                    runCatching {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+                        window.attributes = window.attributes.apply {
+                            blurBehindRadius = 48
+                        }
+                        window.setBackgroundBlurRadius(92)
+                    }
+                }
+            }
+        }
+
+        Surface(
+            shape = sheetShape,
+            color = Color.Transparent,
+            border = BorderStroke(
+                width = 1.dp,
+                brush = Brush.verticalGradient(
+                    listOf(
+                        Color.White.copy(alpha = 0.56f),
+                        Color.White.copy(alpha = 0.14f),
+                        Color.Transparent,
+                    ),
+                ),
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(sheetShape),
+        ) {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                // Sheet ambient frosted backdrop captured into sheetBackdrop for child glass cards/pills.
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .ferricBackdropSource(sheetBackdrop),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(
+                                Color(0xFF141824).copy(alpha = sheetBgAlpha),
+                            ),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(
+                                Brush.radialGradient(
+                                    colors = listOf(
+                                        coverShade.accent.copy(alpha = 0.22f),
+                                        coverShade.orb1.copy(alpha = 0.20f),
+                                        Color.Transparent,
+                                    ),
+                                    center = Offset(220f, 140f),
+                                    radius = 900f,
+                                ),
+                            ),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.White.copy(alpha = 0.14f),
+                                        Color.White.copy(alpha = 0.05f),
+                                        Color.White.copy(alpha = 0.09f),
+                                    ),
+                                ),
+                            ),
+                    )
+                }
+
+                CompositionLocalProvider(LocalBackdropState provides sheetBackdrop) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 12.dp, bottom = 6.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(40.dp)
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(Color.White.copy(alpha = 0.52f)),
+                            )
+                        }
+                        content()
+                    }
+                }
+            }
+        }
+    }
 }

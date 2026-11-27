@@ -72,6 +72,7 @@ import dev.livelydesk.ferric.playback.FerricPlaybackService
 import dev.livelydesk.ferric.playback.OutputRouteHelper
 import dev.livelydesk.ferric.ui.components.AddToPlaylistDialog
 import dev.livelydesk.ferric.ui.components.AuroraBackdrop
+import dev.livelydesk.ferric.ui.components.FerricLaunchSplash
 import dev.livelydesk.ferric.ui.components.FerricTab
 import dev.livelydesk.ferric.ui.components.FloatingLiquidGlassDock
 import dev.livelydesk.ferric.ui.screens.AccountsSheet
@@ -93,6 +94,7 @@ import dev.livelydesk.ferric.ui.theme.FerricEaseOut
 import dev.livelydesk.ferric.ui.theme.FerricTheme
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricBackdropSource
+import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
 import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
 import java.util.Locale
 import kotlin.math.abs
@@ -201,6 +203,7 @@ private fun FerricMainShell(
     var pendingTrackForPlaylist by remember { mutableStateOf<FfiTrack?>(null) }
     var pendingExportText by rememberSaveable { mutableStateOf<String?>(null) }
     var askedNotifPerm by rememberSaveable { mutableStateOf(false) }
+    var showLaunchSplash by rememberSaveable { mutableStateOf(true) }
 
     // Persistent per-tab LazyListStates so scroll positions survive tab switches & FullPlayer open.
     val homeListState = rememberLazyListState()
@@ -749,6 +752,11 @@ private fun FerricMainShell(
                 .navigationBarsPadding()
                 .padding(bottom = if (showFullPlayer) 16.dp else 148.dp, start = 16.dp, end = 16.dp),
         )
+
+        // Layer 5: Cold-start Auralys-style animated Ferric Type-I cassette splash intro
+        if (showLaunchSplash) {
+            FerricLaunchSplash(onFinished = { showLaunchSplash = false })
+        }
     }
 
     if (showQueueSheet) {
@@ -912,7 +920,7 @@ private fun FerricMainShell(
     if (showCreatePlaylistDialog) {
         AlertDialog(
             onDismissRequest = { showCreatePlaylistDialog = false },
-            containerColor = palette.elevated,
+            containerColor = ferricDialogContainerColor(palette),
             title = { Text("New Playlist", color = palette.textPrimary) },
             text = {
                 OutlinedTextField(

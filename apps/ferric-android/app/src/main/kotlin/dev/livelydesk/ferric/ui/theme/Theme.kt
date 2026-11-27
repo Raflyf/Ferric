@@ -153,9 +153,18 @@ fun buildVisualPalette(
     val isLight = theme.backgroundMode == FfiBackgroundMode.WARM_CREAM
     val isLiquidGlass = theme.backgroundMode == FfiBackgroundMode.NATIVE_ACRYLIC || theme.acrylicEnabled
     val canvas = parseHexColor(theme.canvasHex, if (isLight) Color(0xFFF3EEE3) else AmoledBlack)
-    val surface = parseHexColor(theme.surfaceHex, if (isLight) Color(0xFFEAE3D4) else ObsidianSurface)
-    val elevated = if (isLight) Color(0xFFE0D7C5) else ObsidianElevated
-    val border = parseHexColor(theme.borderHex, if (isLight) Color(0xFFD5CCB9) else HairlineBorder)
+    val baseSurface = parseHexColor(theme.surfaceHex, if (isLight) Color(0xFFEAE3D4) else ObsidianSurface)
+    val surface = if (isLiquidGlass && !isLight) Color(0x9E1E2434) else baseSurface
+    val elevated = when {
+        isLight -> Color(0xFFE0D7C5)
+        isLiquidGlass -> Color(0xB8283044)
+        else -> ObsidianElevated
+    }
+    val border = if (isLiquidGlass && !isLight) {
+        Color.White.copy(alpha = 0.24f)
+    } else {
+        parseHexColor(theme.borderHex, if (isLight) Color(0xFFD5CCB9) else HairlineBorder)
+    }
     val textPrimary = parseHexColor(theme.textPrimaryHex, if (isLight) Color(0xFF111111) else TextPrimary)
     val textSecondary = parseHexColor(theme.textSecondaryHex, if (isLight) Color(0xFF524B42) else TextSecondary)
     val baseAccent = parseHexColor(theme.accentHex, FerricOrange)
@@ -299,28 +308,36 @@ fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography 
     )
 }
 
+fun ferricDialogContainerColor(palette: FerricVisualPalette): Color =
+    if (palette.isLiquidGlass && !palette.isLight) Color(0xD91B2230) else palette.elevated
+
 /**
- * Applies Liquid Glass optical refraction + directional specular rim when Liquid Glass is active,
- * or clean translucent surface styling otherwise.
+ * Applies Liquid Glass optical blur + luminous frosted finish when Liquid Glass mode is active,
+ * or clean solid surface styling otherwise.
  */
 fun Modifier.ferricGlassSurface(
     palette: FerricVisualPalette,
     @Suppress("UNUSED_PARAMETER") hazeState: HazeState? = null,
     cornerRadius: Dp = palette.cornerRadiusDp,
+    tier: GlassTier = GlassTier.FROSTED_PANEL,
+    accentGlow: Color = Color.Unspecified,
+    fallbackColor: Color = palette.surface,
 ): Modifier {
     return if (palette.isLiquidGlass) {
         this.ferricLiquidGlass(
             cornerRadius = cornerRadius,
             blurRadius = 14.dp,
-            refractionHeight = 16.dp,
-            refractionAmount = 12.dp,
-            chromaticDispersion = 0.45f,
+            refractionHeight = 14.dp,
+            refractionAmount = if (tier == GlassTier.HERO_LENS) 12.dp else 0.dp,
+            chromaticDispersion = if (tier == GlassTier.HERO_LENS) 0.45f else 0f,
+            tier = tier,
+            accentGlow = accentGlow,
         )
     } else {
         val shape = RoundedCornerShape(cornerRadius)
         this
             .clip(shape)
-            .background(palette.surface)
+            .background(fallbackColor)
             .border(width = 1.dp, color = palette.border, shape = shape)
     }
 }

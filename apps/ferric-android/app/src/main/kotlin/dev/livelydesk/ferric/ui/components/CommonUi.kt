@@ -93,7 +93,10 @@ import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
 import dev.livelydesk.ferric.ui.theme.FerricEaseOut
+import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -200,12 +203,24 @@ fun TrackRow(
     } else {
         Color.Transparent
     }
-
-    Row(
-        modifier = modifier
+    val activeModifier = if (isActive && palette.isLiquidGlass) {
+        modifier
+            .fillMaxWidth()
+            .ferricGlassSurface(
+                palette = palette,
+                cornerRadius = 14.dp,
+                tier = GlassTier.FROSTED_PANEL,
+                accentGlow = palette.accent,
+            )
+    } else {
+        modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(rowBg)
+    }
+
+    Row(
+        modifier = activeModifier
             .clickable(onClick = onPlay)
             .padding(
                 start = if (compact) 4.dp else 6.dp,
@@ -531,6 +546,8 @@ private fun FloatingNavPill(
 
     val restPillBg = if (palette.isLight) {
         Color.Black.copy(alpha = 0.08f)
+    } else if (palette.isLiquidGlass) {
+        Color.White.copy(alpha = 0.22f)
     } else {
         Color.White.copy(alpha = 0.14f)
     }
@@ -661,15 +678,15 @@ private fun FloatingNavPill(
                             .background(
                                 Brush.verticalGradient(
                                     listOf(
-                                        Color.White.copy(alpha = if (palette.isLight) 0.14f else 0.12f * dragFocus),
-                                        restPillBg.copy(alpha = restPillBg.alpha + 0.08f * dragFocus),
-                                        palette.accent.copy(alpha = 0.22f * dragFocus),
+                                        Color.White.copy(alpha = if (palette.isLight) 0.16f else 0.26f + 0.14f * dragFocus),
+                                        restPillBg.copy(alpha = (restPillBg.alpha + 0.12f * dragFocus).coerceAtMost(0.42f)),
+                                        palette.accent.copy(alpha = 0.24f * dragFocus),
                                     ),
                                 ),
                             )
                             .border(
                                 width = 1.dp,
-                                color = Color.White.copy(alpha = 0.48f * dragFocus),
+                                color = Color.White.copy(alpha = (0.28f + 0.44f * dragFocus).coerceAtMost(0.75f)),
                                 shape = RoundedCornerShape(27.dp),
                             ),
                     )
@@ -994,7 +1011,7 @@ fun AddToPlaylistDialog(
     val palette = LocalFerricPalette.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = palette.elevated,
+        containerColor = ferricDialogContainerColor(palette),
         title = {
             Text(
                 text = "Add \"${track.title}\"",
@@ -1015,12 +1032,10 @@ fun AddToPlaylistDialog(
                     modifier = Modifier.height(240.dp),
                 ) {
                     items(playlists, key = { it.id }) { pl ->
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = palette.surface,
-                            border = BorderStroke(1.dp, palette.border),
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .ferricGlassSurface(palette, cornerRadius = 12.dp, fallbackColor = palette.surface)
                                 .clickable { onSelectPlaylist(pl.id) },
                         ) {
                             Row(

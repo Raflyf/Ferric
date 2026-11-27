@@ -21,8 +21,14 @@ const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleW
 const STREAM_CHUNK_BYTES: u64 = 512 * 1024;
 const STREAM_CONCURRENCY: usize = 3;
 const MAX_SINGLE_STREAM_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_STREAM_CACHE_BYTES: u64 = 768 * 1024 * 1024;
-const MAX_ARTWORK_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+#[cfg(target_os = "android")]
+pub const MAX_STREAM_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+#[cfg(not(target_os = "android"))]
+pub const MAX_STREAM_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(target_os = "android")]
+pub const MAX_ARTWORK_CACHE_BYTES: u64 = 24 * 1024 * 1024;
+#[cfg(not(target_os = "android"))]
+pub const MAX_ARTWORK_CACHE_BYTES: u64 = 96 * 1024 * 1024;
 
 use std::sync::{Mutex, OnceLock};
 
@@ -144,6 +150,18 @@ fn prune_cache_dir_lru(cache_dir: &Path, max_bytes: u64, protect_path: Option<&P
         if fs::remove_file(&path).is_ok() {
             total = total.saturating_sub(len);
         }
+    }
+}
+
+/// Enforce strict LRU disk budgets on both stream and artwork caches at startup or trim events.
+pub fn enforce_media_cache_limits(cache_dir: &Path) {
+    let stream_dir = cache_dir.join("stream_cache");
+    if stream_dir.is_dir() {
+        prune_cache_dir_lru(&stream_dir, MAX_STREAM_CACHE_BYTES, None);
+    }
+    let artwork_dir = cache_dir.join("artwork_cache");
+    if artwork_dir.is_dir() {
+        prune_cache_dir_lru(&artwork_dir, MAX_ARTWORK_CACHE_BYTES, None);
     }
 }
 
@@ -6636,5 +6654,26 @@ mod tests {
             "Natalie",
             217_000,
         ));
+    }
+
+    #[test]
+    fn prune_cache_dir_lru_enforces_byte_budget() {
+        let dir = std::env::temp_dir().join(format!("ferric_lru_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let f1 = dir.join("oldest.m4a");
+        let f2 = dir.join("newest.m4a");
+        fs::write(&f1, vec![1u8; 64]).expect("write oldest");
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&f2, vec![2u8; 64]).expect("write newest");
+
+        prune_cache_dir_lru(&dir, 80, Some(&f2));
+        assert!(
+            !f1.exists(),
+            "oldest entry must be evicted when over budget"
+        );
+        assert!(f2.exists(), "protected newest entry must survive");
+
+        let _ = fs::remove_file(&f2);
+        let _ = fs::remove_dir(&dir);
     }
 }

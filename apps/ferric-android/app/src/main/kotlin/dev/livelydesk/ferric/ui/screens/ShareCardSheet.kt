@@ -64,9 +64,12 @@ import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
 import dev.livelydesk.ferric.ui.theme.FerricEaseOut
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
+import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalBackdropState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricBackdropSource
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
 import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
 import dev.livelydesk.ferric.util.ShareCardAspect
@@ -130,10 +133,10 @@ fun ShareCardSheet(
     val cardCorner = (palette.cornerRadiusDp.value * 0.85f).coerceIn(10f, 22f).dp
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(
+    FerricModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = palette.surface,
+        coverShade = state.coverShade,
     ) {
         Column(
             modifier = Modifier
@@ -381,11 +384,10 @@ fun ShareCardSheet(
 
             // Dedicated non-conflicting LazyColumn lyrics selector
             if (allLines.isEmpty()) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = palette.elevated,
-                    border = BorderStroke(1.dp, palette.border),
-                    modifier = Modifier.fillMaxWidth(),
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .ferricGlassSurface(palette = palette, cornerRadius = 12.dp, fallbackColor = palette.elevated),
                 ) {
                     Text(
                         text = "No lyrics loaded yet. Card will showcase cover art and title.",
@@ -409,15 +411,15 @@ fun ShareCardSheet(
                 ) {
                     itemsIndexed(allLines, key = { idx, _ -> "sc_line_$idx" }) { idx, line ->
                         val picked = idx in selectedIndices
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (picked) palette.accent.copy(alpha = 0.20f) else palette.elevated,
-                            border = BorderStroke(
-                                1.dp,
-                                if (picked) palette.accent else palette.border.copy(alpha = 0.45f),
-                            ),
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = 10.dp,
+                                    accentGlow = if (picked) palette.accent else Color.Unspecified,
+                                    fallbackColor = if (picked) palette.accent.copy(alpha = 0.20f) else palette.elevated,
+                                )
                                 .clickable {
                                     if (picked) {
                                         selectedIndices.remove(idx)
@@ -535,21 +537,40 @@ private fun SharePillOption(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
-    Surface(
-        shape = RoundedCornerShape(999.dp),
-        color = if (selected) palette.accent else palette.elevated,
-        border = BorderStroke(1.dp, if (selected) palette.accent else palette.border.copy(alpha = 0.5f)),
-        modifier = modifier
-            .height(36.dp)
-            .clip(RoundedCornerShape(999.dp))
-            .clickable(onClick = onClick),
-    ) {
-        Box(contentAlignment = Alignment.Center) {
+    if (selected) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = palette.accent,
+            border = BorderStroke(1.dp, palette.accent),
+            modifier = modifier
+                .height(36.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .clickable(onClick = onClick),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    } else {
+        Box(
+            modifier = modifier
+                .height(36.dp)
+                .ferricGlassSurface(palette = palette, cornerRadius = 999.dp, fallbackColor = palette.elevated)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelMedium,
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                color = if (selected) Color.Black else palette.textPrimary,
+                fontWeight = FontWeight.Medium,
+                color = palette.textPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

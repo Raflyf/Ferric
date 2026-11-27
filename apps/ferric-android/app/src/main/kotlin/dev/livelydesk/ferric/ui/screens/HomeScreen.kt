@@ -58,7 +58,9 @@ import coil3.size.Precision
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.TrackRow
+import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import java.util.Calendar
 import uniffi.ferric_mobile_ffi.FfiCardKind
 import uniffi.ferric_mobile_ffi.FfiShelfCard
@@ -254,10 +256,15 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                     )
                     if (activePeer != null) {
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = palette.accent.copy(alpha = 0.18f),
-                            modifier = Modifier.clickable(onClick = onOpenConnect),
+                        Box(
+                            modifier = Modifier
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = 999.dp,
+                                    accentGlow = palette.accent,
+                                    fallbackColor = palette.accent.copy(alpha = 0.18f),
+                                )
+                                .clickable(onClick = onOpenConnect),
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -290,15 +297,18 @@ fun HomeScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (latestTrack != null) {
-                            Surface(
-                                shape = RoundedCornerShape(999.dp),
-                                color = if (palette.isLight) {
-                                    palette.surface.copy(alpha = 0.9f)
-                                } else {
-                                    Color.White.copy(alpha = 0.08f)
-                                },
+                            Box(
                                 modifier = Modifier
                                     .weight(1f)
+                                    .ferricGlassSurface(
+                                        palette = palette,
+                                        cornerRadius = 999.dp,
+                                        fallbackColor = if (palette.isLight) {
+                                            palette.surface.copy(alpha = 0.9f)
+                                        } else {
+                                            Color.White.copy(alpha = 0.08f)
+                                        },
+                                    )
                                     .clickable {
                                         onPlayQueue(listOf(latestTrack), 0, "Jump Back In")
                                     },
@@ -333,10 +343,15 @@ fun HomeScreen(
                             }
                         }
                         if (streakDays > 0) {
-                            Surface(
-                                shape = RoundedCornerShape(999.dp),
-                                color = palette.accent.copy(alpha = 0.16f),
-                                modifier = Modifier.clickable(onClick = onOpenStats),
+                            Box(
+                                modifier = Modifier
+                                    .ferricGlassSurface(
+                                        palette = palette,
+                                        cornerRadius = 999.dp,
+                                        accentGlow = palette.accent,
+                                        fallbackColor = palette.accent.copy(alpha = 0.16f),
+                                    )
+                                    .clickable(onClick = onOpenStats),
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -456,16 +471,16 @@ fun HomeScreen(
                                 )
                             }
                         }
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = if (palette.isLight) {
-                                palette.surface
-                            } else {
-                                Color.White.copy(alpha = 0.09f)
-                            },
-                            modifier = Modifier.clickable {
-                                onPlayQueue(quickPicks, 0, "Quick Picks")
-                            },
+                        Box(
+                            modifier = Modifier
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = 999.dp,
+                                    fallbackColor = if (palette.isLight) palette.surface else Color.White.copy(alpha = 0.09f),
+                                )
+                                .clickable {
+                                    onPlayQueue(quickPicks, 0, "Quick Picks")
+                                },
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -682,26 +697,44 @@ private fun MoodPillChip(
     onClick: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
-    val bg = when {
-        selected -> palette.accent
-        palette.isLight -> palette.surface.copy(alpha = 0.92f)
-        else -> palette.glassTint.copy(alpha = (palette.glassOpacity * 0.80f).coerceIn(0.10f, 0.86f))
-    }
     val fg = when {
         selected -> Color.Black
         else -> palette.textPrimary
     }
-    Surface(
-        shape = RoundedCornerShape(999.dp),
-        color = bg,
-        modifier = Modifier.clickable(onClick = onClick),
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = fg,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
-        )
+    if (selected) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = palette.accent,
+            modifier = Modifier.clickable(onClick = onClick),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                color = fg,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
+            )
+        }
+    } else {
+        Box(
+            modifier = Modifier
+                .ferricGlassSurface(
+                    palette = palette,
+                    cornerRadius = 999.dp,
+                    fallbackColor = if (palette.isLight) {
+                        palette.surface.copy(alpha = 0.92f)
+                    } else {
+                        palette.glassTint.copy(alpha = (palette.glassOpacity * 0.80f).coerceIn(0.10f, 0.86f))
+                    },
+                )
+                .clickable(onClick = onClick),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                color = fg,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
+            )
+        }
     }
 }
 
@@ -720,8 +753,12 @@ private fun QuickShortcutCard(
     Row(
         modifier = modifier
             .height(54.dp)
-            .clip(RoundedCornerShape(cardRadius))
-            .background(bg)
+            .ferricGlassSurface(
+                palette = palette,
+                cornerRadius = cardRadius,
+                tier = GlassTier.FROSTED_PANEL,
+                fallbackColor = bg,
+            )
             .clickable(onClick = tile.onClick),
         verticalAlignment = Alignment.CenterVertically,
     ) {

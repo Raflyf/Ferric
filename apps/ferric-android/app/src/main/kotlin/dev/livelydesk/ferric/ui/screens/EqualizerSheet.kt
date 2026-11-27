@@ -78,7 +78,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.livelydesk.ferric.ui.components.EqCurveMath
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import java.util.Locale
 import kotlin.math.roundToInt
 import uniffi.ferric_mobile_ffi.FfiAudioQuality
@@ -124,10 +126,9 @@ fun EqualizerSheet(
     val activeEq = draftEq
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(
+    FerricModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = palette.surface,
     ) {
         Column(
             modifier = Modifier
@@ -176,8 +177,7 @@ fun EqualizerSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(42.dp)
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(palette.elevated)
+                    .ferricGlassSurface(palette = palette, cornerRadius = 999.dp, fallbackColor = palette.elevated)
                     .padding(4.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -207,11 +207,14 @@ fun EqualizerSheet(
                         val curve = remember(activeEq) { EqCurveMath.evaluateCurveDb(activeEq) }
 
                         // Frequency Response Plot with symmetrical dB guides
-                        Surface(
-                            shape = RoundedCornerShape(cardRadius),
-                            color = palette.canvas,
-                            border = BorderStroke(1.dp, palette.border.copy(alpha = 0.7f)),
-                            modifier = Modifier.fillMaxWidth(),
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = cardRadius,
+                                    fallbackColor = palette.canvas,
+                                ),
                         ) {
                             Column(
                                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -317,11 +320,14 @@ fun EqualizerSheet(
                         }
 
                         // Balanced Symmetrical 10-Band Vertical Fader Console
-                        Surface(
-                            shape = RoundedCornerShape(cardRadius),
-                            color = palette.elevated,
-                            border = BorderStroke(1.dp, palette.border.copy(alpha = 0.55f)),
-                            modifier = Modifier.fillMaxWidth(),
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = cardRadius,
+                                    fallbackColor = palette.elevated,
+                                ),
                         ) {
                             Row(
                                 modifier = Modifier
@@ -378,11 +384,14 @@ fun EqualizerSheet(
                         }
 
                         // Preamp Gain Card
-                        Surface(
-                            shape = RoundedCornerShape(cardRadius),
-                            color = palette.elevated,
-                            border = BorderStroke(1.dp, palette.border.copy(alpha = 0.5f)),
-                            modifier = Modifier.fillMaxWidth(),
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = cardRadius,
+                                    fallbackColor = palette.elevated,
+                                ),
                         ) {
                             Column(
                                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -471,12 +480,15 @@ fun EqualizerSheet(
                     ) {
                         items(autoEqProfiles, key = { it.name }) { prof ->
                             val selected = activeEq?.presetName.equals(prof.name, ignoreCase = true)
-                            Surface(
-                                shape = RoundedCornerShape(cardRadius),
-                                color = if (selected) palette.accent.copy(alpha = 0.14f) else palette.elevated,
-                                border = BorderStroke(1.dp, if (selected) palette.accent else palette.border.copy(alpha = 0.6f)),
+                            Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .ferricGlassSurface(
+                                        palette = palette,
+                                        cornerRadius = cardRadius,
+                                        accentGlow = if (selected) palette.accent else Color.Unspecified,
+                                        fallbackColor = if (selected) palette.accent.copy(alpha = 0.14f) else palette.elevated,
+                                    )
                                     .clickable { onApplyAutoEq(prof.name) },
                             ) {
                                 Row(
@@ -498,11 +510,14 @@ fun EqualizerSheet(
 
                 EqStudioTab.DSP -> {
                     if (dspSettings != null) {
-                        Surface(
-                            shape = RoundedCornerShape(cardRadius),
-                            color = palette.elevated,
-                            border = BorderStroke(1.dp, palette.border.copy(alpha = 0.55f)),
-                            modifier = Modifier.fillMaxWidth(),
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = cardRadius,
+                                    fallbackColor = palette.elevated,
+                                ),
                         ) {
                             Column(
                                 modifier = Modifier.padding(14.dp),
@@ -565,11 +580,14 @@ fun EqualizerSheet(
                             }
                         }
 
-                        Surface(
-                            shape = RoundedCornerShape(cardRadius),
-                            color = palette.elevated,
-                            border = BorderStroke(1.dp, palette.border.copy(alpha = 0.55f)),
-                            modifier = Modifier.fillMaxWidth(),
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = cardRadius,
+                                    fallbackColor = palette.elevated,
+                                ),
                         ) {
                             Column(
                                 modifier = Modifier.padding(14.dp),

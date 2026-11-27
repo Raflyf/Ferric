@@ -21,7 +21,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import uniffi.ferric_mobile_ffi.FfiListeningStats
 
 private fun formatListeningTime(ms: Long): String {
@@ -41,9 +43,8 @@ fun StatsSheet(
     val palette = LocalFerricPalette.current
     LaunchedEffect(Unit) { onRefresh() }
 
-    ModalBottomSheet(
+    FerricModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = palette.surface,
     ) {
         Column(
             modifier = Modifier
@@ -90,11 +91,14 @@ fun StatsSheet(
             } else {
                 val maxPlays = artists.maxOf { it.plays.toLong() }.coerceAtLeast(1L)
                 artists.forEachIndexed { idx, item ->
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = palette.elevated,
-                        border = BorderStroke(1.dp, palette.border),
-                        modifier = Modifier.fillMaxWidth(),
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .ferricGlassSurface(
+                                palette = palette,
+                                cornerRadius = palette.cornerRadiusDp,
+                                fallbackColor = palette.elevated,
+                            ),
                     ) {
                         Column(
                             modifier = Modifier.padding(12.dp),
@@ -138,11 +142,12 @@ private fun StatMetricCard(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = palette.elevated,
-        border = BorderStroke(1.dp, palette.border),
-        modifier = modifier,
+    androidx.compose.foundation.layout.Box(
+        modifier = modifier.ferricGlassSurface(
+            palette = palette,
+            cornerRadius = palette.cornerRadiusDp,
+            fallbackColor = palette.elevated,
+        ),
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(label, style = MaterialTheme.typography.labelSmall, color = palette.textSecondary)

@@ -2,6 +2,7 @@ package dev.livelydesk.ferric.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,7 +30,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import uniffi.ferric_mobile_ffi.FfiAccountStatus
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -51,9 +54,8 @@ fun AccountsSheet(
     var subUser by remember(status.subsonicUsername) { mutableStateOf(status.subsonicUsername) }
     var subPass by remember { mutableStateOf("") }
 
-    ModalBottomSheet(
+    FerricModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = palette.surface,
     ) {
         Column(
             modifier = Modifier
@@ -97,11 +99,15 @@ fun AccountsSheet(
                 onLogout = onLogoutYtm,
             )
 
-            Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = palette.elevated,
-                border = BorderStroke(1.dp, if (status.subsonicConnected) palette.accent else palette.border),
-                modifier = Modifier.fillMaxWidth(),
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .ferricGlassSurface(
+                        palette = palette,
+                        cornerRadius = palette.cornerRadiusDp,
+                        accentGlow = if (status.subsonicConnected) palette.accent else Color.Unspecified,
+                        fallbackColor = palette.elevated,
+                    ),
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
@@ -191,11 +197,15 @@ private fun AccountCard(
     onLogout: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
-    Surface(
-        shape = RoundedCornerShape(18.dp),
-        color = palette.elevated,
-        border = BorderStroke(1.dp, if (connected) accentColor.copy(alpha = 0.7f) else palette.border),
-        modifier = Modifier.fillMaxWidth(),
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .ferricGlassSurface(
+                palette = palette,
+                cornerRadius = palette.cornerRadiusDp,
+                accentGlow = if (connected) accentColor else Color.Unspecified,
+                fallbackColor = palette.elevated,
+            ),
     ) {
         Column(
             modifier = Modifier.padding(14.dp),

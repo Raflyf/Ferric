@@ -58,7 +58,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import kotlin.math.roundToInt
 import uniffi.ferric_mobile_ffi.FfiConnectPeer
 import uniffi.ferric_mobile_ffi.FfiDeviceKind
@@ -123,9 +125,9 @@ fun ConnectSheet(
         onDispose { onSheetVisibilityChanged(false) }
     }
 
-    ModalBottomSheet(
+    FerricModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = palette.surface,
+        coverShade = state.coverShade,
     ) {
         Column(
             modifier = Modifier
@@ -158,11 +160,15 @@ fun ConnectSheet(
             }
 
             // Active Speaker Highlight Card (Spotify Connect style)
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = palette.elevated,
-                border = BorderStroke(1.5.dp, palette.accent),
-                modifier = Modifier.fillMaxWidth(),
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .ferricGlassSurface(
+                        palette = palette,
+                        cornerRadius = palette.cornerRadiusDp,
+                        accentGlow = palette.accent,
+                        fallbackColor = palette.elevated,
+                    ),
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
@@ -367,12 +373,15 @@ private fun DeviceTargetRow(
     onClick: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = if (isActive) palette.elevated else palette.surface,
-        border = BorderStroke(1.dp, if (isActive) palette.accent else palette.border),
+    Box(
         modifier = Modifier
             .fillMaxWidth()
+            .ferricGlassSurface(
+                palette = palette,
+                cornerRadius = 14.dp,
+                accentGlow = if (isActive) palette.accent else Color.Unspecified,
+                fallbackColor = if (isActive) palette.elevated else palette.surface,
+            )
             .clickable(enabled = isConnected, onClick = onClick),
     ) {
         Row(
@@ -426,11 +435,14 @@ private fun GuestQrSection(
     onPair: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = palette.elevated,
-        border = BorderStroke(1.dp, palette.border),
-        modifier = Modifier.fillMaxWidth(),
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .ferricGlassSurface(
+                palette = palette,
+                cornerRadius = palette.cornerRadiusDp,
+                fallbackColor = palette.elevated,
+            ),
     ) {
         Column(
             modifier = Modifier.padding(14.dp),

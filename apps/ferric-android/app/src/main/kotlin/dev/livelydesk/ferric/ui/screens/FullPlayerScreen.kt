@@ -127,9 +127,12 @@ import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.AuroraBackdrop
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
 import dev.livelydesk.ferric.ui.theme.FerricEaseOut
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
+import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalBackdropState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricBackdropSource
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
 import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
 import java.util.Locale
@@ -512,14 +515,19 @@ fun FullPlayerScreen(
                         }
                         Spacer(Modifier.width(8.dp))
                         // Playback speed pill (cycles 0.75x .. 1.5x)
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = Color.White.copy(alpha = if (abs(speed - 1.0f) > 0.02f) 0.24f else 0.12f),
-                            modifier = Modifier.clickable {
-                                val curIdx = SPEED_CYCLE.indexOfFirst { abs(it - speed) < 0.03f }.coerceAtLeast(0)
-                                val nextSpeed = SPEED_CYCLE[(curIdx + 1) % SPEED_CYCLE.size]
-                                onSetPlaybackSpeed(nextSpeed)
-                            },
+                        Box(
+                            modifier = Modifier
+                                .ferricGlassSurface(
+                                    palette = palette,
+                                    cornerRadius = 999.dp,
+                                    accentGlow = if (abs(speed - 1.0f) > 0.02f) palette.accent else Color.Unspecified,
+                                    fallbackColor = Color.White.copy(alpha = if (abs(speed - 1.0f) > 0.02f) 0.24f else 0.12f),
+                                )
+                                .clickable {
+                                    val curIdx = SPEED_CYCLE.indexOfFirst { abs(it - speed) < 0.03f }.coerceAtLeast(0)
+                                    val nextSpeed = SPEED_CYCLE[(curIdx + 1) % SPEED_CYCLE.size]
+                                    onSetPlaybackSpeed(nextSpeed)
+                                },
                         ) {
                             Text(
                                 text = if (abs(speed - 1.0f) < 0.02f) "1x" else String.format(Locale.US, "%.2gx", speed),
@@ -533,8 +541,12 @@ fun FullPlayerScreen(
                             Box(
                                 modifier = Modifier
                                     .size(40.dp)
-                                    .clip(CircleShape)
-                                    .background(Color.White.copy(alpha = 0.12f))
+                                    .ferricGlassSurface(
+                                        palette = palette,
+                                        cornerRadius = 999.dp,
+                                        accentGlow = if (track.liked) palette.accent else Color.Unspecified,
+                                        fallbackColor = Color.White.copy(alpha = 0.12f),
+                                    )
                                     .clickable { onToggleLike(track.id) },
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -656,14 +668,19 @@ fun FullPlayerScreen(
                                 },
                                 modifier = Modifier.weight(1f),
                             )
-                            Surface(
-                                shape = RoundedCornerShape(999.dp),
-                                color = if (activeRemote != null) {
-                                    palette.accent.copy(alpha = 0.24f)
-                                } else {
-                                    Color.White.copy(alpha = 0.12f)
-                                },
-                                modifier = Modifier.clickable(onClick = onOpenConnect),
+                            Box(
+                                modifier = Modifier
+                                    .ferricGlassSurface(
+                                        palette = palette,
+                                        cornerRadius = 999.dp,
+                                        accentGlow = if (activeRemote != null) palette.accent else Color.Unspecified,
+                                        fallbackColor = if (activeRemote != null) {
+                                            palette.accent.copy(alpha = 0.24f)
+                                        } else {
+                                            Color.White.copy(alpha = 0.12f)
+                                        },
+                                    )
+                                    .clickable(onClick = onOpenConnect),
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -764,9 +781,9 @@ fun FullPlayerScreen(
     }
 
     if (showSleepSheet) {
-        ModalBottomSheet(
+        FerricModalBottomSheet(
             onDismissRequest = { showSleepSheet = false },
-            containerColor = palette.surface,
+            coverShade = state.coverShade,
         ) {
             Column(
                 modifier = Modifier
@@ -789,11 +806,15 @@ fun FullPlayerScreen(
                     color = palette.textSecondary,
                 )
                 SLEEP_PRESET_MINUTES.forEach { mins ->
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = palette.elevated,
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .ferricGlassSurface(
+                                palette = palette,
+                                cornerRadius = 14.dp,
+                                accentGlow = if (mins == 0 && state.sleepTimerRemainingSecs > 0L) palette.accent else Color.Unspecified,
+                                fallbackColor = palette.elevated,
+                            )
                             .clickable {
                                 onSetSleepTimerMinutes(mins)
                                 showSleepSheet = false
@@ -1009,10 +1030,14 @@ private fun SyncedLyricsStage(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (lyrics.isSynced) {
-                    Surface(
-                        shape = RoundedCornerShape(999.dp),
-                        color = lyricsTextColor.copy(alpha = 0.14f),
-                        modifier = Modifier.clickable { onNudgeOffset(-500L) },
+                    Box(
+                        modifier = Modifier
+                            .ferricGlassSurface(
+                                palette = palette,
+                                cornerRadius = 999.dp,
+                                fallbackColor = lyricsTextColor.copy(alpha = 0.14f),
+                            )
+                            .clickable { onNudgeOffset(-500L) },
                     ) {
                         Text(
                             text = "-0.5s",
@@ -1021,10 +1046,14 @@ private fun SyncedLyricsStage(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                         )
                     }
-                    Surface(
-                        shape = RoundedCornerShape(999.dp),
-                        color = lyricsTextColor.copy(alpha = 0.14f),
-                        modifier = Modifier.clickable { onNudgeOffset(500L) },
+                    Box(
+                        modifier = Modifier
+                            .ferricGlassSurface(
+                                palette = palette,
+                                cornerRadius = 999.dp,
+                                fallbackColor = lyricsTextColor.copy(alpha = 0.14f),
+                            )
+                            .clickable { onNudgeOffset(500L) },
                     ) {
                         Text(
                             text = "+0.5s",
@@ -1034,10 +1063,15 @@ private fun SyncedLyricsStage(
                         )
                     }
                 }
-                Surface(
-                    shape = RoundedCornerShape(999.dp),
-                    color = palette.accent.copy(alpha = 0.22f),
-                    modifier = Modifier.clickable(onClick = onOpenShareCard),
+                Box(
+                    modifier = Modifier
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = 999.dp,
+                            accentGlow = palette.accent,
+                            fallbackColor = palette.accent.copy(alpha = 0.22f),
+                        )
+                        .clickable(onClick = onOpenShareCard),
                 ) {
                     Text(
                         text = "Card",

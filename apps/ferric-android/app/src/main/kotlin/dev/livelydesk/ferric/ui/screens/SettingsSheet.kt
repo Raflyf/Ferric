@@ -3,6 +3,7 @@ package dev.livelydesk.ferric.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -48,8 +49,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import dev.livelydesk.ferric.BuildConfig
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.displayUiFontName
+import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import java.util.Locale
 
 private fun fmtMb(bytes: ULong): String =
@@ -84,9 +88,8 @@ fun SettingsSheet(
 
     val storage = state.storageStats
 
-    ModalBottomSheet(
+    FerricModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = palette.surface,
     ) {
         Column(
             modifier = Modifier
@@ -263,11 +266,14 @@ fun SettingsSheet(
             }
 
             if (matches("about", "version", "rust", "oboe", "uniffi", "ferric")) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = palette.elevated,
-                    border = BorderStroke(1.dp, palette.border),
-                    modifier = Modifier.fillMaxWidth(),
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = palette.cornerRadiusDp,
+                            fallbackColor = palette.elevated,
+                        ),
                 ) {
                     Row(
                         modifier = Modifier.padding(14.dp),
@@ -294,7 +300,7 @@ fun SettingsSheet(
     if (showDeleteAllConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteAllConfirm = false },
-            containerColor = palette.elevated,
+            containerColor = ferricDialogContainerColor(palette),
             title = { Text("Delete All Offline Downloads?", color = palette.textPrimary) },
             text = {
                 Text(
@@ -327,12 +333,14 @@ private fun SettingsRowCard(
     onClick: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = palette.elevated,
-        border = BorderStroke(1.dp, palette.border),
+    Box(
         modifier = Modifier
             .fillMaxWidth()
+            .ferricGlassSurface(
+                palette = palette,
+                cornerRadius = palette.cornerRadiusDp,
+                fallbackColor = palette.elevated,
+            )
             .clickable(onClick = onClick),
     ) {
         Row(

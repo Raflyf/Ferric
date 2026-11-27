@@ -60,7 +60,10 @@ import androidx.compose.ui.unit.dp
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.TrackRow
+import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
+import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
 import kotlinx.coroutines.delay
 import uniffi.ferric_mobile_ffi.FfiCardKind
 import uniffi.ferric_mobile_ffi.FfiShelfCard
@@ -180,13 +183,16 @@ fun SearchScreen(
         // Sleek floating pill search bar with inline URL import toggle
         item(key = "search_input") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Surface(
-                    shape = RoundedCornerShape(999.dp),
-                    color = searchPillBg,
-                    border = BorderStroke(1.dp, palette.border.copy(alpha = 0.5f)),
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(52.dp),
+                        .height(52.dp)
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = 999.dp,
+                            tier = GlassTier.HERO_LENS,
+                            fallbackColor = searchPillBg,
+                        ),
                 ) {
                     Row(
                         modifier = Modifier
@@ -264,8 +270,11 @@ fun SearchScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(42.dp)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(searchPillBg)
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = 999.dp,
+                            fallbackColor = searchPillBg,
+                        )
                         .padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
@@ -314,11 +323,14 @@ fun SearchScreen(
 
         if (showUrlImport) {
             item(key = "url_import_box") {
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = palette.elevated.copy(alpha = if (palette.isLiquidGlass) 0.72f else 1f),
-                    border = BorderStroke(1.dp, palette.border),
-                    modifier = Modifier.fillMaxWidth(),
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = palette.cornerRadiusDp,
+                            fallbackColor = palette.elevated,
+                        ),
                 ) {
                     Column(
                         modifier = Modifier.padding(14.dp),
@@ -375,14 +387,15 @@ fun SearchScreen(
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(SearchCategory.entries, key = { it.name }) { cat ->
                         val selected = selectedCategory == cat
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = if (selected) {
-                                palette.accent
-                            } else {
-                                searchPillBg
-                            },
-                            modifier = Modifier.clickable { selectedCategory = cat },
+                        val chipModifier = if (selected) {
+                            Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(palette.accent)
+                        } else {
+                            Modifier.ferricGlassSurface(palette, cornerRadius = 999.dp, fallbackColor = searchPillBg)
+                        }
+                        Box(
+                            modifier = chipModifier.clickable { selectedCategory = cat },
                         ) {
                             Text(
                                 text = cat.label,
@@ -421,13 +434,13 @@ fun SearchScreen(
                         }
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(distinctRecent, key = { "rec_$it" }) { term ->
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = searchPillBg,
-                                    modifier = Modifier.clickable {
-                                        searchScope = SearchScope.ONLINE
-                                        query = term
-                                    },
+                                Box(
+                                    modifier = Modifier
+                                        .ferricGlassSurface(palette, cornerRadius = 999.dp, fallbackColor = searchPillBg)
+                                        .clickable {
+                                            searchScope = SearchScope.ONLINE
+                                            query = term
+                                        },
                                 ) {
                                     Text(
                                         text = term,
@@ -457,14 +470,34 @@ fun SearchScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         pair.forEach { genre ->
-                            Box(
-                                modifier = Modifier
+                            val tileMod = if (palette.isLiquidGlass) {
+                                Modifier
+                                    .weight(1f)
+                                    .height(78.dp)
+                                    .ferricLiquidGlass(
+                                        cornerRadius = genreRadius,
+                                        tier = GlassTier.FROSTED_PANEL,
+                                        accentGlow = genre.startColor,
+                                    )
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(
+                                                genre.startColor.copy(alpha = 0.38f),
+                                                genre.endColor.copy(alpha = 0.24f),
+                                            ),
+                                        ),
+                                    )
+                            } else {
+                                Modifier
                                     .weight(1f)
                                     .height(78.dp)
                                     .clip(RoundedCornerShape(genreRadius))
                                     .background(
                                         Brush.linearGradient(listOf(genre.startColor, genre.endColor)),
                                     )
+                            }
+                            Box(
+                                modifier = tileMod
                                     .clickable {
                                         searchScope = SearchScope.ONLINE
                                         query = genre.query

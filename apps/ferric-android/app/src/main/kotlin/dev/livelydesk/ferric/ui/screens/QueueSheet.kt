@@ -61,7 +61,10 @@ import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.formatDurationMs
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import java.util.Locale
 import kotlinx.coroutines.flow.StateFlow
 import uniffi.ferric_mobile_ffi.FfiRepeatMode
@@ -117,10 +120,10 @@ fun QueueSheet(
     }
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(
+    FerricModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = palette.surface,
+        coverShade = state.coverShade,
     ) {
         Column(
             modifier = Modifier
@@ -168,11 +171,15 @@ fun QueueSheet(
             }
 
             state.currentTrack?.let { cur ->
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = palette.elevated,
-                    border = BorderStroke(1.dp, palette.accent.copy(alpha = 0.45f)),
-                    modifier = Modifier.fillMaxWidth(),
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = 16.dp,
+                            accentGlow = palette.accent,
+                            fallbackColor = palette.elevated,
+                        ),
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -385,7 +392,7 @@ fun QueueSheet(
     if (showSaveDialog) {
         AlertDialog(
             onDismissRequest = { showSaveDialog = false },
-            containerColor = palette.elevated,
+            containerColor = ferricDialogContainerColor(palette),
             title = { Text("Save Queue as Playlist", color = palette.textPrimary) },
             text = {
                 OutlinedTextField(

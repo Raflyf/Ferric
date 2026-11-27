@@ -60,7 +60,9 @@ import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.TrackRow
 import dev.livelydesk.ferric.ui.components.sourceBadgeLabel
+import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import uniffi.ferric_mobile_ffi.FfiPlaylistSort
 import uniffi.ferric_mobile_ffi.FfiPlaylistSourceFilter
 import uniffi.ferric_mobile_ffi.FfiTrack
@@ -286,10 +288,10 @@ fun LibraryScreen(
                             style = MaterialTheme.typography.titleMedium,
                             color = palette.textPrimary,
                         )
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = pillBg,
-                            modifier = Modifier.clickable(onClick = onCyclePlaylistSort),
+                        Box(
+                            modifier = Modifier
+                                .ferricGlassSurface(palette = palette, cornerRadius = 999.dp, fallbackColor = pillBg)
+                                .clickable(onClick = onCyclePlaylistSort),
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -370,33 +372,40 @@ fun LibraryScreen(
                             )
                             items(sources, key = { it.first.name }) { (src, label) ->
                                 val selected = state.playlistSourceFilter == src
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = if (selected) {
-                                        if (palette.isLight) palette.textPrimary else Color.White
-                                    } else {
-                                        pillBg
-                                    },
-                                    modifier = Modifier.clickable { onSetPlaylistFilter(src) },
-                                ) {
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = if (selected) {
-                                            if (palette.isLight) Color.White else Color.Black
-                                        } else {
-                                            palette.textPrimary
-                                        },
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                                    )
+                                if (selected) {
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = if (palette.isLight) palette.textPrimary else Color.White,
+                                        modifier = Modifier.clickable { onSetPlaylistFilter(src) },
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = if (palette.isLight) Color.White else Color.Black,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                        )
+                                    }
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .ferricGlassSurface(palette = palette, cornerRadius = 999.dp, fallbackColor = pillBg)
+                                            .clickable { onSetPlaylistFilter(src) },
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = palette.textPrimary,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                        )
+                                    }
                                 }
                             }
                         }
                         Spacer(Modifier.width(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = pillBg,
-                            modifier = Modifier.clickable(onClick = onCyclePlaylistSort),
+                        Box(
+                            modifier = Modifier
+                                .ferricGlassSurface(palette = palette, cornerRadius = 999.dp, fallbackColor = pillBg)
+                                .clickable(onClick = onCyclePlaylistSort),
                         ) {
                             Text(
                                 text = sortLabel,
@@ -546,9 +555,9 @@ fun LibraryScreen(
     }
 
     if (showCreateMenu) {
-        ModalBottomSheet(
+        FerricModalBottomSheet(
             onDismissRequest = { showCreateMenu = false },
-            containerColor = palette.surface,
+            coverShade = state.coverShade,
         ) {
             Column(
                 modifier = Modifier

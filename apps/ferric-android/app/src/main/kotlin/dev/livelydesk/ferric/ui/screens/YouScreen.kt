@@ -52,8 +52,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.livelydesk.ferric.BuildConfig
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.displayUiFontName
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
+import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
 
 /**
  * Dedicated "You" tab inspired by Auralys's serene grouped hub:
@@ -291,14 +294,30 @@ private fun GroupedHubCard(
     content: @Composable () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
-    Surface(
-        shape = RoundedCornerShape(palette.cornerRadiusDp),
-        color = background,
-        border = BorderStroke(1.dp, border),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            content()
+    if (palette.isLiquidGlass) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .ferricGlassSurface(
+                    palette = palette,
+                    cornerRadius = palette.cornerRadiusDp,
+                    tier = GlassTier.FROSTED_PANEL,
+                ),
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                content()
+            }
+        }
+    } else {
+        Surface(
+            shape = RoundedCornerShape(palette.cornerRadiusDp),
+            color = background,
+            border = BorderStroke(1.dp, border),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                content()
+            }
         }
     }
 }
@@ -387,26 +406,35 @@ private fun BrandedAccountTile(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
-    val gradient = Brush.verticalGradient(
-        colors = if (palette.isLight) {
-            listOf(
-                tintColor.copy(alpha = 0.15f),
-                palette.surface,
+    val tileMod = if (palette.isLiquidGlass) {
+        modifier
+            .ferricLiquidGlass(
+                cornerRadius = palette.cornerRadiusDp,
+                tier = GlassTier.FROSTED_PANEL,
+                accentGlow = tintColor,
             )
-        } else {
-            listOf(
-                tintColor.copy(alpha = 0.24f),
-                tintColor.copy(alpha = 0.08f),
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        tintColor.copy(alpha = 0.22f),
+                        tintColor.copy(alpha = 0.08f),
+                    ),
+                ),
             )
-        },
-    )
-    Surface(
-        shape = RoundedCornerShape(palette.cornerRadiusDp),
-        color = Color.Transparent,
-        border = BorderStroke(1.dp, tintColor.copy(alpha = if (connected) 0.55f else 0.28f)),
-        modifier = modifier
+    } else {
+        val gradient = Brush.verticalGradient(
+            colors = if (palette.isLight) {
+                listOf(tintColor.copy(alpha = 0.15f), palette.surface)
+            } else {
+                listOf(tintColor.copy(alpha = 0.24f), tintColor.copy(alpha = 0.08f))
+            },
+        )
+        modifier
             .clip(RoundedCornerShape(palette.cornerRadiusDp))
             .background(gradient)
+    }
+    Box(
+        modifier = tileMod
             .clickable(onClick = onCardClick),
     ) {
         Column(
@@ -459,32 +487,53 @@ private fun BrandedAccountTile(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.height(36.dp),
             )
-            Button(
-                onClick = onAction,
-                shape = RoundedCornerShape(999.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (connected) {
-                        palette.textPrimary.copy(alpha = 0.14f)
-                    } else if (palette.isLight) {
-                        palette.textPrimary
-                    } else {
-                        Color.White
-                    },
-                    contentColor = if (connected) {
-                        palette.textPrimary
-                    } else if (palette.isLight) {
-                        Color.White
-                    } else {
-                        Color.Black
-                    },
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    text = actionLabel,
-                    style = MaterialTheme.typography.labelLarge,
-                )
+            if (palette.isLiquidGlass) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = 999.dp,
+                            accentGlow = tintColor,
+                        )
+                        .clickable(onClick = onAction)
+                        .padding(horizontal = 16.dp, vertical = 9.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = actionLabel,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = palette.textPrimary,
+                    )
+                }
+            } else {
+                Button(
+                    onClick = onAction,
+                    shape = RoundedCornerShape(999.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (connected) {
+                            palette.textPrimary.copy(alpha = 0.14f)
+                        } else if (palette.isLight) {
+                            palette.textPrimary
+                        } else {
+                            Color.White
+                        },
+                        contentColor = if (connected) {
+                            palette.textPrimary
+                        } else if (palette.isLight) {
+                            Color.White
+                        } else {
+                            Color.Black
+                        },
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = actionLabel,
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
             }
         }
     }

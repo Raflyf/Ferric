@@ -224,6 +224,15 @@ impl FerricController {
             monitor_handle: Mutex::new(None),
         });
 
+        {
+            let cache_root = ctrl.cfg.cache_dir.clone();
+            let _ = thread::Builder::new()
+                .name("ferric-cache-prune".to_string())
+                .spawn(move || {
+                    ferric_providers::ytmusic::enforce_media_cache_limits(&cache_root);
+                });
+        }
+
         ctrl.start_connect_engine();
 
         let weak = Arc::downgrade(&ctrl);
@@ -1444,6 +1453,7 @@ impl FerricController {
 }
 
 fn monitor_loop(weak: Weak<FerricController>, mon_sync: Arc<MonitorSync>) {
+    let mut idle_settled = false;
     loop {
         if mon_sync.shutdown_flag.load(Ordering::Acquire) {
             return;
@@ -1458,19 +1468,27 @@ fn monitor_loop(weak: Weak<FerricController>, mon_sync: Arc<MonitorSync>) {
             return;
         }
         if active {
+            idle_settled = false;
             thread::sleep(Duration::from_millis(200));
         } else {
             let mut guard = mon_sync.wake_lock.lock().unwrap_or_else(|p| p.into_inner());
-            *guard = false;
-            while !*guard && !mon_sync.shutdown_flag.load(Ordering::Acquire) {
+            if !idle_settled {
+                *guard = false;
                 let (next_g, _) = mon_sync
                     .wake_cv
-                    .wait_timeout(guard, Duration::from_secs(5))
+                    .wait_timeout(guard, Duration::from_secs(2))
                     .unwrap_or_else(|p| p.into_inner());
                 guard = next_g;
-                if !*guard {
-                    break;
+                idle_settled = !*guard;
+            } else {
+                *guard = false;
+                while !*guard && !mon_sync.shutdown_flag.load(Ordering::Acquire) {
+                    guard = mon_sync
+                        .wake_cv
+                        .wait(guard)
+                        .unwrap_or_else(|p| p.into_inner());
                 }
+                idle_settled = false;
             }
         }
     }

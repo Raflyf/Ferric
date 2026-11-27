@@ -3,6 +3,7 @@ package dev.livelydesk.ferric.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -53,7 +54,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.TrackRow
+import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
+import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import uniffi.ferric_mobile_ffi.FfiCollectionDetail
 import uniffi.ferric_mobile_ffi.FfiDetailSort
 import uniffi.ferric_mobile_ffi.FfiTrack
@@ -151,11 +155,15 @@ fun DetailScreen(
 
         item(key = "detail_hero") {
             val thumbRadius = (palette.cornerRadiusDp.value * 0.85f).coerceIn(0f, 24f).dp
-            Surface(
-                shape = RoundedCornerShape(palette.cornerRadiusDp),
-                color = heroBg,
-                border = BorderStroke(1.dp, palette.border.copy(alpha = 0.45f)),
-                modifier = Modifier.fillMaxWidth(),
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .ferricGlassSurface(
+                        palette = palette,
+                        cornerRadius = palette.cornerRadiusDp,
+                        tier = GlassTier.FROSTED_PANEL,
+                        fallbackColor = heroBg,
+                    ),
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -347,7 +355,7 @@ fun DetailScreen(
     if (showRenameDialog) {
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
-            containerColor = palette.elevated,
+            containerColor = ferricDialogContainerColor(palette),
             title = { Text("Rename Playlist", color = palette.textPrimary) },
             text = {
                 OutlinedTextField(
@@ -378,7 +386,7 @@ fun DetailScreen(
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            containerColor = palette.elevated,
+            containerColor = ferricDialogContainerColor(palette),
             title = { Text("Delete Playlist?", color = palette.textPrimary) },
             text = {
                 Text(

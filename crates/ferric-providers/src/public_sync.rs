@@ -562,6 +562,21 @@ fn collect_youtube_renderers(
     limit: usize,
     out: &mut Vec<Track>,
 ) {
+    let mut seen: std::collections::HashSet<String> = out
+        .iter()
+        .filter_map(|t| t.youtube_video_id.clone())
+        .collect();
+    collect_youtube_renderers_inner(val, renderer_key, album_name, limit, &mut seen, out);
+}
+
+fn collect_youtube_renderers_inner(
+    val: &Value,
+    renderer_key: &str,
+    album_name: &str,
+    limit: usize,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<Track>,
+) {
     if out.len() >= limit {
         return;
     }
@@ -572,11 +587,7 @@ fn collect_youtube_renderers(
                 && is_valid_id(vid)
             {
                 let raw_title = extract_yt_text(obj.get("title")).unwrap_or_default();
-                if !raw_title.is_empty()
-                    && !out
-                        .iter()
-                        .any(|t| t.youtube_video_id.as_deref() == Some(vid))
-                {
+                if !raw_title.is_empty() && seen.insert(vid.to_string()) {
                     let raw_author = extract_yt_text(obj.get("shortBylineText"))
                         .or_else(|| extract_yt_text(obj.get("ownerText")))
                         .or_else(|| extract_yt_text(obj.get("longBylineText")))
@@ -616,7 +627,7 @@ fn collect_youtube_renderers(
                 if out.len() >= limit {
                     break;
                 }
-                collect_youtube_renderers(child, renderer_key, album_name, limit, out);
+                collect_youtube_renderers_inner(child, renderer_key, album_name, limit, seen, out);
             }
         }
         Value::Array(arr) => {
@@ -624,7 +635,7 @@ fn collect_youtube_renderers(
                 if out.len() >= limit {
                     break;
                 }
-                collect_youtube_renderers(child, renderer_key, album_name, limit, out);
+                collect_youtube_renderers_inner(child, renderer_key, album_name, limit, seen, out);
             }
         }
         _ => {}
@@ -650,21 +661,18 @@ fn extract_yt_text(v: Option<&Value>) -> Option<String> {
 }
 
 fn parse_clock_ms(text: &str) -> Option<u64> {
-    let parts: Vec<u64> = text
+    let mut parts = text
         .trim()
         .split(':')
-        .filter_map(|p| p.trim().parse::<u64>().ok())
-        .collect();
-    match parts.as_slice() {
-        [m, s] => Some(
-            m.saturating_mul(60)
-                .saturating_add(*s)
-                .saturating_mul(1_000),
-        ),
-        [h, m, s] => Some(
-            h.saturating_mul(3_600)
-                .saturating_add(m.saturating_mul(60))
-                .saturating_add(*s)
+        .filter_map(|p| p.trim().parse::<u64>().ok());
+    let a = parts.next()?;
+    let b = parts.next()?;
+    match (parts.next(), parts.next()) {
+        (None, None) => Some(a.saturating_mul(60).saturating_add(b).saturating_mul(1_000)),
+        (Some(c), None) => Some(
+            a.saturating_mul(3_600)
+                .saturating_add(b.saturating_mul(60))
+                .saturating_add(c)
                 .saturating_mul(1_000),
         ),
         _ => None,
@@ -693,6 +701,7 @@ fn is_valid_id(id: &str) -> bool {
 }
 
 fn percent_encode(input: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(input.len() + 16);
     for b in input.bytes() {
         match b {
@@ -700,7 +709,11 @@ fn percent_encode(input: &str) -> String {
                 out.push(b as char);
             }
             b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0F) as usize] as char);
+            }
         }
     }
     out

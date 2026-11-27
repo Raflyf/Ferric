@@ -688,7 +688,10 @@ mod imp {
         });
 
         // Guard against the host HWND being closed during async WebView2 initialization.
+        // SAFETY: `IsWindow` safely validates a candidate HWND on the creating STA thread.
         if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() } {
+            state.shared_hwnd.store(0, Ordering::Release);
+            // SAFETY: Close the WebView2 controller on the STA thread before dropping state.
             unsafe {
                 let _ = state.controller.Close();
             }
@@ -737,7 +740,20 @@ mod imp {
             batch
         };
 
-        for cmd in pending {
+        // Coalesce bursty `SetBounds` and `SyncPlayback` messages so rapid resize/morph frames
+        // execute only the latest geometry and playback sync per batch.
+        let mut last_bounds_idx: Option<usize> = None;
+        let mut last_sync_idx: Option<usize> = None;
+        for (idx, cmd) in pending.iter().enumerate() {
+            match cmd {
+                VideoCmd::SetBounds(_) => last_bounds_idx = Some(idx),
+                VideoCmd::SyncPlayback { .. } => last_sync_idx = Some(idx),
+                VideoCmd::LoadStream { .. } => last_sync_idx = None,
+                _ => {}
+            }
+        }
+
+        for (idx, cmd) in pending.into_iter().enumerate() {
             match cmd {
                 VideoCmd::LoadStream {
                     url,
@@ -762,6 +778,9 @@ mod imp {
                     }
                 }
                 VideoCmd::SyncPlayback { pos_sec, playing } => {
+                    if last_sync_idx != Some(idx) {
+                        continue;
+                    }
                     let pos = safe_pos_secs(pos_sec);
                     let script = format!(
                         "window.__ferricSync && window.__ferricSync({pos:.3}, {});",
@@ -776,6 +795,9 @@ mod imp {
                     }
                 }
                 VideoCmd::SetBounds(r) => {
+                    if last_bounds_idx != Some(idx) {
+                        continue;
+                    }
                     let clamped = VideoViewportRect {
                         x: r.x,
                         y: r.y,
@@ -834,6 +856,11 @@ mod imp {
         }
     }
 
+    /// Clone the `Rc<VideoHostState>` stored in `GWLP_USERDATA` for `hwnd`.
+    ///
+    /// # Safety
+    /// Must only be called on the video host STA thread for an `hwnd` whose `GWLP_USERDATA`
+    /// holds either null or a live `Rc::into_raw` pointer created in `run_video_window`.
     unsafe fn clone_host_state(hwnd: HWND) -> Option<Rc<VideoHostState>> {
         // SAFETY: `GWLP_USERDATA` stores `Rc::into_raw` on this STA thread until `WM_DESTROY` clears it.
         unsafe {

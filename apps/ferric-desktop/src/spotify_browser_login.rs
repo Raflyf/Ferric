@@ -252,9 +252,6 @@ fn drive(
     ) {
         return SpotifyLoginOutcome::Failed(err);
     }
-    if let Err(err) = cdp.call("Network.enable", json!({})) {
-        return SpotifyLoginOutcome::Failed(err);
-    }
     if clear_existing_cookies {
         // Wipe all cookies & origin storage in Ferric's dedicated browser profile so clicking
         // Sign Out -> Sign in via Web always opens a clean Spotify sign-in screen instead of
@@ -280,7 +277,12 @@ fn drive(
         return SpotifyLoginOutcome::Failed(err);
     }
 
+    let session_deadline = Instant::now() + Duration::from_secs(600);
+    let mut consecutive_cdp_errors = 0u8;
     loop {
+        if Instant::now() >= session_deadline {
+            return SpotifyLoginOutcome::Cancelled;
+        }
         if let Some(spawned) = child.as_mut() {
             match spawned.try_wait() {
                 Ok(Some(_)) => return SpotifyLoginOutcome::Cancelled,
@@ -291,27 +293,39 @@ fn drive(
             return SpotifyLoginOutcome::Cancelled;
         }
 
-        if let Ok(result) = cdp.call(
+        match cdp.call(
             "Runtime.evaluate",
             json!({
                 "expression": "(location.origin === 'https://open.spotify.com' && window.__ferricToken) || null",
                 "returnByValue": true,
             }),
         ) {
-            let token_json = result
-                .get("result")
-                .and_then(|value| value.get("value"))
-                .and_then(Value::as_str);
-            if let Some(text) = token_json
-                && ferric_providers::spotify_web::parse_web_token_json(text).is_ok()
-            {
-                let sp_dc = read_sp_dc(&mut cdp).unwrap_or_default();
-                // Closing is best-effort: the window is Ferric's own dedicated instance.
-                let _ = cdp.call("Browser.close", json!({}));
-                return SpotifyLoginOutcome::SignedIn {
-                    sp_dc,
-                    token_json: text.to_string(),
-                };
+            Ok(result) => {
+                consecutive_cdp_errors = 0;
+                let token_json = result
+                    .get("result")
+                    .and_then(|value| value.get("value"))
+                    .and_then(Value::as_str);
+                if let Some(text) = token_json
+                    && ferric_providers::spotify_web::parse_web_token_json(text).is_ok()
+                {
+                    let sp_dc = read_sp_dc(&mut cdp).unwrap_or_default();
+                    // Closing is best-effort: the window is Ferric's own dedicated instance.
+                    let _ = cdp.call("Browser.close", json!({}));
+                    return SpotifyLoginOutcome::SignedIn {
+                        sp_dc,
+                        token_json: text.to_string(),
+                    };
+                }
+            }
+            Err(err) => {
+                consecutive_cdp_errors = consecutive_cdp_errors.saturating_add(1);
+                if err.contains("closed")
+                    || err.contains("send failed")
+                    || consecutive_cdp_errors >= 5
+                {
+                    return SpotifyLoginOutcome::Cancelled;
+                }
             }
         }
 
@@ -442,21 +456,28 @@ impl Cdp {
             .send(Message::Text(payload.into()))
             .map_err(|err| format!("DevTools send failed: {err}"))?;
 
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
         loop {
+            if Instant::now() >= deadline {
+                return Err(format!("DevTools {method} timed out"));
+            }
             let message = self
                 .socket
                 .read()
                 .map_err(|err| format!("DevTools read failed: {err}"))?;
-            let text = match message {
-                Message::Text(text) => text.as_str().to_string(),
-                Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            let value = match message {
+                Message::Text(ref text) => match serde_json::from_str::<Value>(text.as_str()) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                },
+                Message::Binary(ref bytes) => match serde_json::from_slice::<Value>(bytes) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                },
                 Message::Close(_) => {
                     return Err("The browser closed the DevTools connection.".to_string());
                 }
                 _ => continue,
-            };
-            let Ok(value) = serde_json::from_str::<Value>(&text) else {
-                continue;
             };
             if value.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;

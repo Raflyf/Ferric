@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 
@@ -20,6 +20,13 @@ unsafe_op_in_unsafe_fn = "warn"
 redundant_clone = "warn"
 needless_collect = "warn"
 large_enum_variant = "warn"
+clone_on_ref_ptr = "warn"
+format_push_string = "warn"
+inefficient_to_string = "warn"
+unnecessary_to_owned = "warn"
+cloned_instead_of_copied = "warn"
+flat_map_option = "warn"
+large_stack_arrays = "warn"
 
 [workspace.dependencies]
 thiserror = "2.0"

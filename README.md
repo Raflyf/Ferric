@@ -49,20 +49,21 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 
 ## Resource use
 
-| State | Memory | CPU | Capture notes |
-| :--- | ---: | ---: | :--- |
-| Active streaming playback, UI open | 153.5 – 188.0 MB | 2.0 – 4.1% | Task Manager snapshots (26 Nov 2026) with cover artwork, Home shelves, and synced lyrics active |
-| UI open, idle (20 s after launch) | 35.1 MB | < 1% | Private Working Set (`18.1 MB` Working Set), `v0.1.0` build (27 Nov 2026), integrated GPU only (`0` NVIDIA DLLs loaded) |
-| Minimized to system tray (10 s after close-to-tray) | 7.4 MB | ~0.2% | Private Working Set (`11.5 MB` Working Set), `v0.1.0` build (27 Nov 2026), artwork cache released while hidden |
+| State | Private Working Set | CPU | GPU | Capture notes |
+| :--- | ---: | ---: | ---: | :--- |
+| UI open, idle (10 s after launch) | 6.0 MB | 0.00% | 0.0% | `v0.1.1` (`8.3 MB` Working Set, `168.3 MB` Commit), iGPU only (`0` dGPU DLLs loaded) |
+| Active streaming playback, UI open | 35.5 – 49.5 MB | 0.59 – 0.82% | 2.0 – 2.7% | `v0.1.1` across 5 track switches + reopen, cover art & synced lyrics active |
+| Fullscreen Lyrics active (6 s) | 47.1 MB | 0.90% | 39.6% | `v0.1.1` live ambient aurora shader on Intel iGPU (`67.0 MB` shared GPU memory) |
+| Minimized to system tray, playing | 6.5 – 17.1 MB | 0.14% | 0.0% | `v0.1.1` across 4 real track switches in tray (`53.5 MB` flat shared GPU memory) |
 
-*Observed on the author's Windows 11 laptop, not fixed ceilings or guarantees. Memory and CPU vary with display scaling, graphics driver, library size, streaming codec, and whether cover artwork or video clips are active.*
+*Observed on the author's Windows 11 laptop (`x86_64`, Intel iGPU + hybrid dGPU), not fixed ceilings or guarantees. Memory, CPU, and GPU vary with display scaling, graphics driver, library size, streaming codec, and whether Fullscreen Lyrics or video clips are active.*
 
 ## Download
 
 | Package | Best for |
 | :--- | :--- |
-| [Windows installer (`ferricsetup-v0.1.0.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.0.msi>) | Per-user installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
-| [Portable ZIP (`Ferric-v0.1.0-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.0-windows-x86_64.zip>) | Running without installation |
+| [Windows installer (`ferricsetup-v0.1.1.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.1.msi>) | Per-user installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
+| [Portable ZIP (`Ferric-v0.1.1-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.1-windows-x86_64.zip>) | Running without installation |
 | [SHA-256 checksums (`SHA256SUMS.txt`)](<https://github.com/Raflyf/Ferric/releases/latest/download/SHA256SUMS.txt>) | Verifying installer and portable archive integrity before running |
 
 **Requirements:** Windows 10 or Windows 11 on a 64-bit (`x86_64`) PC. No administrator rights are required. Native Windows Acrylic backdrop works best on Windows 11.
@@ -101,7 +102,7 @@ Optional support via [Buy me a coffee](<https://yapp.ink/raflyf>) or [Saweria](<
 
 ## Code signing policy
 
-Ferric releases (including `v0.1.0`) are currently **unsigned** (no Authenticode code-signing certificate is active). Windows Defender SmartScreen may show an unknown-publisher warning on new releases. All official installers, portable archives, and `SHA256SUMS.txt` manifests are compiled transparently from public source via [GitHub Actions](<.github/workflows/release.yml>). Always download from [GitHub Releases](<https://github.com/Raflyf/Ferric/releases>), verify SHA-256 digests before installing, and keep Windows security protections enabled.
+Ferric releases (including `v0.1.1`) are currently **unsigned** (no Authenticode code-signing certificate is active). Windows Defender SmartScreen may show an unknown-publisher warning on new releases. All official installers, portable archives, and `SHA256SUMS.txt` manifests are compiled transparently from public source via [GitHub Actions](<.github/workflows/release.yml>). Always download from [GitHub Releases](<https://github.com/Raflyf/Ferric/releases>), verify SHA-256 digests before installing, and keep Windows security protections enabled.
 
 ## Privacy policy
 

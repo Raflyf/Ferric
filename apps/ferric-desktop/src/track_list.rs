@@ -1,10 +1,11 @@
 use crate::artwork::{ArtworkCache, CachedArtwork};
-use crate::state::clip_text;
+use crate::state::clean_clip_into;
 use crate::widgets::FerricCoverArtWidgetRefExt;
-use ferric_core::models::{Track, TrackSource, format_duration_ms};
+use ferric_core::models::{Track, TrackSource};
 use makepad_widgets::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::rc::Rc;
 
 live_design! {
@@ -606,6 +607,10 @@ pub struct TrackList {
     smooth_last_t: f64,
     #[rust]
     drawn_item_ids: Vec<usize>,
+    #[rust]
+    row_scratch_a: String,
+    #[rust]
+    row_scratch_b: String,
 }
 
 impl TrackListRef {
@@ -946,42 +951,52 @@ impl Widget for TrackList {
                         }
                         art_ref.set_state(cx, is_active && is_playing, level, accent, false);
 
-                        let idx_txt = if is_active {
-                            "•".to_string()
+                        if is_active {
+                            row.label(id!(idx_lbl)).set_text(cx, "•");
                         } else {
-                            format!("{}", item_id + 1)
-                        };
-                        let clean = |s: &str| -> String {
-                            s.chars()
-                                .filter(|&c| {
-                                    let cp = c as u32;
-                                    !matches!(
-                                        cp,
-                                        0x200D | 0xFE00..=0xFE0F | 0x2600..=0x27BF | 0x1F000..=0x1FFFF
-                                    )
-                                })
-                                .collect::<String>()
-                                .split_whitespace()
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        };
-                        let artist_sub = match track.source {
-                            TrackSource::Local => clean(&track.artist),
-                            other => format!("{} · {}", clean(&track.artist), other.as_badge()),
-                        };
-                        row.label(id!(idx_lbl)).set_text(cx, &idx_txt);
-                        row.label(id!(title_lbl))
-                            .set_text(cx, &clip_text(&clean(&track.title), 38));
-                        row.label(id!(artist_lbl))
-                            .set_text(cx, &clip_text(&artist_sub, 42));
-                        row.label(id!(album_lbl))
-                            .set_text(cx, &clip_text(&clean(&track.album), 24));
-                        let dur_txt = if track.duration_ms > 0 {
-                            format_duration_ms(track.duration_ms)
+                            self.row_scratch_a.clear();
+                            let _ = write!(&mut self.row_scratch_a, "{}", item_id + 1);
+                            row.label(id!(idx_lbl)).set_text(cx, &self.row_scratch_a);
+                        }
+                        clean_clip_into(&track.title, 38, Some("Unknown"), &mut self.row_scratch_a);
+                        row.label(id!(title_lbl)).set_text(cx, &self.row_scratch_a);
+
+                        match track.source {
+                            TrackSource::Local => {
+                                clean_clip_into(
+                                    &track.artist,
+                                    42,
+                                    Some("Unknown"),
+                                    &mut self.row_scratch_a,
+                                );
+                            }
+                            other => {
+                                clean_clip_into(&track.artist, 42, None, &mut self.row_scratch_b);
+                                self.row_scratch_b.push_str(" · ");
+                                self.row_scratch_b.push_str(other.as_badge());
+                                clean_clip_into(
+                                    &self.row_scratch_b,
+                                    42,
+                                    Some("Unknown"),
+                                    &mut self.row_scratch_a,
+                                );
+                            }
+                        }
+                        row.label(id!(artist_lbl)).set_text(cx, &self.row_scratch_a);
+
+                        clean_clip_into(&track.album, 24, Some("Unknown"), &mut self.row_scratch_a);
+                        row.label(id!(album_lbl)).set_text(cx, &self.row_scratch_a);
+
+                        if track.duration_ms > 0 {
+                            let total_secs = track.duration_ms / 1000;
+                            let mins = total_secs / 60;
+                            let secs = total_secs % 60;
+                            self.row_scratch_a.clear();
+                            let _ = write!(&mut self.row_scratch_a, "{mins}:{secs:02}");
+                            row.label(id!(dur_lbl)).set_text(cx, &self.row_scratch_a);
                         } else {
-                            "—".to_string()
-                        };
-                        row.label(id!(dur_lbl)).set_text(cx, &dur_txt);
+                            row.label(id!(dur_lbl)).set_text(cx, "—");
+                        }
                         row.draw_all(cx, scope);
                     }
                 }

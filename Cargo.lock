@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-audio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "biquad",
  "cpal",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "directories",
  "fastrand",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fastrand",
  "ferric-audio",
@@ -660,7 +660,6 @@ dependencies = [
  "serde_json",
  "souvlaki",
  "tungstenite",
- "ureq",
  "webview2-com",
  "windows 0.62.2",
  "windows-core 0.62.2",
@@ -669,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-providers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aho-corasick",
  "fastrand",
@@ -685,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "ferric-sync"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ferric-core",
  "postcard",

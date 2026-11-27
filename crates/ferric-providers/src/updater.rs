@@ -159,7 +159,7 @@ pub fn resolve_installer_from_sums(
 
 pub fn sha256_reader(reader: &mut impl Read) -> Result<[u8; 32], String> {
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 32 * 1024];
     loop {
         let n = reader
             .read(&mut buf)
@@ -342,14 +342,13 @@ fn open_verified_github_response(
     deadline: Instant,
 ) -> Result<(ureq::Body, Option<u64>), String> {
     let mut current_url = initial_url.to_owned();
+    let initial_remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_secs(1));
+    let agent = build_strict_agent(initial_remaining, initial_remaining.min(PHASE_TIMEOUT));
     for _hop in 0..=4 {
         check_cancelled(cancelled, deadline)?;
         validate_https_download_url(&current_url)?;
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .max(Duration::from_secs(1));
-        let phase = remaining.min(PHASE_TIMEOUT);
-        let agent = build_strict_agent(remaining, phase);
         let resp = agent
             .get(&current_url)
             .header("User-Agent", user_agent)
@@ -436,7 +435,7 @@ pub fn download_verified_installer(
         let mut writer = BufWriter::new(file);
         let mut downloaded = 0u64;
         let mut last_pct: Option<u8> = None;
-        let mut buf = [0u8; 64 * 1024];
+        let mut buf = vec![0u8; 32 * 1024];
 
         loop {
             check_cancelled(cancelled, deadline)?;

@@ -555,6 +555,7 @@ struct ActiveDeck {
     time_base: Option<symphonia::core::units::TimeBase>,
     resampler: Option<StereoResampler>,
     pending_stereo: Vec<f32>,
+    stereo_scratch: Vec<f32>,
     pending_offset: usize,
     pos_ms_f64: f64,
     replay_gain_db: i32,
@@ -658,6 +659,7 @@ impl ActiveDeck {
             time_base,
             resampler,
             pending_stereo: Vec::with_capacity(8192),
+            stereo_scratch: Vec::new(),
             pending_offset: 0,
             pos_ms_f64: 0.0,
             replay_gain_db: rg_clamped,
@@ -897,26 +899,34 @@ impl ActiveDeck {
                             self.pending_stereo.extend_from_slice(raw_buf);
                         }
                     } else if ch == 1 {
-                        let mut stereo_in = Vec::with_capacity(raw_buf.len() * 2);
-                        for &s in raw_buf.iter() {
-                            stereo_in.push(s);
-                            stereo_in.push(s);
-                        }
                         if let Some(res) = &mut self.resampler {
-                            res.process_stereo(&stereo_in, &mut self.pending_stereo);
+                            self.stereo_scratch.clear();
+                            self.stereo_scratch.reserve(raw_buf.len() * 2);
+                            for &s in raw_buf.iter() {
+                                self.stereo_scratch.push(s);
+                                self.stereo_scratch.push(s);
+                            }
+                            res.process_stereo(&self.stereo_scratch, &mut self.pending_stereo);
                         } else {
-                            self.pending_stereo = stereo_in;
+                            self.pending_stereo.reserve(raw_buf.len() * 2);
+                            for &s in raw_buf.iter() {
+                                self.pending_stereo.push(s);
+                                self.pending_stereo.push(s);
+                            }
                         }
-                    } else {
-                        let mut stereo_in = Vec::with_capacity((raw_buf.len() / ch) * 2);
+                    } else if let Some(res) = &mut self.resampler {
+                        self.stereo_scratch.clear();
+                        self.stereo_scratch.reserve((raw_buf.len() / ch) * 2);
                         for frame in raw_buf.chunks_exact(ch) {
-                            stereo_in.push(frame[0]);
-                            stereo_in.push(frame[1]);
+                            self.stereo_scratch.push(frame[0]);
+                            self.stereo_scratch.push(frame[1]);
                         }
-                        if let Some(res) = &mut self.resampler {
-                            res.process_stereo(&stereo_in, &mut self.pending_stereo);
-                        } else {
-                            self.pending_stereo = stereo_in;
+                        res.process_stereo(&self.stereo_scratch, &mut self.pending_stereo);
+                    } else {
+                        self.pending_stereo.reserve((raw_buf.len() / ch) * 2);
+                        for frame in raw_buf.chunks_exact(ch) {
+                            self.pending_stereo.push(frame[0]);
+                            self.pending_stereo.push(frame[1]);
                         }
                     }
                     if self.pending_stereo.len() >= 2 {

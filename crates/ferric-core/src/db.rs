@@ -259,6 +259,7 @@ impl LibraryDb {
                 out.push(item?);
             }
         }
+        out.shrink_to_fit();
         Ok(out)
     }
 
@@ -538,6 +539,7 @@ impl LibraryDb {
         for item in rows {
             out.push(item?);
         }
+        out.shrink_to_fit();
         Ok(out)
     }
 
@@ -559,6 +561,7 @@ impl LibraryDb {
         for item in rows {
             out.push(item?);
         }
+        out.shrink_to_fit();
         Ok(out)
     }
 
@@ -703,6 +706,7 @@ impl LibraryDb {
         for p in rows {
             out.push(PathBuf::from(p?));
         }
+        out.shrink_to_fit();
         Ok(out)
     }
 

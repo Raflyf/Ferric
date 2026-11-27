@@ -657,168 +657,68 @@ pub enum MusicLocale {
 /// Detect the musical language/locale of a track from its title, artist, and album
 /// so Radio recommendations stay language- and vibe-coherent instead of injecting random regional charts.
 pub fn detect_track_locale(title: &str, artist: &str, album: &str) -> MusicLocale {
-    let combined = format!("{title} {artist} {album}");
     let mut has_jp = false;
-    let mut has_kr = false;
-    for ch in combined.chars() {
+    for ch in title.chars().chain(artist.chars()).chain(album.chars()) {
         let cp = ch as u32;
+        if (0xAC00..=0xD7AF).contains(&cp) || (0x1100..=0x11FF).contains(&cp) {
+            return MusicLocale::Korean;
+        }
         if (0x3040..=0x30FF).contains(&cp)
             || (0x4E00..=0x9FFF).contains(&cp)
             || (0x3400..=0x4DBF).contains(&cp)
         {
             has_jp = true;
-        } else if (0xAC00..=0xD7AF).contains(&cp) || (0x1100..=0x11FF).contains(&cp) {
-            has_kr = true;
         }
-    }
-    if has_kr {
-        return MusicLocale::Korean;
     }
     if has_jp {
         return MusicLocale::Japanese;
     }
 
-    // Check title + album tokens (and genre hints) for Indonesian language signals.
+    // Allocation-free ASCII token scan over title + album using stack lowercasing (`mem-avoid-format`).
     // Deliberately avoids classifying English songs by Indonesian-born international artists as ID.
-    const ID_WORDS: &[&str] = &[
-        "aku",
-        "kamu",
-        "kau",
-        "cinta",
-        "rindu",
-        "hati",
-        "bukan",
-        "yang",
-        "untuk",
-        "untukmu",
-        "dengan",
-        "dalam",
-        "malam",
-        "hujan",
-        "senja",
-        "kisah",
-        "patah",
-        "selalu",
-        "berdua",
-        "pergi",
-        "pergilah",
-        "tidak",
-        "jangan",
-        "bila",
-        "saat",
-        "sampai",
-        "telah",
-        "lagi",
-        "saja",
-        "cuma",
-        "terlalu",
-        "dirimu",
-        "diriku",
-        "tentang",
-        "seperti",
-        "bersama",
-        "bahagia",
-        "terindah",
-        "sial",
-        "tak",
-        "di",
-        "ke",
-        "dari",
-        "dan",
-        "atau",
-        "jalan",
-        "koplo",
-        "dangdut",
-        "galau",
-        "melayu",
-        "lagu",
-        "indonesia",
-        "nanti",
-        "kita",
-        "hari",
-        "ini",
-        "itu",
-        "semua",
-        "kembali",
-        "menunggu",
-        "mengapa",
-        "kenapa",
-        "sendiri",
-        "sepi",
-        "luka",
-        "rasa",
-        "janji",
-        "mimpi",
-        "jiwa",
-        "tuhan",
-        "indah",
-        "manusia",
-        "komang",
-        "monokrom",
-        "sepatu",
-        "akad",
-        "ruang",
-        "tunggu",
-        "menuju",
-        "teduh",
-        "payung",
-        "dunia",
-        "batas",
-        "perempuan",
-        "pelukan",
-        "sempurna",
-        "pulang",
-        "hilang",
-        "waktu",
-        "langit",
-        "bintang",
-        "cerita",
-        "selamat",
-        "tinggal",
-        "kasih",
-    ];
-    let title_alb = format!("{title} {album}").to_ascii_lowercase();
     let mut id_hits = 0usize;
-    for tok in title_alb.split(|c: char| !c.is_ascii_alphabetic()) {
-        if tok.len() >= 2 && ID_WORDS.contains(&tok) {
-            id_hits += 1;
-            if matches!(
-                tok,
-                "koplo" | "dangdut" | "galau" | "melayu" | "indonesia" | "lagu"
-            ) {
-                return MusicLocale::Indonesian;
+    let mut en_hits = 0usize;
+    let mut buf = [0u8; 16];
+    for source in [title, album] {
+        for raw_tok in source.split(|c: char| !c.is_ascii_alphabetic()) {
+            let len = raw_tok.len();
+            if !(2..=16).contains(&len) {
+                continue;
+            }
+            for (dst, &b) in buf[..len].iter_mut().zip(raw_tok.as_bytes()) {
+                *dst = b.to_ascii_lowercase();
+            }
+            // SAFETY: `raw_tok` was split on `!is_ascii_alphabetic()`, so every byte is valid ASCII UTF-8.
+            let tok = std::str::from_utf8(&buf[..len]).unwrap_or("");
+            match tok {
+                "koplo" | "dangdut" | "galau" | "melayu" | "indonesia" | "lagu" => {
+                    return MusicLocale::Indonesian;
+                }
+                "aku" | "kamu" | "kau" | "cinta" | "rindu" | "hati" | "bukan" | "yang"
+                | "untuk" | "untukmu" | "dengan" | "dalam" | "malam" | "hujan" | "senja"
+                | "kisah" | "patah" | "selalu" | "berdua" | "pergi" | "pergilah" | "tidak"
+                | "jangan" | "bila" | "saat" | "sampai" | "telah" | "lagi" | "saja" | "cuma"
+                | "terlalu" | "dirimu" | "diriku" | "tentang" | "seperti" | "bersama"
+                | "bahagia" | "terindah" | "sial" | "tak" | "di" | "ke" | "dari" | "dan"
+                | "atau" | "jalan" | "nanti" | "kita" | "hari" | "ini" | "itu" | "semua"
+                | "kembali" | "menunggu" | "mengapa" | "kenapa" | "sendiri" | "sepi" | "luka"
+                | "rasa" | "janji" | "mimpi" | "jiwa" | "tuhan" | "indah" | "manusia"
+                | "komang" | "monokrom" | "sepatu" | "akad" | "ruang" | "tunggu" | "menuju"
+                | "teduh" | "payung" | "dunia" | "batas" | "perempuan" | "pelukan" | "sempurna"
+                | "pulang" | "hilang" | "waktu" | "langit" | "bintang" | "cerita" | "selamat"
+                | "tinggal" | "kasih" => {
+                    id_hits += 1;
+                }
+                "the" | "you" | "your" | "love" | "with" | "from" | "that" | "this" | "have"
+                | "don" | "can" | "stay" | "night" | "heart" | "world" | "feat" | "remix" => {
+                    en_hits += 1;
+                }
+                _ => {}
             }
         }
     }
-    if id_hits >= 1 {
-        let en_hits = title_alb
-            .split(|c: char| !c.is_ascii_alphabetic())
-            .filter(|w| {
-                matches!(
-                    *w,
-                    "the"
-                        | "you"
-                        | "your"
-                        | "love"
-                        | "with"
-                        | "from"
-                        | "that"
-                        | "this"
-                        | "have"
-                        | "don"
-                        | "can"
-                        | "stay"
-                        | "night"
-                        | "heart"
-                        | "world"
-                        | "feat"
-                        | "remix"
-                )
-            })
-            .count();
-        if id_hits > en_hits {
-            return MusicLocale::Indonesian;
-        }
+    if id_hits >= 1 && id_hits > en_hits {
+        return MusicLocale::Indonesian;
     }
     MusicLocale::GlobalEn
 }
@@ -1412,25 +1312,23 @@ pub fn fetch_rich_home(
     let mut seed_tracks: Vec<Track> = Vec::new();
     if is_default_home && has_taste {
         let mut used_artists: HashSet<String> = HashSet::new();
-        let top_yt: Vec<Track> = taste
+        let top_yt: Vec<&Track> = taste
             .top_tracks
             .iter()
             .filter(|t| t.youtube_video_id.as_deref().is_some_and(is_valid_video_id))
-            .cloned()
             .collect();
-        let lib_yt: Vec<Track> = taste
+        let lib_yt: Vec<&Track> = taste
             .library_tracks
             .iter()
             .filter(|t| t.youtube_video_id.as_deref().is_some_and(is_valid_video_id))
-            .cloned()
             .collect();
 
-        let pick_weighted_seed = |pool: &[Track],
+        let pick_weighted_seed = |pool: &[&Track],
                                   used: &mut HashSet<String>,
                                   prefer_secondary_locale: bool|
          -> Option<Track> {
             let mut cands: Vec<(bool, bool, f64, &Track)> = Vec::new();
-            for (i, t) in pool.iter().enumerate() {
+            for (i, &t) in pool.iter().enumerate() {
                 let an = primary_artist_norm(&t.artist);
                 if !an.is_empty() && used.contains(&an) {
                     continue;
@@ -1480,7 +1378,9 @@ pub fn fetch_rich_home(
         }
         // Seed 2: secondary active locale (e.g. Indonesian / Japanese) for true multi-locale variety,
         // falling back to another distant library/top artist
-        let combined_yt: Vec<Track> = lib_yt.iter().chain(top_yt.iter()).cloned().collect();
+        let mut combined_yt: Vec<&Track> = Vec::with_capacity(lib_yt.len() + top_yt.len());
+        combined_yt.extend_from_slice(&lib_yt);
+        combined_yt.extend_from_slice(&top_yt);
         if let Some(s2) = pick_weighted_seed(&combined_yt, &mut used_artists, true)
             .or_else(|| pick_weighted_seed(&combined_yt, &mut used_artists, false))
         {
@@ -2197,15 +2097,14 @@ pub fn fetch_rich_home(
         }
 
         // Rediscover Your Library (samples across ALL library_tracks + top_tracks, not just top 60!)
-        let mut listen_pool: Vec<Track> = fav_pool.clone();
+        let mut listen_pool: Vec<Track> = fav_pool;
         if fresh_seed && listen_pool.len() > 4 {
             fastrand::shuffle(&mut listen_pool);
         }
         listen_pool.sort_by_key(|t| {
             first_qp_ids.contains(t.id.as_str()) || is_track_excluded(t, &taste.excluded_track_ids)
         });
-        let listen_again_cards =
-            tracks_to_song_cards(&listen_pool.into_iter().take(15).collect::<Vec<_>>());
+        let listen_again_cards = tracks_to_song_cards(&listen_pool[..listen_pool.len().min(15)]);
         if listen_again_cards.len() >= 3 {
             push_shelf_unique(
                 &mut shelves,
@@ -2233,13 +2132,14 @@ pub fn fetch_rich_home(
             push_shelf_unique(&mut shelves, shelf);
         }
 
-        // Aggregate all_tracks cleanly
+        // Aggregate all_tracks cleanly with O(1) HashSet deduplication (`coll-set-membership`)
+        let mut all_seen: HashSet<String> = all_tracks.iter().map(|a| a.id.clone()).collect();
         for t in quick_picks
             .iter()
             .chain(ranked_discovery.iter())
             .chain(artist_popular_tracks.iter())
         {
-            if !all_tracks.iter().any(|a| a.id == t.id) {
+            if all_seen.insert(t.id.clone()) {
                 all_tracks.push(t.clone());
             }
         }
@@ -2599,8 +2499,12 @@ fn is_same_song_variant(seed_core: &str, cand_core: &str) -> bool {
         return true;
     }
     if seed_core.len() >= 4
-        && (cand_core.starts_with(&format!("{seed_core} "))
-            || seed_core.starts_with(&format!("{cand_core} ")))
+        && (cand_core
+            .strip_prefix(seed_core)
+            .is_some_and(|r| r.starts_with(' '))
+            || seed_core
+                .strip_prefix(cand_core)
+                .is_some_and(|r| r.starts_with(' ')))
     {
         return true;
     }
@@ -2631,6 +2535,18 @@ fn primary_artist_key(artist: &str) -> String {
         .unwrap_or_else(|| artist.trim().to_ascii_lowercase())
 }
 
+#[inline]
+fn contains_ascii_icase(haystack: &str, needle_lower: &[u8]) -> bool {
+    let n = needle_lower.len();
+    if n == 0 || haystack.len() < n {
+        return false;
+    }
+    haystack
+        .as_bytes()
+        .windows(n)
+        .any(|w| w.eq_ignore_ascii_case(needle_lower))
+}
+
 fn is_low_quality_radio_candidate(
     title: &str,
     artist: &str,
@@ -2640,86 +2556,88 @@ fn is_low_quality_radio_candidate(
     if duration_ms > 0 && !(75_000..=540_000).contains(&duration_ms) {
         return true;
     }
-    let t = title.to_ascii_lowercase();
-    let a = artist.to_ascii_lowercase();
-    let seed_is_remix = seed_title.to_ascii_lowercase().contains("remix");
-    if !seed_is_remix && (t.contains("remix") || a.contains("remix")) {
+    let seed_is_remix = contains_ascii_icase(seed_title, b"remix");
+    if !seed_is_remix
+        && (contains_ascii_icase(title, b"remix") || contains_ascii_icase(artist, b"remix"))
+    {
         return true;
     }
-    for bad in [
-        "karaoke",
-        "sped up",
-        "speed up",
-        "slowed",
-        "reverb",
-        "nightcore",
-        "8d audio",
-        "1 hour",
-        "10 hours",
-        "podcast",
-        "episode",
-        "reaction",
-        "interview",
-        "trailer",
-        "teaser",
-        "tutorial",
-        "ringtone",
-        "dj tiktok",
-        "tiktok version",
-        "full bass",
-        "bass boosted",
-        "jedag jedug",
-        "parody",
-        "+1key",
-        "+2key",
-        "+3key",
-        "+4key",
-        "+5key",
-        "-1key",
-        "-2key",
-        "-3key",
-        "-4key",
-        "key no",
-        "mini pop",
-        "kidz bop",
-        "metal version",
-        "metal cover",
-        "piano cover",
-        "guitar cover",
-        "acoustic cover",
-        "violin cover",
-        "drum cover",
-        "vocal cover",
-        "cover by",
-        "(cover)",
-        "[cover]",
-        "instrumental",
-        "backing track",
-        "lullaby",
-        "music box",
-        "8-bit",
-        "8 bit",
-        "minecraft",
-        "extended",
-        "tribute",
-        "chipmunk",
-        "edit audio",
-        "mashup",
-        "acapella",
-        "a cappella",
-        "todays top hits",
-        "today's top hits",
-        "radio top hits",
-        "chill hit songs",
-        "top hits radio",
-        "hits playlist",
-        "nonstop",
-    ] {
-        if t.contains(bad) || a.contains(bad) {
-            return true;
-        }
-    }
-    false
+    static BAD_MATCHER: std::sync::OnceLock<aho_corasick::AhoCorasick> = std::sync::OnceLock::new();
+    let matcher = BAD_MATCHER.get_or_init(|| {
+        aho_corasick::AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build([
+                "karaoke",
+                "sped up",
+                "speed up",
+                "slowed",
+                "reverb",
+                "nightcore",
+                "8d audio",
+                "1 hour",
+                "10 hours",
+                "podcast",
+                "episode",
+                "reaction",
+                "interview",
+                "trailer",
+                "teaser",
+                "tutorial",
+                "ringtone",
+                "dj tiktok",
+                "tiktok version",
+                "full bass",
+                "bass boosted",
+                "jedag jedug",
+                "parody",
+                "+1key",
+                "+2key",
+                "+3key",
+                "+4key",
+                "+5key",
+                "-1key",
+                "-2key",
+                "-3key",
+                "-4key",
+                "key no",
+                "mini pop",
+                "kidz bop",
+                "metal version",
+                "metal cover",
+                "piano cover",
+                "guitar cover",
+                "acoustic cover",
+                "violin cover",
+                "drum cover",
+                "vocal cover",
+                "cover by",
+                "(cover)",
+                "[cover]",
+                "instrumental",
+                "backing track",
+                "lullaby",
+                "music box",
+                "8-bit",
+                "8 bit",
+                "minecraft",
+                "extended",
+                "tribute",
+                "chipmunk",
+                "edit audio",
+                "mashup",
+                "acapella",
+                "a cappella",
+                "todays top hits",
+                "today's top hits",
+                "radio top hits",
+                "chill hit songs",
+                "top hits radio",
+                "hits playlist",
+                "nonstop",
+            ])
+            .expect("static radio filter patterns must compile")
+    });
+    matcher.is_match(title) || matcher.is_match(artist)
 }
 
 fn filter_coherent_radio_tracks(
@@ -3130,20 +3048,20 @@ pub fn format_station_subtitle(companions: &[String], fallback_seed: &str) -> St
 /// while preserving high-affinity track ordering (Spotify Radio sequencing rule).
 pub fn interleave_station_tracks(tracks: Vec<Track>, max_tracks: usize) -> Vec<Track> {
     let target = max_tracks.min(tracks.len());
-    let mut pool = tracks;
+    let mut pool: Vec<(String, Track)> = tracks
+        .into_iter()
+        .map(|t| (primary_artist_key(&t.artist), t))
+        .collect();
     let mut out: Vec<Track> = Vec::with_capacity(target);
     let mut last_artist = String::new();
 
     while out.len() < target && !pool.is_empty() {
         let pick_idx = pool
             .iter()
-            .position(|t| {
-                let ak = primary_artist_key(&t.artist);
-                last_artist.is_empty() || ak.is_empty() || ak != last_artist
-            })
+            .position(|(ak, _)| last_artist.is_empty() || ak.is_empty() || *ak != last_artist)
             .unwrap_or(0);
-        let chosen = pool.remove(pick_idx);
-        last_artist = primary_artist_key(&chosen.artist);
+        let (ak, chosen) = pool.remove(pick_idx);
+        last_artist = ak;
         out.push(chosen);
     }
     out
@@ -3213,38 +3131,39 @@ pub fn build_algorithmic_recommended_stations_rotated(
         if norm.is_empty() || norm == "various artists" {
             return;
         }
-        let display = primary_artist_display(&t.artist);
-        let locale = detect_track_locale(&t.title, &t.artist, &t.album);
         let art_bonus = if t.thumbnail_url.is_some() { 14 } else { 0 };
         let vid_bonus = if t.youtube_video_id.is_some() { 6 } else { 0 };
         let liked_bonus = if t.liked { 26 } else { 0 };
         let track_score = base_weight + art_bonus + vid_bonus + liked_bonus;
 
-        nodes
-            .entry(norm.clone())
-            .and_modify(|node| {
-                node.score += base_weight.max(4);
-                if track_score > node.best_track_score {
-                    node.best_track_score = track_score;
-                    node.best_track = t.clone();
-                    node.locale = locale;
-                } else if node.best_track.thumbnail_url.is_none() && t.thumbnail_url.is_some() {
-                    node.best_track = t.clone();
-                }
-                if node.sample_tracks.len() < 5 && !node.sample_tracks.iter().any(|s| s.id == t.id)
-                {
-                    node.sample_tracks.push(t.clone());
-                }
-            })
-            .or_insert_with(|| ArtistClusterNode {
-                norm,
-                display,
-                locale,
-                score: base_weight + liked_bonus,
-                best_track: t.clone(),
-                best_track_score: track_score,
-                sample_tracks: vec![t.clone()],
-            });
+        if let Some(node) = nodes.get_mut(&norm) {
+            node.score += base_weight.max(4);
+            if track_score > node.best_track_score {
+                node.best_track_score = track_score;
+                node.best_track = t.clone();
+                node.locale = detect_track_locale(&t.title, &t.artist, &t.album);
+            } else if node.best_track.thumbnail_url.is_none() && t.thumbnail_url.is_some() {
+                node.best_track = t.clone();
+            }
+            if node.sample_tracks.len() < 5 && !node.sample_tracks.iter().any(|s| s.id == t.id) {
+                node.sample_tracks.push(t.clone());
+            }
+        } else {
+            let display = primary_artist_display(&t.artist);
+            let locale = detect_track_locale(&t.title, &t.artist, &t.album);
+            nodes.insert(
+                norm.clone(),
+                ArtistClusterNode {
+                    norm,
+                    display,
+                    locale,
+                    score: base_weight + liked_bonus,
+                    best_track: t.clone(),
+                    best_track_score: track_score,
+                    sample_tracks: vec![t.clone()],
+                },
+            );
+        }
     };
 
     // Signal 1: Recent / heavily played taste profile tracks (strongest decay curve)
@@ -3517,6 +3436,7 @@ pub fn expand_recommended_station_tracks(
     library_pool: &[Track],
 ) -> ProviderResult<ExpandedStationTracks> {
     let seed_artist_norm = primary_artist_norm(&station.seed_artist);
+    let seed_title_core = normalize_core_title(&station.seed_title);
     let seed_locale = detect_track_locale(&station.seed_title, &station.seed_artist, "");
 
     // 1. Resolve anchor video ID (existing video_id, or fast YTM Songs lookup for seed song/artist).
@@ -3525,7 +3445,7 @@ pub fn expand_recommended_station_tracks(
         .find(|t| {
             t.youtube_video_id.is_some()
                 && primary_artist_norm(&t.artist) == seed_artist_norm
-                && normalize_core_title(&t.title) == normalize_core_title(&station.seed_title)
+                && normalize_core_title(&t.title) == seed_title_core
         })
         .cloned();
 
@@ -5681,21 +5601,18 @@ fn extract_runs_text(v: Option<&Value>) -> Option<String> {
 }
 
 fn parse_clock_ms(text: &str) -> Option<u64> {
-    let parts: Vec<u64> = text
+    let mut parts = text
         .trim()
         .split(':')
-        .filter_map(|p| p.trim().parse::<u64>().ok())
-        .collect();
-    match parts.as_slice() {
-        [m, s] => Some(
-            m.saturating_mul(60)
-                .saturating_add(*s)
-                .saturating_mul(1_000),
-        ),
-        [h, m, s] => Some(
-            h.saturating_mul(3_600)
-                .saturating_add(m.saturating_mul(60))
-                .saturating_add(*s)
+        .filter_map(|p| p.trim().parse::<u64>().ok());
+    let a = parts.next()?;
+    let b = parts.next()?;
+    match (parts.next(), parts.next()) {
+        (None, None) => Some(a.saturating_mul(60).saturating_add(b).saturating_mul(1_000)),
+        (Some(c), None) => Some(
+            a.saturating_mul(3_600)
+                .saturating_add(b.saturating_mul(60))
+                .saturating_add(c)
                 .saturating_mul(1_000),
         ),
         _ => None,

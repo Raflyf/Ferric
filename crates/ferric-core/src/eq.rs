@@ -238,8 +238,11 @@ impl EqConfig {
 
     /// Export as standard Equalizer APO `.txt` format.
     pub fn to_equalizer_apo(&self) -> String {
-        let mut out = format!(
-            "# Ferric Parametric EQ ({})\nPreamp: {:.2} dB\n",
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(64 + self.bands.len() * 52);
+        let _ = writeln!(
+            out,
+            "# Ferric Parametric EQ ({})\nPreamp: {:.2} dB",
             self.preset_name, self.preamp_db
         );
         for (idx, b) in self.bands.iter().enumerate() {
@@ -249,15 +252,16 @@ impl EqConfig {
                 EqFilterKind::LowShelf => "LSC",
                 EqFilterKind::HighShelf => "HSC",
             };
-            out.push_str(&format!(
-                "Filter {}: {} {} Fc {:.0} Hz Gain {:.2} dB Q {:.2}\n",
+            let _ = writeln!(
+                out,
+                "Filter {}: {} {} Fc {:.0} Hz Gain {:.2} dB Q {:.2}",
                 idx + 1,
                 state,
                 kind,
                 b.freq_hz,
                 b.gain_db,
                 b.q
-            ));
+            );
         }
         out
     }

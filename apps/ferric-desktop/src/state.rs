@@ -318,6 +318,22 @@ impl NavHistory {
     }
 }
 
+pub struct StreamReadyPayload {
+    pub track_id: String,
+    pub video_id: String,
+    pub stream: CachedAudioStream,
+    pub auto_play: bool,
+}
+
+pub struct StationTracksPayload {
+    pub station_id: String,
+    pub tracks: Vec<Track>,
+    pub subtitle: String,
+    pub thumbnail_url: Option<String>,
+    pub left_art: Option<String>,
+    pub right_art: Option<String>,
+}
+
 pub enum BgMessage {
     ScanCompleted(Vec<Track>),
     LyricsLoaded {
@@ -363,12 +379,7 @@ pub enum BgMessage {
     GoogleLoginResult(GoogleLoginOutcome),
     YtmAccountSynced(Box<YtmAccountLibrary>),
     YtmAccountSyncFailed(String),
-    StreamReady {
-        track_id: String,
-        video_id: String,
-        stream: CachedAudioStream,
-        auto_play: bool,
-    },
+    StreamReady(Box<StreamReadyPayload>),
     StreamFailed {
         track_id: String,
         error: String,
@@ -427,14 +438,7 @@ pub enum BgMessage {
         seq: u64,
         stations: Vec<RecommendedStation>,
     },
-    StationTracksLoaded {
-        station_id: String,
-        tracks: Vec<Track>,
-        subtitle: String,
-        thumbnail_url: Option<String>,
-        left_art: Option<String>,
-        right_art: Option<String>,
-    },
+    StationTracksLoaded(Box<StationTracksPayload>),
     StationTracksFailed {
         station_id: String,
         error: String,
@@ -490,7 +494,9 @@ fn is_bogus_album_label(raw: &str) -> bool {
 
 /// Group all library tracks into visual Album cards with real cover artwork.
 pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
-    let mut map: HashMap<String, (bool, CollectionGroup)> = HashMap::new();
+    let mut map: HashMap<String, (bool, CollectionGroup)> =
+        HashMap::with_capacity((tracks.len() / 4).max(8));
+    let mut key_buf = String::with_capacity(64);
     for track in tracks {
         let raw_album = track.album.trim();
         let (is_single, album_name) = if is_bogus_album_label(raw_album) {
@@ -498,37 +504,45 @@ pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
             if fallback.is_empty() {
                 continue;
             }
-            (true, fallback.to_string())
+            (true, fallback)
         } else {
-            (false, raw_album.to_string())
+            (false, raw_album)
         };
-        let key = format!(
-            "{}::{}",
-            album_name.to_ascii_lowercase(),
-            track.artist.trim().to_ascii_lowercase()
-        );
-        let thumb = resolved_track_thumb(track);
-        let entry = map.entry(key).or_insert_with(|| {
-            (
-                is_single,
-                CollectionGroup {
-                    id: format!("album:{}", album_name.to_ascii_lowercase()),
-                    title: album_name.clone(),
-                    subtitle: track.artist.clone(),
-                    kind: YtmCardKind::Album,
-                    thumbnail_url: thumb.clone(),
-                    tracks: Vec::new(),
-                },
-            )
-        });
-        if entry.1.thumbnail_url.is_none() && thumb.is_some() {
-            entry.1.thumbnail_url = thumb;
+        let artist_trimmed = track.artist.trim();
+        key_buf.clear();
+        key_buf.extend(album_name.chars().map(|c| c.to_ascii_lowercase()));
+        key_buf.push_str("::");
+        key_buf.extend(artist_trimmed.chars().map(|c| c.to_ascii_lowercase()));
+
+        if let Some(entry) = map.get_mut(&key_buf) {
+            if entry.1.thumbnail_url.is_none() {
+                entry.1.thumbnail_url = resolved_track_thumb(track);
+            }
+            entry.1.tracks.push(track.clone());
+        } else {
+            let mut id = String::with_capacity(6 + album_name.len());
+            id.push_str("album:");
+            id.extend(album_name.chars().map(|c| c.to_ascii_lowercase()));
+            map.insert(
+                key_buf.clone(),
+                (
+                    is_single,
+                    CollectionGroup {
+                        id,
+                        title: album_name.to_string(),
+                        subtitle: track.artist.clone(),
+                        kind: YtmCardKind::Album,
+                        thumbnail_url: resolved_track_thumb(track),
+                        tracks: vec![track.clone()],
+                    },
+                ),
+            );
         }
-        entry.1.tracks.push(track.clone());
     }
     let mut out: Vec<CollectionGroup> = map
         .into_values()
         .map(|(is_single, mut g)| {
+            g.tracks.shrink_to_fit();
             g.subtitle = if is_single && g.tracks.len() == 1 {
                 format!("{} · Single", g.subtitle)
             } else {
@@ -544,35 +558,49 @@ pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
                 .cmp(&b.title.to_ascii_lowercase())
         })
     });
+    out.shrink_to_fit();
     out
 }
 
 /// Group all library tracks into circular Artist cards with real artwork.
 pub fn build_artist_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
-    let mut map: HashMap<String, CollectionGroup> = HashMap::new();
+    let mut map: HashMap<String, CollectionGroup> =
+        HashMap::with_capacity((tracks.len() / 4).max(8));
+    let mut key_buf = String::with_capacity(48);
     for track in tracks {
-        let artist_name = if track.artist.trim().is_empty() {
-            "Unknown Artist".to_string()
+        let trimmed = track.artist.trim();
+        let artist_name = if trimmed.is_empty() {
+            "Unknown Artist"
         } else {
-            track.artist.trim().to_string()
+            trimmed
         };
-        let key = artist_name.to_ascii_lowercase();
-        let thumb = resolved_track_thumb(track);
-        let entry = map.entry(key.clone()).or_insert_with(|| CollectionGroup {
-            id: format!("artist:{key}"),
-            title: artist_name.clone(),
-            subtitle: String::new(),
-            kind: YtmCardKind::Artist,
-            thumbnail_url: thumb.clone(),
-            tracks: Vec::new(),
-        });
-        if entry.thumbnail_url.is_none() && thumb.is_some() {
-            entry.thumbnail_url = thumb;
+        key_buf.clear();
+        key_buf.extend(artist_name.chars().map(|c| c.to_ascii_lowercase()));
+        if let Some(entry) = map.get_mut(&key_buf) {
+            if entry.thumbnail_url.is_none() {
+                entry.thumbnail_url = resolved_track_thumb(track);
+            }
+            entry.tracks.push(track.clone());
+        } else {
+            let mut id = String::with_capacity(7 + key_buf.len());
+            id.push_str("artist:");
+            id.push_str(&key_buf);
+            map.insert(
+                key_buf.clone(),
+                CollectionGroup {
+                    id,
+                    title: artist_name.to_string(),
+                    subtitle: String::new(),
+                    kind: YtmCardKind::Artist,
+                    thumbnail_url: resolved_track_thumb(track),
+                    tracks: vec![track.clone()],
+                },
+            );
         }
-        entry.tracks.push(track.clone());
     }
     let mut out: Vec<CollectionGroup> = map.into_values().collect();
     for g in &mut out {
+        g.tracks.shrink_to_fit();
         g.subtitle = if g.tracks.len() == 1 {
             "1 song".to_string()
         } else {
@@ -586,51 +614,96 @@ pub fn build_artist_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
                 .cmp(&b.title.to_ascii_lowercase())
         })
     });
+    out.shrink_to_fit();
     out
+}
+
+#[inline]
+fn is_stripped_display_char(c: char) -> bool {
+    let cp = c as u32;
+    c.is_control()
+        || matches!(
+            cp,
+            0x061C
+                | 0x200D..=0x200F
+                | 0x202A..=0x202E
+                | 0x2066..=0x2069
+                | 0xE000..=0xF8FF
+                | 0xFE00..=0xFE0F
+                | 0xFEFF
+                | 0x2600..=0x27BF
+                | 0x1F000..=0x1FFFF
+        )
+}
+
+/// Single-pass text sanitizer + UTF-8 char truncation into a caller-owned scratch `String`
+/// (zero intermediate `String` or `Vec<&str>` allocations).
+pub fn clean_clip_into(
+    raw: &str,
+    max_chars: usize,
+    fallback_if_empty: Option<&str>,
+    out: &mut String,
+) {
+    out.clear();
+    let mut written_chars = 0usize;
+    let mut pending_space = false;
+    let mut truncated = false;
+    let mut truncate_byte_idx = 0usize;
+    let keep_limit = max_chars.saturating_sub(1);
+
+    for ch in raw.chars() {
+        let normalized = if ch == '\n' || ch == '\r' || ch == '\t' {
+            ' '
+        } else if is_stripped_display_char(ch) {
+            continue;
+        } else {
+            ch
+        };
+        if normalized.is_whitespace() {
+            if written_chars > 0 {
+                pending_space = true;
+            }
+            continue;
+        }
+        if pending_space {
+            if written_chars == keep_limit {
+                truncate_byte_idx = out.len();
+            }
+            if written_chars >= max_chars {
+                truncated = true;
+                break;
+            }
+            out.push(' ');
+            written_chars += 1;
+            pending_space = false;
+        }
+        if written_chars == keep_limit {
+            truncate_byte_idx = out.len();
+        }
+        if written_chars >= max_chars {
+            truncated = true;
+            break;
+        }
+        out.push(normalized);
+        written_chars += 1;
+    }
+
+    if truncated {
+        out.truncate(truncate_byte_idx);
+        out.push('…');
+    } else if out.is_empty()
+        && let Some(fb) = fallback_if_empty
+    {
+        out.push_str(fb);
+    }
 }
 
 /// Truncate text cleanly at UTF-8 char boundaries while retaining international scripts
 /// (Latin, Cyrillic, Greek, Japanese/Korean/Chinese, Thai, Arabic, Hebrew, etc.) and
 /// stripping control chars, BiDi spoofing overrides, and color-emoji/private-use codepoints.
 pub fn clip_text(raw: &str, max_chars: usize) -> String {
-    let cleaned: String = raw
-        .chars()
-        .map(|c| {
-            if c == '\n' || c == '\r' || c == '\t' {
-                ' '
-            } else {
-                c
-            }
-        })
-        .filter(|&c| {
-            let cp = c as u32;
-            !c.is_control()
-                && !matches!(
-                    cp,
-                    0x061C
-                        | 0x200D..=0x200F
-                        | 0x202A..=0x202E
-                        | 0x2066..=0x2069
-                        | 0xE000..=0xF8FF
-                        | 0xFE00..=0xFE0F
-                        | 0xFEFF
-                        | 0x2600..=0x27BF
-                        | 0x1F000..=0x1FFFF
-                )
-        })
-        .collect();
-    let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let final_str = if trimmed.is_empty() {
-        "Unknown".to_string()
-    } else {
-        trimmed
-    };
-    if final_str.chars().count() <= max_chars {
-        return final_str;
-    }
-    let take = max_chars.saturating_sub(1);
-    let mut out: String = final_str.chars().take(take).collect();
-    out.push('…');
+    let mut out = String::with_capacity(raw.len().min(max_chars.saturating_mul(4)));
+    clean_clip_into(raw, max_chars, Some("Unknown"), &mut out);
     out
 }
 

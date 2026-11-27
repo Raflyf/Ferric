@@ -46,16 +46,18 @@ pub fn scan_local_folder(root: &Path) -> Vec<Track> {
             tracks.push(track);
         }
     }
+    tracks.shrink_to_fit();
     tracks
 }
 
 /// Read metadata for a single local audio file with clean filename fallback.
 pub fn read_track_metadata(path: &Path) -> Option<Track> {
-    let fallback_title = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Untitled Track")
-        .to_string();
+    let fallback_title = || {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled Track")
+            .to_string()
+    };
     let ext_codec = path
         .extension()
         .and_then(|s| s.to_str())
@@ -76,7 +78,7 @@ pub fn read_track_metadata(path: &Path) -> Option<Track> {
             .and_then(|t| t.title())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or(fallback_title);
+            .unwrap_or_else(fallback_title);
         let artist = tag
             .and_then(|t| t.artist())
             .map(|s| s.trim().to_string())
@@ -115,7 +117,7 @@ pub fn read_track_metadata(path: &Path) -> Option<Track> {
 
     Some(Track {
         id: canonical_id,
-        title: fallback_title,
+        title: fallback_title(),
         artist: "Unknown Artist".to_string(),
         album: "Local Library".to_string(),
         duration_ms: 0,
@@ -138,7 +140,8 @@ const MAX_EMBEDDED_COVER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Extract embedded album art raw bytes (JPEG/PNG) if present in the audio file tags (8 MiB cap).
 pub fn read_embedded_cover_bytes(path: &Path) -> Option<Vec<u8>> {
-    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let opts = lofty::config::ParseOptions::new().read_properties(false);
+    let tagged = Probe::open(path).ok()?.options(opts).read().ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     let pic = tag.pictures().first()?;
     let data = pic.data();

@@ -37,12 +37,15 @@ pub struct SmtcBridge {
     last_playing: Option<bool>,
     last_pos_ms: u64,
     last_sync_at: Option<Instant>,
+    last_attach_attempt: Option<Instant>,
+    attach_failures: u8,
 }
 
 impl SmtcBridge {
     pub fn try_init() -> Self {
         let (tx, rx) = mpsc::channel();
         let controls = create_platform_controls(tx);
+        let failed = controls.is_none();
         Self {
             controls,
             rx,
@@ -56,20 +59,38 @@ impl SmtcBridge {
             last_playing: None,
             last_pos_ms: 0,
             last_sync_at: None,
+            last_attach_attempt: failed.then(Instant::now),
+            attach_failures: u8::from(failed),
         }
     }
 
     pub fn try_attach_late(&mut self) {
-        if self.controls.is_some() {
+        if self.controls.is_some() || self.attach_failures >= 6 {
             return;
         }
+        let backoff = Duration::from_secs(match self.attach_failures {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 5,
+            _ => 10,
+        });
+        if let Some(prev) = self.last_attach_attempt
+            && prev.elapsed() < backoff
+        {
+            return;
+        }
+        self.last_attach_attempt = Some(Instant::now());
         let (tx, rx) = mpsc::channel();
         if let Some(ctrl) = create_platform_controls(tx) {
             self.controls = Some(ctrl);
             self.rx = rx;
+            self.attach_failures = 0;
             if !self.last_title.is_empty() {
                 self.push_cached_metadata();
             }
+        } else {
+            self.attach_failures = self.attach_failures.saturating_add(1);
         }
     }
 
@@ -90,10 +111,10 @@ impl SmtcBridge {
         } else {
             resolve_smtc_cover_url(track)
         };
-        self.last_track_id = track.id.clone();
-        self.last_title = track.title.clone();
-        self.last_artist = track.artist.clone();
-        self.last_album = track.album.clone();
+        self.last_track_id.clone_from(&track.id);
+        self.last_title.clone_from(&track.title);
+        self.last_artist.clone_from(&track.artist);
+        self.last_album.clone_from(&track.album);
         self.last_duration_ms = track.duration_ms;
         self.last_cover_url = cover_url;
         self.cover_is_local_file = is_local;
@@ -126,7 +147,7 @@ impl SmtcBridge {
 
         // If Symphonia resolved exact stream duration after initial metadata push, update EndTime.
         if duration_ms > 0
-            && (duration_ms as i64 - self.last_duration_ms as i64).abs() > 1_000
+            && duration_ms.abs_diff(self.last_duration_ms) > 1_000
             && !self.last_title.is_empty()
         {
             self.last_duration_ms = duration_ms;
@@ -142,7 +163,7 @@ impl SmtcBridge {
         } else {
             self.last_pos_ms
         };
-        let jumped = (position_ms as i64 - expected_pos as i64).abs() > 1_200;
+        let jumped = position_ms.abs_diff(expected_pos) > 1_200;
         let periodic_due = playing && elapsed_ms >= 1_000;
 
         if !state_changed && !jumped && !periodic_due {
@@ -199,15 +220,34 @@ impl SmtcBridge {
     }
 }
 
-fn write_smtc_cover_bytes(bytes: &[u8], cache_dir: &std::path::Path) -> Option<PathBuf> {
-    let ext = if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-    {
-        "png"
-    } else if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
-        "jpg"
+fn detect_image_ext(header: &[u8]) -> Option<&'static str> {
+    if header.len() >= 8 && header[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        Some("png")
+    } else if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
+        Some("jpg")
     } else {
-        return None;
-    };
+        None
+    }
+}
+
+fn copy_cached_smtc_cover(
+    cached_path: &std::path::Path,
+    cache_dir: &std::path::Path,
+) -> Option<PathBuf> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(cached_path).ok()?;
+    let mut hdr = [0u8; 8];
+    let n = f.read(&mut hdr).ok()?;
+    let ext = detect_image_ext(&hdr[..n])?;
+    drop(f);
+    let _ = std::fs::create_dir_all(cache_dir);
+    let dest = cache_dir.join(format!("smtc_now_playing.{ext}"));
+    std::fs::copy(cached_path, &dest).ok()?;
+    Some(dest)
+}
+
+fn write_smtc_cover_bytes(bytes: &[u8], cache_dir: &std::path::Path) -> Option<PathBuf> {
+    let ext = detect_image_ext(bytes)?;
     let _ = std::fs::create_dir_all(cache_dir);
     let dest = cache_dir.join(format!("smtc_now_playing.{ext}"));
     std::fs::write(&dest, bytes).ok()?;
@@ -238,8 +278,7 @@ fn resolve_smtc_cover_url(track: &Track) -> (Option<String>, bool) {
 
     if let Some(ref url) = remote_url
         && let Some(cached_path) = cached_artwork_file(url, &cache_dir)
-        && let Ok(bytes) = std::fs::read(&cached_path)
-        && let Some(typed_path) = write_smtc_cover_bytes(&bytes, &cache_dir)
+        && let Some(typed_path) = copy_cached_smtc_cover(&cached_path, &cache_dir)
     {
         return (Some(format!("file://{}", typed_path.display())), true);
     }

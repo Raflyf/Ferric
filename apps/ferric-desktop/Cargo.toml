@@ -25,7 +25,6 @@ fastrand.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com.workspace = true
 tungstenite.workspace = true
-ureq.workspace = true
 windows.workspace = true
 windows-core.workspace = true
 

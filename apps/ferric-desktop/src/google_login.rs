@@ -981,11 +981,12 @@ mod imp {
         let wv_for_capture = webview.clone();
 
         let handler = GetCookiesCompletedHandler::create(Box::new(move |status, list_opt| {
-            flag_slot.set(false);
             if status.is_err() || dead_slot.get() {
+                flag_slot.set(false);
                 return Ok(());
             }
             let Some(list) = list_opt else {
+                flag_slot.set(false);
                 return Ok(());
             };
 
@@ -993,11 +994,12 @@ mod imp {
             // SAFETY: Enumerate cookies returned by WebView2 CookieManager.
             unsafe {
                 if list.Count(&mut count).is_err() {
+                    flag_slot.set(false);
                     return Ok(());
                 }
             }
 
-            let mut pairs = Vec::with_capacity(count as usize);
+            let mut cookie_header = String::with_capacity((count as usize).saturating_mul(32));
             for i in 0..count {
                 // SAFETY: Release each COM PWSTR immediately after its call succeeds (zero leak on partial failure).
                 unsafe {
@@ -1013,13 +1015,17 @@ mod imp {
                         }
                         let val = take_pwstr(val_raw);
                         if !name.is_empty() {
-                            pairs.push(format!("{name}={val}"));
+                            if !cookie_header.is_empty() {
+                                cookie_header.push_str("; ");
+                            }
+                            cookie_header.push_str(&name);
+                            cookie_header.push('=');
+                            cookie_header.push_str(&val);
                         }
                     }
                 }
             }
 
-            let cookie_header = pairs.join("; ");
             let captured = match target {
                 LoginTarget::GoogleYtm => extract_sapisid_from_cookie(&cookie_header).is_some(),
                 LoginTarget::Spotify => extract_sp_dc(&cookie_header).is_some(),
@@ -1027,14 +1033,15 @@ mod imp {
             if captured {
                 match target {
                     LoginTarget::Spotify => {
-                        // The token endpoint rejects non-browser clients with a 403 edge block,
-                        // so the token is fetched from inside the signed-in page context where
-                        // the request carries the real session cookies and TLS fingerprint.
+                        // Keep `flag_slot` set while `ExecuteScript` runs so timer/navigation ticks
+                        // cannot pile up concurrent JS token fetches.
                         let done_inner = Rc::clone(&done_slot);
                         let dead_inner = Rc::clone(&dead_slot);
+                        let flag_inner = Rc::clone(&flag_slot);
                         let wv_inner = wv_for_capture.clone();
                         let exec = ExecuteScriptCompletedHandler::create(Box::new(
                             move |status, result| {
+                                flag_inner.set(false);
                                 if status.is_err() || dead_inner.get() {
                                     return Ok(());
                                 }
@@ -1055,11 +1062,15 @@ mod imp {
                         ));
                         let script = CoTaskMemPWSTR::from(SPOTIFY_TOKEN_READ_JS);
                         // SAFETY: Execute inside the signed-in page on the STA thread.
-                        unsafe {
-                            let _ = wv_inner.ExecuteScript(*script.as_ref().as_pcwstr(), &exec);
+                        let exec_res =
+                            unsafe { wv_inner.ExecuteScript(*script.as_ref().as_pcwstr(), &exec) };
+                        if exec_res.is_err() {
+                            flag_slot.set(false);
                         }
+                        return Ok(());
                     }
                     LoginTarget::GoogleYtm => {
+                        flag_slot.set(false);
                         emit_once(&done_slot, LoginPayload::Cookie(cookie_header));
                         if !dead_slot.get() {
                             // SAFETY: Auto-close once authenticated cookies are captured.
@@ -1067,9 +1078,11 @@ mod imp {
                                 let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                             }
                         }
+                        return Ok(());
                     }
                 }
             }
+            flag_slot.set(false);
             Ok(())
         }));
 

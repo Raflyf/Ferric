@@ -6,7 +6,11 @@ use lofty::tag::ItemKey;
 use serde::Deserialize;
 use std::path::Path;
 
-const FERRIC_LYRICS_USER_AGENT: &str = "Ferric/0.1.0 (https://github.com/Raflyf/Ferric)";
+const FERRIC_LYRICS_USER_AGENT: &str = concat!(
+    "Ferric/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/Raflyf/Ferric)"
+);
 const MAX_LYRICS_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_PLAIN_DURATION_MS: u64 = 180_000;
 
@@ -81,13 +85,14 @@ impl SyncedLyrics {
         let raw = raw.trim_start_matches('\u{feff}');
         let source = source_name.into();
         let mut lines = Vec::new();
+        let mut timestamps = Vec::with_capacity(4);
 
         for row in raw.lines() {
             let mut rest = row.trim();
             if !rest.starts_with('[') {
                 continue;
             }
-            let mut timestamps = Vec::new();
+            timestamps.clear();
             while let Some(after_open) = rest.strip_prefix('[') {
                 let Some((tag, remainder)) = after_open.split_once(']') else {
                     break;
@@ -106,7 +111,7 @@ impl SyncedLyrics {
             if text.is_empty() {
                 continue;
             }
-            for ts_ms in timestamps {
+            for &ts_ms in &timestamps {
                 lines.push(LyricLine {
                     timestamp_ms: ts_ms,
                     text: text.to_string(),

@@ -337,36 +337,84 @@ fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<String, D::Error
 where
     D: Deserializer<'de>,
 {
-    let val = serde_json::Value::deserialize(deserializer)?;
-    match val {
-        serde_json::Value::String(s) => Ok(s),
-        serde_json::Value::Number(n) => Ok(n.to_string()),
-        other => Ok(other.to_string()),
+    struct StringOrIntVisitor;
+    impl serde::de::Visitor<'_> for StringOrIntVisitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a string or integer")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(v.to_owned())
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(String::new())
+        }
     }
+    deserializer.deserialize_any(StringOrIntVisitor)
 }
 
 fn deserialize_vec_or_single<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
-    T: for<'a> Deserialize<'a>,
+    T: Deserialize<'de>,
 {
-    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
-    let Some(val) = val else {
-        return Ok(Vec::new());
-    };
-    match val {
-        serde_json::Value::Null => Ok(Vec::new()),
-        serde_json::Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(serde_json::from_value(item).map_err(serde::de::Error::custom)?);
+    struct VecOrSingleVisitor<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for VecOrSingleVisitor<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a sequence, single object, or null")
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(item) = seq.next_element()? {
+                out.push(item);
             }
+            out.shrink_to_fit();
             Ok(out)
         }
-        single => Ok(vec![
-            serde_json::from_value(single).map_err(serde::de::Error::custom)?,
-        ]),
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            let single = T::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(vec![single])
+        }
     }
+    deserializer.deserialize_any(VecOrSingleVisitor(std::marker::PhantomData))
 }
 
 fn deserialize_first_isrc<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -521,7 +569,7 @@ fn fetch_subsonic_response(agent: &ureq::Agent, url: &str) -> ProviderResult<Sub
     let resp = agent
         .get(url)
         .header("Accept", "application/json")
-        .header("User-Agent", "Ferric/0.1.0")
+        .header("User-Agent", concat!("Ferric/", env!("CARGO_PKG_VERSION")))
         .call()
         .map_err(|e| ProviderError::Http(format!("Subsonic request failed: {e}")))?;
 

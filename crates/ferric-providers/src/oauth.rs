@@ -683,7 +683,7 @@ fn post_token_form(
         .post(endpoint)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
-        .header("User-Agent", "Ferric/0.1.0")
+        .header("User-Agent", concat!("Ferric/", env!("CARGO_PKG_VERSION")))
         .send(form_body.as_bytes())
         .map_err(|e| ProviderError::Http(format!("Token request failed: {e}")))?;
 
@@ -732,7 +732,7 @@ fn get_bearer_json<T: for<'de> Deserialize<'de>>(
         .get(url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Accept", "application/json")
-        .header("User-Agent", "Ferric/0.1.0")
+        .header("User-Agent", concat!("Ferric/", env!("CARGO_PKG_VERSION")))
         .call()
         .map_err(|e| ProviderError::Http(format!("API request failed: {e}")))?;
 
@@ -796,7 +796,7 @@ fn get_spotify_bearer_json<T: for<'de> Deserialize<'de>>(
             .get(url)
             .header("Authorization", format!("Bearer {access_token}"))
             .header("Accept", "application/json")
-            .header("User-Agent", "Ferric/0.1.0")
+            .header("User-Agent", concat!("Ferric/", env!("CARGO_PKG_VERSION")))
             .call()
             .map_err(|e| {
                 SpotifyFetchError::Other(ProviderError::Http(format!("API request failed: {e}")))
@@ -1551,7 +1551,7 @@ fn get_bearer_json_conditional<T: for<'de> Deserialize<'de>>(
         .get(url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Accept", "application/json")
-        .header("User-Agent", "Ferric/0.1.0");
+        .header("User-Agent", concat!("Ferric/", env!("CARGO_PKG_VERSION")));
     if let Some(etag) = if_none_match.filter(|s| !s.is_empty()) {
         req = req.header("If-None-Match", etag);
     }

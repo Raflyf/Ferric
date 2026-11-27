@@ -9,7 +9,7 @@ use ferric_core::models::{DiscordRpcSettings, DiscordStatusFormat};
 use serde_json::{Value, json};
 #[cfg(target_os = "windows")]
 use std::io::{Read, Write};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -53,19 +53,19 @@ pub struct DiscordTrackSnapshot {
 
 enum RpcCommand {
     Configure(DiscordRpcSettings),
-    UpdatePlayback(Option<DiscordTrackSnapshot>),
+    UpdatePlayback(Option<Box<DiscordTrackSnapshot>>),
     Shutdown,
 }
 
 pub struct DiscordRpcBridge {
-    tx: Sender<RpcCommand>,
+    tx: SyncSender<RpcCommand>,
     status: Arc<Mutex<String>>,
     last_track_key: Option<(String, String, bool, u64)>,
 }
 
 impl DiscordRpcBridge {
     pub fn start(initial: DiscordRpcSettings) -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(16);
         let init_status = initial_status_label(&initial).to_string();
         let status = Arc::new(Mutex::new(init_status));
         let status_bg = Arc::clone(&status);
@@ -84,21 +84,33 @@ impl DiscordRpcBridge {
 
     pub fn configure(&mut self, cfg: DiscordRpcSettings) {
         self.last_track_key = None;
-        let _ = self.tx.send(RpcCommand::Configure(cfg));
+        let _ = self.tx.try_send(RpcCommand::Configure(cfg));
     }
 
     pub fn update_playback(&mut self, snap: Option<DiscordTrackSnapshot>) {
-        // Deduplicate high-frequency ticks: only emit on track/state change or seek drift >= 3s.
-        let next_key = snap.as_ref().map(|s| {
-            let now_s = unix_now_secs();
-            let start_s = now_s.saturating_sub(s.position_ms / 1000);
-            (s.title.clone(), s.artist.clone(), s.is_playing, start_s / 3)
-        });
-        if next_key == self.last_track_key {
-            return;
+        // Deduplicate high-frequency ticks without allocating Strings on cache hits:
+        // only emit on track/state change or seek drift >= 3s.
+        match (&snap, &self.last_track_key) {
+            (None, None) => return,
+            (Some(s), Some((prev_t, prev_a, prev_p, prev_start_s))) => {
+                let start_s = unix_now_secs().saturating_sub(s.position_ms / 1000);
+                if *prev_p == s.is_playing
+                    && *prev_t == s.title
+                    && *prev_a == s.artist
+                    && (!s.is_playing || start_s.abs_diff(*prev_start_s) < 3)
+                {
+                    return;
+                }
+            }
+            _ => {}
         }
-        self.last_track_key = next_key;
-        let _ = self.tx.send(RpcCommand::UpdatePlayback(snap));
+        self.last_track_key = snap.as_ref().map(|s| {
+            let start_s = unix_now_secs().saturating_sub(s.position_ms / 1000);
+            (s.title.clone(), s.artist.clone(), s.is_playing, start_s)
+        });
+        let _ = self
+            .tx
+            .try_send(RpcCommand::UpdatePlayback(snap.map(Box::new)));
     }
 
     pub fn status_text(&self) -> String {
@@ -111,7 +123,7 @@ impl DiscordRpcBridge {
 
 impl Drop for DiscordRpcBridge {
     fn drop(&mut self) {
-        let _ = self.tx.send(RpcCommand::Shutdown);
+        let _ = self.tx.try_send(RpcCommand::Shutdown);
     }
 }
 
@@ -319,6 +331,7 @@ pub fn encode_ipc_frame(opcode: u32, payload: &Value) -> Vec<u8> {
 #[cfg(target_os = "windows")]
 struct DiscordPipe {
     file: std::fs::File,
+    read_buf: Vec<u8>,
 }
 
 #[cfg(target_os = "windows")]
@@ -344,7 +357,10 @@ impl DiscordPipe {
                         last_err = format!("IPC write failed: {e}");
                         continue;
                     }
-                    let mut pipe = Self { file };
+                    let mut pipe = Self {
+                        file,
+                        read_buf: Vec::with_capacity(2048),
+                    };
                     match pipe.read_frame() {
                         Ok((OP_FRAME, val)) => {
                             if val.get("evt").and_then(Value::as_str) == Some("ERROR") {
@@ -393,13 +409,17 @@ impl DiscordPipe {
         if len > 256 * 1024 {
             return Err("IPC frame exceeded safety limit".to_string());
         }
-        let mut buf = vec![0u8; len];
+        self.read_buf.resize(len, 0);
         if len > 0 {
             self.file
-                .read_exact(&mut buf)
+                .read_exact(&mut self.read_buf)
                 .map_err(|e| format!("IPC read body error: {e}"))?;
         }
-        let val = serde_json::from_slice(&buf).unwrap_or(Value::Null);
+        let val = serde_json::from_slice(&self.read_buf).unwrap_or(Value::Null);
+        if self.read_buf.capacity() > 16 * 1024 {
+            self.read_buf.clear();
+            self.read_buf.shrink_to(2048);
+        }
         Ok((op, val))
     }
 
@@ -549,7 +569,7 @@ fn worker_loop(rx: Receiver<RpcCommand>, mut cfg: DiscordRpcSettings, status: Ar
                 send_now(&mut pipe, &cfg, current_snap.as_ref(), &mut nonce, &status);
             }
             RpcCommand::UpdatePlayback(snap) => {
-                current_snap = snap;
+                current_snap = snap.map(|b| *b);
                 if cfg.enabled {
                     send_now(&mut pipe, &cfg, current_snap.as_ref(), &mut nonce, &status);
                 }

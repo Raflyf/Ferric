@@ -23,15 +23,49 @@ impl PlayQueue {
 
     /// Append tracks to the end of the active queue (skipping duplicates by ID).
     pub fn append_tracks(&mut self, extra: Vec<Track>) -> usize {
-        let mut added = 0usize;
+        if extra.is_empty() {
+            return 0;
+        }
+        if self.tracks.len().saturating_mul(extra.len()) < 128 {
+            let mut added = 0usize;
+            self.tracks.reserve(extra.len());
+            self.order.reserve(extra.len());
+            for t in extra {
+                if self.tracks.iter().any(|existing| existing.id == t.id) {
+                    continue;
+                }
+                let idx = self.tracks.len();
+                self.tracks.push(t);
+                self.order.push(idx);
+                added += 1;
+            }
+            return added;
+        }
+
+        let existing: std::collections::HashSet<&str> =
+            self.tracks.iter().map(|t| t.id.as_str()).collect();
+        let mut batch_seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(extra.len());
+        let mut to_add = Vec::with_capacity(extra.len());
         for t in extra {
-            if self.tracks.iter().any(|existing| existing.id == t.id) {
+            if existing.contains(t.id.as_str()) || !batch_seen.insert(t.id.clone()) {
                 continue;
             }
+            to_add.push(t);
+        }
+        drop(existing);
+        drop(batch_seen);
+
+        let added = to_add.len();
+        if added == 0 {
+            return 0;
+        }
+        self.tracks.reserve(added);
+        self.order.reserve(added);
+        for t in to_add {
             let idx = self.tracks.len();
             self.tracks.push(t);
             self.order.push(idx);
-            added += 1;
         }
         added
     }
@@ -176,7 +210,11 @@ impl PlayQueue {
                 *idx = mapped;
             }
         }
+        new_tracks.shrink_to_fit();
         self.tracks = new_tracks;
+        if self.order.capacity() > self.order.len().saturating_mul(2).max(64) {
+            self.order.shrink_to_fit();
+        }
     }
 
     /// Jump directly to the `offset`-th upcoming track (0 = very next song in Up Next,

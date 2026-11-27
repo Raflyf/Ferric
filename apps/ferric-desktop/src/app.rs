@@ -19,7 +19,8 @@ use crate::smtc::{SmtcBridge, SmtcCommand};
 use crate::state::{
     BgMessage, CollectionGroup, DetailViewState, LibraryFilter, MainPage, NavEntry, NavHistory,
     PlaylistSortOrder, PlaylistSourceFilter, SearchFilter, SettingsTab, SleepTimerMode, SortField,
-    build_album_groups, build_artist_groups, clip_text, dir_size_bytes, format_bytes_mb,
+    StationTracksPayload, StreamReadyPayload, build_album_groups, build_artist_groups, clip_text,
+    dir_size_bytes, format_bytes_mb,
 };
 use crate::track_list::{TrackListAction, TrackListScope, TrackListWidgetRefExt};
 use crate::video_player::{NativeVideoPlayer, VideoViewportRect};
@@ -3122,7 +3123,7 @@ live_design! {
                                             flow: Down, spacing: 8,
                                             <View> {
                                                 width: Fill, height: Fit, flow: Right, align: { y: 0.5 },
-                                                lbl_t_st_update = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Software Updates (Ferric v0.1.0)" }
+                                                lbl_t_st_update = <Label> { width: Fill, draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Software Updates (Ferric)" }
                                                 auto_update_toggle = <FerricToggle> { is_on: true }
                                             }
                                             update_status_lbl = <Label> { draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.8 } }, text: "SHA-256 verified GitHub Releases MSI updater" }
@@ -4084,6 +4085,8 @@ pub struct App {
     artwork: Option<ArtworkCache>,
     #[rust]
     artwork_snapshot: Rc<HashMap<String, CachedArtwork>>,
+    #[rust]
+    artwork_snapshot_dirty: bool,
     #[rust]
     all_tracks: Vec<Track>,
     #[rust]
@@ -5795,16 +5798,41 @@ impl App {
         self.navigate_to(cx, entry.page, false);
     }
 
+    #[inline]
+    fn is_track_list_page(page: MainPage) -> bool {
+        matches!(
+            page,
+            MainPage::Songs | MainPage::Recents | MainPage::Search | MainPage::Detail
+        )
+    }
+
+    fn ensure_artwork_snapshot(&mut self) {
+        if self.artwork_snapshot_dirty {
+            if let Some(cache) = &self.artwork {
+                self.artwork_snapshot = Rc::new(cache.snapshot());
+            }
+            self.artwork_snapshot_dirty = false;
+        }
+    }
+
     fn navigate_to(&mut self, cx: &mut Cx, target: MainPage, push_history: bool) {
         if self.video_open {
             self.close_native_video_stage_inner(cx, false);
         }
         let prev_page = self.active_page;
         if prev_page != target {
+            if Self::is_track_list_page(prev_page) && !Self::is_track_list_page(target) {
+                // Drop extra Texture handles held by the TrackList snapshot before reclaiming VRAM.
+                self.artwork_snapshot = Rc::new(HashMap::new());
+                self.artwork_snapshot_dirty = true;
+            }
             self.unbind_page_cover_textures(cx, prev_page);
             cx.textures.free_unused_textures();
         }
         self.active_page = target;
+        if Self::is_track_list_page(target) {
+            self.ensure_artwork_snapshot();
+        }
         if push_history && let Some(hist) = &mut self.nav_history {
             let det = if target == MainPage::Detail {
                 Some(self.detail_state.clone())
@@ -6562,8 +6590,9 @@ impl App {
     }
 
     fn refresh_all_artwork_slots_inner(&mut self, cx: &mut Cx, active_cover_changed: bool) {
-        if let Some(cache) = &self.artwork {
-            self.artwork_snapshot = Rc::new(cache.snapshot());
+        self.artwork_snapshot_dirty = true;
+        if Self::is_track_list_page(self.active_page) {
+            self.ensure_artwork_snapshot();
         }
         if active_cover_changed {
             self.apply_adaptive_accent_live(cx);
@@ -9088,17 +9117,19 @@ impl App {
                     } else {
                         bundle.playlist.description
                     };
-                    let _ = tx.send(BgMessage::StationTracksLoaded {
-                        station_id,
-                        tracks: bundle.tracks,
-                        subtitle: sub,
-                        thumbnail_url: bundle
-                            .playlist
-                            .thumbnail_url
-                            .or(station.center_art_url.clone()),
-                        left_art: None,
-                        right_art: None,
-                    });
+                    let _ = tx.send(BgMessage::StationTracksLoaded(Box::new(
+                        StationTracksPayload {
+                            station_id,
+                            tracks: bundle.tracks,
+                            subtitle: sub,
+                            thumbnail_url: bundle
+                                .playlist
+                                .thumbnail_url
+                                .or(station.center_art_url.clone()),
+                            left_art: None,
+                            right_art: None,
+                        },
+                    )));
                     return;
                 }
                 let pub_url = format!("https://open.spotify.com/playlist/{pid}");
@@ -9110,14 +9141,16 @@ impl App {
                     } else {
                         pl.description
                     };
-                    let _ = tx.send(BgMessage::StationTracksLoaded {
-                        station_id,
-                        tracks,
-                        subtitle: sub,
-                        thumbnail_url: pl.thumbnail_url.or(station.center_art_url.clone()),
-                        left_art: None,
-                        right_art: None,
-                    });
+                    let _ = tx.send(BgMessage::StationTracksLoaded(Box::new(
+                        StationTracksPayload {
+                            station_id,
+                            tracks,
+                            subtitle: sub,
+                            thumbnail_url: pl.thumbnail_url.or(station.center_art_url.clone()),
+                            left_art: None,
+                            right_art: None,
+                        },
+                    )));
                     return;
                 }
             }
@@ -9131,14 +9164,16 @@ impl App {
                             .first()
                             .and_then(|t| t.thumbnail_url.clone())
                     });
-                    let _ = tx.send(BgMessage::StationTracksLoaded {
-                        station_id,
-                        tracks: expanded.tracks,
-                        subtitle: expanded.subtitle,
-                        thumbnail_url: thumb,
-                        left_art: expanded.left_art,
-                        right_art: expanded.right_art,
-                    });
+                    let _ = tx.send(BgMessage::StationTracksLoaded(Box::new(
+                        StationTracksPayload {
+                            station_id,
+                            tracks: expanded.tracks,
+                            subtitle: expanded.subtitle,
+                            thumbnail_url: thumb,
+                            left_art: expanded.left_art,
+                            right_art: expanded.right_art,
+                        },
+                    )));
                 }
                 Err(err) => {
                     let _ = tx.send(BgMessage::StationTracksFailed {
@@ -11268,16 +11303,18 @@ impl App {
             .add_filter("M3U8 Playlist", &["m3u8", "m3u"])
             .save_file()
         {
-            let mut out = String::from("#EXTM3U\n");
+            use std::fmt::Write as _;
+            let mut out = String::with_capacity(64 + self.detail_state.tracks.len() * 96);
+            out.push_str("#EXTM3U\n");
             for t in &self.detail_state.tracks {
                 let secs = i64::try_from(t.duration_ms / 1000).unwrap_or(i64::MAX);
                 let artist = t.artist.replace(['\r', '\n'], " ");
                 let title = t.title.replace(['\r', '\n'], " ");
-                out.push_str(&format!("#EXTINF:{secs},{artist} - {title}\n"));
+                let _ = writeln!(out, "#EXTINF:{secs},{artist} - {title}");
                 if let Some(p) = &t.path {
                     let path_line = p.to_string_lossy().replace(['\r', '\n'], "");
                     if !path_line.is_empty() {
-                        out.push_str(&format!("{path_line}\n"));
+                        let _ = writeln!(out, "{path_line}");
                     }
                 } else if let Some(vid) = &t.youtube_video_id {
                     let vid_clean: String = vid
@@ -11285,7 +11322,7 @@ impl App {
                         .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
                         .collect();
                     if !vid_clean.is_empty() {
-                        out.push_str(&format!("https://music.youtube.com/watch?v={vid_clean}\n"));
+                        let _ = writeln!(out, "https://music.youtube.com/watch?v={vid_clean}");
                     }
                 }
             }
@@ -11352,12 +11389,12 @@ impl App {
 
             match outcome {
                 Ok((video_id, stream)) => {
-                    let _ = tx.send(BgMessage::StreamReady {
+                    let _ = tx.send(BgMessage::StreamReady(Box::new(StreamReadyPayload {
                         track_id,
                         video_id,
                         stream,
                         auto_play,
-                    });
+                    })));
                 }
                 Err(error) => {
                     let _ = tx.send(BgMessage::StreamFailed {
@@ -13009,6 +13046,7 @@ impl App {
                     // so `free_unused_textures()` immediately releases every single GPU cover texture.
                     self.unbind_all_cover_textures_for_tray(cx);
                     self.artwork_snapshot = Rc::new(HashMap::new());
+                    self.artwork_snapshot_dirty = true;
                     if let Some(cache) = &mut self.artwork {
                         cache.clear_all_for_tray(cx);
                         self.artwork_cleared_for_tray = true;
@@ -13830,14 +13868,15 @@ impl App {
                         }
                     }
                 }
-                BgMessage::StationTracksLoaded {
-                    station_id,
-                    tracks,
-                    subtitle,
-                    thumbnail_url,
-                    left_art,
-                    right_art,
-                } => {
+                BgMessage::StationTracksLoaded(payload) => {
+                    let StationTracksPayload {
+                        station_id,
+                        tracks,
+                        subtitle,
+                        thumbnail_url,
+                        left_art,
+                        right_art,
+                    } = *payload;
                     if let Some(st) = self
                         .recommended_stations
                         .iter_mut()
@@ -13893,12 +13932,13 @@ impl App {
                         self.show_toast(cx, "Could not load station tracks — retry shortly");
                     }
                 }
-                BgMessage::StreamReady {
-                    track_id,
-                    video_id,
-                    stream,
-                    auto_play,
-                } => {
+                BgMessage::StreamReady(payload) => {
+                    let StreamReadyPayload {
+                        track_id,
+                        video_id,
+                        stream,
+                        auto_play,
+                    } = *payload;
                     if self.prefetch_stream_track_id.as_deref() == Some(track_id.as_str()) {
                         self.prefetch_stream_track_id = None;
                     }
@@ -14400,13 +14440,15 @@ impl App {
             }
             let discord_changed = self.last_discord_track_id != cur_track_key
                 || self.last_discord_playing != Some(snap.is_playing);
-            if discord_changed
-                || self
-                    .last_discord_tick_at
-                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+            if self.discord_settings.enabled
+                && (discord_changed
+                    || self
+                        .last_discord_tick_at
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(1)))
             {
                 self.last_discord_tick_at = Some(Instant::now());
-                self.last_discord_track_id = cur_track_key.to_string();
+                self.last_discord_track_id.clear();
+                self.last_discord_track_id.push_str(cur_track_key);
                 self.last_discord_playing = Some(snap.is_playing);
                 if let Some(cur) = self.queue.current() {
                     if let Some(rpc) = &mut self.discord_rpc {
@@ -14426,11 +14468,13 @@ impl App {
                 if let Some(rpc) = &self.discord_rpc {
                     let st = rpc.status_text();
                     if st != self.last_discord_status {
-                        self.last_discord_status = st.clone();
+                        self.last_discord_status = st;
                         if window_hidden {
                             self.ui_dirty_while_hidden = true;
                         } else {
-                            self.ui.label(id!(discord_status_lbl)).set_text(cx, &st);
+                            self.ui
+                                .label(id!(discord_status_lbl))
+                                .set_text(cx, &self.last_discord_status);
                         }
                     }
                 }
@@ -17748,15 +17792,29 @@ impl AppMain for App {
             }
         }
 
-        let snap_opt = self.audio.as_ref().map(|a| a.telemetry());
+        let on_track_list = Self::is_track_list_page(self.active_page);
+        if on_track_list {
+            self.ensure_artwork_snapshot();
+        }
+        let snap_opt = if on_track_list {
+            self.audio.as_ref().map(|a| a.telemetry())
+        } else {
+            None
+        };
         let avg_lvl = snap_opt.map_or(0.5_f32, |s| {
             ((s.spectrum_bins[0] + s.spectrum_bins[1]) as f32 / 2_000.0).clamp(0.1, 1.0)
         });
-        self.missing_art_queue.borrow_mut().clear();
+        if !self.missing_art_queue.borrow().is_empty() {
+            self.missing_art_queue.borrow_mut().clear();
+        }
         let pal = self.adaptive_palette();
         let props = TrackListScope {
             tracks: self.active_track_list(),
-            active_track_id: self.queue.current().map(|t| t.id.clone()),
+            active_track_id: if on_track_list {
+                self.queue.current().map(|t| t.id.clone())
+            } else {
+                None
+            },
             is_playing: snap_opt.is_some_and(|s| s.is_playing),
             audio_level: avg_lvl,
             accent: rgba_to_vec4(pal.accent),
@@ -17776,13 +17834,14 @@ impl AppMain for App {
         }
 
         // Drain lazily requested artwork for scrolled TrackList rows beyond initial batch
-        let lazy_tracks: Vec<Track> = self.missing_art_queue.borrow_mut().drain(..).collect();
-        if !self.window_hidden_or_minimized
-            && !lazy_tracks.is_empty()
-            && let Some(cache) = &mut self.artwork
-        {
-            for t in &lazy_tracks {
-                let _ = cache.request_for_track(t);
+        if !self.missing_art_queue.borrow().is_empty() {
+            let lazy_tracks: Vec<Track> = self.missing_art_queue.borrow_mut().drain(..).collect();
+            if !self.window_hidden_or_minimized
+                && let Some(cache) = &mut self.artwork
+            {
+                for t in &lazy_tracks {
+                    let _ = cache.request_for_track(t);
+                }
             }
         }
 
@@ -17814,17 +17873,29 @@ fn view_clicked(view: &ViewRef, actions: &Actions) -> bool {
 }
 
 fn clean_display_text(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .filter(|&c| {
-            let cp = c as u32;
-            !matches!(
-                cp,
-                0x200D | 0xFE00..=0xFE0F | 0x2600..=0x27BF | 0x1F000..=0x1FFFF
-            )
-        })
-        .collect();
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for c in s.chars() {
+        let cp = c as u32;
+        if matches!(
+            cp,
+            0x200D | 0xFE00..=0xFE0F | 0x2600..=0x27BF | 0x1F000..=0x1FFFF
+        ) {
+            continue;
+        }
+        if c.is_whitespace() {
+            if !out.is_empty() {
+                pending_space = true;
+            }
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn clear_flat_cache_files(dir: &std::path::Path) {

@@ -249,6 +249,19 @@ mod win_impl {
         last_title: String,
     }
 
+    impl Drop for TaskbarThumbState {
+        fn drop(&mut self) {
+            // SAFETY: Releases HICON handles created via `CreateIconIndirect` exactly once.
+            unsafe {
+                for ic in [self.ico_prev, self.ico_play, self.ico_pause, self.ico_next] {
+                    if !ic.is_invalid() {
+                        let _ = DestroyIcon(ic);
+                    }
+                }
+            }
+        }
+    }
+
     thread_local! {
         static TASKBAR_STATE: RefCell<Option<TaskbarThumbState>> = const { RefCell::new(None) };
         static COM_INITIALIZED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -997,7 +1010,10 @@ mod win_impl {
         if len <= 0 {
             return false;
         }
-        String::from_utf16_lossy(&buf[..len as usize]) == "FerricMainWindow"
+        buf[..len as usize]
+            .iter()
+            .copied()
+            .eq("FerricMainWindow".encode_utf16())
     }
 
     fn push_event(ev: TrayEvent) {
@@ -1327,13 +1343,8 @@ mod win_impl {
                     (None, false, String::new())
                 }
             });
-            if let Some(old) = old_state {
-                for ic in [old.ico_prev, old.ico_play, old.ico_pause, old.ico_next] {
-                    if !ic.is_invalid() {
-                        let _ = DestroyIcon(ic);
-                    }
-                }
-            }
+            // Dropping `old_state` runs `TaskbarThumbState::drop` to release previous HICONs.
+            drop(old_state);
             let ico_prev = create_media_hicon(ThumbIconKind::Prev);
             let ico_play = create_media_hicon(ThumbIconKind::Play);
             let ico_pause = create_media_hicon(ThumbIconKind::Pause);
@@ -1467,16 +1478,7 @@ mod win_impl {
     fn destroy_taskbar_thumbbar() {
         let taken =
             TASKBAR_STATE.with(|cell| cell.try_borrow_mut().ok().and_then(|mut g| g.take()));
-        if let Some(st) = taken {
-            // SAFETY: Releases HICONs created via CreateIconIndirect on shutdown.
-            unsafe {
-                for ic in [st.ico_prev, st.ico_play, st.ico_pause, st.ico_next] {
-                    if !ic.is_invalid() {
-                        let _ = DestroyIcon(ic);
-                    }
-                }
-            }
-        }
+        drop(taken);
     }
 
     fn apply_window_icon(hwnd: HWND) {
@@ -1662,8 +1664,7 @@ mod win_impl {
                 hIcon: icon,
                 ..Default::default()
             };
-            let wide: Vec<u16> = tooltip.encode_utf16().take(126).collect();
-            for (i, ch) in wide.into_iter().enumerate() {
+            for (i, ch) in tooltip.encode_utf16().take(126).enumerate() {
                 nid.szTip[i] = ch;
             }
             if TRAY_ADDED.load(Ordering::Acquire) {

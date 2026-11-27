@@ -1,6 +1,6 @@
 use ferric_mobile_ffi::{
-    FerricMobileCore, FfiBackgroundMode, FfiContentOpener, FfiError, FfiEventSink,
-    FfiSecretCipher, FfiTelemetry, FfiTrack,
+    FerricMobileCore, FfiBackgroundMode, FfiContentOpener, FfiError, FfiEventSink, FfiSecretCipher,
+    FfiTelemetry, FfiTrack,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,7 +20,7 @@ struct TestOpener;
 impl FfiContentOpener for TestOpener {
     fn open_fd(&self, uri: String) -> Result<i32, FfiError> {
         Err(FfiError::Io {
-            message: format!("test opener cannot open {uri}"),
+            reason: format!("test opener cannot open {uri}"),
         })
     }
 }

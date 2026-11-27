@@ -24,33 +24,31 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, Error, uniffi::Error)]
 pub enum FfiError {
-    #[error("{message}")]
-    Internal { message: String },
-    #[error("{message}")]
-    SecretProtection { message: String },
-    #[error("{message}")]
-    Io { message: String },
+    #[error("{reason}")]
+    Internal { reason: String },
+    #[error("{reason}")]
+    SecretProtection { reason: String },
+    #[error("{reason}")]
+    Io { reason: String },
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for FfiError {
     fn from(err: uniffi::UnexpectedUniFFICallbackError) -> Self {
-        Self::Internal {
-            message: err.reason,
-        }
+        Self::Internal { reason: err.reason }
     }
 }
 
 impl From<ControllerError> for FfiError {
     fn from(err: ControllerError) -> Self {
         match err {
-            ControllerError::Core(ferric_core::CoreError::SecretProtection(message)) => {
-                Self::SecretProtection { message }
+            ControllerError::Core(ferric_core::CoreError::SecretProtection(reason)) => {
+                Self::SecretProtection { reason }
             }
             ControllerError::Io(e) => Self::Io {
-                message: e.to_string(),
+                reason: e.to_string(),
             },
             other => Self::Internal {
-                message: other.to_string(),
+                reason: other.to_string(),
             },
         }
     }

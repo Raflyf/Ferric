@@ -1027,7 +1027,10 @@ impl LibraryDb {
         Ok(())
     }
 
-    pub fn get_offline_download(&self, track_id: &str) -> CoreResult<Option<OfflineDownloadRecord>> {
+    pub fn get_offline_download(
+        &self,
+        track_id: &str,
+    ) -> CoreResult<Option<OfflineDownloadRecord>> {
         let row = self
             .conn
             .query_row(
@@ -1147,7 +1150,9 @@ impl LibraryDb {
             prev_day = Some(d);
         }
 
-        let today = now_unix_secs.saturating_add(tz_offset_secs).div_euclid(86_400);
+        let today = now_unix_secs
+            .saturating_add(tz_offset_secs)
+            .div_euclid(86_400);
         let mut current_streak = 0u32;
         if let Some(&last_day) = day_set.iter().next_back()
             && (last_day == today || last_day == today - 1)
@@ -1753,7 +1758,10 @@ mod tests {
                 .map(|r| r.size_bytes),
             Some(4_200_000)
         );
-        assert_eq!(db.offline_downloads_total_bytes().expect("total"), 4_200_000);
+        assert_eq!(
+            db.offline_downloads_total_bytes().expect("total"),
+            4_200_000
+        );
         assert_eq!(db.list_offline_downloads().expect("list dls").len(), 1);
         db.delete_offline_download("yt:video:abc12345678")
             .expect("delete dl");

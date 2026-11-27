@@ -700,7 +700,8 @@ mod tests {
         assert!(json.contains("\"NativeAcrylic\""));
 
         // Desktop v0.1.2 JSON lacking new mobile fields must deserialize cleanly with defaults.
-        let desktop_json = r#"{"name":"AMOLED Black","background_mode":"AmoledSolid","acrylic_enabled":false}"#;
+        let desktop_json =
+            r#"{"name":"AMOLED Black","background_mode":"AmoledSolid","acrylic_enabled":false}"#;
         let parsed: ThemeConfig = serde_json::from_str(desktop_json).expect("parse desktop theme");
         assert_eq!(parsed.font_family, "Inter");
         assert_eq!(parsed.player_layout, "standard");

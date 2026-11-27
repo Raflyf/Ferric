@@ -5,8 +5,8 @@ use crate::engine::{AudioTelemetry, RingFrame, pop_epoch_frame};
 use crate::{AudioError, AudioResult};
 use oboe::{
     AudioOutputCallback, AudioOutputStream, AudioOutputStreamSafe, AudioStream, AudioStreamAsync,
-    AudioStreamBase, AudioStreamBuilder, ContentType, DataCallbackResult, Output,
-    PerformanceMode, SharingMode, Stereo, Usage,
+    AudioStreamBase, AudioStreamBuilder, ContentType, DataCallbackResult, Output, PerformanceMode,
+    SharingMode, Stereo, Usage,
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

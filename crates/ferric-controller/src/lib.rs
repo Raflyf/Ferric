@@ -253,7 +253,9 @@ impl FerricController {
         context: String,
     ) -> ControllerResult<()> {
         if tracks.is_empty() {
-            return Err(ControllerError::State("cannot play empty queue".to_string()));
+            return Err(ControllerError::State(
+                "cannot play empty queue".to_string(),
+            ));
         }
         self.ensure_audio_started()?;
         let clamped_idx = start_index.min(tracks.len() - 1);
@@ -349,12 +351,10 @@ impl FerricController {
             )
         };
 
-        let video_id = track.youtube_video_id.clone().or_else(|| {
-            track
-                .id
-                .strip_prefix("yt:video:")
-                .map(ToOwned::to_owned)
-        });
+        let video_id = track
+            .youtube_video_id
+            .clone()
+            .or_else(|| track.id.strip_prefix("yt:video:").map(ToOwned::to_owned));
         let Some(vid) = video_id else {
             self.sink
                 .on_toast(format!("No playable stream source for {}", track.title));
@@ -571,7 +571,9 @@ impl FerricController {
     #[must_use]
     pub fn telemetry(&self) -> TelemetrySnapshot {
         let guard = self.audio.lock().unwrap_or_else(|p| p.into_inner());
-        guard.as_ref().map_or_else(TelemetrySnapshot::default, AudioEngine::telemetry)
+        guard
+            .as_ref()
+            .map_or_else(TelemetrySnapshot::default, AudioEngine::telemetry)
     }
 
     #[must_use]
@@ -583,11 +585,7 @@ impl FerricController {
     #[must_use]
     pub fn up_next(&self, limit: usize) -> Vec<Track> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        st.queue
-            .peek_upcoming(limit)
-            .into_iter()
-            .cloned()
-            .collect()
+        st.queue.peek_upcoming(limit).into_iter().cloned().collect()
     }
 
     #[must_use]
@@ -667,7 +665,10 @@ impl FerricController {
         Ok(true)
     }
 
-    pub fn get_listening_stats(&self, tz_offset_secs: i64) -> ControllerResult<ListeningStatsSummary> {
+    pub fn get_listening_stats(
+        &self,
+        tz_offset_secs: i64,
+    ) -> ControllerResult<ListeningStatsSummary> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         Ok(st.db.get_listening_stats(unix_now_secs(), tz_offset_secs)?)
     }
@@ -836,10 +837,7 @@ mod tests {
         }
 
         fn on_now_playing(&self, track: Option<Track>) {
-            self.now_playing
-                .lock()
-                .unwrap()
-                .push(track.map(|t| t.id));
+            self.now_playing.lock().unwrap().push(track.map(|t| t.id));
         }
 
         fn on_library_changed(&self) {

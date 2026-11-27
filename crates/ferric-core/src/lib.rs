@@ -79,7 +79,8 @@ mod tests {
 
     #[test]
     fn app_data_dir_respects_explicit_override() {
-        let custom = std::env::temp_dir().join(format!("ferric_data_override_{}", std::process::id()));
+        let custom =
+            std::env::temp_dir().join(format!("ferric_data_override_{}", std::process::id()));
         set_app_data_dir_override(custom.clone());
         assert_eq!(app_data_dir(), custom);
         clear_app_data_dir_override();

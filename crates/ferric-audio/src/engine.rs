@@ -311,12 +311,11 @@ fn build_output_stream_and_producer(
     preferred_device: Option<&str>,
     start_playing: bool,
 ) -> AudioResult<OutputStreamBundle> {
-    let (stream, producer, out_rate, name) =
-        crate::android_oboe::build_output_stream_and_producer(
-            telemetry,
-            preferred_device,
-            start_playing,
-        )?;
+    let (stream, producer, out_rate, name) = crate::android_oboe::build_output_stream_and_producer(
+        telemetry,
+        preferred_device,
+        start_playing,
+    )?;
     Ok((PlatformOutputStream(stream), producer, out_rate, name))
 }
 
@@ -2464,7 +2463,10 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(started, "content:// URI must decode via registered ContentOpener");
+        assert!(
+            started,
+            "content:// URI must decode via registered ContentOpener"
+        );
         engine.send(EngineCommand::SetDucking(false));
         engine.send(EngineCommand::Shutdown);
         let _ = std::fs::remove_dir_all(&dir);

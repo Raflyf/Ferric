@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Ferric</h1>
-<p align="center"><strong>Native Rust desktop music player for Windows.</strong><br>Play local lossless files alongside YouTube Music and Spotify libraries, with synced lyrics and Windows 11 Acrylic.</p>
+<p align="center"><strong>Native Rust desktop music player for Windows.</strong><br>Sign in and sync your Spotify library (Free &amp; Premium) alongside YouTube Music and local lossless files, with synced lyrics and Windows 11 Acrylic.</p>
 
 <p align="center">
   <a href="https://github.com/Raflyf/Ferric/releases/latest"><img src="https://img.shields.io/github/v/release/Raflyf/Ferric?color=E86A2C" alt="Latest release"></a>
@@ -24,7 +24,7 @@
   &nbsp;&middot;&nbsp; <a href="#privacy-policy">Privacy policy</a>
 </p>
 
-Ferric is a native Windows desktop music player built in Rust with a GPU-accelerated DirectX 11 interface (`makepad-widgets`), a pure-Rust dual-deck audio engine, and a local SQLite library. It combines your local FLAC/MP3/Opus/AAC collection with YouTube Music discovery, optional Spotify library sync, synchronized lyrics, and native Windows 11 integration without Electron or a browser shell.
+Ferric is a native Windows desktop music player built in Rust with a GPU-accelerated DirectX 11 interface (`makepad-widgets`), a pure-Rust dual-deck audio engine, and a local SQLite library. Sign in directly with your Spotify account (Free or Premium, no Developer Client ID required) to sync your Liked Songs, playlists, and personalized radio stations alongside YouTube Music discovery, OpenSubsonic/Navidrome, and local FLAC/MP3/Opus/AAC collections, with synchronized lyrics and native Windows 11 integration without Electron or a browser shell.
 
 > Windows 10/11 x64. Unsigned per-user installer (no administrator rights required). Native Acrylic backdrop works best on Windows 11. Part of the [LivelyDesk](<https://livelydesk.vercel.app>) desktop suite alongside [WallpaperLive](<https://github.com/Raflyf/WallpaperLive>) and [TransparentBar](<https://github.com/Raflyf/TransparentBar>).
 
@@ -46,7 +46,8 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 
 ## Features
 
-- **Unified local and online libraries:** Scan local audio folders (`FLAC`, `MP3`, `AAC`/`M4A`, `ALAC`, `Ogg Vorbis`, `Opus`, `WAV`, `AIFF`), browse YouTube Music Home, Search, and Recommended Stations, sync playlists from YouTube Music, Spotify (Free & Premium), or OpenSubsonic/Navidrome, and import public playlist URLs or `.m3u`/`.csv` files.
+- **Spotify sign-in and library sync (Free & Premium):** Log in directly inside **Settings > Accounts** with any Spotify Free or Premium account (no API key or Client ID setup required) to sync your Liked Songs, personal and followed playlists, and personalized Recommended Stations into Ferric. Tokens and session cookies are encrypted at rest with Windows DPAPI (`CryptProtectData`).
+- **Unified local and online libraries:** Scan local audio folders (`FLAC`, `MP3`, `AAC`/`M4A`, `ALAC`, `Ogg Vorbis`, `Opus`, `WAV`, `AIFF`), browse YouTube Music Home, Search, and Smart Radio, sign in to YouTube Music or OpenSubsonic/Navidrome, and import public playlist URLs or `.m3u`/`.csv` files.
 - **Pure-Rust dual-deck audio engine:** Gapless album playback, configurable auto-crossfade (`0–12 s`) with 140 Hz Bass-Swap Automix, S-Curve Velvet, and Equal-Power curves, 10-band parametric Biquad EQ with 24 built-in AutoEq profiles and Equalizer APO `.txt` import/export, ReplayGain, Mono downmix, Sleep Timer, and one-click bottom-bar Playback Speed (`0.75x` / `1.0x` / `1.25x` / `1.5x`).
 - **Synced lyrics, Fullscreen Lyrics, and docked video clips:** 4-stage lyrics waterfall (local `.lrc` sidecar, embedded tags, `LRCLIB`, `Lyrics.ovh`), timing offset controls (`-0.5s` / `+0.5s`), Fullscreen Lyrics aurora stage, and optional docked HD music video clips.
 - **Four themes with Windows 11 Acrylic and adaptive cover colors:** Switch between `AMOLED Black` (default), `Native Acrylic`, `Obsidian Studio`, and `Warm Cream Light`. Customize glass opacity and tint with a GPU HSV picker, or let Adaptive Artwork Accent and Adaptive Acrylic Tint harmonize automatically with the playing cover while maintaining WCAG AA contrast.
@@ -100,7 +101,7 @@ Browse [all releases](<https://github.com/Raflyf/Ferric/releases>) &middot; [Liv
 ## Getting started
 
 1. Download the MSI installer or extract the portable ZIP, and verify its hash against `SHA256SUMS.txt`.
-2. Launch Ferric. Add local music folders under **Settings > Storage**, or optionally connect YouTube Music, Spotify, or OpenSubsonic/Navidrome under **Settings > Accounts**.
+2. Launch Ferric. Open **Settings > Accounts** to sign in with your **Spotify (Free & Premium)** account and press **Sync Library** to sync your Liked Songs and playlists (or optionally connect YouTube Music or OpenSubsonic/Navidrome), and add local music folders under **Settings > Storage**.
 3. Open **Settings > Appearance** to switch between `AMOLED Black`, `Native Acrylic`, `Obsidian Studio`, and `Warm Cream Light`, adjust UI zoom (`Ctrl -` / `Ctrl +` / `Ctrl 0`), or tune Acrylic opacity and glass tint.
 4. Useful shortcuts: `Space` (play/pause), `Shift+Left` / `Shift+Right` (previous/next track), `M` (mute), `S` (shuffle), `R` (repeat), `L` (lyrics panel), `F` (fullscreen lyrics), `Ctrl+K` (command palette), `Esc` (close overlay).
 

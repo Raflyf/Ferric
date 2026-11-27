@@ -1,5 +1,6 @@
 package dev.livelydesk.ferric.util
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -15,7 +16,10 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.FileProvider
-import coil3.ImageLoader
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.withSave
+import androidx.core.graphics.withTranslation
+import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import coil3.request.allowHardware
@@ -49,16 +53,18 @@ object ShareCardRenderer {
     ): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
             val artBitmap = fetchCoverBitmap(context, track.thumbnailUrl)
-            val bitmap = Bitmap.createBitmap(aspect.widthPx, aspect.heightPx, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            drawCard(canvas, aspect.widthPx, aspect.heightPx, track, lyricLines, style, coverShade, artBitmap)
-
+            val bitmap = createBitmap(aspect.widthPx, aspect.heightPx, Bitmap.Config.ARGB_8888)
             val outDir = File(context.cacheDir, "shared_cards").apply { mkdirs() }
             val outFile = File(outDir, "ferric_lyrics_card.png")
-            FileOutputStream(outFile).use { fos ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 96, fos)
+            try {
+                val canvas = Canvas(bitmap)
+                drawCard(canvas, aspect.widthPx, aspect.heightPx, track, lyricLines, style, coverShade, artBitmap)
+                FileOutputStream(outFile).use { fos ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 96, fos)
+                }
+            } finally {
+                bitmap.recycle()
             }
-            bitmap.recycle()
 
             val uri = FileProvider.getUriForFile(
                 context,
@@ -69,12 +75,15 @@ object ShareCardRenderer {
                 type = "image/png"
                 putExtra(Intent.EXTRA_STREAM, uri)
                 putExtra(Intent.EXTRA_TEXT, "${track.title} - ${track.artist}")
+                clipData = ClipData.newRawUri("Ferric Lyrics Card", uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             val chooser = Intent.createChooser(shareIntent, "Share Lyrics Card").apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(chooser)
+            withContext(Dispatchers.Main) {
+                context.startActivity(chooser)
+            }
             outFile
         }
     }
@@ -82,7 +91,7 @@ object ShareCardRenderer {
     private suspend fun fetchCoverBitmap(context: Context, url: String?): Bitmap? {
         if (url.isNullOrBlank()) return null
         return runCatching {
-            val loader = ImageLoader(context.applicationContext)
+            val loader = SingletonImageLoader.get(context.applicationContext)
             val req = ImageRequest.Builder(context.applicationContext)
                 .data(url)
                 .size(512, 512)
@@ -155,7 +164,7 @@ object ShareCardRenderer {
         val cardBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             this.style = Paint.Style.STROKE
             strokeWidth = 3f
-            color = Color.argb(85, 255, 255, 255)
+            color = Color.argb(95, 255, 255, 255)
         }
         canvas.drawRoundRect(cardRect, 48f, 48f, cardBorder)
 
@@ -163,17 +172,16 @@ object ShareCardRenderer {
         val innerW = (cardRect.width() - 116f).toInt().coerceAtLeast(200)
         var cursorY = cardRect.top + 64f
 
-        // Header: Cover Art + Title/Artist
         val artSize = 136f
         val artRect = RectF(innerX, cursorY, innerX + artSize, cursorY + artSize)
         if (artBitmap != null) {
-            val saved = canvas.save()
-            val clipPath = android.graphics.Path().apply {
-                addRoundRect(artRect, 24f, 24f, android.graphics.Path.Direction.CW)
+            canvas.withSave {
+                val clipPath = android.graphics.Path().apply {
+                    addRoundRect(artRect, 24f, 24f, android.graphics.Path.Direction.CW)
+                }
+                clipPath(clipPath)
+                drawBitmap(artBitmap, null, artRect, Paint(Paint.FILTER_BITMAP_FLAG))
             }
-            canvas.clipPath(clipPath)
-            canvas.drawBitmap(artBitmap, null, artRect, Paint(Paint.FILTER_BITMAP_FLAG))
-            canvas.restoreToCount(saved)
         } else {
             val fallbackArt = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent }
             canvas.drawRoundRect(artRect, 24f, 24f, fallbackArt)
@@ -195,23 +203,20 @@ object ShareCardRenderer {
             .setMaxLines(2)
             .setAlignment(Layout.Alignment.ALIGN_NORMAL)
             .build()
-        canvas.save()
-        canvas.translate(textStartX, cursorY + 12f)
-        titleLayout.draw(canvas)
-        canvas.restore()
+        canvas.withTranslation(textStartX, cursorY + 12f) {
+            titleLayout.draw(this)
+        }
 
         val artistLayout = StaticLayout.Builder.obtain(track.artist, 0, track.artist.length, artistPaint, headerW)
             .setMaxLines(1)
             .setAlignment(Layout.Alignment.ALIGN_NORMAL)
             .build()
-        canvas.save()
-        canvas.translate(textStartX, cursorY + 18f + titleLayout.height)
-        artistLayout.draw(canvas)
-        canvas.restore()
+        canvas.withTranslation(textStartX, cursorY + 18f + titleLayout.height) {
+            artistLayout.draw(this)
+        }
 
         cursorY += artSize + 64f
 
-        // Lyrics body (1-5 lines)
         val bodyText = if (lines.isEmpty()) {
             "\"${track.title}\"\n${track.artist}"
         } else {
@@ -227,12 +232,10 @@ object ShareCardRenderer {
             .setLineSpacing(10f, 1.08f)
             .setMaxLines(10)
             .build()
-        canvas.save()
-        canvas.translate(innerX, cursorY)
-        lyricsLayout.draw(canvas)
-        canvas.restore()
+        canvas.withTranslation(innerX, cursorY) {
+            lyricsLayout.draw(this)
+        }
 
-        // Footer brand stamp
         val brandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = accent
             textSize = 28f

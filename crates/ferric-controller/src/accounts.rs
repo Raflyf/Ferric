@@ -104,21 +104,23 @@ impl FerricController {
 
     /// Synchronize Spotify Liked Songs and playlists off the main thread.
     pub fn sync_spotify_account(self: &Arc<Self>) {
-        let (token, snapshots) = {
+        let maybe_sync = {
             let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(tok) = active_spotify_token(&st.accounts) else {
-                self.sink.on_toast("Sign in to Spotify first".to_string());
-                return;
-            };
-            let mut map = HashMap::new();
-            if let Ok(pls) = st.db.list_playlists() {
-                for pl in pls {
-                    if let Some(etag) = pl.etag {
-                        map.insert(pl.id, etag);
+            active_spotify_token(&st.accounts).map(|tok| {
+                let mut map = HashMap::new();
+                if let Ok(pls) = st.db.list_playlists() {
+                    for pl in pls {
+                        if let Some(etag) = pl.etag {
+                            map.insert(pl.id, etag);
+                        }
                     }
                 }
-            }
-            (tok, map)
+                (tok, map)
+            })
+        };
+        let Some((token, snapshots)) = maybe_sync else {
+            self.sink.on_toast("Sign in to Spotify first".to_string());
+            return;
         };
 
         let this = Arc::clone(self);
@@ -144,9 +146,10 @@ impl FerricController {
                         if !report.account_id.trim().is_empty() {
                             st.accounts.spotify_user_id = report.account_id.clone();
                         }
+                        let total_playlists = report.playlists.len() + report.etag_skipped;
                         st.accounts.spotify_web_connected = true;
                         st.accounts.spotify_liked_count = report.liked_tracks.len();
-                        st.accounts.spotify_playlist_count = report.playlists.len();
+                        st.accounts.spotify_playlist_count = total_playlists;
                         let _ = st.db.save_accounts(&st.accounts);
                         account_status_from_settings(&st.accounts)
                     };
@@ -155,7 +158,7 @@ impl FerricController {
                     this.sink.on_library_changed();
                     this.sink.on_toast(format!(
                         "Spotify synced: {} playlists, {} liked songs",
-                        report.playlists.len(),
+                        report.playlists.len() + report.etag_skipped,
                         report.liked_tracks.len()
                     ));
                 }
@@ -232,6 +235,7 @@ impl FerricController {
             st.db.save_accounts(&st.accounts)?;
             account_status_from_settings(&st.accounts)
         };
+        ferric_providers::ytmusic::reset_visionos_auth_flag();
         self.sink.on_accounts_changed(status);
         self.sync_connect_accounts();
         self.sync_ytm_account();
@@ -242,14 +246,13 @@ impl FerricController {
     pub fn sync_ytm_account(self: &Arc<Self>) {
         let session = {
             let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let sess = active_ytm_session(&st.accounts);
-            if !sess.is_signed_in() {
-                self.sink
-                    .on_toast("Sign in to YouTube Music first".to_string());
-                return;
-            }
-            sess
+            active_ytm_session(&st.accounts)
         };
+        if !session.is_signed_in() {
+            self.sink
+                .on_toast("Sign in to YouTube Music first".to_string());
+            return;
+        }
 
         let this = Arc::clone(self);
         let _ = thread::Builder::new()
@@ -309,6 +312,7 @@ impl FerricController {
             st.db.save_accounts(&st.accounts)?;
             account_status_from_settings(&st.accounts)
         };
+        ferric_providers::ytmusic::reset_visionos_auth_flag();
         self.sink.on_accounts_changed(status);
         self.sync_connect_accounts();
         self.sink.on_library_changed();
@@ -326,7 +330,21 @@ impl FerricController {
     ) -> ControllerResult<()> {
         let clean_url = base_url.trim().trim_end_matches('/').to_string();
         let clean_user = username.trim().to_string();
-        if clean_url.is_empty() || clean_user.is_empty() || password.is_empty() {
+        let resolved_password = if password.is_empty() {
+            let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if st.accounts.subsonic_connected
+                && !st.accounts.subsonic_password.is_empty()
+                && st.accounts.subsonic_url == clean_url
+                && st.accounts.subsonic_username == clean_user
+            {
+                st.accounts.subsonic_password.clone()
+            } else {
+                String::new()
+            }
+        } else {
+            password
+        };
+        if clean_url.is_empty() || clean_user.is_empty() || resolved_password.is_empty() {
             return Err(ControllerError::State(
                 "Subsonic URL, username, and password are required".to_string(),
             ));
@@ -335,7 +353,7 @@ impl FerricController {
         let creds = SubsonicCredentials {
             base_url: clean_url.clone(),
             username: clean_user.clone(),
-            password: password.clone(),
+            password: resolved_password.clone(),
         };
         let this = Arc::clone(self);
         let _ = thread::Builder::new()
@@ -356,7 +374,7 @@ impl FerricController {
                         }
                         st.accounts.subsonic_url = clean_url;
                         st.accounts.subsonic_username = clean_user;
-                        st.accounts.subsonic_password = password;
+                        st.accounts.subsonic_password = resolved_password;
                         st.accounts.subsonic_connected = true;
                         let _ = st.db.save_accounts(&st.accounts);
                         account_status_from_settings(&st.accounts)

@@ -576,7 +576,7 @@ impl FerricController {
                 .name("ferric-sp-add".to_string())
                 .spawn(move || {
                     let uri = track.spotify_id.clone().or_else(|| {
-                        search_spotify_track_uri(&tok, &track.artist, &track.title)
+                        search_spotify_track_uri(&tok, &track.title, &track.artist)
                             .ok()
                             .flatten()
                     });
@@ -736,7 +736,7 @@ impl FerricController {
                         if let Some(sp) = &t.spotify_id {
                             uris.push(sp.clone());
                         } else if let Ok(Some(found)) =
-                            search_spotify_track_uri(&tok, &t.artist, &t.title)
+                            search_spotify_track_uri(&tok, &t.title, &t.artist)
                         {
                             uris.push(found);
                         }

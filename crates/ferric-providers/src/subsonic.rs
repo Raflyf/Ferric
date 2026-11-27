@@ -19,17 +19,18 @@ pub struct CachedSubsonicStream {
 }
 
 #[cfg(target_os = "android")]
-fn load_android_system_and_user_certs() -> Vec<ureq::tls::Certificate<'static>> {
+fn load_android_system_and_user_certs() -> (Vec<ureq::tls::Certificate<'static>>, bool) {
     use ureq::tls::{Certificate, PemItem, parse_pem};
     let mut certs = Vec::new();
-    let dirs = [
+    let mut loaded_system_root = false;
+    let system_dirs = [
         "/apex/com.android.conscrypt/cacerts",
         "/system/etc/security/cacerts",
-        "/data/misc/user/0/cacerts-added",
     ];
-    for dir in dirs {
+    let user_dirs = ["/data/misc/user/0/cacerts-added"];
+    let mut ingest = |dir: &str, is_system: bool| {
         let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
+            return;
         };
         for entry in entries.flatten() {
             let Ok(bytes) = std::fs::read(entry.path()) else {
@@ -47,15 +48,26 @@ fn load_android_system_and_user_certs() -> Vec<ureq::tls::Certificate<'static>> 
             }
             if !parsed_any && bytes.first() == Some(&0x30) {
                 certs.push(Certificate::from_der(&bytes).to_owned());
+                parsed_any = true;
+            }
+            if parsed_any && is_system {
+                loaded_system_root = true;
             }
         }
+    };
+    for dir in system_dirs {
+        ingest(dir, true);
     }
-    certs
+    for dir in user_dirs {
+        ingest(dir, false);
+    }
+    (certs, loaded_system_root)
 }
 
 /// Shared HTTP client for OpenSubsonic / Navidrome servers.
-/// On Android, trusts Android system + user-installed CA certificates so home-lab HTTPS servers
-/// with private LAN CAs work fail-closed without disabling TLS verification.
+/// On Android, trusts Android system + user-installed CA certificates when system roots are
+/// readable (preserving public CAs alongside private LAN CAs); falls back to built-in WebPKI
+/// roots if SELinux restricts system CA directories so public HTTPS servers never break.
 pub fn subsonic_http_agent() -> &'static ureq::Agent {
     SUBSONIC_HTTP_AGENT.get_or_init(|| {
         let builder = ureq::Agent::config_builder()
@@ -68,8 +80,8 @@ pub fn subsonic_http_agent() -> &'static ureq::Agent {
             .http_status_as_error(false);
         #[cfg(target_os = "android")]
         let builder = {
-            let android_certs = load_android_system_and_user_certs();
-            if !android_certs.is_empty() {
+            let (android_certs, loaded_system_root) = load_android_system_and_user_certs();
+            if loaded_system_root && !android_certs.is_empty() {
                 let tls = ureq::tls::TlsConfig::builder()
                     .root_certs(ureq::tls::RootCerts::new_with_certs(&android_certs))
                     .build();

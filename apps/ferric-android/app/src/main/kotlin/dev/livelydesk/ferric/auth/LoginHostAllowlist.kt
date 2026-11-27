@@ -134,41 +134,13 @@ object LoginHostAllowlist {
     try {
       const parsed = JSON.parse(text);
       if (!parsed || !parsed.accessToken || parsed.isAnonymous === true) return;
+      if (parsed.isAnonymous !== false) return;
       window.__ferricToken = text;
-    } catch (e) {}
-  };
-  const setBearer = (value) => {
-    if (!onPlayer() || typeof value !== 'string') return;
-    const match = /^Bearer\s+(.+)$/i.exec(value.trim());
-    if (!match) return;
-    const token = match[1].trim();
-    if (token.length < 20) return;
-    if (!window.__ferricToken) {
-      window.__ferricToken = JSON.stringify({ accessToken: token, isAnonymous: false, source: 'bearer' });
-    }
-  };
-  const readHeaders = (headers) => {
-    try {
-      if (!headers) return;
-      if (typeof headers.get === 'function') { setBearer(headers.get('authorization')); return; }
-      if (Array.isArray(headers)) {
-        headers.forEach((pair) => {
-          if (pair && String(pair[0]).toLowerCase() === 'authorization') setBearer(pair[1]);
-        });
-        return;
-      }
-      Object.keys(headers).forEach((k) => {
-        if (k.toLowerCase() === 'authorization') setBearer(headers[k]);
-      });
     } catch (e) {}
   };
   const originalFetch = window.fetch;
   if (originalFetch) {
     window.fetch = function (input, init) {
-      try {
-        if (input && typeof input === 'object' && input.headers) readHeaders(input.headers);
-        if (init && init.headers) readHeaders(init.headers);
-      } catch (e) {}
       const url = (input && input.url) || input;
       const pending = originalFetch.apply(this, arguments);
       if (isTokenUrl(url)) {
@@ -177,11 +149,6 @@ object LoginHostAllowlist {
       return pending;
     };
   }
-  const originalSetHeader = XMLHttpRequest.prototype.setRequestHeader;
-  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-    if (String(name).toLowerCase() === 'authorization') setBearer(value);
-    return originalSetHeader.apply(this, arguments);
-  };
   const originalOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url) {
     if (isTokenUrl(url)) {

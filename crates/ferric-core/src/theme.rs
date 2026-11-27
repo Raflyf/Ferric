@@ -173,7 +173,11 @@ impl ThemeConfig {
     pub fn liquid_glass() -> Self {
         Self {
             name: "Liquid Glass".to_string(),
-            corner_radius_px: 20.0,
+            canvas_hex: "#08090D".to_string(),
+            surface_hex: "#12141E".to_string(),
+            border_hex: "#282C3C".to_string(),
+            corner_radius_px: 22.0,
+            acrylic_opacity: 0.62,
             player_layout: "liquid_glass".to_string(),
             ..Self::native_acrylic()
         }
@@ -292,9 +296,8 @@ impl ThemeConfig {
             default_acrylic_opacity()
         };
         out.font_family = match out.font_family.trim() {
-            "Inter" | "Plus Jakarta Sans" | "DM Sans" | "Space Grotesk" | "JetBrains Mono" => {
-                out.font_family.trim().to_string()
-            }
+            "Inter" | "Plus Jakarta Sans" | "DM Sans" | "Figtree" | "Space Grotesk"
+            | "JetBrains Mono" => out.font_family.trim().to_string(),
             _ => default_font_family(),
         };
         out.player_layout = match out.player_layout.trim() {

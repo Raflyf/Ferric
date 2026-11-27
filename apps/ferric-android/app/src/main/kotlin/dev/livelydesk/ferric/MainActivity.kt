@@ -16,45 +16,48 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.LibraryMusic
-import androidx.compose.material.icons.rounded.Search
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
 import dev.livelydesk.ferric.auth.WebLoginActivity
 import dev.livelydesk.ferric.auth.WebLoginTarget
 import dev.livelydesk.ferric.core.CoreStateStore
@@ -62,7 +65,8 @@ import dev.livelydesk.ferric.playback.FerricPlaybackService
 import dev.livelydesk.ferric.playback.OutputRouteHelper
 import dev.livelydesk.ferric.ui.components.AddToPlaylistDialog
 import dev.livelydesk.ferric.ui.components.AuroraBackdrop
-import dev.livelydesk.ferric.ui.components.MiniPlayerBar
+import dev.livelydesk.ferric.ui.components.FerricTab
+import dev.livelydesk.ferric.ui.components.FloatingLiquidGlassDock
 import dev.livelydesk.ferric.ui.screens.AccountsSheet
 import dev.livelydesk.ferric.ui.screens.ConnectSheet
 import dev.livelydesk.ferric.ui.screens.DetailScreen
@@ -76,16 +80,16 @@ import dev.livelydesk.ferric.ui.screens.SettingsSheet
 import dev.livelydesk.ferric.ui.screens.ShareCardSheet
 import dev.livelydesk.ferric.ui.screens.StatsSheet
 import dev.livelydesk.ferric.ui.screens.ThemeStudioSheet
+import dev.livelydesk.ferric.ui.screens.YouScreen
 import dev.livelydesk.ferric.ui.theme.FerricTheme
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.ferricBackdropSource
+import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import uniffi.ferric_mobile_ffi.FfiTrack
-
-private enum class BottomTab(val label: String) {
-    HOME("Home"),
-    SEARCH("Search"),
-    LIBRARY("Library"),
-}
 
 class MainActivity : ComponentActivity() {
     private var controllerFuture: ListenableFuture<MediaController>? = null
@@ -93,8 +97,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
-            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         val store = (application as FerricApp).store
         store.bootstrapLibrary()
@@ -102,14 +106,33 @@ class MainActivity : ComponentActivity() {
         setContent {
             val state by store.uiState.collectAsStateWithLifecycle()
             val appHaze = remember { HazeState() }
+            val backdropState = rememberFerricBackdropState()
+
+            val isLightTheme = state.themeConfig?.backgroundMode == uniffi.ferric_mobile_ffi.FfiBackgroundMode.WARM_CREAM
+            LaunchedEffect(isLightTheme) {
+                enableEdgeToEdge(
+                    statusBarStyle = if (isLightTheme) {
+                        SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    },
+                    navigationBarStyle = if (isLightTheme) {
+                        SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    },
+                )
+            }
+
             FerricTheme(
                 themeConfig = state.themeConfig,
                 coverShade = state.coverShade,
                 hazeState = appHaze,
+                backdropState = backdropState,
             ) {
                 FerricMainShell(
                     store = store,
-                    appHaze = appHaze,
+                    backdropState = backdropState,
                     onLaunchWebLogin = { target ->
                         startActivity(WebLoginActivity.createIntent(this, target))
                     },
@@ -139,16 +162,19 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun FerricMainShell(
     store: CoreStateStore,
-    appHaze: HazeState,
+    backdropState: dev.livelydesk.ferric.ui.theme.FerricBackdropState,
     onLaunchWebLogin: (WebLoginTarget) -> Unit,
     onOpenOutputSwitcher: () -> Unit,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val ioScope = rememberCoroutineScope()
     val palette = LocalFerricPalette.current
     val state by store.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var activeTab by rememberSaveable { mutableStateOf(BottomTab.HOME) }
+    var activeTab by rememberSaveable { mutableStateOf(FerricTab.HOME) }
+    var dockCollapsed by rememberSaveable { mutableStateOf(false) }
     var showFullPlayer by rememberSaveable { mutableStateOf(false) }
     var showQueueSheet by rememberSaveable { mutableStateOf(false) }
     var showAccountsSheet by rememberSaveable { mutableStateOf(false) }
@@ -161,7 +187,75 @@ private fun FerricMainShell(
     var showCreatePlaylistDialog by rememberSaveable { mutableStateOf(false) }
     var newPlaylistName by rememberSaveable { mutableStateOf("") }
     var pendingTrackForPlaylist by remember { mutableStateOf<FfiTrack?>(null) }
-    var pendingExportText by remember { mutableStateOf<String?>(null) }
+    var pendingExportText by rememberSaveable { mutableStateOf<String?>(null) }
+    var askedNotifPerm by rememberSaveable { mutableStateOf(false) }
+
+    // Persistent per-tab LazyListStates so scroll positions survive tab switches & FullPlayer open.
+    val homeListState = rememberLazyListState()
+    val searchListState = rememberLazyListState()
+    val libraryListState = rememberLazyListState()
+    val youListState = rememberLazyListState()
+    val detailListState = rememberLazyListState()
+
+    val currentListState: LazyListState = when {
+        state.activeDetail != null -> detailListState
+        activeTab == FerricTab.HOME -> homeListState
+        activeTab == FerricTab.SEARCH -> searchListState
+        activeTab == FerricTab.LIBRARY -> libraryListState
+        else -> youListState
+    }
+
+    // Track scroll direction to morph the 4-tab Liquid Glass dock cleanly into a compact orb on scroll-down.
+    LaunchedEffect(currentListState, activeTab, state.activeDetail != null) {
+        dockCollapsed = false
+        var prevIndex = currentListState.firstVisibleItemIndex
+        var prevOffset = currentListState.firstVisibleItemScrollOffset
+        snapshotFlow { currentListState.firstVisibleItemIndex to currentListState.firstVisibleItemScrollOffset }
+            .distinctUntilChanged()
+            .collect { (index, offset) ->
+                if (index == 0 && offset < 48) {
+                    dockCollapsed = false
+                } else {
+                    val scrollingDown = index > prevIndex || (index == prevIndex && offset - prevOffset > 28)
+                    val scrollingUp = index < prevIndex || (index == prevIndex && prevOffset - offset > 28)
+                    if (scrollingDown) dockCollapsed = true
+                    else if (scrollingUp) dockCollapsed = false
+                }
+                prevIndex = index
+                prevOffset = offset
+            }
+    }
+
+    // Pause background mDNS NSD discovery whenever the app moves to the background.
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> store.setAppForeground(true)
+                Lifecycle.Event.ON_STOP -> store.setAppForeground(false)
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { /* MediaSession notification permission handled gracefully if denied */ }
+
+    // Request POST_NOTIFICATIONS on Android 13+ once when playback starts so media controls appear.
+    LaunchedEffect(state.isPlaying) {
+        if (state.isPlaying && !askedNotifPerm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            askedNotifPerm = true
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     val audioPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_AUDIO
@@ -195,13 +289,15 @@ private fun FerricMainShell(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri != null) {
-            val text = runCatching {
-                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            if (!text.isNullOrBlank()) {
-                val baseName = uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.')
-                    ?.ifBlank { "Imported Playlist" } ?: "Imported Playlist"
-                store.importPlaylistText(baseName, text)
+            ioScope.launch(Dispatchers.IO) {
+                val text = runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                }.getOrNull()
+                if (!text.isNullOrBlank()) {
+                    val baseName = uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.')
+                        ?.ifBlank { "Imported Playlist" } ?: "Imported Playlist"
+                    store.importPlaylistText(baseName, text)
+                }
             }
         }
     }
@@ -210,11 +306,13 @@ private fun FerricMainShell(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri != null) {
-            val text = runCatching {
-                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            if (!text.isNullOrBlank()) {
-                store.importEqApo(text)
+            ioScope.launch(Dispatchers.IO) {
+                val text = runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                }.getOrNull()
+                if (!text.isNullOrBlank()) {
+                    store.importEqApo(text)
+                }
             }
         }
     }
@@ -223,11 +321,13 @@ private fun FerricMainShell(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri != null) {
-            val text = runCatching {
-                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            if (!text.isNullOrBlank()) {
-                store.importThemeJson(text)
+            ioScope.launch(Dispatchers.IO) {
+                val text = runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                }.getOrNull()
+                if (!text.isNullOrBlank()) {
+                    store.importThemeJson(text)
+                }
             }
         }
     }
@@ -238,9 +338,15 @@ private fun FerricMainShell(
         val content = pendingExportText
         pendingExportText = null
         if (uri != null && !content.isNullOrEmpty()) {
-            runCatching {
-                context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
-                    it.write(content)
+            ioScope.launch(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                        it.write(content)
+                    }
+                }.onSuccess {
+                    store.postToast("Export saved")
+                }.onFailure { err ->
+                    store.postToast("Export failed: ${err.message}")
                 }
             }
         }
@@ -249,6 +355,7 @@ private fun FerricMainShell(
     fun copyToClipboard(label: String, text: String) {
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
         cm.setPrimaryClip(ClipData.newPlainText(label, text))
+        store.postToast("Copied $label")
     }
 
     LaunchedEffect(state.statusMessage) {
@@ -272,27 +379,250 @@ private fun FerricMainShell(
             .fillMaxSize()
             .background(palette.canvas),
     ) {
-        if (palette.isLiquidGlass) {
-            AuroraBackdrop(
-                colors = state.coverShade,
-                baseCanvas = palette.canvas,
-                isPlaying = state.isPlaying,
-                intensity = 0.62f,
-                modifier = Modifier.hazeSource(appHaze),
-            )
+        // Layer 1: Full-screen scrollable canvas captured into GPU backdropState so floating
+        // Liquid Glass capsules optically blur, vibrate, and refract live artwork gliding underneath!
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .ferricBackdropSource(backdropState),
+        ) {
+            if (palette.isLiquidGlass) {
+                AuroraBackdrop(
+                    colors = state.coverShade,
+                    baseCanvas = palette.canvas,
+                    isPlaying = state.isPlaying,
+                    intensity = 0.64f,
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding(),
+            ) {
+                val detail = state.activeDetail
+                if (detail != null) {
+                    DetailScreen(
+                        detail = detail,
+                        detailSort = state.detailSort,
+                        currentTrackId = state.currentTrack?.id,
+                        offlineTrackIds = state.offlineTrackIds,
+                        downloadProgress = state.downloadProgress,
+                        listState = detailListState,
+                        onBack = { store.closeDetail() },
+                        onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
+                        onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
+                        onCycleSort = { store.cycleDetailSort() },
+                        onDeduplicate = { store.deduplicatePlaylist(detail.id) },
+                        onSyncToAccount = { store.pushLocalPlaylistToCloud(detail.id) },
+                        onDownloadCollection = { store.downloadTracksOffline(detail.tracks) },
+                        onDownloadTrack = { t -> store.downloadTrackOffline(t) },
+                        onDeleteOfflineTrack = { id -> store.deleteOfflineTrack(id) },
+                        onCopyShareLink = {
+                            detail.shareUrl?.let { copyToClipboard("Ferric Link", it) }
+                        },
+                        onCopyTracklist = {
+                            store.buildDetailShareTracklist(detail) { txt ->
+                                copyToClipboard("Ferric Tracklist", txt)
+                            }
+                        },
+                        onExportCsv = {
+                            store.buildDetailCsv(detail) { csv ->
+                                pendingExportText = csv
+                                exportDocLauncher.launch("${detail.title.replace(' ', '_')}.csv")
+                            }
+                        },
+                        onRenamePlaylist = { name -> store.renamePlaylist(detail.id, name) },
+                        onDeletePlaylist = { store.deletePlaylist(detail.id) },
+                        onToggleLike = { id -> store.toggleLike(id) },
+                        onPlayNext = { t -> store.playNext(t) },
+                        onAddToQueue = { t -> store.appendToQueue(t) },
+                        onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
+                        onCopyTrackLink = { t ->
+                            store.buildTrackShareLink(t) { link ->
+                                if (link != null) copyToClipboard("Track Link", link)
+                            }
+                        },
+                        onOpenArtist = { artist -> store.openArtistDetail(artist) },
+                        onRemoveFromPlaylist = { trackId -> store.removeTrackFromPlaylist(detail.id, trackId) },
+                    )
+                } else {
+                    when (activeTab) {
+                        FerricTab.HOME -> HomeScreen(
+                            state = state,
+                            listState = homeListState,
+                            onRefresh = { store.loadHome(forceRefresh = true, moodIdx = null) },
+                            onSelectMood = { idx -> store.loadHome(forceRefresh = false, moodIdx = idx) },
+                            onOpenConnect = { showConnectSheet = true },
+                            onOpenStats = { showStatsSheet = true },
+                            onOpenPlaylist = { id -> store.openPlaylistDetail(id) },
+                            onOpenLikedDetail = { store.openLikedDetail() },
+                            onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
+                            onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
+                            onOpenStation = { id -> store.openStation(id) },
+                            onOpenShelfCard = { card ->
+                                val bid = card.browseId
+                                if (!bid.isNullOrBlank()) {
+                                    store.openBrowseDetail(bid, card.kind)
+                                }
+                            },
+                            onToggleLike = { id -> store.toggleLike(id) },
+                            onPlayNext = { t -> store.playNext(t) },
+                            onAddToQueue = { t -> store.appendToQueue(t) },
+                            onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
+                            onCopyTrackLink = { t ->
+                                store.buildTrackShareLink(t) { link ->
+                                    if (link != null) copyToClipboard("Track Link", link)
+                                }
+                            },
+                            onOpenArtist = { artist -> store.openArtistDetail(artist) },
+                        )
+
+                        FerricTab.SEARCH -> SearchScreen(
+                            state = state,
+                            listState = searchListState,
+                            onInstantLocalSearch = { q -> store.instantSearchLocal(q) },
+                            onOnlineSearch = { q -> store.searchOnline(q) },
+                            onClearRecentSearches = { store.clearRecentSearches() },
+                            onImportUrl = { url -> store.importPublicUrl(url) },
+                            onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
+                            onOpenCard = { card ->
+                                val bid = card.browseId
+                                if (!bid.isNullOrBlank()) {
+                                    store.openBrowseDetail(bid, card.kind)
+                                }
+                            },
+                            onToggleLike = { id -> store.toggleLike(id) },
+                            onPlayNext = { t -> store.playNext(t) },
+                            onAddToQueue = { t -> store.appendToQueue(t) },
+                            onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
+                            onCopyTrackLink = { t ->
+                                store.buildTrackShareLink(t) { link ->
+                                    if (link != null) copyToClipboard("Track Link", link)
+                                }
+                            },
+                            onOpenArtist = { artist -> store.openArtistDetail(artist) },
+                            onDownloadOffline = { t -> store.downloadTrackOffline(t) },
+                            onDeleteOffline = { id -> store.deleteOfflineTrack(id) },
+                        )
+
+                        FerricTab.LIBRARY -> LibraryScreen(
+                            state = state,
+                            listState = libraryListState,
+                            onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
+                            onOpenPlaylist = { id -> store.openPlaylistDetail(id) },
+                            onOpenAlbum = { alb, art -> store.openAlbumDetail(alb, art) },
+                            onOpenArtist = { art -> store.openArtistDetail(art) },
+                            onOpenLikedDetail = { store.openLikedDetail() },
+                            onOpenLocalCollection = { title, sub, tracks ->
+                                store.openLocalCollectionDetail(title, sub, tracks)
+                            },
+                            onSetPlaylistFilter = { f -> store.setPlaylistFilter(f) },
+                            onCyclePlaylistSort = { store.cyclePlaylistSort() },
+                            onCreatePlaylistRequest = {
+                                newPlaylistName = ""
+                                showCreatePlaylistDialog = true
+                            },
+                            onImportPlaylistFile = {
+                                importPlaylistLauncher.launch(arrayOf("*/*"))
+                            },
+                            onScanPhoneMusic = {
+                                val hasPerm = ContextCompat.checkSelfPermission(
+                                    context,
+                                    audioPermission,
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (hasPerm) {
+                                    store.scanDeviceMediaStore()
+                                } else {
+                                    audioPermissionLauncher.launch(audioPermission)
+                                }
+                            },
+                            onPickSafFolder = { safFolderLauncher.launch(null) },
+                            onToggleLike = { id -> store.toggleLike(id) },
+                            onPlayNext = { t -> store.playNext(t) },
+                            onAddToQueue = { t -> store.appendToQueue(t) },
+                            onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
+                            onCopyTrackLink = { t ->
+                                store.buildTrackShareLink(t) { link ->
+                                    if (link != null) copyToClipboard("Track Link", link)
+                                }
+                            },
+                            onDownloadOffline = { t -> store.downloadTrackOffline(t) },
+                            onDeleteOffline = { id -> store.deleteOfflineTrack(id) },
+                        )
+
+                        FerricTab.YOU -> YouScreen(
+                            state = state,
+                            listState = youListState,
+                            onOpenHistory = {
+                                store.openLocalCollectionDetail(
+                                    "Listening History",
+                                    "${state.recentTracks.size} recent tracks",
+                                    state.recentTracks,
+                                )
+                            },
+                            onOpenStats = { showStatsSheet = true },
+                            onOpenConnect = { showConnectSheet = true },
+                            onOpenThemeStudio = { showThemeSheet = true },
+                            onOpenEqualizer = { showEqSheet = true },
+                            onSignInYtm = { onLaunchWebLogin(WebLoginTarget.YOUTUBE_MUSIC) },
+                            onSyncYtm = { store.syncYtm() },
+                            onSignInSpotify = { onLaunchWebLogin(WebLoginTarget.SPOTIFY) },
+                            onSyncSpotify = { store.syncSpotify() },
+                            onOpenAccounts = { showAccountsSheet = true },
+                            onOpenSettings = { showSettingsSheet = true },
+                        )
+                    }
+                }
+            }
         }
 
-        if (showFullPlayer) {
+        // Layer 2: Floating Optical Liquid Glass Dock + Mini-Player Pill (sibling over backdrop!)
+        FloatingLiquidGlassDock(
+            state = state,
+            progressFlow = store.playbackProgress,
+            activeTab = activeTab,
+            isDetailOpen = state.activeDetail != null,
+            isCollapsed = dockCollapsed,
+            onSelectTab = { tab ->
+                store.closeDetail()
+                activeTab = tab
+                dockCollapsed = false
+            },
+            onExpandDock = { dockCollapsed = false },
+            onTogglePlayPause = { store.togglePlayPause() },
+            onNext = { store.next() },
+            onPrev = { store.prev() },
+            onToggleLike = { id -> store.toggleLike(id) },
+            onOpenFullPlayer = { showFullPlayer = true },
+            onOpenConnect = { showConnectSheet = true },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding(),
+        )
+
+        // Layer 3: Full Player rendered as sibling overlay (preserves all tab scroll positions!)
+        AnimatedVisibility(
+            visible = showFullPlayer,
+            enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
+        ) {
             FullPlayerScreen(
                 state = state,
+                progressFlow = store.playbackProgress,
                 onCollapse = { showFullPlayer = false },
                 onTogglePlayPause = { store.togglePlayPause() },
                 onNext = { store.next() },
                 onPrev = { store.prev() },
                 onSeek = { pos -> store.seekTo(pos) },
+                onSetVolume = { id, vol -> store.setConnectVolume(id, vol) },
                 onToggleShuffle = { store.toggleShuffle() },
                 onCycleRepeat = { store.cycleRepeat() },
                 onToggleLike = { id -> store.toggleLike(id) },
+                onSetSleepTimerMinutes = { mins -> store.setSleepTimerMinutes(mins) },
+                onSetPlaybackSpeed = { spd ->
+                    state.dspSettings?.let { dsp -> store.updateDsp(dsp.copy(playbackSpeed = spd)) }
+                },
                 onOpenArtist = { artist -> store.openArtistDetail(artist) },
                 onOpenQueue = { showQueueSheet = true },
                 onOpenEqualizer = { showEqSheet = true },
@@ -304,216 +634,22 @@ private fun FerricMainShell(
                 onNudgeLyricsOffset = { delta -> store.nudgeLyricsOffsetMs(delta) },
                 onResolveVideo = { store.resolveVideoForCurrent() },
             )
-        } else {
-            Scaffold(
-                containerColor = if (palette.isLiquidGlass) Color.Transparent else palette.canvas,
-                snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
-                bottomBar = {
-                    Column(
-                        modifier = Modifier
-                            .background(if (palette.isLiquidGlass) Color.Transparent else palette.canvas)
-                            .navigationBarsPadding(),
-                    ) {
-                        MiniPlayerBar(
-                            state = state,
-                            onTogglePlayPause = { store.togglePlayPause() },
-                            onNext = { store.next() },
-                            onPrev = { store.prev() },
-                            onOpenFullPlayer = { showFullPlayer = true },
-                            onOpenQueue = { showQueueSheet = true },
-                            onOpenConnect = { showConnectSheet = true },
-                        )
-                        NavigationBar(
-                            containerColor = if (palette.isLiquidGlass) {
-                                palette.glassTint.copy(alpha = 0.78f)
-                            } else {
-                                palette.surface
-                            },
-                        ) {
-                            val items = listOf(
-                                Triple(BottomTab.HOME, "Home", Icons.Rounded.Home),
-                                Triple(BottomTab.SEARCH, "Search", Icons.Rounded.Search),
-                                Triple(BottomTab.LIBRARY, "Library", Icons.Rounded.LibraryMusic),
-                            )
-                            items.forEach { (tab, label, icon) ->
-                                NavigationBarItem(
-                                    selected = activeTab == tab && state.activeDetail == null,
-                                    onClick = {
-                                        store.closeDetail()
-                                        activeTab = tab
-                                    },
-                                    icon = { Icon(icon, contentDescription = label) },
-                                    label = { Text(label) },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = palette.accent,
-                                        selectedTextColor = palette.accent,
-                                        unselectedIconColor = palette.textSecondary,
-                                        unselectedTextColor = palette.textSecondary,
-                                        indicatorColor = palette.elevated,
-                                    ),
-                                )
-                            }
-                        }
-                    }
-                },
-            ) { innerPadding ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .statusBarsPadding()
-                        .padding(innerPadding)
-                        .then(if (palette.isLiquidGlass) Modifier.hazeSource(appHaze) else Modifier),
-                ) {
-                    val detail = state.activeDetail
-                    if (detail != null) {
-                        DetailScreen(
-                            detail = detail,
-                            detailSort = state.detailSort,
-                            currentTrackId = state.currentTrack?.id,
-                            offlineTrackIds = state.offlineTrackIds,
-                            onBack = { store.closeDetail() },
-                            onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
-                            onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
-                            onCycleSort = { store.cycleDetailSort() },
-                            onDeduplicate = { store.deduplicatePlaylist(detail.id) },
-                            onSyncToAccount = { store.pushLocalPlaylistToCloud(detail.id) },
-                            onDownloadPlaylist = { store.downloadPlaylistOffline(detail.id) },
-                            onDownloadTrack = { t -> store.downloadTrackOffline(t) },
-                            onDeleteOfflineTrack = { id -> store.deleteOfflineTrack(id) },
-                            onCopyShareLink = {
-                                detail.shareUrl?.let { copyToClipboard("Ferric Link", it) }
-                            },
-                            onCopyTracklist = {
-                                store.buildDetailShareTracklist(detail) { txt ->
-                                    copyToClipboard("Ferric Tracklist", txt)
-                                }
-                            },
-                            onExportCsv = {
-                                store.buildDetailCsv(detail) { csv ->
-                                    pendingExportText = csv
-                                    exportDocLauncher.launch("${detail.title.replace(' ', '_')}.csv")
-                                }
-                            },
-                            onRenamePlaylist = { name -> store.renamePlaylist(detail.id, name) },
-                            onDeletePlaylist = { store.deletePlaylist(detail.id) },
-                            onToggleLike = { id -> store.toggleLike(id) },
-                            onPlayNext = { t -> store.playNext(t) },
-                            onAddToQueue = { t -> store.appendToQueue(t) },
-                            onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
-                            onCopyTrackLink = { t ->
-                                store.buildTrackShareLink(t) { link ->
-                                    if (link != null) copyToClipboard("Track Link", link)
-                                }
-                            },
-                            onOpenArtist = { artist -> store.openArtistDetail(artist) },
-                            onRemoveFromPlaylist = { trackId -> store.removeTrackFromPlaylist(detail.id, trackId) },
-                        )
-                    } else {
-                        when (activeTab) {
-                            BottomTab.HOME -> HomeScreen(
-                                state = state,
-                                onRefresh = { store.loadHome(forceRefresh = true, moodIdx = null) },
-                                onSelectMood = { idx -> store.loadHome(forceRefresh = false, moodIdx = idx) },
-                                onOpenAccounts = { showAccountsSheet = true },
-                                onOpenThemeStudio = { showThemeSheet = true },
-                                onOpenConnect = { showConnectSheet = true },
-                                onOpenSettings = { showSettingsSheet = true },
-                                onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
-                                onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
-                                onOpenStation = { id -> store.openStation(id) },
-                                onOpenShelfCard = { card ->
-                                    val bid = card.browseId
-                                    if (!bid.isNullOrBlank()) {
-                                        store.openBrowseDetail(bid, card.kind)
-                                    }
-                                },
-                                onToggleLike = { id -> store.toggleLike(id) },
-                                onPlayNext = { t -> store.playNext(t) },
-                                onAddToQueue = { t -> store.appendToQueue(t) },
-                                onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
-                                onCopyTrackLink = { t ->
-                                    store.buildTrackShareLink(t) { link ->
-                                        if (link != null) copyToClipboard("Track Link", link)
-                                    }
-                                },
-                                onOpenArtist = { artist -> store.openArtistDetail(artist) },
-                            )
-
-                            BottomTab.SEARCH -> SearchScreen(
-                                state = state,
-                                onInstantLocalSearch = { q -> store.instantSearchLocal(q) },
-                                onOnlineSearch = { q -> store.searchOnline(q) },
-                                onClearRecentSearches = { store.clearRecentSearches() },
-                                onImportUrl = { url -> store.importPublicUrl(url) },
-                                onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
-                                onOpenCard = { card ->
-                                    val bid = card.browseId
-                                    if (!bid.isNullOrBlank()) {
-                                        store.openBrowseDetail(bid, card.kind)
-                                    }
-                                },
-                                onToggleLike = { id -> store.toggleLike(id) },
-                                onPlayNext = { t -> store.playNext(t) },
-                                onAddToQueue = { t -> store.appendToQueue(t) },
-                                onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
-                                onCopyTrackLink = { t ->
-                                    store.buildTrackShareLink(t) { link ->
-                                        if (link != null) copyToClipboard("Track Link", link)
-                                    }
-                                },
-                                onOpenArtist = { artist -> store.openArtistDetail(artist) },
-                            )
-
-                            BottomTab.LIBRARY -> LibraryScreen(
-                                state = state,
-                                onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
-                                onOpenPlaylist = { id -> store.openPlaylistDetail(id) },
-                                onOpenAlbum = { alb, art -> store.openAlbumDetail(alb, art) },
-                                onOpenArtist = { art -> store.openArtistDetail(art) },
-                                onOpenLikedDetail = { store.openLikedDetail() },
-                                onSetPlaylistFilter = { f -> store.setPlaylistFilter(f) },
-                                onCyclePlaylistSort = { store.cyclePlaylistSort() },
-                                onCreatePlaylistRequest = {
-                                    newPlaylistName = ""
-                                    showCreatePlaylistDialog = true
-                                },
-                                onImportPlaylistFile = {
-                                    importPlaylistLauncher.launch(arrayOf("*/*"))
-                                },
-                                onScanPhoneMusic = {
-                                    val hasPerm = ContextCompat.checkSelfPermission(
-                                        context,
-                                        audioPermission,
-                                    ) == PackageManager.PERMISSION_GRANTED
-                                    if (hasPerm) {
-                                        store.scanDeviceMediaStore()
-                                    } else {
-                                        audioPermissionLauncher.launch(audioPermission)
-                                    }
-                                },
-                                onPickSafFolder = { safFolderLauncher.launch(null) },
-                                onToggleLike = { id -> store.toggleLike(id) },
-                                onPlayNext = { t -> store.playNext(t) },
-                                onAddToQueue = { t -> store.appendToQueue(t) },
-                                onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
-                                onCopyTrackLink = { t ->
-                                    store.buildTrackShareLink(t) { link ->
-                                        if (link != null) copyToClipboard("Track Link", link)
-                                    }
-                                },
-                                onDownloadOffline = { t -> store.downloadTrackOffline(t) },
-                                onDeleteOffline = { id -> store.deleteOfflineTrack(id) },
-                            )
-                        }
-                    }
-                }
-            }
         }
+
+        // Layer 4: Top-most SnackbarHost so toasts are always visible even over FullPlayerScreen
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = if (showFullPlayer) 16.dp else 148.dp, start = 16.dp, end = 16.dp),
+        )
     }
 
     if (showQueueSheet) {
         QueueSheet(
             state = state,
+            progressFlow = store.playbackProgress,
             onDismiss = { showQueueSheet = false },
             onSeek = { pos -> store.seekTo(pos) },
             onToggleShuffle = { store.toggleShuffle() },
@@ -562,7 +698,6 @@ private fun FerricMainShell(
             onLoadQrCode = { regen -> store.loadConnectQrCode(regen) },
             onCopyPairingUri = { uri ->
                 copyToClipboard("Ferric Connect URI", uri)
-                store.clearStatusMessage()
             },
             onPairWithUri = { uri -> store.pairConnectQrUri(uri) },
         )

@@ -41,10 +41,15 @@ object CoverShadeExtractor {
                     ?: pal.darkMutedSwatch?.rgb
                     ?: darkVibrant
 
-                val accentColor = vibrant?.let { Color(it) } ?: FerricOrange
+                val rawAccent = vibrant?.let { Color(it) } ?: FerricOrange
+                val chroma = maxOf(rawAccent.red, rawAccent.green, rawAccent.blue) -
+                    minOf(rawAccent.red, rawAccent.green, rawAccent.blue)
+                // Keep monochrome / B&W covers crisp by falling back to warm Ferric accent
+                // instead of flat muddy grey.
+                val accentColor = if (chroma < 0.14f) FerricOrange else rawAccent
                 val orb1 = darkVibrant?.let { Color(it) } ?: Color(0xFF4A2012)
                 val orb2 = muted?.let { Color(it) } ?: Color(0xFF1A1F38)
-                val orb3 = vibrant?.let { Color(it).copy(alpha = 0.55f) } ?: Color(0xFF28172E)
+                val orb3 = accentColor.copy(alpha = 0.55f)
                 val glassTint = Color(
                     red = (0.04f + accentColor.red * 0.16f).coerceIn(0.03f, 0.24f),
                     green = (0.04f + accentColor.green * 0.16f).coerceIn(0.03f, 0.24f),

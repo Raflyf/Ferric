@@ -10,7 +10,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -27,17 +29,17 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * Battery-safe Aurora ambient backdrop driven by `CoverShadeColors`.
- * Automatically freezes its infinite animation when paused OR when the Activity leaves `RESUMED`
- * (`ON_STOP` / screen off) so GPU utilization drops to 0% in standby.
+ * Battery-safe Aurora ambient backdrop driven by [CoverShadeColors].
+ * Reads animation phase strictly inside Canvas draw scope (zero per-frame recomposition) and
+ * freezes cleanly when paused or when the Activity leaves `RESUMED`.
  */
 @Composable
 fun AuroraBackdrop(
     colors: CoverShadeColors,
     baseCanvas: Color,
     isPlaying: Boolean,
-    intensity: Float = 0.65f,
     modifier: Modifier = Modifier,
+    intensity: Float = 0.65f,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var isResumed by remember {
@@ -52,20 +54,29 @@ fun AuroraBackdrop(
     }
 
     val animate = isPlaying && isResumed
-    val phase = if (animate) {
+    val phaseState: State<Float> = if (animate) {
         val transition = rememberInfiniteTransition(label = "aurora")
-        val p by transition.animateFloat(
+        transition.animateFloat(
             initialValue = 0f,
             targetValue = (2.0 * PI).toFloat(),
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 16_000, easing = LinearEasing),
+                animation = tween(durationMillis = 18_000, easing = LinearEasing),
                 repeatMode = RepeatMode.Restart,
             ),
             label = "aurora_phase",
         )
-        p
     } else {
-        0.6f
+        remember { mutableFloatStateOf(0.6f) }
+    }
+
+    val orb1Stops = remember(colors.orb1, intensity) {
+        listOf(colors.orb1.copy(alpha = 0.50f * intensity), Color.Transparent)
+    }
+    val orb2Stops = remember(colors.orb2, intensity) {
+        listOf(colors.orb2.copy(alpha = 0.42f * intensity), Color.Transparent)
+    }
+    val orb3Stops = remember(colors.orb3, intensity) {
+        listOf(colors.orb3.copy(alpha = 0.30f * intensity), Color.Transparent)
     }
 
     Canvas(modifier = modifier.fillMaxSize()) {
@@ -74,44 +85,34 @@ fun AuroraBackdrop(
         val h = size.height
         if (w <= 0f || h <= 0f) return@Canvas
 
+        // Read animated value inside draw phase only so Compose never recomposes at 60-120Hz.
+        val phase = phaseState.value
         val c1 = Offset(
-            x = w * (0.28f + 0.16f * cos(phase)),
-            y = h * (0.22f + 0.12f * sin(phase)),
+            x = w * (0.28f + 0.14f * cos(phase)),
+            y = h * (0.18f + 0.10f * sin(phase)),
         )
         val c2 = Offset(
-            x = w * (0.76f + 0.14f * sin(phase * 0.8f)),
-            y = h * (0.58f + 0.15f * cos(phase * 0.9f)),
+            x = w * (0.78f + 0.12f * sin(phase * 0.8f)),
+            y = h * (0.56f + 0.12f * cos(phase * 0.9f)),
         )
         val c3 = Offset(
-            x = w * (0.45f + 0.18f * cos(phase * 1.1f + 1.4f)),
-            y = h * (0.82f + 0.10f * sin(phase * 0.7f)),
+            x = w * (0.44f + 0.15f * cos(phase * 1.1f + 1.4f)),
+            y = h * (0.84f + 0.08f * sin(phase * 0.7f)),
         )
         val radius = maxOf(w, h) * 0.72f
 
         drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(colors.orb1.copy(alpha = 0.52f * intensity), Color.Transparent),
-                center = c1,
-                radius = radius,
-            ),
+            brush = Brush.radialGradient(colors = orb1Stops, center = c1, radius = radius),
             center = c1,
             radius = radius,
         )
         drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(colors.orb2.copy(alpha = 0.45f * intensity), Color.Transparent),
-                center = c2,
-                radius = radius,
-            ),
+            brush = Brush.radialGradient(colors = orb2Stops, center = c2, radius = radius),
             center = c2,
             radius = radius,
         )
         drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(colors.orb3.copy(alpha = 0.34f * intensity), Color.Transparent),
-                center = c3,
-                radius = radius * 0.85f,
-            ),
+            brush = Brush.radialGradient(colors = orb3Stops, center = c3, radius = radius * 0.85f),
             center = c3,
             radius = radius * 0.85f,
         )

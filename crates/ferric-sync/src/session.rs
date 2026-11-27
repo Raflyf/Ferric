@@ -505,6 +505,16 @@ impl EngineRunner {
                         let changed = new_keys.advertised_tags() != self.keys.advertised_tags();
                         self.keys = new_keys;
                         if changed {
+                            // Revoke existing sessions whose room keys no longer match the updated account state.
+                            for peer in self.connected.values() {
+                                if let Ok(w) = peer.writer.lock() {
+                                    let _ = w.stream.shutdown(std::net::Shutdown::Both);
+                                }
+                            }
+                            self.connected.clear();
+                            if self.active_speaker_id != self.local_device_id {
+                                self.active_speaker_id = self.local_device_id.clone();
+                            }
                             self.last_beacon_at = None;
                             dirty = true;
                         }
@@ -576,6 +586,7 @@ impl EngineRunner {
                         let tok = csprng_hex(16);
                         self.qr_token_hex = tok.clone();
                         self.keys.guest = derive_qr_room(&tok);
+                        self.local_ip = detect_local_lan_ip();
                         let payload = PairingPayload {
                             endpoint_id: self.local_device_id.clone(),
                             token_hex: tok,
@@ -633,6 +644,11 @@ impl EngineRunner {
                 .is_none_or(|t| t.elapsed() >= BEACON_INTERVAL);
             if should_beacon {
                 self.last_beacon_at = Some(Instant::now());
+                let detected_ip = detect_local_lan_ip();
+                if detected_ip != "127.0.0.1" && detected_ip != self.local_ip {
+                    self.local_ip = detected_ip;
+                    dirty = true;
+                }
                 if self.keys.has_any_room() {
                     let (title, artist) = self
                         .local_playback
@@ -683,11 +699,16 @@ impl EngineRunner {
                         || self
                             .last_dial_attempt
                             .get(&p.device_id)
-                            .is_none_or(|t| t.elapsed() >= RECONNECT_BACKOFF);
+                            .is_some_and(|t| t.elapsed() >= RECONNECT_BACKOFF * 2);
                     let not_throttled = self
                         .last_dial_attempt
                         .get(&p.device_id)
                         .is_none_or(|t| t.elapsed() >= RECONNECT_BACKOFF);
+                    if !should_dial && !self.last_dial_attempt.contains_key(&p.device_id) {
+                        // Start grace timer so the lexicographically smaller device dials first.
+                        self.last_dial_attempt
+                            .insert(p.device_id.clone(), Instant::now());
+                    }
                     if should_dial
                         && not_throttled
                         && let Ok(addr) = p.addr.parse::<SocketAddr>()
@@ -928,6 +949,22 @@ impl EngineRunner {
                     false
                 }
             },
+            SyncFrame::Ping {
+                client_send_mono_ms,
+                ..
+            } => {
+                let now = unix_now_utc_ms();
+                if let Some(peer) = self.connected.get(peer_id)
+                    && let Ok(mut w) = peer.writer.lock()
+                {
+                    let _ = w.send_frame(&SyncFrame::Pong {
+                        client_send_mono_ms,
+                        server_recv_utc_ms: now,
+                        server_send_utc_ms: now,
+                    });
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -939,9 +976,14 @@ impl EngineRunner {
         start_playing: bool,
     ) {
         if new_speaker == self.local_device_id {
+            let source_peer_id = if self.connected.contains_key(&self.active_speaker_id) {
+                self.active_speaker_id.clone()
+            } else {
+                from_peer_id.to_string()
+            };
             self.active_speaker_id = self.local_device_id.clone();
             self.revision += 1;
-            if let Some(peer) = self.connected.get(from_peer_id) {
+            if let Some(peer) = self.connected.get(&source_peer_id) {
                 let mut st = peer
                     .last_state
                     .clone()
@@ -1001,7 +1043,7 @@ impl EngineRunner {
                 self.revision += 1;
                 handoff_state.revision = self.revision;
                 handoff_state.active_speaker = Some(target_device_id.clone());
-                handoff_state.is_playing = true;
+                handoff_state.is_playing = self.local_playback.is_playing;
                 handoff_state.anchor_utc_ms = unix_now_utc_ms();
 
                 self.active_speaker_id = target_device_id.clone();

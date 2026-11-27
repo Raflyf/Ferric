@@ -7,6 +7,9 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import java.net.Inet4Address
+import java.util.ArrayDeque
+import java.util.Collections
 import java.util.concurrent.Executors
 import uniffi.ferric_mobile_ffi.FfiDeviceKind
 
@@ -15,7 +18,8 @@ private const val FERRIC_NSD_TYPE = "_ferric-connect._udp."
 /**
  * Android NSD (mDNS) advertiser & discoverer for Zero-Pairing Ferric Connect.
  * Acquires a bounded [WifiManager.MulticastLock] only during the initial 10-second discovery burst
- * or while the user has the Connect sheet open so standby battery drain remains near zero.
+ * or while the user has the Connect sheet open, tracks API 34+ callbacks cleanly, serializes
+ * API 28-33 resolves, prefers IPv4 addresses, and pauses discovery when backgrounded.
  */
 class ConnectNsdHelper(
     private val context: Context,
@@ -35,6 +39,10 @@ class ConnectNsdHelper(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val callbackExecutor = Executors.newSingleThreadExecutor()
 
+    private val activeInfoCallbacks = Collections.synchronizedSet(mutableSetOf<Any>())
+    private val legacyResolveQueue = ArrayDeque<NsdServiceInfo>()
+    private var legacyResolving = false
+
     private var multicastLock: WifiManager.MulticastLock? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
@@ -42,6 +50,7 @@ class ConnectNsdHelper(
     private var localDeviceId: String = ""
     private var isDiscoveryRunning = false
     private var boostPinned = false
+    private var isForeground = true
 
     private val releaseBurstRunnable = Runnable {
         if (!boostPinned) {
@@ -61,7 +70,7 @@ class ConnectNsdHelper(
         localDeviceId = deviceId
         val key = "$deviceId|$deviceName|$tcpPort|$roomTagsHex"
         if (key == lastRegisteredKey) {
-            ensureDiscoveryStarted()
+            if (isForeground) ensureDiscoveryStarted()
             return
         }
         lastRegisteredKey = key
@@ -86,8 +95,27 @@ class ConnectNsdHelper(
         runCatching {
             mgr.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
         }
-        ensureDiscoveryStarted()
-        triggerInitialBurstLock()
+        if (isForeground) {
+            ensureDiscoveryStarted()
+            triggerInitialBurstLock()
+        }
+    }
+
+    @Synchronized
+    fun setAppForeground(foreground: Boolean) {
+        isForeground = foreground
+        val mgr = nsdManager ?: return
+        if (foreground) {
+            if (lastRegisteredKey != null) {
+                ensureDiscoveryStarted()
+            }
+        } else {
+            stopDiscoveryLocked(mgr)
+            if (!boostPinned) {
+                mainHandler.removeCallbacks(releaseBurstRunnable)
+                releaseMulticastLock()
+            }
+        }
     }
 
     @Synchronized
@@ -109,15 +137,33 @@ class ConnectNsdHelper(
         val mgr = nsdManager
         if (mgr != null) {
             unregisterServiceLocked(mgr)
-            discoveryListener?.let { listener ->
-                runCatching { mgr.stopServiceDiscovery(listener) }
+            stopDiscoveryLocked(mgr)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val snapshot = synchronized(activeInfoCallbacks) {
+                    val copy = activeInfoCallbacks.toList()
+                    activeInfoCallbacks.clear()
+                    copy
+                }
+                snapshot.forEach { cb ->
+                    (cb as? NsdManager.ServiceInfoCallback)?.let {
+                        runCatching { mgr.unregisterServiceInfoCallback(it) }
+                    }
+                }
             }
         }
-        discoveryListener = null
-        isDiscoveryRunning = false
+        legacyResolveQueue.clear()
+        legacyResolving = false
         lastRegisteredKey = null
         releaseMulticastLock()
         callbackExecutor.shutdownNow()
+    }
+
+    private fun stopDiscoveryLocked(mgr: NsdManager) {
+        discoveryListener?.let { listener ->
+            runCatching { mgr.stopServiceDiscovery(listener) }
+        }
+        discoveryListener = null
+        isDiscoveryRunning = false
     }
 
     private fun ensureDiscoveryStarted() {
@@ -140,48 +186,93 @@ class ConnectNsdHelper(
             }
 
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                // Never call stopServiceDiscovery when start failed; Android throws IllegalArgumentException.
                 isDiscoveryRunning = false
-                runCatching { mgr.stopServiceDiscovery(this) }
+                discoveryListener = null
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
                 isDiscoveryRunning = false
+                discoveryListener = null
             }
         }
         discoveryListener = listener
         runCatching {
             mgr.discoverServices(FERRIC_NSD_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        }.onFailure {
+            isDiscoveryRunning = false
+            discoveryListener = null
         }
     }
 
     private fun resolvePeerService(mgr: NsdManager, serviceInfo: NsdServiceInfo) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val cb = object : NsdManager.ServiceInfoCallback {
-                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {}
+                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                    activeInfoCallbacks.remove(this)
+                }
+
                 override fun onServiceUpdated(resolved: NsdServiceInfo) {
                     emitResolved(resolved)
+                    activeInfoCallbacks.remove(this)
                     runCatching { mgr.unregisterServiceInfoCallback(this) }
                 }
 
-                override fun onServiceLost() {}
-                override fun onServiceInfoCallbackUnregistered() {}
+                override fun onServiceLost() {
+                    activeInfoCallbacks.remove(this)
+                    runCatching { mgr.unregisterServiceInfoCallback(this) }
+                }
+
+                override fun onServiceInfoCallbackUnregistered() {
+                    activeInfoCallbacks.remove(this)
+                }
             }
+            activeInfoCallbacks.add(cb)
             runCatching {
                 mgr.registerServiceInfoCallback(serviceInfo, callbackExecutor, cb)
+            }.onFailure {
+                activeInfoCallbacks.remove(cb)
             }
         } else {
-            @Suppress("DEPRECATION")
-            runCatching {
-                mgr.resolveService(
-                    serviceInfo,
-                    object : NsdManager.ResolveListener {
-                        override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {}
-                        override fun onServiceResolved(resolved: NsdServiceInfo) {
-                            emitResolved(resolved)
-                        }
-                    },
-                )
+            synchronized(this) {
+                if (legacyResolveQueue.size < 16) {
+                    legacyResolveQueue.addLast(serviceInfo)
+                }
+                if (!legacyResolving) {
+                    drainNextLegacyResolveLocked(mgr)
+                }
             }
+        }
+    }
+
+    private fun drainNextLegacyResolveLocked(mgr: NsdManager) {
+        val next = legacyResolveQueue.pollFirst()
+        if (next == null) {
+            legacyResolving = false
+            return
+        }
+        legacyResolving = true
+        @Suppress("DEPRECATION")
+        runCatching {
+            mgr.resolveService(
+                next,
+                object : NsdManager.ResolveListener {
+                    override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
+                        synchronized(this@ConnectNsdHelper) {
+                            drainNextLegacyResolveLocked(mgr)
+                        }
+                    }
+
+                    override fun onServiceResolved(resolved: NsdServiceInfo) {
+                        emitResolved(resolved)
+                        synchronized(this@ConnectNsdHelper) {
+                            drainNextLegacyResolveLocked(mgr)
+                        }
+                    }
+                },
+            )
+        }.onFailure {
+            drainNextLegacyResolveLocked(mgr)
         }
     }
 
@@ -200,7 +291,9 @@ class ConnectNsdHelper(
         val tagsHex = attrs["tags"]?.decodeToString()?.trim().orEmpty()
         val port = resolved.port
         val hostAddr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            resolved.hostAddresses.firstOrNull()?.hostAddress
+            val addrs = resolved.hostAddresses
+            (addrs.firstOrNull { it is Inet4Address } ?: addrs.firstOrNull { !it.isLinkLocalAddress } ?: addrs.firstOrNull())
+                ?.hostAddress
         } else {
             @Suppress("DEPRECATION")
             resolved.host?.hostAddress

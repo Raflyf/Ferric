@@ -1,8 +1,10 @@
 package dev.livelydesk.ferric
 
+import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackStateReducer
 import dev.livelydesk.ferric.core.PlaybackUiState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.ferric_mobile_ffi.FfiTelemetry
@@ -30,6 +32,18 @@ class PlaybackStateReducerTest {
         assertEquals(48_000, updated.outputRate)
         assertTrue(updated.isCrossfading)
         assertEquals(1000, updated.spectrumBins[5])
+
+        val progress = PlaybackStateReducer.applyProgress(PlaybackProgress(), telemetry)
+        assertEquals(42_500L, progress.positionMs)
+        assertEquals(180_000L, progress.durationMs)
+        assertEquals(1000, progress.spectrumBins[5])
+
+        val lowFreq1 = PlaybackStateReducer.applyLowFreqTelemetry(initial, telemetry)
+        val lowFreq2 = PlaybackStateReducer.applyLowFreqTelemetry(
+            lowFreq1,
+            telemetry.copy(positionMs = 43_000uL),
+        )
+        assertSame(lowFreq1, lowFreq2)
     }
 
     @Test

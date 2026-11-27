@@ -163,13 +163,7 @@ impl FerricController {
                 .map(|c| c.params.clone())
                 .filter(|p| !p.is_empty());
 
-            let refresh_mood_params =
-                if force_refresh && mood_idx.is_none() && !chips_snapshot.is_empty() {
-                    let pick = st.station_rotation_epoch % chips_snapshot.len();
-                    Some(chips_snapshot[pick].params.clone())
-                } else {
-                    None
-                };
+            let refresh_mood_params = None;
 
             let taste = YtmHomeTasteProfile {
                 top_tracks,
@@ -278,6 +272,7 @@ impl FerricController {
                                 && st.accounts.youtube_visitor_data.is_empty()
                             {
                                 st.accounts.youtube_visitor_data = rich.visitor_data;
+                                let _ = st.db.save_accounts(&st.accounts);
                             }
                             st.home_continuation = rich.continuation_token;
 
@@ -297,7 +292,8 @@ impl FerricController {
                             st.home_excluded_artists.clear();
                             for s in &stations {
                                 if !s.seed_artist.is_empty() {
-                                    st.home_excluded_artists.insert(s.seed_artist.clone());
+                                    st.home_excluded_artists
+                                        .insert(s.seed_artist.trim().to_ascii_lowercase());
                                 }
                             }
 

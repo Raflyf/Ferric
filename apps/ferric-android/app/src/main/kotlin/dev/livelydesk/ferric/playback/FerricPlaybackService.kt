@@ -1,13 +1,20 @@
 package dev.livelydesk.ferric.playback
 
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.media.AudioAttributes
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.net.Uri
+import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
@@ -18,72 +25,79 @@ import androidx.media3.common.SimpleBasePlayer
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import coil3.SingletonImageLoader
+import coil3.request.ImageRequest
+import coil3.request.SuccessResult
+import coil3.request.allowHardware
+import coil3.toBitmap
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import dev.livelydesk.ferric.FerricApp
+import dev.livelydesk.ferric.MainActivity
 import dev.livelydesk.ferric.core.CoreStateStore
-import dev.livelydesk.ferric.core.PlaybackUiState
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * Foreground Media3 [MediaSessionService] bridging Android media notifications, lockscreen
- * transport controls, Bluetooth AVRCP keys, AudioFocus ducking/pausing, and `ACTION_AUDIO_BECOMING_NOISY`
- * directly to Ferric's Rust `oboe-rs` audio engine.
+ * Process-wide AudioFocus and foreground-service coordinator shared by UI playback buttons,
+ * Home Screen widgets, and [FerricPlaybackService] MediaSession3 callbacks so every playback
+ * entry point properly owns Android AudioFocus, handles phone-call delayed gain, and keeps
+ * the foreground media notification alive.
  */
-@OptIn(UnstableApi::class)
-class FerricPlaybackService : MediaSessionService() {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private lateinit var store: CoreStateStore
-    private lateinit var audioManager: AudioManager
-    private lateinit var focusRequest: AudioFocusRequest
-    private var mediaSession: MediaSession? = null
-    private var bridgePlayer: RustBridgePlayer? = null
-    private var noisyRegistered = false
+object PlaybackFocusCoordinator {
+    @Volatile
+    private var initialized = false
+
+    @Volatile
     private var resumeOnFocusGain = false
 
-    private val noisyReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
-                resumeOnFocusGain = false
-                store.pause()
-                store.refreshOutputRoute()
-            }
-        }
-    }
+    @Volatile
+    private var hasFocus = false
+
+    private lateinit var appContext: Context
+    private lateinit var audioManager: AudioManager
+    private lateinit var focusRequest: AudioFocusRequest
+    private lateinit var storeRef: CoreStateStore
 
     private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS -> {
+                hasFocus = false
                 resumeOnFocusGain = false
-                store.setDucking(false)
-                store.pause()
+                storeRef.setDucking(false)
+                storeRef.pauseInternal()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                resumeOnFocusGain = store.uiState.value.isPlaying
-                store.pause()
+                hasFocus = false
+                resumeOnFocusGain = storeRef.uiState.value.isPlaying
+                storeRef.pauseInternal()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                store.setDucking(true)
+                storeRef.setDucking(true)
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
-                store.setDucking(false)
+                hasFocus = true
+                storeRef.setDucking(false)
                 if (resumeOnFocusGain) {
                     resumeOnFocusGain = false
-                    store.play()
+                    storeRef.playInternal()
                 }
             }
         }
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        store = (application as FerricApp).store
-        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
-
+    @Synchronized
+    fun ensureInitialized(context: Context, store: CoreStateStore) {
+        if (initialized) return
+        appContext = context.applicationContext
+        storeRef = store
+        audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val attrs = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -93,8 +107,104 @@ class FerricPlaybackService : MediaSessionService() {
             .setAcceptsDelayedFocusGain(true)
             .setOnAudioFocusChangeListener(focusChangeListener)
             .build()
+        initialized = true
+    }
 
-        // Lazily initialize Rust Oboe audio inside the foreground MediaSessionService (not Application.onCreate).
+    /**
+     * Request Android media AudioFocus and ensure [FerricPlaybackService] is running.
+     * Returns `true` if focus is granted immediately; returns `false` if delayed (sets
+     * [resumeOnFocusGain] = true so playback starts automatically once the call/alarm finishes)
+     * or failed.
+     */
+    fun requestFocusForPlayback(startService: Boolean = true): Boolean {
+        if (!initialized) return true
+        if (startService) {
+            runCatching {
+                ContextCompat.startForegroundService(
+                    appContext,
+                    Intent(appContext, FerricPlaybackService::class.java),
+                )
+            }
+        }
+        if (hasFocus) return true
+        return when (audioManager.requestAudioFocus(focusRequest)) {
+            AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> {
+                hasFocus = true
+                resumeOnFocusGain = false
+                true
+            }
+            AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> {
+                hasFocus = false
+                resumeOnFocusGain = true
+                false
+            }
+            else -> {
+                hasFocus = false
+                resumeOnFocusGain = false
+                false
+            }
+        }
+    }
+
+    fun onExplicitPause() {
+        resumeOnFocusGain = false
+    }
+
+    fun abandonFocus() {
+        if (!initialized) return
+        hasFocus = false
+        resumeOnFocusGain = false
+        runCatching { audioManager.abandonAudioFocusRequest(focusRequest) }
+    }
+}
+
+private data class SessionStateKey(
+    val trackId: String?,
+    val title: String?,
+    val artist: String?,
+    val album: String?,
+    val thumbnailUrl: String?,
+    val isPlaying: Boolean,
+    val durationMs: Long,
+    val playbackSpeed: Float,
+    val seekSyncNonce: Long,
+)
+
+/**
+ * Foreground Media3 [MediaSessionService] bridging Android media notifications (with cover artwork
+ * and click-to-open activity intent), lockscreen transport controls, Bluetooth AVRCP keys, live
+ * AudioDevice route hot-plug updates, AudioFocus, and `ACTION_AUDIO_BECOMING_NOISY` directly to
+ * Ferric's Rust `oboe-rs` audio engine.
+ */
+@OptIn(UnstableApi::class)
+class FerricPlaybackService : MediaSessionService() {
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private lateinit var store: CoreStateStore
+    private lateinit var audioManager: AudioManager
+    private var mediaSession: MediaSession? = null
+    private var bridgePlayer: RustBridgePlayer? = null
+    private var noisyRegistered = false
+    private var audioDeviceCallback: AudioDeviceCallback? = null
+    private var lastArtUrl: String? = null
+    private var cachedArtBytes: ByteArray? = null
+
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                PlaybackFocusCoordinator.onExplicitPause()
+                store.pauseInternal()
+                store.refreshOutputRoute()
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        store = (application as FerricApp).store
+        PlaybackFocusCoordinator.ensureInitialized(this, store)
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+
+        // Lazily initialize Rust Oboe audio inside the foreground MediaSessionService.
         serviceScope.launch(Dispatchers.IO) {
             store.ensureAudioStartedSync()
         }
@@ -102,10 +212,36 @@ class FerricPlaybackService : MediaSessionService() {
         val player = RustBridgePlayer(
             looper = Looper.getMainLooper(),
             store = store,
-            requestAudioFocus = { requestMediaFocus() },
         )
         bridgePlayer = player
-        mediaSession = MediaSession.Builder(this, player).build()
+
+        val openAppPi = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val sessionCallback = object : MediaSession.Callback {
+            override fun onConnect(
+                session: MediaSession,
+                controller: MediaSession.ControllerInfo,
+            ): MediaSession.ConnectionResult {
+                val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
+                    .buildUpon()
+                    .build()
+                return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                    .setAvailablePlayerCommands(playerCommands)
+                    .build()
+            }
+        }
+
+        mediaSession = MediaSession.Builder(this, player)
+            .setSessionActivity(openAppPi)
+            .setCallback(sessionCallback)
+            .build()
 
         ContextCompat.registerReceiver(
             this,
@@ -115,9 +251,98 @@ class FerricPlaybackService : MediaSessionService() {
         )
         noisyRegistered = true
 
+        val devCb = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                store.refreshOutputRoute()
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                store.refreshOutputRoute()
+            }
+        }
+        audioDeviceCallback = devCb
+        audioManager.registerAudioDeviceCallback(devCb, Handler(Looper.getMainLooper()))
+
+        // Deduplicate MediaSession state updates: only call invalidateState() when track, play
+        // state, duration, speed, or explicit seek changes, NOT on every 200ms position tick.
         serviceScope.launch {
-            store.uiState.collect { ui ->
-                player.pushState(ui)
+            store.uiState
+                .map { ui ->
+                    SessionStateKey(
+                        trackId = ui.currentTrack?.id,
+                        title = ui.currentTrack?.title,
+                        artist = ui.currentTrack?.artist,
+                        album = ui.currentTrack?.album,
+                        thumbnailUrl = ui.currentTrack?.thumbnailUrl,
+                        isPlaying = ui.isPlaying,
+                        durationMs = ui.durationMs,
+                        playbackSpeed = ui.dspSettings?.playbackSpeed ?: 1f,
+                        seekSyncNonce = ui.seekSyncNonce,
+                    )
+                }
+                .distinctUntilChanged()
+                .collect { key ->
+                    val posMs = store.playbackProgress.value.positionMs
+                    val artBytes = if (!key.thumbnailUrl.isNullOrBlank() && key.thumbnailUrl == lastArtUrl) {
+                        cachedArtBytes
+                    } else {
+                        null
+                    }
+                    player.pushSnapshot(
+                        key = key,
+                        positionMs = posMs,
+                        artworkBytes = artBytes,
+                    )
+                    val artUrl = key.thumbnailUrl
+                    if (!artUrl.isNullOrBlank() && artUrl != lastArtUrl) {
+                        fetchArtworkForNotification(artUrl, player)
+                    } else if (artUrl.isNullOrBlank()) {
+                        lastArtUrl = null
+                        cachedArtBytes = null
+                    }
+                }
+        }
+    }
+
+    private fun fetchArtworkForNotification(url: String, player: RustBridgePlayer) {
+        serviceScope.launch(Dispatchers.IO) {
+            val bytes = runCatching {
+                val loader = SingletonImageLoader.get(applicationContext)
+                val req = ImageRequest.Builder(applicationContext)
+                    .data(url)
+                    .size(512, 512)
+                    .allowHardware(false)
+                    .build()
+                val bmp = (loader.execute(req) as? SuccessResult)?.image?.toBitmap() ?: return@runCatching null
+                ByteArrayOutputStream().use { out ->
+                    bmp.compress(Bitmap.CompressFormat.JPEG, 88, out)
+                    out.toByteArray()
+                }
+            }.getOrNull()
+            if (bytes != null) {
+                serviceScope.launch(Dispatchers.Main.immediate) {
+                    val current = store.uiState.value
+                    if (current.currentTrack?.thumbnailUrl == url) {
+                        lastArtUrl = url
+                        cachedArtBytes = bytes
+                        val key = SessionStateKey(
+                            trackId = current.currentTrack.id,
+                            title = current.currentTrack.title,
+                            artist = current.currentTrack.artist,
+                            album = current.currentTrack.album,
+                            thumbnailUrl = current.currentTrack.thumbnailUrl,
+                            isPlaying = current.isPlaying,
+                            durationMs = current.durationMs,
+                            playbackSpeed = current.dspSettings?.playbackSpeed ?: 1f,
+                            seekSyncNonce = current.seekSyncNonce,
+                        )
+                        player.pushSnapshot(
+                            key = key,
+                            positionMs = store.playbackProgress.value.positionMs,
+                            artworkBytes = bytes,
+                        )
+                    }
+                }
             }
         }
     }
@@ -127,21 +352,20 @@ class FerricPlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        audioDeviceCallback?.let { cb ->
+            runCatching { audioManager.unregisterAudioDeviceCallback(cb) }
+        }
+        audioDeviceCallback = null
         if (noisyRegistered) {
             unregisterReceiver(noisyReceiver)
             noisyRegistered = false
         }
-        audioManager.abandonAudioFocusRequest(focusRequest)
+        PlaybackFocusCoordinator.abandonFocus()
         mediaSession?.release()
         mediaSession = null
         bridgePlayer = null
         serviceScope.cancel()
         super.onDestroy()
-    }
-
-    private fun requestMediaFocus(): Boolean {
-        val granted = audioManager.requestAudioFocus(focusRequest)
-        return granted == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     }
 }
 
@@ -149,32 +373,53 @@ class FerricPlaybackService : MediaSessionService() {
 private class RustBridgePlayer(
     looper: Looper,
     private val store: CoreStateStore,
-    private val requestAudioFocus: () -> Boolean,
 ) : SimpleBasePlayer(looper) {
-    private var snapshot: PlaybackUiState = store.uiState.value
+    private var key: SessionStateKey = SessionStateKey(
+        trackId = null,
+        title = null,
+        artist = null,
+        album = null,
+        thumbnailUrl = null,
+        isPlaying = false,
+        durationMs = 0L,
+        playbackSpeed = 1f,
+        seekSyncNonce = 0L,
+    )
+    private var anchorPositionMs: Long = 0L
+    private var anchorElapsedRealtimeMs: Long = SystemClock.elapsedRealtime()
+    private var artworkBytes: ByteArray? = null
 
-    fun pushState(newState: PlaybackUiState) {
-        snapshot = newState
+    fun pushSnapshot(key: SessionStateKey, positionMs: Long, artworkBytes: ByteArray?) {
+        this.key = key
+        this.anchorPositionMs = positionMs.coerceAtLeast(0L)
+        this.anchorElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        this.artworkBytes = artworkBytes
         invalidateState()
     }
 
     override fun getState(): State {
-        val current = snapshot.currentTrack
-        val items = if (current != null) {
-            val metadata = MediaMetadata.Builder()
-                .setTitle(current.title)
-                .setArtist(current.artist)
-                .setAlbumTitle(current.album)
-                .build()
+        val id = key.trackId
+        val items = if (id != null) {
+            val metaBuilder = MediaMetadata.Builder()
+                .setTitle(key.title.orEmpty())
+                .setArtist(key.artist.orEmpty())
+                .setAlbumTitle(key.album.orEmpty())
+            val artUri = key.thumbnailUrl?.takeIf { it.isNotBlank() }?.let { runCatching { Uri.parse(it) }.getOrNull() }
+            if (artUri != null) {
+                metaBuilder.setArtworkUri(artUri)
+            }
+            artworkBytes?.let { bytes ->
+                metaBuilder.setArtworkData(bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+            }
             val mediaItem = MediaItem.Builder()
-                .setMediaId(current.id)
-                .setMediaMetadata(metadata)
+                .setMediaId(id)
+                .setMediaMetadata(metaBuilder.build())
                 .build()
             listOf(
-                MediaItemData.Builder(current.id)
+                MediaItemData.Builder(id)
                     .setMediaItem(mediaItem)
                     .setDurationUs(
-                        if (snapshot.durationMs > 0L) snapshot.durationMs * 1_000L else C.TIME_UNSET,
+                        if (key.durationMs > 0L) key.durationMs * 1_000L else C.TIME_UNSET,
                     )
                     .build(),
             )
@@ -196,26 +441,31 @@ private class RustBridgePlayer(
             )
             .build()
 
-        val playbackState = when {
-            items.isEmpty() -> Player.STATE_IDLE
-            else -> Player.STATE_READY
+        val playbackState = if (items.isEmpty()) Player.STATE_IDLE else Player.STATE_READY
+        val speed = if (key.isPlaying) key.playbackSpeed.coerceIn(0.5f, 2.0f) else 0f
+        val posSupplier = PositionSupplier {
+            if (speed > 0f) {
+                val delta = ((SystemClock.elapsedRealtime() - anchorElapsedRealtimeMs) * speed).toLong()
+                val raw = anchorPositionMs + delta
+                if (key.durationMs > 0L) raw.coerceIn(0L, key.durationMs) else raw.coerceAtLeast(0L)
+            } else {
+                anchorPositionMs
+            }
         }
 
         return State.Builder()
             .setAvailableCommands(commands)
-            .setPlayWhenReady(snapshot.isPlaying, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+            .setPlayWhenReady(key.isPlaying, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
             .setPlaybackState(playbackState)
             .setPlaylist(items)
             .setCurrentMediaItemIndex(if (items.isEmpty()) C.INDEX_UNSET else 0)
-            .setContentPositionMs { snapshot.positionMs }
+            .setContentPositionMs(posSupplier)
             .build()
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
         if (playWhenReady) {
-            if (requestAudioFocus()) {
-                store.play()
-            }
+            store.play()
         } else {
             store.pause()
         }
@@ -229,15 +479,9 @@ private class RustBridgePlayer(
     ): ListenableFuture<*> {
         when (seekCommand) {
             Player.COMMAND_SEEK_TO_NEXT,
-            Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> {
-                requestAudioFocus()
-                store.next()
-            }
+            Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> store.next()
             Player.COMMAND_SEEK_TO_PREVIOUS,
-            Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> {
-                requestAudioFocus()
-                store.prev()
-            }
+            Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> store.prev()
             else -> {
                 if (positionMs != C.TIME_UNSET) {
                     store.seekTo(positionMs)

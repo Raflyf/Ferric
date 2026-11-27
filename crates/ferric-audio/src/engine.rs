@@ -13,7 +13,7 @@ use rubato::{
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
@@ -454,25 +454,25 @@ struct OutputSlotState {
     stream: Option<PlatformOutputStream>,
     preferred_device: Option<String>,
     active_device_name: String,
+    stream_paused: bool,
     last_recovery_attempt: Option<std::time::Instant>,
 }
 
 fn poll_recovery_inner(
     slot_lock: &Mutex<OutputSlotState>,
-    stream_paused: &AtomicBool,
     telemetry: &Arc<AudioTelemetry>,
     cmd_tx: &Sender<EngineCommand>,
 ) -> bool {
     let mut slot = slot_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !stream_paused.load(Ordering::Acquire)
+    if !slot.stream_paused
         && telemetry.idle_silent.load(Ordering::Acquire)
         && !telemetry.is_playing.load(Ordering::Acquire)
         && let Some(stream) = slot.stream.as_mut()
     {
         let _ = stream.pause();
-        stream_paused.store(true, Ordering::Release);
+        slot.stream_paused = true;
     }
     if !telemetry.device_lost.load(Ordering::Acquire) {
         return false;
@@ -489,7 +489,7 @@ fn poll_recovery_inner(
     match build_output_stream_and_producer(telemetry, slot.preferred_device.as_deref(), want_play) {
         Ok((new_stream, new_producer, new_rate, active_name)) => {
             slot.stream = Some(new_stream);
-            stream_paused.store(!want_play, Ordering::Release);
+            slot.stream_paused = !want_play;
             telemetry.device_lost.store(false, Ordering::Release);
             slot.active_device_name = active_name;
             let _ = cmd_tx.send(EngineCommand::ReplaceOutputRing {
@@ -499,8 +499,10 @@ fn poll_recovery_inner(
             true
         }
         Err(_) => {
-            telemetry.is_playing.store(false, Ordering::Release);
-            stream_paused.store(true, Ordering::Release);
+            // Preserve telemetry.is_playing so the next recovery retry resumes automatically
+            // once Bluetooth/USB audio routing settles.
+            slot.stream_paused = true;
+            telemetry.device_lost.store(true, Ordering::Release);
             false
         }
     }
@@ -510,9 +512,9 @@ pub struct AudioEngine {
     cmd_tx: Sender<EngineCommand>,
     telemetry: Arc<AudioTelemetry>,
     output_slot: Arc<Mutex<OutputSlotState>>,
-    stream_paused: Arc<AtomicBool>,
     decode_handle: Option<thread::JoinHandle<()>>,
     supervisor_stop: Arc<AtomicBool>,
+    supervisor_wake: Arc<(Mutex<bool>, Condvar)>,
     supervisor_handle: Option<thread::JoinHandle<()>>,
     headless: bool,
     preferred_device: Option<String>,
@@ -578,22 +580,48 @@ impl AudioEngine {
             stream: Some(stream),
             preferred_device: cleaned_pref.clone(),
             active_device_name: active_device_name.clone(),
+            stream_paused: true,
             last_recovery_attempt: None,
         }));
-        let stream_paused = Arc::new(AtomicBool::new(true));
         let supervisor_stop = Arc::new(AtomicBool::new(false));
+        let supervisor_wake = Arc::new((Mutex::new(false), Condvar::new()));
         let supervisor_handle = if with_supervisor {
             let sup_slot = Arc::clone(&output_slot);
-            let sup_paused = Arc::clone(&stream_paused);
             let sup_tel = Arc::clone(&telemetry);
             let sup_tx = cmd_tx.clone();
             let sup_stop = Arc::clone(&supervisor_stop);
+            let sup_wake = Arc::clone(&supervisor_wake);
             thread::Builder::new()
                 .name("ferric-audio-sup".to_string())
                 .spawn(move || {
+                    let (wake_lock, wake_cv) = &*sup_wake;
                     while !sup_stop.load(Ordering::Acquire) {
-                        poll_recovery_inner(&sup_slot, &sup_paused, &sup_tel, &sup_tx);
-                        thread::sleep(Duration::from_millis(450));
+                        poll_recovery_inner(&sup_slot, &sup_tel, &sup_tx);
+                        let active = sup_tel.is_playing.load(Ordering::Acquire)
+                            || sup_tel.device_lost.load(Ordering::Acquire)
+                            || !sup_tel.idle_silent.load(Ordering::Acquire);
+                        let mut guard = wake_lock.lock().unwrap_or_else(|p| p.into_inner());
+                        if sup_stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if *guard {
+                            *guard = false;
+                            continue;
+                        }
+                        if active {
+                            let (g, _) = wake_cv
+                                .wait_timeout(guard, Duration::from_millis(450))
+                                .unwrap_or_else(|p| p.into_inner());
+                            let mut g = g;
+                            *g = false;
+                        } else {
+                            // Standby while paused & drained: sleep indefinitely until Play/Drop wakes us.
+                            let (g, _) = wake_cv
+                                .wait_timeout(guard, Duration::from_secs(30))
+                                .unwrap_or_else(|p| p.into_inner());
+                            let mut g = g;
+                            *g = false;
+                        }
                     }
                 })
                 .ok()
@@ -605,9 +633,9 @@ impl AudioEngine {
             cmd_tx,
             telemetry,
             output_slot,
-            stream_paused,
             decode_handle: Some(handle),
             supervisor_stop,
+            supervisor_wake,
             supervisor_handle,
             headless: false,
             preferred_device: cleaned_pref,
@@ -635,11 +663,12 @@ impl AudioEngine {
                 stream: None,
                 preferred_device: None,
                 active_device_name: "Headless (No Audio Device)".to_string(),
+                stream_paused: true,
                 last_recovery_attempt: None,
             })),
-            stream_paused: Arc::new(AtomicBool::new(true)),
             decode_handle: handle,
             supervisor_stop: Arc::new(AtomicBool::new(true)),
+            supervisor_wake: Arc::new((Mutex::new(false), Condvar::new())),
             supervisor_handle: None,
             headless: true,
             preferred_device: None,
@@ -689,7 +718,7 @@ impl AudioEngine {
         ) {
             Ok((new_stream, new_producer, new_rate, active_name)) => {
                 slot.stream = Some(new_stream);
-                self.stream_paused.store(!want_play, Ordering::Release);
+                slot.stream_paused = !want_play;
                 self.telemetry.device_lost.store(false, Ordering::Release);
                 slot.active_device_name = active_name.clone();
                 self.active_device_name = active_name.clone();
@@ -701,7 +730,7 @@ impl AudioEngine {
             }
             Err(err) => {
                 self.telemetry.is_playing.store(false, Ordering::Release);
-                self.stream_paused.store(true, Ordering::Release);
+                slot.stream_paused = true;
                 Err(err)
             }
         }
@@ -715,12 +744,7 @@ impl AudioEngine {
         if self.headless {
             return false;
         }
-        let recovered = poll_recovery_inner(
-            &self.output_slot,
-            &self.stream_paused,
-            &self.telemetry,
-            &self.cmd_tx,
-        );
+        let recovered = poll_recovery_inner(&self.output_slot, &self.telemetry, &self.cmd_tx);
         if recovered {
             let slot = self
                 .output_slot
@@ -729,6 +753,13 @@ impl AudioEngine {
             self.active_device_name = slot.active_device_name.clone();
         }
         recovered
+    }
+
+    fn wake_supervisor(&self) {
+        let (lock, cv) = &*self.supervisor_wake;
+        let mut flag = lock.lock().unwrap_or_else(|p| p.into_inner());
+        *flag = true;
+        cv.notify_all();
     }
 
     pub fn send(&self, cmd: EngineCommand) {
@@ -742,18 +773,22 @@ impl AudioEngine {
         );
         if needs_audio_wake {
             self.telemetry.idle_silent.store(false, Ordering::Release);
-            if self.stream_paused.swap(false, Ordering::AcqRel) {
+            {
                 let mut slot = self
                     .output_slot
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Some(stream) = slot.stream.as_mut()
-                    && stream.play().is_err()
-                {
-                    self.stream_paused.store(true, Ordering::Release);
-                    self.telemetry.device_lost.store(true, Ordering::Release);
+                if slot.stream_paused {
+                    slot.stream_paused = false;
+                    if let Some(stream) = slot.stream.as_mut()
+                        && stream.play().is_err()
+                    {
+                        slot.stream_paused = true;
+                        self.telemetry.device_lost.store(true, Ordering::Release);
+                    }
                 }
             }
+            self.wake_supervisor();
         }
         let _ = self.cmd_tx.send(cmd);
     }
@@ -770,6 +805,7 @@ impl AudioEngine {
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         self.supervisor_stop.store(true, Ordering::Release);
+        self.wake_supervisor();
         let _ = self.cmd_tx.send(EngineCommand::Shutdown);
         if let Some(sup) = self.supervisor_handle.take() {
             let _ = sup.join();
@@ -1029,12 +1065,17 @@ impl ActiveDeck {
     }
 
     fn seek_ms(&mut self, target_ms: u64) -> AudioResult<u64> {
+        let clamped_ms = if self.duration_ms > 50 {
+            target_ms.min(self.duration_ms.saturating_sub(50))
+        } else {
+            target_ms
+        };
         let seeked = self
             .format
             .seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
-                    time: Time::from_millis_u64(target_ms),
+                    time: Time::from_millis_u64(clamped_ms),
                     track_id: Some(self.track_id),
                 },
             )
@@ -1049,11 +1090,33 @@ impl ActiveDeck {
         if let Some(res) = &mut self.resampler {
             res.reset();
         }
+        // Symphonia demuxers land on the preceding keyframe/Cue/Ogg page (`actual_ts <= required_ts`).
+        // Fast-forward decode and discard intermediate packets so WebM/Opus/Ogg/MP3 seeks land
+        // accurately instead of snapping backward by 2-8 seconds.
+        let mut landed_ts = seeked.actual_ts;
+        if seeked.actual_ts < seeked.required_ts {
+            for _ in 0..256 {
+                match self.format.next_packet() {
+                    Ok(Some(packet)) => {
+                        if packet.track_id != self.track_id {
+                            continue;
+                        }
+                        let pkt_end = packet.pts.saturating_add(packet.dur);
+                        let _ = self.decoder.decode(&packet);
+                        landed_ts = pkt_end;
+                        if pkt_end >= seeked.required_ts {
+                            break;
+                        }
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        }
         let actual_ms = self
             .time_base
-            .and_then(|tb| tb.calc_time(seeked.actual_ts))
+            .and_then(|tb| tb.calc_time(landed_ts))
             .map(|t| t.as_millis().max(0) as u64)
-            .unwrap_or(target_ms);
+            .unwrap_or(clamped_ms);
         self.pos_ms_f64 = actual_ms as f64;
         Ok(actual_ms)
     }
@@ -1254,15 +1317,25 @@ impl ActiveDeck {
                         self.stereo_scratch.clear();
                         self.stereo_scratch.reserve((raw_buf.len() / ch) * 2);
                         for frame in raw_buf.chunks_exact(ch) {
-                            self.stereo_scratch.push(frame[0]);
-                            self.stereo_scratch.push(frame[1]);
+                            let c = if ch >= 3 {
+                                frame[2] * 0.707_106_77
+                            } else {
+                                0.0
+                            };
+                            self.stereo_scratch.push((frame[0] + c).clamp(-1.0, 1.0));
+                            self.stereo_scratch.push((frame[1] + c).clamp(-1.0, 1.0));
                         }
                         res.process_stereo(&self.stereo_scratch, &mut self.pending_stereo);
                     } else {
                         self.pending_stereo.reserve((raw_buf.len() / ch) * 2);
                         for frame in raw_buf.chunks_exact(ch) {
-                            self.pending_stereo.push(frame[0]);
-                            self.pending_stereo.push(frame[1]);
+                            let c = if ch >= 3 {
+                                frame[2] * 0.707_106_77
+                            } else {
+                                0.0
+                            };
+                            self.pending_stereo.push((frame[0] + c).clamp(-1.0, 1.0));
+                            self.pending_stereo.push((frame[1] + c).clamp(-1.0, 1.0));
                         }
                     }
                     if self.pending_stereo.len() >= 2 {
@@ -1522,6 +1595,7 @@ impl DecodeRuntime {
                 self.bass_swap.reset();
                 self.crossfade_state = None;
                 self.deck_b = None;
+                self.queued_next = None;
                 self.micro_fade = if self.dsp.fade_in_play_ms > 0 {
                     MicroFade::FadingIn {
                         start_gain: 0.0,
@@ -1622,6 +1696,13 @@ impl DecodeRuntime {
                     "ferric-audio manual crossfade open failed ({}): {_err}",
                     path.display()
                 );
+                telemetry.is_playing.store(false, Ordering::Release);
+                telemetry.is_crossfading.store(false, Ordering::Relaxed);
+                self.deck_a = None;
+                self.deck_b = None;
+                self.queued_next = None;
+                self.crossfade_state = None;
+                self.bass_swap.reset();
             }
         }
     }

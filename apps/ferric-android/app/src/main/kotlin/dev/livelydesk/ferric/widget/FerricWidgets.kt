@@ -9,7 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.widget.RemoteViews
-import coil3.ImageLoader
+import androidx.core.content.ContextCompat
+import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import coil3.request.allowHardware
@@ -18,6 +19,7 @@ import dev.livelydesk.ferric.FerricApp
 import dev.livelydesk.ferric.MainActivity
 import dev.livelydesk.ferric.R
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.playback.FerricPlaybackService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,16 +52,41 @@ class WidgetActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val app = context.applicationContext as? FerricApp ?: return
         val store = app.store
-        when (intent.action) {
-            ACTION_WIDGET_PREV -> store.prev()
-            ACTION_WIDGET_PLAY_PAUSE -> store.togglePlayPause()
-            ACTION_WIDGET_NEXT -> store.next()
-            ACTION_WIDGET_LIKE -> {
-                val id = store.uiState.value.currentTrack?.id
-                if (!id.isNullOrBlank()) {
-                    store.toggleLike(id)
+        val pendingResult = goAsync()
+        FerricWidgetUpdater.runWidgetAction {
+            try {
+                when (intent.action) {
+                    ACTION_WIDGET_PREV -> {
+                        startPlaybackService(context)
+                        store.prev()
+                    }
+                    ACTION_WIDGET_PLAY_PAUSE -> {
+                        startPlaybackService(context)
+                        store.togglePlayPause()
+                    }
+                    ACTION_WIDGET_NEXT -> {
+                        startPlaybackService(context)
+                        store.next()
+                    }
+                    ACTION_WIDGET_LIKE -> {
+                        val id = store.uiState.value.currentTrack?.id
+                        if (!id.isNullOrBlank()) {
+                            store.toggleLike(id)
+                        }
+                    }
                 }
+            } finally {
+                pendingResult.finish()
             }
+        }
+    }
+
+    private fun startPlaybackService(context: Context) {
+        runCatching {
+            ContextCompat.startForegroundService(
+                context.applicationContext,
+                Intent(context.applicationContext, FerricPlaybackService::class.java),
+            )
         }
     }
 }
@@ -73,6 +100,15 @@ object FerricWidgetUpdater {
     @Volatile
     private var cachedArtBitmap: Bitmap? = null
 
+    fun runWidgetAction(block: suspend () -> Unit) {
+        scope.launch { block() }
+    }
+
+    fun clearCachedArt() {
+        cachedArtUrl = null
+        cachedArtBitmap = null
+    }
+
     fun updateAll(context: Context, overrideState: PlaybackUiState? = null) {
         val app = context.applicationContext as? FerricApp
         val state = overrideState ?: app?.store?.uiState?.value ?: return
@@ -84,13 +120,13 @@ object FerricWidgetUpdater {
         if (stripIds.isEmpty() && squareIds.isEmpty() && glassIds.isEmpty()) return
 
         val artUrl = state.currentTrack?.thumbnailUrl
-        val currentBitmap = if (artUrl != null && artUrl == cachedArtUrl) cachedArtBitmap else null
+        val currentBitmap = if (!artUrl.isNullOrBlank() && artUrl == cachedArtUrl) cachedArtBitmap else null
         applyWidgets(context, manager, state, currentBitmap, stripIds, squareIds, glassIds)
 
         if (!artUrl.isNullOrBlank() && artUrl != cachedArtUrl) {
             scope.launch {
                 val bmp = runCatching {
-                    val loader = ImageLoader(context.applicationContext)
+                    val loader = SingletonImageLoader.get(context.applicationContext)
                     val req = ImageRequest.Builder(context.applicationContext)
                         .data(artUrl)
                         .size(256, 256)
@@ -102,7 +138,11 @@ object FerricWidgetUpdater {
                 if (bmp != null) {
                     cachedArtUrl = artUrl
                     cachedArtBitmap = bmp
-                    applyWidgets(context, manager, state, bmp, stripIds, squareIds, glassIds)
+                    // Re-read freshest playback state so async cover fetch never reverts play/track state.
+                    val latest = app?.store?.uiState?.value ?: state
+                    if (latest.currentTrack?.thumbnailUrl == artUrl) {
+                        applyWidgets(context, manager, latest, bmp, stripIds, squareIds, glassIds)
+                    }
                 }
             }
         }
@@ -147,12 +187,20 @@ object FerricWidgetUpdater {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
 
+        fun bindArt(views: RemoteViews) {
+            if (artBitmap != null) {
+                views.setImageViewBitmap(R.id.widget_art, artBitmap)
+            } else {
+                views.setImageViewResource(R.id.widget_art, R.mipmap.ic_launcher)
+            }
+        }
+
         if (stripIds.isNotEmpty()) {
             val views = RemoteViews(context.packageName, R.layout.widget_compact_strip).apply {
                 setTextViewText(R.id.widget_title, title)
                 setTextViewText(R.id.widget_artist, artist)
                 setImageViewResource(R.id.widget_btn_play, playIcon)
-                if (artBitmap != null) setImageViewBitmap(R.id.widget_art, artBitmap)
+                bindArt(this)
                 setOnClickPendingIntent(R.id.widget_root, openAppIntent)
                 setOnClickPendingIntent(R.id.widget_btn_prev, actionPi(101, ACTION_WIDGET_PREV))
                 setOnClickPendingIntent(R.id.widget_btn_play, actionPi(102, ACTION_WIDGET_PLAY_PAUSE))
@@ -167,7 +215,7 @@ object FerricWidgetUpdater {
                 setTextViewText(R.id.widget_artist, artist)
                 setImageViewResource(R.id.widget_btn_play, playIcon)
                 setImageViewResource(R.id.widget_btn_like, likeIcon)
-                if (artBitmap != null) setImageViewBitmap(R.id.widget_art, artBitmap)
+                bindArt(this)
                 setOnClickPendingIntent(R.id.widget_root, openAppIntent)
                 setOnClickPendingIntent(R.id.widget_btn_play, actionPi(202, ACTION_WIDGET_PLAY_PAUSE))
                 setOnClickPendingIntent(R.id.widget_btn_next, actionPi(203, ACTION_WIDGET_NEXT))
@@ -182,7 +230,7 @@ object FerricWidgetUpdater {
                 setTextViewText(R.id.widget_artist, artist)
                 setImageViewResource(R.id.widget_btn_play, playIcon)
                 setImageViewResource(R.id.widget_btn_like, likeIcon)
-                if (artBitmap != null) setImageViewBitmap(R.id.widget_art, artBitmap)
+                bindArt(this)
                 setOnClickPendingIntent(R.id.widget_root, openAppIntent)
                 setOnClickPendingIntent(R.id.widget_btn_prev, actionPi(301, ACTION_WIDGET_PREV))
                 setOnClickPendingIntent(R.id.widget_btn_play, actionPi(302, ACTION_WIDGET_PLAY_PAUSE))

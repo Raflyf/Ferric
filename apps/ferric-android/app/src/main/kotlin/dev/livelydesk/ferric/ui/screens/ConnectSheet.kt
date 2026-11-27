@@ -107,12 +107,15 @@ fun ConnectSheet(
         activePeer.volumeNorm
     }
 
+    var isDraggingVol by remember { mutableStateOf(false) }
     var sliderVol by remember(activeTargetId) { mutableFloatStateOf(remoteVol.coerceIn(0f, 1f)) }
     var showGuestQr by remember { mutableStateOf(false) }
     var manualUri by remember { mutableStateOf("") }
 
-    LaunchedEffect(remoteVol) {
-        sliderVol = remoteVol.coerceIn(0f, 1f)
+    LaunchedEffect(remoteVol, isDraggingVol) {
+        if (!isDraggingVol) {
+            sliderVol = remoteVol.coerceIn(0f, 1f)
+        }
     }
 
     DisposableEffect(Unit) {
@@ -225,8 +228,12 @@ fun ConnectSheet(
                         Slider(
                             value = sliderVol,
                             onValueChange = { nextVol ->
+                                isDraggingVol = true
                                 sliderVol = nextVol
-                                onSetVolume(activeTargetId, nextVol)
+                            },
+                            onValueChangeFinished = {
+                                isDraggingVol = false
+                                onSetVolume(activeTargetId, sliderVol)
                             },
                             valueRange = 0f..1f,
                             modifier = Modifier.weight(1f),

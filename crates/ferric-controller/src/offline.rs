@@ -5,7 +5,6 @@ use crate::types::StorageStatsSnapshot;
 use crate::{ControllerError, ControllerResult, FerricController, unix_now_secs};
 use ferric_core::models::{OfflineDownloadRecord, Track};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -117,9 +116,19 @@ impl FerricController {
         if tracks.is_empty() {
             return Err(ControllerError::State("Playlist has no tracks".to_string()));
         }
+        self.download_tracks(tracks);
+        Ok(())
+    }
+
+    /// Download any batch of tracks (Album, Artist, Liked, Station, or Playlist) sequentially
+    /// into isolated persistent `data_dir/offline_downloads/`.
+    pub fn download_tracks(self: &Arc<Self>, tracks: Vec<Track>) {
+        if tracks.is_empty() {
+            return;
+        }
         let this = Arc::clone(self);
         let _ = thread::Builder::new()
-            .name("ferric-pl-dl".to_string())
+            .name("ferric-batch-dl".to_string())
             .spawn(move || {
                 let total = tracks.len();
                 let mut ok_count = 0usize;
@@ -142,10 +151,9 @@ impl FerricController {
                 }
                 this.sink.on_library_changed();
                 this.sink.on_toast(format!(
-                    "Offline playlist ready: {ok_count}/{total} songs downloaded"
+                    "Offline ready: {ok_count}/{total} songs downloaded"
                 ));
             });
-        Ok(())
     }
 
     pub(crate) fn download_track_blocking(&self, track: &Track) -> Result<u64, String> {
@@ -166,14 +174,21 @@ impl FerricController {
         self.sink.on_download_progress(track.id.clone(), 75);
         let dest_name = safe_offline_filename(&track.id, &codec);
         let dest_path = offline_dir.join(&dest_name);
-        let tmp_path = offline_dir.join(format!("{dest_name}.part"));
+        let nonce = fastrand::u64(..);
+        let tmp_path = offline_dir.join(format!("{dest_name}.{nonce:016x}.part"));
 
-        std::fs::copy(&src_path, &tmp_path).map_err(|e| e.to_string())?;
+        if let Err(err) = std::fs::copy(&src_path, &tmp_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err.to_string());
+        }
         let size_bytes = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
         if dest_path.exists() {
             let _ = std::fs::remove_file(&dest_path);
         }
-        std::fs::rename(&tmp_path, &dest_path).map_err(|e| e.to_string())?;
+        if let Err(err) = std::fs::rename(&tmp_path, &dest_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err.to_string());
+        }
 
         let quality_label = {
             let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -189,12 +204,14 @@ impl FerricController {
             downloaded_at: unix_now_secs(),
         };
 
-        {
+        let db_res = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let _ = st.db.upsert_tracks(std::slice::from_ref(track));
-            st.db
-                .upsert_offline_download(&rec)
-                .map_err(|e| e.to_string())?;
+            st.db.upsert_offline_download(&rec)
+        };
+        if let Err(err) = db_res {
+            let _ = std::fs::remove_file(&dest_path);
+            return Err(err.to_string());
         }
 
         self.sink.on_download_progress(track.id.clone(), 100);
@@ -213,28 +230,11 @@ impl FerricController {
 
     pub fn list_offline_tracks(&self) -> ControllerResult<Vec<Track>> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let records = st.db.list_offline_downloads()?;
-        let mut wanted = HashSet::with_capacity(records.len());
-        let mut path_map = std::collections::HashMap::with_capacity(records.len());
-        for rec in records {
-            if Path::new(&rec.local_path).is_file() {
-                wanted.insert(rec.track_id.clone());
-                path_map.insert(rec.track_id, PathBuf::from(rec.local_path));
-            }
-        }
-        let all = st.db.list_tracks("")?;
-        let mut out: Vec<Track> = all
+        let rows = st.db.list_offline_tracks_joined()?;
+        Ok(rows
             .into_iter()
-            .filter(|t| wanted.contains(&t.id))
-            .map(|mut t| {
-                if let Some(p) = path_map.get(&t.id) {
-                    t.path = Some(p.clone());
-                }
-                t
-            })
-            .collect();
-        out.sort_by_key(|a| a.title.to_lowercase());
-        Ok(out)
+            .filter(|t| t.path.as_ref().is_some_and(|p| p.is_file()))
+            .collect())
     }
 
     pub fn delete_offline_track(&self, track_id: &str) -> ControllerResult<()> {

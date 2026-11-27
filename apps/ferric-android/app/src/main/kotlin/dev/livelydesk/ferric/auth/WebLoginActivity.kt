@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebStorage
@@ -16,6 +17,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -24,6 +26,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -53,11 +57,66 @@ import dev.livelydesk.ferric.ui.theme.TextSecondary
 import java.util.concurrent.atomic.AtomicBoolean
 
 object WebCookieCleaner {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private fun expireCookiesForOrigins(origins: List<String>) {
+        val run = {
+            runCatching {
+                val cm = CookieManager.getInstance()
+                for (origin in origins) {
+                    val raw = cm.getCookie(origin) ?: continue
+                    for (pair in raw.split(';')) {
+                        val name = pair.substringBefore('=').trim()
+                        if (name.isEmpty()) continue
+                        cm.setCookie(origin, "$name=; Max-Age=0; Path=/; Secure")
+                        cm.setCookie(origin, "$name=; Max-Age=0; Path=/")
+                    }
+                    WebStorage.getInstance().deleteOrigin(origin)
+                }
+                cm.flush()
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            run()
+        } else {
+            mainHandler.post { run() }
+        }
+    }
+
+    fun clearSpotifyCookies() {
+        expireCookiesForOrigins(
+            listOf(
+                "https://open.spotify.com",
+                "https://accounts.spotify.com",
+                "https://spotify.com",
+            ),
+        )
+    }
+
+    fun clearYtmCookies() {
+        expireCookiesForOrigins(
+            listOf(
+                "https://music.youtube.com",
+                "https://www.youtube.com",
+                "https://youtube.com",
+                "https://accounts.google.com",
+                "https://google.com",
+            ),
+        )
+    }
+
     fun clearAllWebAuthData() {
-        runCatching {
-            CookieManager.getInstance().removeAllCookies(null)
-            CookieManager.getInstance().flush()
-            WebStorage.getInstance().deleteAllData()
+        val run = {
+            runCatching {
+                CookieManager.getInstance().removeAllCookies(null)
+                CookieManager.getInstance().flush()
+                WebStorage.getInstance().deleteAllData()
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            run()
+        } else {
+            mainHandler.post { run() }
         }
     }
 }
@@ -65,7 +124,8 @@ object WebCookieCleaner {
 /**
  * Isolated app-private WebView Activity strictly for optional Spotify and YouTube Music sign-in.
  * Enforces [LoginHostAllowlist], disables file/content access, strips `; wv` for Google OAuth,
- * and captures session cookies/bearer tokens without exposing any `@JavascriptInterface`.
+ * handles hardware Back cleanly, protects against WebView renderer crashes, and immediately purges
+ * Google session cookies after persisting them into Android Keystore-encrypted storage.
  */
 class WebLoginActivity : ComponentActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -104,12 +164,22 @@ class WebLoginActivity : ComponentActivity() {
         }
 
         setContent {
+            BackHandler {
+                val wv = webViewRef
+                if (wv != null && wv.canGoBack()) {
+                    wv.goBack()
+                } else {
+                    finish()
+                }
+            }
             FerricTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(AmoledBlack)
-                        .statusBarsPadding(),
+                        .statusBarsPadding()
+                        .navigationBarsPadding()
+                        .imePadding(),
                 ) {
                     Row(
                         modifier = Modifier
@@ -211,6 +281,15 @@ class WebLoginActivity : ComponentActivity() {
                 }
                 pollSessionCredentials()
             }
+
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?,
+            ): Boolean {
+                statusHint = "Sign-in renderer restarted; please reopen sign-in"
+                finish()
+                return true
+            }
         }
 
         val startUrl = when (target) {
@@ -232,12 +311,14 @@ class WebLoginActivity : ComponentActivity() {
                 val cookie = cm.getCookie(LoginHostAllowlist.YTM_ORIGIN).orEmpty()
                 val sapisid = LoginHostAllowlist.extractSapisid(cookie) ?: return
                 if (completed.compareAndSet(false, true)) {
-                    cm.flush()
                     statusHint = "Connected! Syncing YouTube Music..."
                     (application as FerricApp).store.completeYtmLogin(
                         cookie = cookie,
                         sapisid = sapisid,
                     )
+                    // Immediately purge unencrypted Google session cookies from WebView storage now
+                    // that credentials are sealed inside Android Keystore-encrypted SQLite.
+                    WebCookieCleaner.clearYtmCookies()
                     finish()
                 }
             }

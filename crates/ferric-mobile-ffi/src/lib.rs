@@ -654,10 +654,10 @@ impl ContentOpener for ContentOpenerBridge {
             .0
             .open_fd(uri.to_string())
             .map_err(|e| io::Error::other(e.to_string()))?;
-        if fd < 0 {
+        if fd <= 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "invalid negative file descriptor from Android ContentResolver",
+                "invalid file descriptor (<= 2) from Android ContentResolver",
             ));
         }
         #[cfg(unix)]
@@ -1426,6 +1426,19 @@ impl FerricMobileCore {
     pub fn download_playlist(&self, playlist_id: String) -> Result<(), FfiError> {
         self.controller.download_playlist(playlist_id)?;
         Ok(())
+    }
+
+    pub fn download_tracks(&self, tracks: Vec<FfiTrack>) {
+        self.controller
+            .download_tracks(tracks.into_iter().map(Into::into).collect());
+    }
+
+    pub fn set_sleep_timer_minutes(&self, minutes: u32) {
+        self.controller.set_sleep_timer_minutes(minutes);
+    }
+
+    pub fn get_sleep_timer_remaining_secs(&self) -> u64 {
+        self.controller.sleep_timer_remaining_secs()
     }
 
     pub fn list_offline_track_ids(&self) -> Result<Vec<String>, FfiError> {

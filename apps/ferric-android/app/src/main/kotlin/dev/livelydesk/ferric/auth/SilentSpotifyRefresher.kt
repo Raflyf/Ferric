@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -47,6 +48,10 @@ class SilentSpotifyRefresher(
                 settings.allowContentAccess = false
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 settings.setSupportMultipleWindows(false)
+                settings.userAgentString = settings.userAgentString
+                    ?.replace("; wv", "")
+                    ?.replace("Version/4.0 ", "")
+                    ?: settings.userAgentString
             }
             cm.setAcceptCookie(true)
             cm.setAcceptThirdPartyCookies(wv, true)
@@ -59,8 +64,13 @@ class SilentSpotifyRefresher(
                 )
             }
 
+            lateinit var pollTask: Runnable
+            lateinit var timeoutRunnable: Runnable
+
             fun teardown() {
                 mainHandler.post {
+                    mainHandler.removeCallbacks(pollTask)
+                    mainHandler.removeCallbacks(timeoutRunnable)
                     runCatching {
                         wv.stopLoading()
                         wv.destroy()
@@ -69,20 +79,19 @@ class SilentSpotifyRefresher(
                 }
             }
 
-            val timeoutRunnable = Runnable {
+            timeoutRunnable = Runnable {
                 if (finished.compareAndSet(false, true)) {
                     teardown()
                     onFailed()
                 }
             }
 
-            val pollTask = object : Runnable {
+            pollTask = object : Runnable {
                 override fun run() {
                     if (finished.get()) return
                     wv.evaluateJavascript("window.__ferricToken || null") { raw ->
                         val token = LoginHostAllowlist.parseAccessTokenFromJson(raw)
                         if (token != null && finished.compareAndSet(false, true)) {
-                            mainHandler.removeCallbacks(timeoutRunnable)
                             val latestCookie = cm.getCookie(LoginHostAllowlist.SPOTIFY_ORIGIN).orEmpty()
                             val latestSpDc = LoginHostAllowlist.extractSpDc(latestCookie) ?: spDc
                             teardown()
@@ -107,6 +116,17 @@ class SilentSpotifyRefresher(
                     if (url?.startsWith(LoginHostAllowlist.SPOTIFY_ORIGIN) == true) {
                         view?.evaluateJavascript(LoginHostAllowlist.SPOTIFY_TOKEN_HOOK_JS, null)
                     }
+                }
+
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: RenderProcessGoneDetail?,
+                ): Boolean {
+                    if (finished.compareAndSet(false, true)) {
+                        teardown()
+                        onFailed()
+                    }
+                    return true
                 }
             }
 

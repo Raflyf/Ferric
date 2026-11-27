@@ -11,22 +11,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
+import dev.livelydesk.ferric.R
 import uniffi.ferric_mobile_ffi.FfiBackgroundMode
 import uniffi.ferric_mobile_ffi.FfiThemeConfig
 
@@ -50,16 +51,50 @@ data class FerricVisualPalette(
     val accent: Color = FerricOrange,
     val isLight: Boolean = false,
     val isLiquidGlass: Boolean = false,
-    val glassOpacity: Float = 0.72f,
+    val glassOpacity: Float = 0.62f,
     val glassTint: Color = Color(0xFF10131D),
-    val cornerRadiusDp: Dp = 12.dp,
+    val cornerRadiusDp: Dp = 18.dp,
     val editorialMode: Boolean = false,
-    val fontFamilyName: String = "Inter",
-    val playerLayout: String = "standard",
+    val fontFamilyName: String = "DM Sans",
+    val playerLayout: String = "liquid_glass",
 )
 
 val LocalFerricPalette = staticCompositionLocalOf { FerricVisualPalette() }
 val LocalHazeState = compositionLocalOf<HazeState?> { null }
+
+@OptIn(ExperimentalTextApi::class)
+private fun variableFontFamily(resId: Int): FontFamily = FontFamily(
+    Font(
+        resId = resId,
+        weight = FontWeight.Light,
+        variationSettings = FontVariation.Settings(FontVariation.weight(300)),
+    ),
+    Font(
+        resId = resId,
+        weight = FontWeight.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(400)),
+    ),
+    Font(
+        resId = resId,
+        weight = FontWeight.Medium,
+        variationSettings = FontVariation.Settings(FontVariation.weight(500)),
+    ),
+    Font(
+        resId = resId,
+        weight = FontWeight.SemiBold,
+        variationSettings = FontVariation.Settings(FontVariation.weight(600)),
+    ),
+    Font(
+        resId = resId,
+        weight = FontWeight.Bold,
+        variationSettings = FontVariation.Settings(FontVariation.weight(700)),
+    ),
+)
+
+private val DmSansFamily: FontFamily by lazy { variableFontFamily(R.font.dm_sans) }
+private val FigtreeFamily: FontFamily by lazy { variableFontFamily(R.font.figtree) }
+private val SpaceGroteskFamily: FontFamily by lazy { variableFontFamily(R.font.space_grotesk) }
+private val JetBrainsMonoFamily: FontFamily by lazy { variableFontFamily(R.font.jetbrains_mono) }
 
 fun parseHexColor(hex: String, fallback: Color): Color {
     val clean = hex.trim().removePrefix("#")
@@ -80,10 +115,10 @@ private fun contrastRatio(fg: Color, bg: Color): Double {
 }
 
 /**
- * Adjust accent luminance until WCAG AA (>= 4.5:1) holds against `background`.
+ * Adjust accent luminance until WCAG AA+ (>= 5.2:1) holds against [background].
  */
 fun ensureWcagAccent(accent: Color, background: Color, isLightBg: Boolean): Color {
-    if (contrastRatio(accent, background) >= 4.5) return accent
+    if (contrastRatio(accent, background) >= 5.2) return accent
     val target = if (isLightBg) Color(0xFF1A120E) else Color(0xFFFFF5EE)
     var candidate = accent
     for (step in 1..10) {
@@ -94,9 +129,16 @@ fun ensureWcagAccent(accent: Color, background: Color, isLightBg: Boolean): Colo
             blue = candidate.blue + (target.blue - candidate.blue) * t,
             alpha = 1f,
         )
-        if (contrastRatio(candidate, background) >= 4.5) return candidate
+        if (contrastRatio(candidate, background) >= 5.2) return candidate
     }
     return if (isLightBg) Color(0xFFB34014) else Color(0xFFFF884D)
+}
+
+fun displayUiFontName(raw: String?): String = when (raw?.trim()?.lowercase()) {
+    "figtree", "plus jakarta sans" -> "Figtree"
+    "space grotesk" -> "Space Grotesk"
+    "jetbrains mono", "mono" -> "JetBrains Mono"
+    else -> "DM Sans"
 }
 
 fun buildVisualPalette(
@@ -114,7 +156,7 @@ fun buildVisualPalette(
     val textSecondary = parseHexColor(theme.textSecondaryHex, if (isLight) Color(0xFF524B42) else TextSecondary)
     val baseAccent = parseHexColor(theme.accentHex, FerricOrange)
     val chosenAccent = if (theme.adaptiveAlbumArt && !isLight) coverShade.accent else baseAccent
-    val safeAccent = ensureWcagAccent(chosenAccent, canvas, isLight)
+    val safeAccent = ensureWcagAccent(chosenAccent, elevated, isLight)
     val glassTint = if (theme.adaptiveAcrylicTint && !isLight) {
         coverShade.glassTint
     } else {
@@ -141,45 +183,67 @@ fun buildVisualPalette(
 }
 
 fun resolveUiFontFamily(name: String): FontFamily = when (name.trim().lowercase()) {
-    "jetbrains mono", "mono" -> FontFamily.Monospace
+    "figtree", "plus jakarta sans" -> FigtreeFamily
+    "space grotesk" -> SpaceGroteskFamily
+    "jetbrains mono", "mono" -> JetBrainsMonoFamily
     "editorial", "serif" -> FontFamily.Serif
-    else -> FontFamily.SansSerif
+    else -> DmSansFamily
 }
 
 fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography {
     val bodyFamily = resolveUiFontFamily(fontName)
     val headlineFamily = if (editorialMode) FontFamily.Serif else bodyFamily
-    val headlineSize = if (editorialMode) 28.sp else 24.sp
     return Typography(
+        displaySmall = TextStyle(
+            fontFamily = headlineFamily,
+            fontWeight = if (editorialMode) FontWeight.Normal else FontWeight.Light,
+            fontSize = 30.sp,
+            lineHeight = 36.sp,
+            letterSpacing = (-0.6).sp,
+        ),
         headlineMedium = TextStyle(
             fontFamily = headlineFamily,
-            fontWeight = if (editorialMode) FontWeight.SemiBold else FontWeight.Bold,
-            fontSize = headlineSize,
-            lineHeight = (headlineSize.value + 6f).sp,
-            letterSpacing = if (editorialMode) (-0.5).sp else (-0.2).sp,
+            fontWeight = if (editorialMode) FontWeight.SemiBold else FontWeight.SemiBold,
+            fontSize = if (editorialMode) 28.sp else 26.sp,
+            lineHeight = 32.sp,
+            letterSpacing = (-0.4).sp,
         ),
         headlineSmall = TextStyle(
             fontFamily = headlineFamily,
-            fontWeight = FontWeight.Bold,
+            fontWeight = FontWeight.SemiBold,
             fontSize = 21.sp,
             lineHeight = 27.sp,
-            letterSpacing = (-0.2).sp,
+            letterSpacing = (-0.25).sp,
         ),
         titleLarge = TextStyle(
             fontFamily = headlineFamily,
             fontWeight = FontWeight.SemiBold,
-            fontSize = if (editorialMode) 20.sp else 18.sp,
+            fontSize = if (editorialMode) 20.sp else 19.sp,
             lineHeight = 24.sp,
+            letterSpacing = (-0.2).sp,
         ),
         titleMedium = TextStyle(
             fontFamily = bodyFamily,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = FontWeight.Medium,
             fontSize = 15.sp,
             lineHeight = 20.sp,
+            letterSpacing = (-0.1).sp,
+        ),
+        bodyLarge = TextStyle(
+            fontFamily = bodyFamily,
+            fontWeight = FontWeight.Normal,
+            fontSize = 15.sp,
+            lineHeight = 21.sp,
         ),
         bodyMedium = TextStyle(
             fontFamily = bodyFamily,
             fontWeight = FontWeight.Normal,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+        ),
+        labelLarge = TextStyle(
+            fontFamily = bodyFamily,
+            fontWeight = FontWeight.SemiBold,
             fontSize = 13.sp,
             lineHeight = 18.sp,
         ),
@@ -190,7 +254,7 @@ fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography 
             lineHeight = 16.sp,
         ),
         labelSmall = TextStyle(
-            fontFamily = FontFamily.Monospace,
+            fontFamily = JetBrainsMonoFamily,
             fontWeight = FontWeight.Medium,
             fontSize = 11.sp,
             lineHeight = 14.sp,
@@ -199,38 +263,24 @@ fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography 
 }
 
 /**
- * Applies Liquid Glass real-time frosted backdrop (via Haze 1.7.2 with automatic RenderEffect on
- * Android 12+ and graceful frosted fallback on Android 9-11) plus a 1dp specular top-edge sheen.
+ * Applies Liquid Glass optical refraction + directional specular rim when Liquid Glass is active,
+ * or clean translucent surface styling otherwise.
  */
 fun Modifier.ferricGlassSurface(
     palette: FerricVisualPalette,
-    hazeState: HazeState?,
+    @Suppress("UNUSED_PARAMETER") hazeState: HazeState? = null,
     cornerRadius: Dp = palette.cornerRadiusDp,
 ): Modifier {
-    val shape = RoundedCornerShape(cornerRadius)
     return if (palette.isLiquidGlass) {
-        val specularBorder = Brush.verticalGradient(
-            colors = listOf(
-                Color.White.copy(alpha = if (palette.isLight) 0.55f else 0.24f),
-                palette.border.copy(alpha = 0.25f),
-            ),
+        this.ferricLiquidGlass(
+            cornerRadius = cornerRadius,
+            blurRadius = 14.dp,
+            refractionHeight = 16.dp,
+            refractionAmount = 12.dp,
+            chromaticDispersion = 0.45f,
         )
-        val base = this.clip(shape)
-        val blurred = if (hazeState != null) {
-            base.hazeEffect(
-                state = hazeState,
-                style = HazeStyle(
-                    backgroundColor = palette.glassTint,
-                    tint = HazeTint(palette.glassTint.copy(alpha = (palette.glassOpacity * 0.65f).coerceIn(0.22f, 0.72f))),
-                    blurRadius = 24.dp,
-                    noiseFactor = 0.06f,
-                ),
-            )
-        } else {
-            base.background(palette.glassTint.copy(alpha = palette.glassOpacity.coerceIn(0.45f, 0.88f)))
-        }
-        blurred.border(width = 1.dp, brush = specularBorder, shape = shape)
     } else {
+        val shape = RoundedCornerShape(cornerRadius)
         this
             .clip(shape)
             .background(palette.surface)
@@ -243,46 +293,55 @@ fun FerricTheme(
     themeConfig: FfiThemeConfig? = null,
     coverShade: CoverShadeColors = CoverShadeColors(),
     hazeState: HazeState? = null,
+    backdropState: FerricBackdropState? = null,
     content: @Composable () -> Unit,
 ) {
-    val palette = buildVisualPalette(themeConfig, coverShade)
-    val scheme = if (palette.isLight) {
-        lightColorScheme(
-            primary = palette.accent,
-            onPrimary = Color.White,
-            secondary = palette.accent,
-            onSecondary = Color.White,
-            background = palette.canvas,
-            onBackground = palette.textPrimary,
-            surface = palette.surface,
-            onSurface = palette.textPrimary,
-            surfaceVariant = palette.elevated,
-            onSurfaceVariant = palette.textSecondary,
-            outline = palette.border,
-        )
-    } else {
-        darkColorScheme(
-            primary = palette.accent,
-            onPrimary = AmoledBlack,
-            secondary = FerricOrangeDark,
-            onSecondary = palette.textPrimary,
-            background = palette.canvas,
-            onBackground = palette.textPrimary,
-            surface = palette.surface,
-            onSurface = palette.textPrimary,
-            surfaceVariant = palette.elevated,
-            onSurfaceVariant = palette.textSecondary,
-            outline = palette.border,
-        )
+    val palette = remember(themeConfig, coverShade) {
+        buildVisualPalette(themeConfig, coverShade)
+    }
+    val scheme = remember(palette) {
+        if (palette.isLight) {
+            lightColorScheme(
+                primary = palette.accent,
+                onPrimary = Color.White,
+                secondary = palette.accent,
+                onSecondary = Color.White,
+                background = palette.canvas,
+                onBackground = palette.textPrimary,
+                surface = palette.surface,
+                onSurface = palette.textPrimary,
+                surfaceVariant = palette.elevated,
+                onSurfaceVariant = palette.textSecondary,
+                outline = palette.border,
+            )
+        } else {
+            darkColorScheme(
+                primary = palette.accent,
+                onPrimary = AmoledBlack,
+                secondary = FerricOrangeDark,
+                onSecondary = palette.textPrimary,
+                background = palette.canvas,
+                onBackground = palette.textPrimary,
+                surface = palette.surface,
+                onSurface = palette.textPrimary,
+                surfaceVariant = palette.elevated,
+                onSurfaceVariant = palette.textSecondary,
+                outline = palette.border,
+            )
+        }
+    }
+    val typography = remember(palette.fontFamilyName, palette.editorialMode) {
+        buildFerricTypography(palette.fontFamilyName, palette.editorialMode)
     }
 
     CompositionLocalProvider(
         LocalFerricPalette provides palette,
         LocalHazeState provides hazeState,
+        LocalBackdropState provides backdropState,
     ) {
         MaterialTheme(
             colorScheme = scheme,
-            typography = buildFerricTypography(palette.fontFamilyName, palette.editorialMode),
+            typography = typography,
             content = content,
         )
     }

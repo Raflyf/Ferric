@@ -26,14 +26,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import dev.livelydesk.ferric.ui.theme.FerricOrange
-import dev.livelydesk.ferric.ui.theme.HairlineBorder
-import dev.livelydesk.ferric.ui.theme.ObsidianElevated
-import dev.livelydesk.ferric.ui.theme.ObsidianSurface
-import dev.livelydesk.ferric.ui.theme.TextPrimary
-import dev.livelydesk.ferric.ui.theme.TextSecondary
+import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import uniffi.ferric_mobile_ffi.FfiAccountStatus
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -50,29 +46,29 @@ fun AccountsSheet(
     onSyncSubsonic: (url: String, user: String, pass: String) -> Unit,
     onLogoutSubsonic: () -> Unit,
 ) {
+    val palette = LocalFerricPalette.current
     var subUrl by remember(status.subsonicUrl) { mutableStateOf(status.subsonicUrl) }
     var subUser by remember(status.subsonicUsername) { mutableStateOf(status.subsonicUsername) }
     var subPass by remember { mutableStateOf("") }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = ObsidianSurface,
+        containerColor = palette.surface,
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 18.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Connected Accounts", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
+            Text("Connected Accounts", style = MaterialTheme.typography.headlineSmall, color = palette.textPrimary)
             Text(
                 "Credentials stay hardware-encrypted in Android Keystore. Sign in with the same Spotify or YouTube Music account as Ferric Desktop for two-way sync and Connect.",
                 style = MaterialTheme.typography.bodyMedium,
-                color = TextSecondary,
+                color = palette.textSecondary,
             )
 
-            // Spotify Card
             AccountCard(
                 title = "Spotify (Free & Premium)",
                 subtitle = if (status.spotifyConnected) {
@@ -81,12 +77,12 @@ fun AccountsSheet(
                     "Two-way Liked Songs, playlists, and Spotify Recommended Stations"
                 },
                 connected = status.spotifyConnected,
+                accentColor = Color(0xFF1ED760),
                 onSignIn = onSignInSpotify,
                 onSync = onSyncSpotify,
                 onLogout = onLogoutSpotify,
             )
 
-            // YouTube Music Card
             AccountCard(
                 title = "YouTube Music",
                 subtitle = if (status.youtubeConnected) {
@@ -95,31 +91,31 @@ fun AccountsSheet(
                     "Two-way YouTube Music library, Likes, and personalized Home"
                 },
                 connected = status.youtubeConnected,
+                accentColor = Color(0xFFFF2B4A),
                 onSignIn = onSignInYtm,
                 onSync = onSyncYtm,
                 onLogout = onLogoutYtm,
             )
 
-            // OpenSubsonic / Navidrome Card
             Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = ObsidianElevated,
-                border = BorderStroke(1.dp, if (status.subsonicConnected) FerricOrange else HairlineBorder),
+                shape = RoundedCornerShape(18.dp),
+                color = palette.elevated,
+                border = BorderStroke(1.dp, if (status.subsonicConnected) palette.accent else palette.border),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("OpenSubsonic / Navidrome", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                    Text("OpenSubsonic / Navidrome", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                     Text(
                         if (status.subsonicConnected) {
-                            "Connected to ${status.subsonicUrl} (${status.subsonicUsername})"
+                            "Connected to ${status.subsonicUrl} (${status.subsonicUsername}). Leave password empty to re-sync with stored Keystore password."
                         } else {
                             "Stream lossless FLAC from your personal Navidrome / Subsonic server"
                         },
                         style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
+                        color = palette.textSecondary,
                     )
                     OutlinedTextField(
                         value = subUrl,
@@ -138,7 +134,7 @@ fun AccountsSheet(
                     OutlinedTextField(
                         value = subPass,
                         onValueChange = { subPass = it },
-                        label = { Text("Password") },
+                        label = { Text(if (status.subsonicConnected) "Password (optional on re-sync)" else "Password") },
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
@@ -147,15 +143,20 @@ fun AccountsSheet(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        val canSubmit = subUrl.isNotBlank() &&
+                            subUser.isNotBlank() &&
+                            (subPass.isNotEmpty() || status.subsonicConnected)
                         Button(
                             onClick = {
-                                if (subUrl.isNotBlank() && subUser.isNotBlank() && subPass.isNotEmpty()) {
+                                if (canSubmit) {
                                     onSyncSubsonic(subUrl.trim(), subUser.trim(), subPass)
                                 }
                             },
+                            enabled = canSubmit,
+                            shape = RoundedCornerShape(999.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = FerricOrange,
-                                contentColor = ObsidianSurface,
+                                containerColor = palette.accent,
+                                contentColor = if (palette.isLight) Color.White else Color.Black,
                             ),
                             modifier = Modifier.weight(1f),
                         ) {
@@ -164,9 +165,10 @@ fun AccountsSheet(
                         if (status.subsonicConnected) {
                             OutlinedButton(
                                 onClick = onLogoutSubsonic,
-                                border = BorderStroke(1.dp, HairlineBorder),
+                                shape = RoundedCornerShape(999.dp),
+                                border = BorderStroke(1.dp, palette.border),
                             ) {
-                                Text("Disconnect", color = TextPrimary)
+                                Text("Disconnect", color = palette.textPrimary)
                             }
                         }
                     }
@@ -183,22 +185,24 @@ private fun AccountCard(
     title: String,
     subtitle: String,
     connected: Boolean,
+    accentColor: Color,
     onSignIn: () -> Unit,
     onSync: () -> Unit,
     onLogout: () -> Unit,
 ) {
+    val palette = LocalFerricPalette.current
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = ObsidianElevated,
-        border = BorderStroke(1.dp, if (connected) FerricOrange else HairlineBorder),
+        shape = RoundedCornerShape(18.dp),
+        color = palette.elevated,
+        border = BorderStroke(1.dp, if (connected) accentColor.copy(alpha = 0.7f) else palette.border),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+            Text(title, style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
+            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = palette.textSecondary)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -206,22 +210,25 @@ private fun AccountCard(
                 if (connected) {
                     Button(
                         onClick = onSync,
+                        shape = RoundedCornerShape(999.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = FerricOrange,
-                            contentColor = ObsidianSurface,
+                            containerColor = accentColor,
+                            contentColor = Color.Black,
                         ),
                         modifier = Modifier.weight(1f),
                     ) { Text("Sync Now") }
                     OutlinedButton(
                         onClick = onLogout,
-                        border = BorderStroke(1.dp, HairlineBorder),
-                    ) { Text("Sign Out", color = TextPrimary) }
+                        shape = RoundedCornerShape(999.dp),
+                        border = BorderStroke(1.dp, palette.border),
+                    ) { Text("Sign Out", color = palette.textPrimary) }
                 } else {
                     Button(
                         onClick = onSignIn,
+                        shape = RoundedCornerShape(999.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = FerricOrange,
-                            contentColor = ObsidianSurface,
+                            containerColor = palette.accent,
+                            contentColor = if (palette.isLight) Color.White else Color.Black,
                         ),
                         modifier = Modifier.weight(1f),
                     ) { Text("Sign In") }

@@ -36,6 +36,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,24 +57,23 @@ private data class ThemePresetCardSpec(
 )
 
 private val THEME_PRESETS = listOf(
+    ThemePresetCardSpec("Liquid Glass", "AGSL Lens + Aurora", Color(0xFF141826), Color(0xFF8AB4F8)),
     ThemePresetCardSpec("AMOLED Black", "Pure #000 OLED", Color(0xFF000000), Color(0xFFE86A2C)),
-    ThemePresetCardSpec("Liquid Glass", "Haze + CoverShade", Color(0xFF141826), Color(0xFF8AB4F8)),
     ThemePresetCardSpec("Obsidian Studio", "Studio dark slate", Color(0xFF0D0E12), Color(0xFFE86A2C)),
     ThemePresetCardSpec("Warm Cream Light", "High-contrast paper", Color(0xFFF3EEE3), Color(0xFFD9541E)),
 )
 
 private val UI_FONTS = listOf(
-    "Inter",
-    "Plus Jakarta Sans",
     "DM Sans",
+    "Figtree",
     "Space Grotesk",
     "JetBrains Mono",
 )
 
 private val PLAYER_LAYOUTS = listOf(
-    "standard" to "Standard",
-    "full_bleed" to "Full-Bleed",
     "liquid_glass" to "Liquid Glass",
+    "full_bleed" to "Full-Bleed",
+    "standard" to "Standard",
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -83,6 +87,18 @@ fun ThemeStudioSheet(
     onExportThemeJson: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
+    var draftOpacity by remember(themeConfig?.acrylicOpacity) {
+        mutableFloatStateOf((themeConfig?.acrylicOpacity ?: 0.62f).coerceIn(0.25f, 0.92f))
+    }
+    var draftRadius by remember(themeConfig?.cornerRadiusPx) {
+        mutableFloatStateOf((themeConfig?.cornerRadiusPx ?: 20f).coerceIn(8f, 24f))
+    }
+    LaunchedEffect(themeConfig?.acrylicOpacity) {
+        if (themeConfig != null) draftOpacity = themeConfig.acrylicOpacity.coerceIn(0.25f, 0.92f)
+    }
+    LaunchedEffect(themeConfig?.cornerRadiusPx) {
+        if (themeConfig != null) draftRadius = themeConfig.cornerRadiusPx.coerceIn(8f, 24f)
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -92,7 +108,7 @@ fun ThemeStudioSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 18.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text("Theme & Visual Studio", style = MaterialTheme.typography.titleLarge, color = palette.textPrimary)
@@ -102,19 +118,18 @@ fun ThemeStudioSheet(
                 color = palette.textSecondary,
             )
 
-            // 4 Theme Presets
             LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(THEME_PRESETS, key = { it.name }) { preset ->
                     val selected = themeConfig?.name.equals(preset.name, ignoreCase = true)
                     Surface(
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(16.dp),
                         color = palette.elevated,
                         border = BorderStroke(
                             width = if (selected) 2.dp else 1.dp,
                             color = if (selected) palette.accent else palette.border,
                         ),
                         modifier = Modifier
-                            .width(142.dp)
+                            .width(146.dp)
                             .clickable { onApplyPreset(preset.name) },
                     ) {
                         Column(
@@ -143,7 +158,6 @@ fun ThemeStudioSheet(
             }
 
             if (themeConfig != null) {
-                // Player Layout Selector
                 Text("Full Player Layout", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(PLAYER_LAYOUTS, key = { it.first }) { (key, label) ->
@@ -161,12 +175,14 @@ fun ThemeStudioSheet(
                     }
                 }
 
-                // UI Font Picker
                 Text("UI Font Family", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(UI_FONTS, key = { it }) { font ->
+                        val isSelected = themeConfig.fontFamily.equals(font, ignoreCase = true) ||
+                            (font == "DM Sans" && themeConfig.fontFamily.equals("Inter", ignoreCase = true)) ||
+                            (font == "Figtree" && themeConfig.fontFamily.equals("Plus Jakarta Sans", ignoreCase = true))
                         FilterChip(
-                            selected = themeConfig.fontFamily.equals(font, ignoreCase = true),
+                            selected = isSelected,
                             onClick = { onUpdateTheme(themeConfig.copy(fontFamily = font)) },
                             label = { Text(font) },
                             colors = FilterChipDefaults.filterChipColors(
@@ -179,7 +195,6 @@ fun ThemeStudioSheet(
                     }
                 }
 
-                // Toggles
                 ThemeToggleRow("Editorial Typography Mode", themeConfig.editorialMode) {
                     onUpdateTheme(themeConfig.copy(editorialMode = it))
                 }
@@ -190,17 +205,19 @@ fun ThemeStudioSheet(
                     onUpdateTheme(themeConfig.copy(adaptiveAcrylicTint = it))
                 }
 
-                // Glass Opacity & Corner Radius
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text("Glass Frost Opacity", color = palette.textPrimary)
-                    Text("${(themeConfig.acrylicOpacity * 100).toInt()}%", color = palette.accent, style = MaterialTheme.typography.labelSmall)
+                    Text("${(draftOpacity * 100).toInt()}%", color = palette.accent, style = MaterialTheme.typography.labelSmall)
                 }
                 Slider(
-                    value = themeConfig.acrylicOpacity.coerceIn(0.25f, 0.92f),
-                    onValueChange = { onUpdateTheme(themeConfig.copy(acrylicOpacity = it)) },
+                    value = draftOpacity,
+                    onValueChange = { draftOpacity = it },
+                    onValueChangeFinished = {
+                        onUpdateTheme(themeConfig.copy(acrylicOpacity = draftOpacity))
+                    },
                     valueRange = 0.25f..0.92f,
                     colors = SliderDefaults.colors(
                         thumbColor = palette.accent,
@@ -214,11 +231,14 @@ fun ThemeStudioSheet(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text("Card Corner Radius", color = palette.textPrimary)
-                    Text("${themeConfig.cornerRadiusPx.toInt()} dp", color = palette.accent, style = MaterialTheme.typography.labelSmall)
+                    Text("${draftRadius.toInt()} dp", color = palette.accent, style = MaterialTheme.typography.labelSmall)
                 }
                 Slider(
-                    value = themeConfig.cornerRadiusPx.coerceIn(8f, 24f),
-                    onValueChange = { onUpdateTheme(themeConfig.copy(cornerRadiusPx = it)) },
+                    value = draftRadius,
+                    onValueChange = { draftRadius = it },
+                    onValueChangeFinished = {
+                        onUpdateTheme(themeConfig.copy(cornerRadiusPx = draftRadius))
+                    },
                     valueRange = 8f..24f,
                     colors = SliderDefaults.colors(
                         thumbColor = palette.accent,
@@ -227,7 +247,6 @@ fun ThemeStudioSheet(
                     ),
                 )
 
-                // Import / Export `.ferric-theme.json`
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),

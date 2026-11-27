@@ -4,7 +4,7 @@ pub mod qr;
 pub mod session;
 
 pub use crypto::{
-    AeadChannel, AeadReceiver, AeadSender, LocalRoomKeys, MatchedRoomSlot, RoomIdentity,
+    AeadChannel, AeadReceiver, AeadSender, LocalRoomKeys, MatchedRoomSlot, RoomIdentity, RoomKey,
     decode_room_tags_hex, derive_qr_room, derive_spotify_room, derive_ytm_room,
     encode_room_tags_hex,
 };

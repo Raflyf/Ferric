@@ -3,11 +3,14 @@ package dev.livelydesk.ferric.core
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import androidx.compose.runtime.Immutable
+import coil3.SingletonImageLoader
 import dev.livelydesk.ferric.auth.SilentSpotifyRefresher
 import dev.livelydesk.ferric.auth.WebCookieCleaner
 import dev.livelydesk.ferric.connect.ConnectNsdHelper
 import dev.livelydesk.ferric.local.LocalMediaScanner
 import dev.livelydesk.ferric.playback.OutputRouteHelper
+import dev.livelydesk.ferric.playback.PlaybackFocusCoordinator
 import dev.livelydesk.ferric.ui.theme.CoverShadeColors
 import dev.livelydesk.ferric.ui.theme.CoverShadeExtractor
 import dev.livelydesk.ferric.widget.FerricWidgetUpdater
@@ -16,7 +19,9 @@ import java.util.TimeZone
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,7 +54,19 @@ import uniffi.ferric_mobile_ffi.FfiStorageStats
 import uniffi.ferric_mobile_ffi.FfiTelemetry
 import uniffi.ferric_mobile_ffi.FfiThemeConfig
 import uniffi.ferric_mobile_ffi.FfiTrack
+import uniffi.ferric_mobile_ffi.FfiTrackSource
 import uniffi.ferric_mobile_ffi.FfiVideoStreamsState
+
+/**
+ * High-frequency (5 Hz) playback progress stream separated from [PlaybackUiState] so only
+ * seekbars, timestamps, lyrics highlighter, and spectrum meters recompose during playback.
+ */
+@Immutable
+data class PlaybackProgress(
+    val positionMs: Long = 0L,
+    val durationMs: Long = 0L,
+    val spectrumBins: List<Int> = List(8) { 0 },
+)
 
 data class PlaybackUiState(
     val tracks: List<FfiTrack> = emptyList(),
@@ -83,6 +100,7 @@ data class PlaybackUiState(
     ),
     val recentSearches: List<String> = emptyList(),
     val activeDetail: FfiCollectionDetail? = null,
+    val originalDetailTracks: List<FfiTrack> = emptyList(),
     val detailSort: FfiDetailSort = FfiDetailSort.ORIGINAL,
     val accountStatus: FfiAccountStatus = FfiAccountStatus(
         spotifyConnected = false,
@@ -128,6 +146,8 @@ data class PlaybackUiState(
     val outputRate: Int = 0,
     val isCrossfading: Boolean = false,
     val spectrumBins: List<Int> = List(8) { 0 },
+    val seekSyncNonce: Long = 0L,
+    val sleepTimerRemainingSecs: Long = 0L,
     val shuffle: Boolean = false,
     val repeatMode: FfiRepeatMode = FfiRepeatMode.OFF,
     val localVolume: Float = 0.85f,
@@ -153,6 +173,37 @@ data class PlaybackUiState(
  * Pure state reducer kept JVM-testable without native `.so` loading.
  */
 object PlaybackStateReducer {
+    fun applyProgress(prev: PlaybackProgress, t: FfiTelemetry): PlaybackProgress = PlaybackProgress(
+        positionMs = t.positionMs.toLong().coerceAtLeast(0L),
+        durationMs = t.durationMs.toLong().coerceAtLeast(0L),
+        spectrumBins = if (t.spectrumBins.size == 8) {
+            t.spectrumBins.map { it.toInt().coerceIn(0, 1000) }
+        } else {
+            prev.spectrumBins
+        },
+    )
+
+    fun applyLowFreqTelemetry(state: PlaybackUiState, t: FfiTelemetry): PlaybackUiState {
+        val nextDur = t.durationMs.toLong().coerceAtLeast(0L)
+        val nextSr = t.sampleRate.toInt()
+        val nextOr = t.outputRate.toInt()
+        if (state.isPlaying == t.isPlaying &&
+            state.durationMs == nextDur &&
+            state.sampleRate == nextSr &&
+            state.outputRate == nextOr &&
+            state.isCrossfading == t.isCrossfading
+        ) {
+            return state
+        }
+        return state.copy(
+            isPlaying = t.isPlaying,
+            durationMs = nextDur,
+            sampleRate = nextSr,
+            outputRate = nextOr,
+            isCrossfading = t.isCrossfading,
+        )
+    }
+
     fun applyTelemetry(state: PlaybackUiState, t: FfiTelemetry): PlaybackUiState = state.copy(
         isPlaying = t.isPlaying,
         positionMs = t.positionMs.toLong().coerceAtLeast(0L),
@@ -187,12 +238,24 @@ class CoreStateStore(private val appContext: Context) {
     @Volatile
     private var lastExtractedArtUrl: String? = null
 
+    private var localSearchJob: Job? = null
+    private var onlineSearchJob: Job? = null
+    private var autoEqSearchJob: Job? = null
+    private var sleepTimerPollJob: Job? = null
+
     private val _uiState = MutableStateFlow(
         PlaybackUiState(
             activeOutputRoute = OutputRouteHelper.activeOutputLabel(appContext),
         ),
     )
     val uiState: StateFlow<PlaybackUiState> = _uiState.asStateFlow()
+
+    private val _playbackProgress = MutableStateFlow(PlaybackProgress())
+    val playbackProgress: StateFlow<PlaybackProgress> = _playbackProgress.asStateFlow()
+
+    init {
+        PlaybackFocusCoordinator.ensureInitialized(appContext, this)
+    }
 
     private val silentSpotifyRefresher = SilentSpotifyRefresher(
         appContext = appContext,
@@ -201,7 +264,7 @@ class CoreStateStore(private val appContext: Context) {
         },
         onFailed = {
             _uiState.update {
-                it.copy(statusMessage = "Spotify session expired. Tap Accounts to sign in again.")
+                it.copy(statusMessage = "Spotify session expired. Open You > Accounts to sign in again.")
             }
         },
     )
@@ -241,7 +304,10 @@ class CoreStateStore(private val appContext: Context) {
     private val eventSink = object : FfiEventSink {
         override fun onPlaybackTelemetry(telemetry: FfiTelemetry) {
             val prevPlaying = _uiState.value.isPlaying
-            _uiState.update { PlaybackStateReducer.applyTelemetry(it, telemetry) }
+            // High-frequency progress goes exclusively to playbackProgress (zero root recomposition).
+            _playbackProgress.update { PlaybackStateReducer.applyProgress(it, telemetry) }
+            // Low-frequency state only triggers _uiState emission when discrete values actually change.
+            _uiState.update { PlaybackStateReducer.applyLowFreqTelemetry(it, telemetry) }
             if (prevPlaying != telemetry.isPlaying) {
                 FerricWidgetUpdater.updateAll(appContext, _uiState.value)
             }
@@ -250,10 +316,17 @@ class CoreStateStore(private val appContext: Context) {
         override fun onNowPlayingChanged(track: FfiTrack?) {
             val prevId = _uiState.value.currentTrack?.id
             _uiState.update { PlaybackStateReducer.applyNowPlaying(it, track) }
+            if (track != null && track.id != prevId) {
+                _playbackProgress.update {
+                    it.copy(
+                        positionMs = 0L,
+                        durationMs = track.durationMs.toLong().coerceAtLeast(0L),
+                    )
+                }
+            }
             FerricWidgetUpdater.updateAll(appContext, _uiState.value)
             if (track != null && track.id != prevId) {
                 extractCoverShadeAsync(track.thumbnailUrl)
-                // Reset stale video streams when track changes; lyrics load on demand or if open.
                 _uiState.update {
                     it.copy(
                         videoStreams = FfiVideoStreamsState(
@@ -286,7 +359,13 @@ class CoreStateStore(private val appContext: Context) {
         }
 
         override fun onDetailLoaded(detail: FfiCollectionDetail) {
-            _uiState.update { it.copy(activeDetail = detail, detailSort = FfiDetailSort.ORIGINAL) }
+            _uiState.update {
+                it.copy(
+                    activeDetail = detail,
+                    originalDetailTracks = detail.tracks,
+                    detailSort = FfiDetailSort.ORIGINAL,
+                )
+            }
         }
 
         override fun onAccountsChanged(status: FfiAccountStatus) {
@@ -348,12 +427,25 @@ class CoreStateStore(private val appContext: Context) {
                 refreshLibraryInternal()
                 val accounts = handle.getAccountStatus()
                 val recentSearches = handle.recentSearches()
-                val theme = handle.getTheme()
+                var theme = handle.getTheme()
+                // On fresh Android install (or first launch of the Liquid Glass overhaul), default
+                // to Liquid Glass once while preserving any explicit user preset choice thereafter.
+                val prefs = appContext.getSharedPreferences("ferric_device", Context.MODE_PRIVATE)
+                if (!prefs.getBoolean("liquid_glass_v2_default_applied", false)) {
+                    prefs.edit().putBoolean("liquid_glass_v2_default_applied", true).apply()
+                    if (theme.name.equals("AMOLED Black", ignoreCase = true) ||
+                        theme.name.equals("Liquid Glass", ignoreCase = true)
+                    ) {
+                        theme = runCatching { handle.applyThemePreset("Liquid Glass") }.getOrDefault(theme)
+                    }
+                }
                 val eq = handle.getEq()
                 val eqPresets = handle.listEqPresets()
                 val autoEq = handle.searchAutoeq("")
                 val dsp = handle.getDsp()
                 val connect = handle.getConnectState()
+                val tzOffsetSecs = (TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000L)
+                val stats = runCatching { handle.getListeningStats(tzOffsetSecs) }.getOrNull()
                 _uiState.update {
                     it.copy(
                         accountStatus = accounts,
@@ -364,6 +456,7 @@ class CoreStateStore(private val appContext: Context) {
                         autoEqProfiles = autoEq,
                         dspSettings = dsp,
                         connectState = connect,
+                        listeningStats = stats ?: it.listeningStats,
                         isReady = true,
                     )
                 }
@@ -419,9 +512,14 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    fun setAppForeground(foreground: Boolean) {
+        nsdHelper.setAppForeground(foreground)
+    }
+
     // --- Playback & Queue ---
 
     fun playTrack(trackId: String) {
+        if (!PlaybackFocusCoordinator.requestFocusForPlayback()) return
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             runCatching { handle.playTrack(trackId) }
@@ -431,6 +529,7 @@ class CoreStateStore(private val appContext: Context) {
 
     fun playQueue(tracks: List<FfiTrack>, startIndex: Int, context: String) {
         if (tracks.isEmpty()) return
+        if (!PlaybackFocusCoordinator.requestFocusForPlayback()) return
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             val idx = startIndex.coerceIn(0, tracks.lastIndex).toUInt()
@@ -441,6 +540,7 @@ class CoreStateStore(private val appContext: Context) {
 
     fun shuffleQueue(tracks: List<FfiTrack>, context: String) {
         if (tracks.isEmpty()) return
+        if (!PlaybackFocusCoordinator.requestFocusForPlayback()) return
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             val shuffled = tracks.shuffled()
@@ -450,10 +550,22 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun togglePlayPause() {
+        val state = _uiState.value
+        val remotePlaying = if (!state.connectState.isLocalActiveSpeaker) {
+            state.connectState.peers.firstOrNull {
+                it.connected && it.deviceId == state.connectState.activeSpeakerId
+            }?.isPlaying ?: state.isPlaying
+        } else {
+            state.isPlaying
+        }
+        if (remotePlaying) {
+            PlaybackFocusCoordinator.onExplicitPause()
+        } else if (state.connectState.isLocalActiveSpeaker) {
+            if (!PlaybackFocusCoordinator.requestFocusForPlayback()) return
+        }
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
-            val state = _uiState.value
-            if (state.currentTrack == null && state.tracks.isNotEmpty()) {
+            if (state.currentTrack == null && state.tracks.isNotEmpty() && state.connectState.isLocalActiveSpeaker) {
                 runCatching { handle.playTrack(state.tracks.first().id) }
             } else {
                 runCatching { handle.togglePlayPause() }
@@ -462,6 +574,17 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun play() {
+        val isLocal = _uiState.value.connectState.isLocalActiveSpeaker
+        if (isLocal && !PlaybackFocusCoordinator.requestFocusForPlayback()) return
+        playInternal()
+    }
+
+    fun pause() {
+        PlaybackFocusCoordinator.onExplicitPause()
+        pauseInternal()
+    }
+
+    internal fun playInternal() {
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             val state = _uiState.value
@@ -473,26 +596,58 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
-    fun pause() {
+    internal fun pauseInternal() {
         scope.launch { core?.pause() }
     }
 
     fun next() {
+        if (_uiState.value.connectState.isLocalActiveSpeaker) {
+            PlaybackFocusCoordinator.requestFocusForPlayback()
+        }
         scope.launch { runCatching { getOrCreateCore()?.next() } }
     }
 
     fun prev() {
+        if (_uiState.value.connectState.isLocalActiveSpeaker) {
+            PlaybackFocusCoordinator.requestFocusForPlayback()
+        }
         scope.launch { runCatching { getOrCreateCore()?.prev() } }
     }
 
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceAtLeast(0L)
-        _uiState.update { it.copy(positionMs = clamped) }
+        _playbackProgress.update { it.copy(positionMs = clamped) }
+        _uiState.update { it.copy(seekSyncNonce = it.seekSyncNonce + 1L) }
         scope.launch { core?.seekMs(clamped.toULong()) }
     }
 
     fun setDucking(duck: Boolean) {
         scope.launch { core?.setDucking(duck) }
+    }
+
+    fun setSleepTimerMinutes(minutes: Int) {
+        val clamped = minutes.coerceIn(0, 720)
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            handle.setSleepTimerMinutes(clamped.toUInt())
+            val rem = handle.getSleepTimerRemainingSecs().toLong().coerceAtLeast(0L)
+            _uiState.update { it.copy(sleepTimerRemainingSecs = rem) }
+            restartSleepTimerPoller(rem > 0L)
+        }
+    }
+
+    private fun restartSleepTimerPoller(active: Boolean) {
+        sleepTimerPollJob?.cancel()
+        sleepTimerPollJob = null
+        if (!active) return
+        sleepTimerPollJob = scope.launch {
+            while (true) {
+                delay(1_000L)
+                val rem = runCatching { core?.getSleepTimerRemainingSecs()?.toLong() ?: 0L }.getOrDefault(0L)
+                _uiState.update { it.copy(sleepTimerRemainingSecs = rem) }
+                if (rem <= 0L) break
+            }
+        }
     }
 
     fun toggleShuffle() {
@@ -521,6 +676,9 @@ class CoreStateStore(private val appContext: Context) {
 
     fun jumpToUpcoming(offset: Int) {
         if (offset < 0) return
+        if (_uiState.value.connectState.isLocalActiveSpeaker) {
+            PlaybackFocusCoordinator.requestFocusForPlayback()
+        }
         scope.launch { runCatching { getOrCreateCore()?.jumpToUpcoming(offset.toUInt()) } }
     }
 
@@ -596,7 +754,8 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun searchAutoEq(query: String) {
-        scope.launch {
+        autoEqSearchJob?.cancel()
+        autoEqSearchJob = scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             val matches = handle.searchAutoeq(query)
             _uiState.update { it.copy(autoEqProfiles = matches) }
@@ -700,7 +859,8 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun instantSearchLocal(query: String) {
-        scope.launch {
+        localSearchJob?.cancel()
+        localSearchJob = scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             val hits = runCatching { handle.instantSearchLocal(query) }.getOrDefault(emptyList())
             _uiState.update { st ->
@@ -715,7 +875,8 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun searchOnline(query: String) {
-        scope.launch {
+        onlineSearchJob?.cancel()
+        onlineSearchJob = scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             runCatching { handle.searchOnline(query) }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
@@ -761,7 +922,13 @@ class CoreStateStore(private val appContext: Context) {
             val handle = getOrCreateCore() ?: return@launch
             runCatching { handle.getPlaylistDetail(playlistId, sort) }
                 .onSuccess { detail ->
-                    _uiState.update { it.copy(activeDetail = detail, detailSort = sort) }
+                    _uiState.update {
+                        it.copy(
+                            activeDetail = detail,
+                            originalDetailTracks = detail.tracks,
+                            detailSort = sort,
+                        )
+                    }
                 }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
         }
@@ -772,7 +939,13 @@ class CoreStateStore(private val appContext: Context) {
             val handle = getOrCreateCore() ?: return@launch
             runCatching { handle.getAlbumDetail(albumName, artistName, sort) }
                 .onSuccess { detail ->
-                    _uiState.update { it.copy(activeDetail = detail, detailSort = sort) }
+                    _uiState.update {
+                        it.copy(
+                            activeDetail = detail,
+                            originalDetailTracks = detail.tracks,
+                            detailSort = sort,
+                        )
+                    }
                 }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
         }
@@ -783,7 +956,13 @@ class CoreStateStore(private val appContext: Context) {
             val handle = getOrCreateCore() ?: return@launch
             runCatching { handle.getArtistDetail(artistName, sort) }
                 .onSuccess { detail ->
-                    _uiState.update { it.copy(activeDetail = detail, detailSort = sort) }
+                    _uiState.update {
+                        it.copy(
+                            activeDetail = detail,
+                            originalDetailTracks = detail.tracks,
+                            detailSort = sort,
+                        )
+                    }
                 }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
         }
@@ -794,29 +973,60 @@ class CoreStateStore(private val appContext: Context) {
             val handle = getOrCreateCore() ?: return@launch
             runCatching { handle.getLikedDetail(sort) }
                 .onSuccess { detail ->
-                    _uiState.update { it.copy(activeDetail = detail, detailSort = sort) }
+                    _uiState.update {
+                        it.copy(
+                            activeDetail = detail,
+                            originalDetailTracks = detail.tracks,
+                            detailSort = sort,
+                        )
+                    }
                 }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
         }
     }
 
+    fun openLocalCollectionDetail(title: String, subtitle: String, tracks: List<FfiTrack>) {
+        val detail = FfiCollectionDetail(
+            id = "collection:${title.lowercase()}",
+            title = title,
+            subtitle = subtitle,
+            description = "",
+            kind = FfiCardKind.PLAYLIST,
+            source = FfiTrackSource.LOCAL,
+            thumbnailUrl = tracks.firstOrNull()?.thumbnailUrl,
+            shareUrl = null,
+            canSyncToAccount = false,
+            isEditablePlaylist = false,
+            tracks = tracks,
+        )
+        _uiState.update {
+            it.copy(
+                activeDetail = detail,
+                originalDetailTracks = tracks,
+                detailSort = FfiDetailSort.ORIGINAL,
+            )
+        }
+    }
+
     fun closeDetail() {
-        _uiState.update { it.copy(activeDetail = null) }
+        _uiState.update { it.copy(activeDetail = null, originalDetailTracks = emptyList()) }
     }
 
     fun cycleDetailSort() {
-        val cur = _uiState.value.activeDetail ?: return
-        val next = when (_uiState.value.detailSort) {
+        val st = _uiState.value
+        val cur = st.activeDetail ?: return
+        val base = st.originalDetailTracks.ifEmpty { cur.tracks }
+        val next = when (st.detailSort) {
             FfiDetailSort.ORIGINAL -> FfiDetailSort.TITLE
             FfiDetailSort.TITLE -> FfiDetailSort.ARTIST
             FfiDetailSort.ARTIST -> FfiDetailSort.DURATION
             FfiDetailSort.DURATION -> FfiDetailSort.ORIGINAL
         }
         val sorted = when (next) {
-            FfiDetailSort.ORIGINAL -> cur.tracks
-            FfiDetailSort.TITLE -> cur.tracks.sortedBy { it.title.lowercase() }
-            FfiDetailSort.ARTIST -> cur.tracks.sortedBy { it.artist.lowercase() }
-            FfiDetailSort.DURATION -> cur.tracks.sortedBy { it.durationMs }
+            FfiDetailSort.ORIGINAL -> base
+            FfiDetailSort.TITLE -> base.sortedBy { it.title.lowercase() }
+            FfiDetailSort.ARTIST -> base.sortedBy { it.artist.lowercase() }
+            FfiDetailSort.DURATION -> base.sortedBy { it.durationMs }
         }
         _uiState.update {
             it.copy(
@@ -918,7 +1128,17 @@ class CoreStateStore(private val appContext: Context) {
                                 },
                             )
                         }
-                        st.copy(activeDetail = detail)
+                        val orig = st.originalDetailTracks.map { t ->
+                            if (t.id == trackId) t.copy(liked = liked) else t
+                        }
+                        val curTrack = st.currentTrack?.let { c ->
+                            if (c.id == trackId) c.copy(liked = liked) else c
+                        }
+                        st.copy(
+                            activeDetail = detail,
+                            originalDetailTracks = orig,
+                            currentTrack = curTrack,
+                        )
                     }
                 }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
@@ -1015,7 +1235,7 @@ class CoreStateStore(private val appContext: Context) {
 
     fun logoutSpotify() {
         scope.launch {
-            WebCookieCleaner.clearAllWebAuthData()
+            WebCookieCleaner.clearSpotifyCookies()
             runCatching { getOrCreateCore()?.logoutSpotify() }
         }
     }
@@ -1043,7 +1263,7 @@ class CoreStateStore(private val appContext: Context) {
 
     fun logoutYtm() {
         scope.launch {
-            WebCookieCleaner.clearAllWebAuthData()
+            WebCookieCleaner.clearYtmCookies()
             runCatching { getOrCreateCore()?.logoutYtm() }
         }
     }
@@ -1105,6 +1325,15 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    fun downloadTracksOffline(tracks: List<FfiTrack>) {
+        if (tracks.isEmpty()) return
+        scope.launch {
+            _uiState.update { it.copy(statusMessage = "Downloading ${tracks.size} track(s) for offline playback...") }
+            runCatching { getOrCreateCore()?.downloadTracks(tracks) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
     fun downloadPlaylistOffline(playlistId: String) {
         scope.launch {
             _uiState.update { it.copy(statusMessage = "Downloading playlist for offline playback...") }
@@ -1137,7 +1366,11 @@ class CoreStateStore(private val appContext: Context) {
     fun clearArtworkCache() {
         scope.launch {
             getOrCreateCore()?.clearArtworkCache()
-            runCatching { File(appContext.cacheDir, "artwork_cache").deleteRecursively() }
+            runCatching {
+                val loader = SingletonImageLoader.get(appContext)
+                loader.memoryCache?.clear()
+                loader.diskCache?.clear()
+            }
             refreshStorageAndStats()
         }
     }
@@ -1175,6 +1408,7 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun shutdown() {
+        sleepTimerPollJob?.cancel()
         nsdHelper.shutdown()
         synchronized(coreLock) {
             core?.shutdown()

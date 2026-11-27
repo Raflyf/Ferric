@@ -171,15 +171,52 @@ fn lookup_cached_hash(operation: &str, fallback: &str) -> String {
     fallback.to_string()
 }
 
-fn refresh_hashes_from_web_bundle(agent: &ureq::Agent) -> Option<HashMap<String, String>> {
-    let resp = agent
-        .get("https://open.spotify.com/")
-        .header("User-Agent", SPOTIFY_WEB_UA)
-        .call()
-        .ok()?;
-    if resp.status().as_u16() != 200 {
-        return None;
+fn is_allowlisted_spotify_bundle_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    host.eq_ignore_ascii_case("open.spotify.com")
+        || host.eq_ignore_ascii_case("open.spotifycdn.com")
+}
+
+fn fetch_allowlisted_spotify_get(
+    agent: &ureq::Agent,
+    initial_url: &str,
+) -> Option<ureq::http::Response<ureq::Body>> {
+    let mut current = initial_url.to_string();
+    for _ in 0..=3 {
+        if !is_allowlisted_spotify_bundle_url(&current) {
+            return None;
+        }
+        let resp = agent
+            .get(&current)
+            .header("User-Agent", SPOTIFY_WEB_UA)
+            .call()
+            .ok()?;
+        let status = resp.status().as_u16();
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let loc = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())?
+                .trim();
+            current = if loc.starts_with("https://") {
+                loc.to_string()
+            } else if loc.starts_with('/') {
+                format!("https://open.spotify.com{loc}")
+            } else {
+                return None;
+            };
+            continue;
+        }
+        return (status == 200).then_some(resp);
     }
+    None
+}
+
+fn refresh_hashes_from_web_bundle(agent: &ureq::Agent) -> Option<HashMap<String, String>> {
+    let resp = fetch_allowlisted_spotify_get(agent, "https://open.spotify.com/")?;
     let html_bytes = resp
         .into_body()
         .into_with_config()
@@ -189,14 +226,7 @@ fn refresh_hashes_from_web_bundle(agent: &ureq::Agent) -> Option<HashMap<String,
     let html = String::from_utf8_lossy(&html_bytes);
     let bundle_url = extract_web_bundle_url_from_html(&html)?;
 
-    let js_resp = agent
-        .get(&bundle_url)
-        .header("User-Agent", SPOTIFY_WEB_UA)
-        .call()
-        .ok()?;
-    if js_resp.status().as_u16() != 200 {
-        return None;
-    }
+    let js_resp = fetch_allowlisted_spotify_get(agent, &bundle_url)?;
     let js_bytes = js_resp
         .into_body()
         .into_with_config()

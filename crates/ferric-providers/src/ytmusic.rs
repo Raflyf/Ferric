@@ -2404,7 +2404,7 @@ pub fn fetch_browse_detail(
             "context": web_remix_context(session),
         });
         if let Ok(next_root) = post_ytm_json("next", &next_body, session) {
-            collect_music_items(&next_root, &resolved_title, 50, &mut seen, &mut tracks);
+            collect_radio_panel_items(&next_root, 50, &mut seen, &mut tracks);
         }
     }
     if tracks.is_empty()
@@ -3882,6 +3882,11 @@ fn fetch_player_root_as_clean_guest(video_id: &str) -> ProviderResult<Value> {
     }
 }
 
+/// Reset the sticky VisionOS auth-rejection flag when the user signs in again or signs out.
+pub fn reset_visionos_auth_flag() {
+    VISIONOS_AUTH_REJECTED.store(false, Ordering::Relaxed);
+}
+
 /// Resolve the player response. A stale/mismatched stored `visitorData` or account cookie makes
 /// InnerTube answer HTTP 400 / `LOGIN_REQUIRED`; in that case retry once as a clean guest session
 /// with freshly primed `visitorData` (stream URLs from guest VISIONOS are fully playable).
@@ -3945,8 +3950,7 @@ fn fetch_player_root_once(
     let mut client = json!({
         "clientName": "VISIONOS",
         "clientVersion": VISIONOS_VERSION,
-        "hl": "en",
-        "gl": "ID"
+        "hl": "en"
     });
     if !visitor_data.is_empty() {
         client["visitorData"] = json!(visitor_data);

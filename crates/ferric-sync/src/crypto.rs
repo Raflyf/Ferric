@@ -95,11 +95,48 @@ pub fn hkdf_sha256_32(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
     okm
 }
 
+/// Zeroize-on-drop wrapper for a 32-byte room key passed across handshake threads.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RoomKey([u8; 32]);
+
+impl RoomKey {
+    #[must_use]
+    pub fn from_bytes(src: &[u8; 32]) -> Self {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(src);
+        Self(out)
+    }
+
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RoomKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RoomKey([REDACTED])")
+    }
+}
+
+impl Drop for RoomKey {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.0);
+    }
+}
+
 /// Deterministic 32-byte room key + 16-byte opaque LAN discovery tag (zero PII on the wire).
 #[derive(Clone, PartialEq, Eq)]
 pub struct RoomIdentity {
     pub key: [u8; 32],
     pub tag: [u8; 16],
+}
+
+impl RoomIdentity {
+    #[must_use]
+    pub fn room_key(&self) -> RoomKey {
+        RoomKey::from_bytes(&self.key)
+    }
 }
 
 impl std::fmt::Debug for RoomIdentity {
@@ -249,6 +286,51 @@ impl LocalRoomKeys {
             MatchedRoomSlot::YouTubeMusic => self.ytm.as_ref().map(|r| r.key),
             MatchedRoomSlot::GuestQr => self.guest.as_ref().map(|r| r.key),
         }
+    }
+
+    /// Match remote discovery tags using a Drop-zeroizing [`RoomKey`] and return the matched tag.
+    #[must_use]
+    pub fn match_remote_tags_zeroizing(
+        &self,
+        remote: &[Option<[u8; 16]>; 2],
+    ) -> Option<(MatchedRoomSlot, [u8; 16], RoomKey)> {
+        if let Some(sp) = &self.spotify
+            && remote.iter().flatten().any(|tag| ct_eq(tag, &sp.tag))
+        {
+            return Some((MatchedRoomSlot::Spotify, sp.tag, sp.room_key()));
+        }
+        if let Some(yt) = &self.ytm
+            && remote.iter().flatten().any(|tag| ct_eq(tag, &yt.tag))
+        {
+            return Some((MatchedRoomSlot::YouTubeMusic, yt.tag, yt.room_key()));
+        }
+        if let Some(guest) = &self.guest
+            && remote.iter().flatten().any(|tag| ct_eq(tag, &guest.tag))
+        {
+            return Some((MatchedRoomSlot::GuestQr, guest.tag, guest.room_key()));
+        }
+        None
+    }
+
+    /// Return the Drop-zeroizing [`RoomKey`] and discovery tag for a specific room slot.
+    #[must_use]
+    pub fn key_and_tag_for_slot(&self, slot: MatchedRoomSlot) -> Option<(RoomKey, [u8; 16])> {
+        match slot {
+            MatchedRoomSlot::Spotify => self.spotify.as_ref().map(|r| (r.room_key(), r.tag)),
+            MatchedRoomSlot::YouTubeMusic => self.ytm.as_ref().map(|r| (r.room_key(), r.tag)),
+            MatchedRoomSlot::GuestQr => self.guest.as_ref().map(|r| (r.room_key(), r.tag)),
+        }
+    }
+
+    /// Check in constant time whether `(slot, tag)` still matches an active local room key.
+    #[must_use]
+    pub fn matches_slot_tag(&self, slot: MatchedRoomSlot, tag: &[u8; 16]) -> bool {
+        let current = match slot {
+            MatchedRoomSlot::Spotify => self.spotify.as_ref(),
+            MatchedRoomSlot::YouTubeMusic => self.ytm.as_ref(),
+            MatchedRoomSlot::GuestQr => self.guest.as_ref(),
+        };
+        current.is_some_and(|r| ct_eq(&r.tag, tag))
     }
 }
 
@@ -456,13 +538,13 @@ impl AeadChannel {
         let mut r2i = hkdf_sha256_32(room_key, &salt, b"ferric-connect-r2i-v1");
 
         let (tx_key, rx_key, tx_dir, rx_dir) = if is_initiator {
-            (i2r, r2i, DIR_INIT_TO_RESP, DIR_RESP_TO_INIT)
+            (&i2r, &r2i, DIR_INIT_TO_RESP, DIR_RESP_TO_INIT)
         } else {
-            (r2i, i2r, DIR_RESP_TO_INIT, DIR_INIT_TO_RESP)
+            (&r2i, &i2r, DIR_RESP_TO_INIT, DIR_INIT_TO_RESP)
         };
 
-        let tx_cipher = ChaCha20Poly1305::new(Key::from_slice(&tx_key));
-        let rx_cipher = ChaCha20Poly1305::new(Key::from_slice(&rx_key));
+        let tx_cipher = ChaCha20Poly1305::new(Key::from_slice(tx_key));
+        let rx_cipher = ChaCha20Poly1305::new(Key::from_slice(rx_key));
 
         zeroize_bytes(&mut salt);
         zeroize_bytes(&mut i2r);

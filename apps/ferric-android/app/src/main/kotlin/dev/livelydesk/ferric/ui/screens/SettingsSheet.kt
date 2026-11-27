@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Speaker
 import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +35,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import dev.livelydesk.ferric.BuildConfig
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.displayUiFontName
 import java.util.Locale
 
 private fun fmtMb(bytes: ULong): String =
@@ -72,6 +75,7 @@ fun SettingsSheet(
 ) {
     val palette = LocalFerricPalette.current
     var query by remember { mutableStateOf("") }
+    var showDeleteAllConfirm by remember { mutableStateOf(false) }
     val needle = query.trim().lowercase(Locale.ROOT)
     fun matches(vararg terms: String): Boolean =
         needle.isEmpty() || terms.any { it.lowercase(Locale.ROOT).contains(needle) }
@@ -141,7 +145,7 @@ fun SettingsSheet(
                 SettingsRowCard(
                     icon = Icons.Rounded.Palette,
                     title = "Visual & Theme Studio",
-                    subtitle = "${state.themeConfig?.name ?: "AMOLED Black"} · Font: ${state.themeConfig?.fontFamily ?: "Inter"}",
+                    subtitle = "${state.themeConfig?.name ?: "Liquid Glass"} · Font: ${displayUiFontName(state.themeConfig?.fontFamily)}",
                     onClick = {
                         onDismiss()
                         onOpenThemeStudio()
@@ -246,7 +250,7 @@ fun SettingsSheet(
                             }
                         }
                         OutlinedButton(
-                            onClick = onDeleteAllOffline,
+                            onClick = { showDeleteAllConfirm = true },
                             border = BorderStroke(1.dp, palette.accent.copy(alpha = 0.6f)),
                             modifier = Modifier.fillMaxWidth(),
                         ) {
@@ -285,6 +289,33 @@ fun SettingsSheet(
 
             Spacer(Modifier.height(20.dp))
         }
+    }
+
+    if (showDeleteAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteAllConfirm = false },
+            containerColor = palette.elevated,
+            title = { Text("Delete All Offline Downloads?", color = palette.textPrimary) },
+            text = {
+                Text(
+                    "Remove all ${storage?.offlineTrackCount ?: state.offlineTracks.size} downloaded offline tracks from device storage? Local phone music files are untouched.",
+                    color = palette.textSecondary,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteAllConfirm = false
+                        onDeleteAllOffline()
+                    },
+                ) { Text("Delete All", color = palette.accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteAllConfirm = false }) {
+                    Text("Cancel", color = palette.textSecondary)
+                }
+            },
+        )
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{DeviceKind, SyncResult};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
 
@@ -9,6 +9,7 @@ pub const FERRIC_LAN_UDP_PORT: u16 = 43821;
 const BEACON_MAGIC_V1: &[u8; 4] = b"FRC1";
 const BEACON_MAGIC_V2: &[u8; 4] = b"FRC2";
 const PEER_STALE_TIMEOUT_MS: u64 = 30_000;
+const REBIND_ERROR_THRESHOLD: u32 = 3;
 const MAX_DATAGRAM_BYTES: usize = 1024;
 const MAX_POLL_PACKETS_PER_TICK: usize = 64;
 const MAX_DISCOVERED_PEERS: usize = 32;
@@ -108,13 +109,15 @@ struct BeaconAnnouncementV2 {
 pub struct LanDiscoveryBeacon {
     socket: UdpSocket,
     local_device_id: String,
+    requested_port: u16,
     port: u16,
+    consecutive_errors: u32,
+    connected_peers: HashSet<String>,
     peers: HashMap<String, DiscoveredPeer>,
 }
 
 impl LanDiscoveryBeacon {
-    /// Bind a non-blocking UDP discovery socket on `0.0.0.0:{port}` (falling back to ephemeral port if busy).
-    pub fn bind_nonblocking(local_device_id: impl Into<String>, port: u16) -> SyncResult<Self> {
+    fn open_socket(port: u16) -> SyncResult<(UdpSocket, u16)> {
         let socket = match UdpSocket::bind(("0.0.0.0", port)) {
             Ok(sock) => sock,
             Err(err) if err.kind() == ErrorKind::AddrInUse && port != 0 => {
@@ -124,14 +127,87 @@ impl LanDiscoveryBeacon {
         };
         socket.set_nonblocking(true)?;
         let _ = socket.set_broadcast(true);
-
         let actual_port = socket.local_addr()?.port();
+        Ok((socket, actual_port))
+    }
+
+    /// Bind a non-blocking UDP discovery socket on `0.0.0.0:{port}` (falling back to ephemeral port if busy).
+    pub fn bind_nonblocking(local_device_id: impl Into<String>, port: u16) -> SyncResult<Self> {
+        let (socket, actual_port) = Self::open_socket(port)?;
         Ok(Self {
             socket,
             local_device_id: local_device_id.into(),
+            requested_port: port,
             port: actual_port,
+            consecutive_errors: 0,
+            connected_peers: HashSet::new(),
             peers: HashMap::new(),
         })
+    }
+
+    /// Rebind the UDP discovery socket after persistent network/interface errors.
+    pub fn rebind(&mut self) -> SyncResult<()> {
+        let (socket, actual_port) = Self::open_socket(self.requested_port)?;
+        self.socket = socket;
+        self.port = actual_port;
+        self.consecutive_errors = 0;
+        Ok(())
+    }
+
+    /// Record whether a UDP send succeeded and rebind if persistent errors accumulate.
+    pub fn note_send_result(&mut self, ok: bool) {
+        if ok {
+            self.consecutive_errors = 0;
+        } else {
+            self.consecutive_errors = self.consecutive_errors.saturating_add(1);
+            if self.consecutive_errors >= REBIND_ERROR_THRESHOLD {
+                let _ = self.rebind();
+            }
+        }
+    }
+
+    /// Track whether `device_id` currently has an active authenticated session.
+    pub fn set_peer_connected(&mut self, device_id: &str, connected: bool) {
+        let clean = device_id.trim();
+        if clean.is_empty() {
+            return;
+        }
+        if connected {
+            self.connected_peers.insert(clean.to_string());
+        } else {
+            self.connected_peers.remove(clean);
+        }
+    }
+
+    /// Update a peer's IP address following an authenticated handshake (bypasses unauthenticated IP pinning).
+    pub fn update_authenticated_peer_ip(
+        &mut self,
+        device_id: &str,
+        ip: IpAddr,
+        tcp_port: Option<u16>,
+        now_ms: u64,
+    ) -> bool {
+        if !is_lan_or_loopback(ip) {
+            return false;
+        }
+        let clean = device_id.trim();
+        let Some(existing) = self.peers.get(clean).cloned() else {
+            return false;
+        };
+        let port = tcp_port.filter(|&p| p >= 1024).unwrap_or(existing.tcp_port);
+        self.upsert_peer(
+            clean,
+            &existing.device_name,
+            existing.device_kind,
+            ip,
+            port,
+            existing.room_tags,
+            existing.is_active_speaker,
+            &existing.now_playing_title,
+            &existing.now_playing_artist,
+            now_ms,
+            true,
+        )
     }
 
     /// Bind on the default `FERRIC_LAN_UDP_PORT` (`43821`).
@@ -312,6 +388,7 @@ impl LanDiscoveryBeacon {
             "",
             "",
             now_ms,
+            false,
         )
     }
 
@@ -328,6 +405,7 @@ impl LanDiscoveryBeacon {
         now_playing_title: &str,
         now_playing_artist: &str,
         now_ms: u64,
+        authenticated: bool,
     ) -> bool {
         let clean_id = raw_id.trim();
         if clean_id.is_empty()
@@ -348,8 +426,26 @@ impl LanDiscoveryBeacon {
                 .map(|(ip, _)| ip)
                 .unwrap_or("");
             let is_fresh = now_ms.saturating_sub(existing.last_seen_ms) <= PEER_STALE_TIMEOUT_MS;
-            if is_fresh && existing_ip != src_ip_str {
-                return false;
+            if existing_ip != src_ip_str {
+                if !authenticated && is_fresh && self.connected_peers.contains(clean_id) {
+                    return false;
+                }
+                if !authenticated {
+                    let same_ip_count = self
+                        .peers
+                        .iter()
+                        .filter(|(id, p)| {
+                            id.as_str() != clean_id
+                                && now_ms.saturating_sub(p.last_seen_ms) <= PEER_STALE_TIMEOUT_MS
+                                && p.addr
+                                    .rsplit_once(':')
+                                    .is_some_and(|(ip, _)| ip == src_ip_str)
+                        })
+                        .count();
+                    if same_ip_count >= MAX_PEERS_PER_IP {
+                        return false;
+                    }
+                }
             }
         } else {
             let same_ip_count = self
@@ -422,7 +518,10 @@ impl LanDiscoveryBeacon {
 
         for _ in 0..MAX_POLL_PACKETS_PER_TICK {
             let (n, src_addr) = match self.socket.recv_from(&mut buf) {
-                Ok(pair) => pair,
+                Ok(pair) => {
+                    self.consecutive_errors = 0;
+                    pair
+                }
                 Err(err) if err.kind() == ErrorKind::WouldBlock => break,
                 Err(err)
                     if matches!(
@@ -432,7 +531,13 @@ impl LanDiscoveryBeacon {
                 {
                     continue;
                 }
-                Err(_) => break,
+                Err(_) => {
+                    self.consecutive_errors = self.consecutive_errors.saturating_add(1);
+                    if self.consecutive_errors >= REBIND_ERROR_THRESHOLD {
+                        let _ = self.rebind();
+                    }
+                    break;
+                }
             };
             if !is_lan_or_loopback(src_addr.ip()) || n <= 4 {
                 continue;
@@ -451,6 +556,7 @@ impl LanDiscoveryBeacon {
                         &ann.now_playing_title,
                         &ann.now_playing_artist,
                         now_ms,
+                        false,
                     );
                 }
             } else if magic == BEACON_MAGIC_V1
@@ -467,6 +573,7 @@ impl LanDiscoveryBeacon {
                     "",
                     "",
                     now_ms,
+                    false,
                 );
             }
         }

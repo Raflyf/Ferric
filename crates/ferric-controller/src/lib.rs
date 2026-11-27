@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -98,7 +98,16 @@ struct ControllerState {
     lyrics_offset_ms: i64,
     lyrics_cache: LyricsSnapshot,
     pending_handoff_seek_ms: Option<u64>,
+    paused_while_resolving: bool,
+    sleep_timer_end: Option<Instant>,
+    last_tick_at: Option<Instant>,
     connect_sync_ticks: u8,
+}
+
+struct MonitorSync {
+    wake_lock: Mutex<bool>,
+    wake_cv: Condvar,
+    shutdown_flag: AtomicBool,
 }
 
 /// Thread-safe headless Ferric controller owning SQLite persistence, PlayQueue, lazy `AudioEngine`,
@@ -109,9 +118,7 @@ pub struct FerricController {
     state: Mutex<ControllerState>,
     audio: Mutex<Option<AudioEngine>>,
     connect: Mutex<Option<Arc<ferric_sync::ConnectEngine>>>,
-    wake_lock: Mutex<bool>,
-    wake_cv: Condvar,
-    shutdown_flag: AtomicBool,
+    monitor_sync: Arc<MonitorSync>,
     monitor_handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
@@ -189,22 +196,28 @@ impl FerricController {
                 lyrics_offset_ms: 0,
                 lyrics_cache: LyricsSnapshot::default(),
                 pending_handoff_seek_ms: None,
+                paused_while_resolving: false,
+                sleep_timer_end: None,
+                last_tick_at: None,
                 connect_sync_ticks: 0,
             }),
             audio: Mutex::new(None),
             connect: Mutex::new(None),
-            wake_lock: Mutex::new(false),
-            wake_cv: Condvar::new(),
-            shutdown_flag: AtomicBool::new(false),
+            monitor_sync: Arc::new(MonitorSync {
+                wake_lock: Mutex::new(false),
+                wake_cv: Condvar::new(),
+                shutdown_flag: AtomicBool::new(false),
+            }),
             monitor_handle: Mutex::new(None),
         });
 
         ctrl.start_connect_engine();
 
         let weak = Arc::downgrade(&ctrl);
+        let mon_sync = Arc::clone(&ctrl.monitor_sync);
         if let Ok(handle) = thread::Builder::new()
             .name("ferric-ctrl-mon".to_string())
-            .spawn(move || monitor_loop(weak))
+            .spawn(move || monitor_loop(weak, mon_sync))
         {
             let mut slot = ctrl
                 .monitor_handle
@@ -239,8 +252,7 @@ impl FerricController {
         let engine = if self.cfg.headless_audio {
             AudioEngine::start_headless(eq)
         } else {
-            AudioEngine::start_supervised(eq.clone(), dsp.output_device.clone())
-                .unwrap_or_else(|_| AudioEngine::start_headless(eq))
+            AudioEngine::start_supervised(eq, dsp.output_device.clone())?
         };
         engine.send(EngineCommand::SetDspSettings(dsp));
         engine.send(EngineCommand::SetVolume(volume));
@@ -343,10 +355,13 @@ impl FerricController {
         }
         self.ensure_audio_started()?;
         let clamped_idx = start_index.min(tracks.len() - 1);
+        let current_seq = self.telemetry().track_finished_seq;
         let (current, up_next, gen_id) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.queue.set_tracks(tracks, Some(clamped_idx));
             st.queue_context = context;
+            st.last_finished_seq = current_seq;
+            st.paused_while_resolving = false;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
             let cur = st.queue.current().cloned();
             let next_list: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
@@ -390,7 +405,10 @@ impl FerricController {
             return Ok(());
         }
 
-        // Online streaming track: resolve & cache on a dedicated worker so caller never blocks.
+        // Online streaming track: pause stale Deck A and clear Deck B before resolving off-thread
+        // so an old track cannot finish or crossfade mid-download and hijack the queue.
+        self.send_audio(EngineCommand::Pause);
+        self.send_audio(EngineCommand::QueueNext(None));
         let this = Arc::clone(self);
         let track_clone = track.clone();
         let _ = thread::Builder::new()
@@ -482,7 +500,7 @@ impl FerricController {
     fn resolve_online_track_worker(self: &Arc<Self>, track: Track, gen_id: u64) {
         match self.resolve_stream_path_blocking(&track) {
             Ok((path, vid, codec, bitrate_kbps, duration_ms)) => {
-                let (is_still_current, pending_seek) = {
+                let (is_still_current, pending_seek, was_paused) = {
                     let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
                     st.queue.update_track_cached_stream(
                         &track.id,
@@ -498,7 +516,8 @@ impl FerricController {
                     } else {
                         None
                     };
-                    (current, seek)
+                    let paused = st.paused_while_resolving;
+                    (current, seek, paused)
                 };
                 if is_still_current {
                     self.send_audio(EngineCommand::LoadAndPlayTrack {
@@ -515,6 +534,9 @@ impl FerricController {
                     {
                         self.send_audio(EngineCommand::SeekMs(ms));
                     }
+                    if was_paused {
+                        self.send_audio(EngineCommand::Pause);
+                    }
                     self.queue_upcoming_deck_b();
                     self.prefetch_upcoming_online_track();
                     self.push_connect_playback_snapshot();
@@ -522,6 +544,13 @@ impl FerricController {
                 }
             }
             Err(err) => {
+                let is_still_current = {
+                    let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    st.resolve_gen == gen_id
+                };
+                if !is_still_current {
+                    return;
+                }
                 if track.source == TrackSource::Local && track.path.is_none() {
                     self.sink.on_toast(format!(
                         "Track '{}' is stored locally on the other device",
@@ -626,9 +655,39 @@ impl FerricController {
     }
 
     fn wake_monitor(&self) {
-        let mut active = self.wake_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut active = self
+            .monitor_sync
+            .wake_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         *active = true;
-        self.wake_cv.notify_one();
+        self.monitor_sync.wake_cv.notify_one();
+    }
+
+    pub fn set_sleep_timer_minutes(&self, minutes: u32) {
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.sleep_timer_end = if minutes == 0 {
+                None
+            } else {
+                Some(Instant::now() + Duration::from_secs(u64::from(minutes) * 60))
+            };
+        }
+        if minutes == 0 {
+            self.sink.on_toast("Sleep timer cancelled".to_string());
+        } else {
+            self.sink
+                .on_toast(format!("Sleep timer set for {minutes} min"));
+            self.wake_monitor();
+        }
+    }
+
+    #[must_use]
+    pub fn sleep_timer_remaining_secs(&self) -> u64 {
+        let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.sleep_timer_end
+            .map(|end| end.saturating_duration_since(Instant::now()).as_secs())
+            .unwrap_or(0)
     }
 
     pub fn toggle_play_pause(&self) -> ControllerResult<()> {
@@ -641,6 +700,11 @@ impl FerricController {
 
     pub(crate) fn toggle_play_pause_local_only(&self) -> ControllerResult<()> {
         self.ensure_audio_started()?;
+        let currently_playing = self.telemetry().is_playing;
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.paused_while_resolving = currently_playing;
+        }
         self.send_audio(EngineCommand::TogglePlayPause);
         self.push_connect_playback_snapshot();
         self.wake_monitor();
@@ -657,6 +721,10 @@ impl FerricController {
 
     pub(crate) fn play_local_only(&self) -> ControllerResult<()> {
         self.ensure_audio_started()?;
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.paused_while_resolving = false;
+        }
         self.send_audio(EngineCommand::Play);
         self.push_connect_playback_snapshot();
         self.wake_monitor();
@@ -667,6 +735,10 @@ impl FerricController {
         if self.is_controlling_remote() {
             self.forward_remote_action(ferric_sync::RemoteAction::Pause);
             return;
+        }
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.paused_while_resolving = true;
         }
         self.send_audio(EngineCommand::Pause);
         self.push_connect_playback_snapshot();
@@ -682,9 +754,12 @@ impl FerricController {
 
     pub(crate) fn next_local_only(self: &Arc<Self>) -> ControllerResult<()> {
         self.ensure_audio_started()?;
+        let current_seq = self.telemetry().track_finished_seq;
         let (next_track, up_next, gen_id) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let next_t = st.queue.next_track_manual().cloned();
+            st.last_finished_seq = current_seq;
+            st.paused_while_resolving = false;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
             let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
             if let Some(t) = &next_t {
@@ -723,9 +798,12 @@ impl FerricController {
             self.push_connect_playback_snapshot();
             return Ok(());
         }
+        let current_seq = self.telemetry().track_finished_seq;
         let (prev_track, up_next, gen_id) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let prev_t = st.queue.prev_track().cloned();
+            st.last_finished_seq = current_seq;
+            st.paused_while_resolving = false;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
             let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
             if let Some(t) = &prev_t {
@@ -935,13 +1013,16 @@ impl FerricController {
 
     /// Flush session resume state, stop background monitor thread, and tear down audio cleanly.
     pub fn shutdown(&self) {
-        self.shutdown_flag.store(true, Ordering::Release);
+        self.monitor_sync
+            .shutdown_flag
+            .store(true, Ordering::Release);
         self.wake_monitor();
         if let Some(handle) = self
             .monitor_handle
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
+            && handle.thread().id() != thread::current().id()
         {
             let _ = handle.join();
         }
@@ -953,10 +1034,8 @@ impl FerricController {
         {
             conn.shutdown();
         }
-        {
-            let mut audio_guard = self.audio.lock().unwrap_or_else(|p| p.into_inner());
-            *audio_guard = None;
-        }
+        let dropped_audio = self.audio.lock().unwrap_or_else(|p| p.into_inner()).take();
+        drop(dropped_audio);
         {
             let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let _ = st.db.save_session_state(&st.session);
@@ -967,13 +1046,32 @@ impl FerricController {
     fn monitor_tick(self: &Arc<Self>) -> bool {
         let snap = self.telemetry();
         let mut track_changed: Option<(Option<Track>, Vec<Track>, bool, u64)> = None;
+        let mut sleep_expired = false;
 
         {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let now = Instant::now();
+            let elapsed_ms = st
+                .last_tick_at
+                .map(|prev| {
+                    u64::try_from(now.saturating_duration_since(prev).as_millis())
+                        .unwrap_or(200)
+                        .clamp(1, 2_000)
+                })
+                .unwrap_or(200);
+            st.last_tick_at = Some(now);
+
+            if let Some(end_at) = st.sleep_timer_end
+                && now >= end_at
+            {
+                st.sleep_timer_end = None;
+                sleep_expired = true;
+            }
+
             if snap.is_playing
                 && let Some(mut tracker) = st.play_tracker.take()
             {
-                tracker.listened_ms = tracker.listened_ms.saturating_add(200);
+                tracker.listened_ms = tracker.listened_ms.saturating_add(elapsed_ms);
                 let dur = if tracker.duration_ms > 0 {
                     tracker.duration_ms
                 } else {
@@ -1018,6 +1116,12 @@ impl FerricController {
             }
         }
 
+        if sleep_expired {
+            self.pause();
+            self.sink
+                .on_toast("Sleep timer finished; playback paused".to_string());
+        }
+
         self.sink.on_telemetry(snap);
 
         if let Some((next_track, up_next, auto_transitioned, gen_id)) = track_changed {
@@ -1041,30 +1145,31 @@ impl FerricController {
             }
         }
 
-        snap.is_playing
+        snap.is_playing || self.sleep_timer_remaining_secs() > 0
     }
 }
 
-fn monitor_loop(weak: Weak<FerricController>) {
+fn monitor_loop(weak: Weak<FerricController>, mon_sync: Arc<MonitorSync>) {
     loop {
-        let Some(ctrl) = weak.upgrade() else {
-            return;
-        };
-        if ctrl.shutdown_flag.load(Ordering::Acquire) {
+        if mon_sync.shutdown_flag.load(Ordering::Acquire) {
             return;
         }
-        let active = ctrl.monitor_tick();
-        if ctrl.shutdown_flag.load(Ordering::Acquire) {
+        let active = {
+            let Some(ctrl) = weak.upgrade() else {
+                return;
+            };
+            ctrl.monitor_tick()
+        };
+        if mon_sync.shutdown_flag.load(Ordering::Acquire) {
             return;
         }
         if active {
-            drop(ctrl);
             thread::sleep(Duration::from_millis(200));
         } else {
-            let mut guard = ctrl.wake_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut guard = mon_sync.wake_lock.lock().unwrap_or_else(|p| p.into_inner());
             *guard = false;
-            while !*guard && !ctrl.shutdown_flag.load(Ordering::Acquire) {
-                let (next_g, _) = ctrl
+            while !*guard && !mon_sync.shutdown_flag.load(Ordering::Acquire) {
+                let (next_g, _) = mon_sync
                     .wake_cv
                     .wait_timeout(guard, Duration::from_secs(5))
                     .unwrap_or_else(|p| p.into_inner());
@@ -1079,7 +1184,9 @@ fn monitor_loop(weak: Weak<FerricController>) {
 
 impl Drop for FerricController {
     fn drop(&mut self) {
-        self.shutdown_flag.store(true, Ordering::Release);
+        self.monitor_sync
+            .shutdown_flag
+            .store(true, Ordering::Release);
         self.wake_monitor();
         if let Some(conn) = self
             .connect
@@ -1094,6 +1201,7 @@ impl Drop for FerricController {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
+            && handle.thread().id() != thread::current().id()
         {
             let _ = handle.join();
         }

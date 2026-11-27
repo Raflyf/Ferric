@@ -30,7 +30,7 @@ impl LibraryDb {
         conn.pragma_update(None, "cache_size", -512_i64)?;
         conn.pragma_update(None, "mmap_size", 0_i64)?;
         conn.pragma_update(None, "temp_store", "FILE")?;
-        let db = Self { conn };
+        let mut db = Self { conn };
         db.migrate()?;
         Ok(db)
     }
@@ -42,7 +42,7 @@ impl LibraryDb {
     pub fn open_in_memory() -> CoreResult<Self> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let db = Self { conn };
+        let mut db = Self { conn };
         db.migrate()?;
         Ok(db)
     }
@@ -61,7 +61,7 @@ impl LibraryDb {
         Ok(false)
     }
 
-    fn migrate(&self) -> CoreResult<()> {
+    fn migrate(&mut self) -> CoreResult<()> {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS tracks (
@@ -88,6 +88,8 @@ impl LibraryDb {
             CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
             CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
             CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(source);
+            CREATE INDEX IF NOT EXISTS idx_tracks_liked ON tracks(liked) WHERE liked = 1;
+            CREATE INDEX IF NOT EXISTS idx_tracks_album_nocase ON tracks(album COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_tracks_artist_nocase
                 ON tracks(artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE);
 
@@ -152,28 +154,35 @@ impl LibraryDb {
             );
             CREATE INDEX IF NOT EXISTS idx_play_history_played_at
                 ON play_history(played_at);
+            CREATE INDEX IF NOT EXISTS idx_play_history_artist
+                ON play_history(artist);
+            CREATE INDEX IF NOT EXISTS idx_play_history_track_id
+                ON play_history(track_id);
             "#,
         )?;
-        // Checked schema upgrades for existing user databases (never silently swallow real SQLite errors).
-        if !self.has_column("tracks", "thumbnail_url")? {
-            self.conn
-                .execute("ALTER TABLE tracks ADD COLUMN thumbnail_url TEXT", [])?;
-        }
-        if !self.has_column("playlists", "thumbnail_url")? {
-            self.conn
-                .execute("ALTER TABLE playlists ADD COLUMN thumbnail_url TEXT", [])?;
-        }
-        if !self.has_column("playlists", "created_at")? {
-            self.conn.execute(
-                "ALTER TABLE playlists ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-            // Backfill legacy playlists with deterministic millisecond timestamps derived from
-            // `updated_at` and insertion `rowid` so newer playlists sort first cleanly.
-            self.conn.execute(
-                "UPDATE playlists SET created_at = (updated_at * 1000) + rowid WHERE created_at = 0",
-                [],
-            )?;
+        // Checked transactional schema upgrades for existing user databases.
+        let need_track_thumb = !self.has_column("tracks", "thumbnail_url")?;
+        let need_pl_thumb = !self.has_column("playlists", "thumbnail_url")?;
+        let need_pl_created = !self.has_column("playlists", "created_at")?;
+        if need_track_thumb || need_pl_thumb || need_pl_created {
+            let tx = self.conn.transaction()?;
+            if need_track_thumb {
+                tx.execute("ALTER TABLE tracks ADD COLUMN thumbnail_url TEXT", [])?;
+            }
+            if need_pl_thumb {
+                tx.execute("ALTER TABLE playlists ADD COLUMN thumbnail_url TEXT", [])?;
+            }
+            if need_pl_created {
+                tx.execute(
+                    "ALTER TABLE playlists ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+                tx.execute(
+                    "UPDATE playlists SET created_at = (updated_at * 1000) + rowid WHERE created_at = 0",
+                    [],
+                )?;
+            }
+            tx.commit()?;
         }
         Ok(())
     }
@@ -300,6 +309,10 @@ impl LibraryDb {
             "DELETE FROM playlist_tracks WHERE track_id = ?1",
             [track_id],
         )?;
+        tx.execute(
+            "DELETE FROM offline_downloads WHERE track_id = ?1",
+            [track_id],
+        )?;
         tx.execute("DELETE FROM tracks WHERE id = ?1", [track_id])?;
         tx.commit()?;
         Ok(())
@@ -309,6 +322,10 @@ impl LibraryDb {
         let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM playlist_tracks WHERE track_id LIKE 'demo:%'",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM offline_downloads WHERE track_id LIKE 'demo:%'",
             [],
         )?;
         let removed = tx.execute("DELETE FROM tracks WHERE id LIKE 'demo:%'", [])?;
@@ -337,7 +354,8 @@ impl LibraryDb {
                  WHERE source = 'YT MUSIC' \
                    AND liked = 0 \
                    AND (file_path IS NULL OR file_path LIKE '%stream_cache%') \
-                   AND id NOT IN (SELECT track_id FROM playlist_tracks)",
+                   AND id NOT IN (SELECT track_id FROM playlist_tracks) \
+                   AND id NOT IN (SELECT track_id FROM offline_downloads)",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
@@ -693,6 +711,177 @@ impl LibraryDb {
         Ok(out)
     }
 
+    pub fn get_track_by_id(&self, track_id: &str) -> CoreResult<Option<Track>> {
+        let track = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    id, title, artist, album, duration_ms, file_path, source,
+                    codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                    spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+                FROM tracks
+                WHERE id = ?1
+                "#,
+                [track_id],
+                row_to_track,
+            )
+            .optional()?;
+        Ok(track)
+    }
+
+    pub fn list_liked_tracks(&self) -> CoreResult<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                id, title, artist, album, duration_ms, file_path, source,
+                codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+            FROM tracks
+            WHERE liked = 1
+            ORDER BY added_at DESC, title COLLATE NOCASE ASC
+            "#,
+        )?;
+        let rows = stmt.query_map([], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        out.shrink_to_fit();
+        Ok(out)
+    }
+
+    pub fn list_local_tracks(&self) -> CoreResult<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                id, title, artist, album, duration_ms, file_path, source,
+                codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+            FROM tracks
+            WHERE source = 'LOCAL'
+            ORDER BY artist COLLATE NOCASE ASC, album COLLATE NOCASE ASC, title COLLATE NOCASE ASC
+            "#,
+        )?;
+        let rows = stmt.query_map([], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        out.shrink_to_fit();
+        Ok(out)
+    }
+
+    pub fn list_offline_tracks_joined(&self) -> CoreResult<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                t.id, t.title, t.artist, t.album, t.duration_ms, od.local_path, t.source,
+                t.codec, t.sample_rate, t.bit_depth, t.bitrate_kbps, t.isrc,
+                t.spotify_id, t.youtube_video_id, t.replay_gain_db, t.liked, t.thumbnail_url
+            FROM offline_downloads od
+            INNER JOIN tracks t ON t.id = od.track_id
+            ORDER BY od.downloaded_at DESC, t.title COLLATE NOCASE ASC
+            "#,
+        )?;
+        let rows = stmt.query_map([], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        out.shrink_to_fit();
+        Ok(out)
+    }
+
+    pub fn list_tracks_by_ids(&self, ids: &[String]) -> CoreResult<Vec<Track>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = HashMap::with_capacity(ids.len());
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                id, title, artist, album, duration_ms, file_path, source,
+                codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+            FROM tracks
+            WHERE id = ?1
+            "#,
+        )?;
+        for id in ids {
+            if !by_id.contains_key(id)
+                && let Some(track) = stmt.query_row([id], row_to_track).optional()?
+            {
+                by_id.insert(id.clone(), track);
+            }
+        }
+        let mut out = Vec::with_capacity(by_id.len());
+        for id in ids {
+            if let Some(track) = by_id.get(id) {
+                out.push(track.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn list_album_tracks(&self, album: &str, artist: Option<&str>) -> CoreResult<Vec<Track>> {
+        let mut out = Vec::new();
+        if let Some(artist_name) = artist.map(str::trim).filter(|s| !s.is_empty()) {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT
+                    id, title, artist, album, duration_ms, file_path, source,
+                    codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                    spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+                FROM tracks
+                WHERE album = ?1 COLLATE NOCASE AND artist = ?2 COLLATE NOCASE
+                ORDER BY title COLLATE NOCASE ASC
+                "#,
+            )?;
+            for item in stmt.query_map(params![album, artist_name], row_to_track)? {
+                out.push(item?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT
+                    id, title, artist, album, duration_ms, file_path, source,
+                    codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                    spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+                FROM tracks
+                WHERE album = ?1 COLLATE NOCASE
+                ORDER BY title COLLATE NOCASE ASC
+                "#,
+            )?;
+            for item in stmt.query_map([album], row_to_track)? {
+                out.push(item?);
+            }
+        }
+        out.shrink_to_fit();
+        Ok(out)
+    }
+
+    pub fn list_artist_tracks(&self, artist: &str) -> CoreResult<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                id, title, artist, album, duration_ms, file_path, source,
+                codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+            FROM tracks
+            WHERE artist = ?1 COLLATE NOCASE
+            ORDER BY album COLLATE NOCASE ASC, title COLLATE NOCASE ASC
+            "#,
+        )?;
+        let rows = stmt.query_map([artist], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        out.shrink_to_fit();
+        Ok(out)
+    }
+
     /// Match cloud catalog tracks (`file_path IS NULL`) against local tracks (`file_path IS NOT NULL`)
     /// first by case-insensitive ISRC, then by normalized lowercase `(title, artist)`, copying
     /// `file_path`, `codec`, `sample_rate`, `bit_depth`, and `bitrate_kbps` onto matched rows.
@@ -711,7 +900,7 @@ impl LibraryDb {
 
         {
             let mut stmt = self.conn.prepare(
-                "SELECT file_path, codec, sample_rate, bit_depth, bitrate_kbps, isrc, title, artist FROM tracks WHERE file_path IS NOT NULL AND file_path != '' AND UPPER(source) = 'LOCAL' AND file_path NOT LIKE '%stream_cache%'",
+                "SELECT file_path, codec, sample_rate, bit_depth, bitrate_kbps, isrc, title, artist FROM tracks WHERE file_path IS NOT NULL AND file_path != '' AND source = 'LOCAL' AND file_path NOT LIKE '%stream_cache%'",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
@@ -842,10 +1031,14 @@ impl LibraryDb {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM music_folders", [])?;
         tx.execute(
-            "DELETE FROM playlist_tracks WHERE track_id IN (SELECT id FROM tracks WHERE UPPER(source) = 'LOCAL')",
+            "DELETE FROM playlist_tracks WHERE track_id IN (SELECT id FROM tracks WHERE source = 'LOCAL')",
             [],
         )?;
-        let removed = tx.execute("DELETE FROM tracks WHERE UPPER(source) = 'LOCAL'", [])?;
+        tx.execute(
+            "DELETE FROM offline_downloads WHERE track_id IN (SELECT id FROM tracks WHERE source = 'LOCAL')",
+            [],
+        )?;
+        let removed = tx.execute("DELETE FROM tracks WHERE source = 'LOCAL'", [])?;
         tx.commit()?;
         Ok(removed)
     }
@@ -997,15 +1190,28 @@ impl LibraryDb {
 
     pub fn save_cached_lyrics(&self, track_key: &str, lrc: &str) -> CoreResult<()> {
         const MAX_LYRICS_CACHE_ROWS: i64 = 500;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO lyrics_cache (track_key, synced_lrc, updated_at) VALUES (?1, ?2, strftime('%s','now'))",
-            params![track_key, lrc],
-        )?;
-        let _ = self.conn.execute(
-            "DELETE FROM lyrics_cache WHERE track_key NOT IN (SELECT track_key FROM lyrics_cache ORDER BY updated_at DESC LIMIT ?1)",
-            params![MAX_LYRICS_CACHE_ROWS],
-        );
-        Ok(())
+        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let res = (|| -> CoreResult<()> {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO lyrics_cache (track_key, synced_lrc, updated_at) VALUES (?1, ?2, strftime('%s','now'))",
+                params![track_key, lrc],
+            )?;
+            let _ = self.conn.execute(
+                "DELETE FROM lyrics_cache WHERE track_key NOT IN (SELECT track_key FROM lyrics_cache ORDER BY updated_at DESC LIMIT ?1)",
+                params![MAX_LYRICS_CACHE_ROWS],
+            );
+            Ok(())
+        })();
+        match res {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
     }
 
     pub fn upsert_offline_download(&self, rec: &OfflineDownloadRecord) -> CoreResult<()> {
@@ -1018,7 +1224,7 @@ impl LibraryDb {
             params![
                 rec.track_id,
                 rec.local_path,
-                rec.size_bytes as i64,
+                i64::try_from(rec.size_bytes).unwrap_or(i64::MAX),
                 rec.codec,
                 rec.quality,
                 rec.downloaded_at,

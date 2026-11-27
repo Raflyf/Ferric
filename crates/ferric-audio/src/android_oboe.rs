@@ -61,22 +61,23 @@ pub(crate) fn list_output_devices() -> Vec<String> {
     vec!["Android System Output".to_string()]
 }
 
-pub(crate) fn build_output_stream_and_producer(
+fn open_oboe_stream(
     telemetry: &Arc<AudioTelemetry>,
-    _preferred_device: Option<&str>,
-    start_playing: bool,
-) -> AudioResult<(AndroidOutputStream, rtrb::Producer<RingFrame>, u32, String)> {
-    // Allocate a ~260 ms stereo ring buffer sized for up to 48 kHz (expanded dynamically if higher).
-    let ring_frames: usize = 16_384;
+    ring_frames: usize,
+) -> AudioResult<(
+    AudioStreamAsync<Output, OboeRenderCallback>,
+    rtrb::Producer<RingFrame>,
+    u32,
+)> {
     let (producer, consumer) = rtrb::RingBuffer::<RingFrame>::new(ring_frames);
 
     let cb = OboeRenderCallback {
         consumer,
         telemetry: Arc::clone(telemetry),
-        max_skip: ring_frames.min(16_384),
+        max_skip: ring_frames.min(32_768),
     };
 
-    let mut stream = AudioStreamBuilder::default()
+    let stream = AudioStreamBuilder::default()
         .set_performance_mode(PerformanceMode::None)
         .set_sharing_mode(SharingMode::Shared)
         .set_usage(Usage::Media)
@@ -89,6 +90,28 @@ pub(crate) fn build_output_stream_and_producer(
 
     let raw_rate = stream.get_sample_rate();
     let out_rate = u32::try_from(raw_rate).unwrap_or(48_000).max(8_000);
+    Ok((stream, producer, out_rate))
+}
+
+pub(crate) fn build_output_stream_and_producer(
+    telemetry: &Arc<AudioTelemetry>,
+    _preferred_device: Option<&str>,
+    start_playing: bool,
+) -> AudioResult<(AndroidOutputStream, rtrb::Producer<RingFrame>, u32, String)> {
+    // Default ~340 ms ring buffer at 48 kHz; expand dynamically to >= 300 ms for 96/192 kHz USB DACs.
+    let initial_frames: usize = 16_384;
+    let (mut stream, mut producer, mut out_rate) = open_oboe_stream(telemetry, initial_frames)?;
+
+    let desired_frames = ((out_rate as usize).saturating_mul(300) / 1_000).max(initial_frames);
+    if desired_frames > initial_frames {
+        drop(stream);
+        let (rebuilt_stream, rebuilt_producer, rebuilt_rate) =
+            open_oboe_stream(telemetry, desired_frames)?;
+        stream = rebuilt_stream;
+        producer = rebuilt_producer;
+        out_rate = rebuilt_rate;
+    }
+
     telemetry.output_rate.store(out_rate, Ordering::Relaxed);
 
     if start_playing {

@@ -35,7 +35,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -51,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import dev.livelydesk.ferric.ui.components.EqCurveMath
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import java.util.Locale
+import kotlin.math.roundToInt
 import uniffi.ferric_mobile_ffi.FfiAudioQuality
 import uniffi.ferric_mobile_ffi.FfiAutoEqProfile
 import uniffi.ferric_mobile_ffi.FfiDspSettings
@@ -77,6 +80,12 @@ fun EqualizerSheet(
 ) {
     val palette = LocalFerricPalette.current
     var autoEqQuery by remember { mutableStateOf("") }
+    // Keep local draft EQ & crossfade so slider drags animate at 60fps and commit cleanly to SQLite on release.
+    var draftEq by remember(eqConfig) { mutableStateOf(eqConfig) }
+    var draftCrossfadeSec by remember(dspSettings?.crossfadeMs) {
+        mutableFloatStateOf(((dspSettings?.crossfadeMs?.toFloat() ?: 0f) / 1000f).coerceIn(0f, 12f))
+    }
+    LaunchedEffect(eqConfig) { draftEq = eqConfig }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -86,7 +95,7 @@ fun EqualizerSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 18.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
@@ -95,20 +104,25 @@ fun EqualizerSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Parametric EQ & Audio DSP", style = MaterialTheme.typography.titleLarge, color = palette.textPrimary)
-                if (eqConfig != null) {
+                val activeEq = draftEq
+                if (activeEq != null) {
                     Switch(
-                        checked = eqConfig.enabled,
-                        onCheckedChange = { onUpdateEq(eqConfig.copy(enabled = it)) },
+                        checked = activeEq.enabled,
+                        onCheckedChange = {
+                            val updated = activeEq.copy(enabled = it)
+                            draftEq = updated
+                            onUpdateEq(updated)
+                        },
                         colors = SwitchDefaults.colors(checkedTrackColor = palette.accent),
                     )
                 }
             }
 
-            if (eqConfig != null) {
-                // Live 64-point frequency response curve canvas (20 Hz..20 kHz)
-                val curve = remember(eqConfig) { EqCurveMath.evaluateCurveDb(eqConfig) }
+            val activeEq = draftEq
+            if (activeEq != null) {
+                val curve = remember(activeEq) { EqCurveMath.evaluateCurveDb(activeEq) }
                 Surface(
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(16.dp),
                     color = palette.canvas,
                     border = BorderStroke(1.dp, palette.border),
                     modifier = Modifier.fillMaxWidth(),
@@ -122,7 +136,6 @@ fun EqualizerSheet(
                             val w = size.width
                             val h = size.height
                             val midY = h * 0.5f
-                            // Horizontal grid (+9, 0, -9 dB)
                             for (frac in listOf(0.25f, 0.5f, 0.75f)) {
                                 drawLine(
                                     color = palette.border,
@@ -160,7 +173,7 @@ fun EqualizerSheet(
                                 )
                                 drawPath(
                                     path = linePath,
-                                    color = if (eqConfig.enabled) palette.accent else palette.textSecondary,
+                                    color = if (activeEq.enabled) palette.accent else palette.textSecondary,
                                     style = Stroke(width = 4f, cap = StrokeCap.Round),
                                 )
                             }
@@ -176,11 +189,10 @@ fun EqualizerSheet(
                     }
                 }
 
-                // 14 Built-in EQ Presets
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(eqPresets, key = { it }) { preset ->
                         FilterChip(
-                            selected = eqConfig.presetName.equals(preset, ignoreCase = true),
+                            selected = activeEq.presetName.equals(preset, ignoreCase = true),
                             onClick = { onApplyPreset(preset) },
                             label = { Text(preset) },
                             colors = FilterChipDefaults.filterChipColors(
@@ -193,21 +205,25 @@ fun EqualizerSheet(
                     }
                 }
 
-                // Preamp
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text("Preamp", color = palette.textPrimary, style = MaterialTheme.typography.labelMedium)
                     Text(
-                        String.format(Locale.US, "%+.1f dB", eqConfig.preampDb),
+                        String.format(Locale.US, "%+.1f dB", activeEq.preampDb),
                         style = MaterialTheme.typography.labelSmall,
                         color = palette.accent,
                     )
                 }
                 Slider(
-                    value = eqConfig.preampDb.coerceIn(-12f, 12f),
-                    onValueChange = { v -> onUpdateEq(eqConfig.copy(preampDb = v, presetName = "Custom")) },
+                    value = activeEq.preampDb.coerceIn(-12f, 12f),
+                    onValueChange = { v ->
+                        draftEq = activeEq.copy(preampDb = v, presetName = "Custom")
+                    },
+                    onValueChangeFinished = {
+                        draftEq?.let(onUpdateEq)
+                    },
                     valueRange = -12f..12f,
                     colors = SliderDefaults.colors(
                         thumbColor = palette.accent,
@@ -216,8 +232,7 @@ fun EqualizerSheet(
                     ),
                 )
 
-                // 10-Band Interactive Parametric Gain Controls
-                eqConfig.bands.forEachIndexed { idx, band ->
+                activeEq.bands.forEachIndexed { idx, band ->
                     val freqLabel = if (band.freqHz >= 1000f) {
                         String.format(Locale.US, "%.0fkHz", band.freqHz / 1000f)
                     } else {
@@ -236,9 +251,12 @@ fun EqualizerSheet(
                         Slider(
                             value = band.gainDb.coerceIn(-12f, 12f),
                             onValueChange = { newGain ->
-                                val nextBands = eqConfig.bands.toMutableList()
+                                val nextBands = activeEq.bands.toMutableList()
                                 nextBands[idx] = band.copy(gainDb = newGain)
-                                onUpdateEq(eqConfig.copy(bands = nextBands, presetName = "Custom"))
+                                draftEq = activeEq.copy(bands = nextBands, presetName = "Custom")
+                            },
+                            onValueChangeFinished = {
+                                draftEq?.let(onUpdateEq)
                             },
                             valueRange = -12f..12f,
                             colors = SliderDefaults.colors(
@@ -257,7 +275,6 @@ fun EqualizerSheet(
                     }
                 }
 
-                // Equalizer APO Import / Export
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -282,7 +299,6 @@ fun EqualizerSheet(
                     }
                 }
 
-                // 24 AutoEq Headphone & IEM Profiles
                 Text("AutoEq Headphone / IEM Profiles (24)", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                 OutlinedTextField(
                     value = autoEqQuery,
@@ -297,11 +313,11 @@ fun EqualizerSheet(
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(autoEqProfiles, key = { it.name }) { prof ->
                         Surface(
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RoundedCornerShape(12.dp),
                             color = palette.elevated,
                             border = BorderStroke(
                                 1.dp,
-                                if (eqConfig.presetName.equals(prof.name, ignoreCase = true)) palette.accent else palette.border,
+                                if (activeEq.presetName.equals(prof.name, ignoreCase = true)) palette.accent else palette.border,
                             ),
                             modifier = Modifier.clickable { onApplyAutoEq(prof.name) },
                         ) {
@@ -314,7 +330,6 @@ fun EqualizerSheet(
                 }
             }
 
-            // Audio DSP, Automix Crossfade & System Output Switcher
             if (dspSettings != null) {
                 Text("Automix Crossfade & DSP", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
 
@@ -323,12 +338,13 @@ fun EqualizerSheet(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text("Auto Crossfade", color = palette.textPrimary)
-                    Text("${dspSettings.crossfadeMs / 1000u}s", color = palette.accent, style = MaterialTheme.typography.labelSmall)
+                    Text("${draftCrossfadeSec.roundToInt()}s", color = palette.accent, style = MaterialTheme.typography.labelSmall)
                 }
                 Slider(
-                    value = (dspSettings.crossfadeMs.toFloat() / 1000f).coerceIn(0f, 12f),
-                    onValueChange = { sec ->
-                        onUpdateDsp(dspSettings.copy(crossfadeMs = (sec.toInt() * 1000).toUInt()))
+                    value = draftCrossfadeSec,
+                    onValueChange = { sec -> draftCrossfadeSec = sec },
+                    onValueChangeFinished = {
+                        onUpdateDsp(dspSettings.copy(crossfadeMs = (draftCrossfadeSec.roundToInt() * 1000).toUInt()))
                     },
                     valueRange = 0f..12f,
                     steps = 11,

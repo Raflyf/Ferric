@@ -396,7 +396,14 @@ pub fn protect_secret(plain: &str) -> CoreResult<String> {
             win_dpapi::protect_bytes(plain.as_bytes()).map_err(CoreError::SecretProtection)?;
         Ok(format!("{DPAPI_PREFIX}{}", b64_encode(&cipher)))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "android")]
+    {
+        let _ = b64_encode(&[]);
+        Err(CoreError::SecretProtection(
+            "Android Keystore SecretCipher not registered".to_string(),
+        ))
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
     {
         let _ = b64_encode(&[]);
         Ok(plain.to_string())

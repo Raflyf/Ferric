@@ -363,6 +363,8 @@ pub struct AccountSettings {
     #[serde(default)]
     pub spotify_user_name: String,
     #[serde(default)]
+    pub spotify_user_id: String,
+    #[serde(default)]
     pub spotify_access_token: String,
     #[serde(default)]
     pub spotify_refresh_token: String,
@@ -386,6 +388,8 @@ pub struct AccountSettings {
     pub youtube_connected: bool,
     #[serde(default)]
     pub youtube_channel_name: String,
+    #[serde(default)]
+    pub youtube_account_id: String,
     #[serde(default)]
     pub youtube_access_token: String,
     #[serde(default)]
@@ -417,6 +421,7 @@ impl std::fmt::Debug for AccountSettings {
             .field("spotify_client_id", &self.spotify_client_id)
             .field("spotify_connected", &self.spotify_connected)
             .field("spotify_user_name", &self.spotify_user_name)
+            .field("spotify_user_id", &self.spotify_user_id)
             .field("spotify_access_token", &redact(&self.spotify_access_token))
             .field(
                 "spotify_refresh_token",
@@ -438,6 +443,7 @@ impl std::fmt::Debug for AccountSettings {
             )
             .field("youtube_connected", &self.youtube_connected)
             .field("youtube_channel_name", &self.youtube_channel_name)
+            .field("youtube_account_id", &self.youtube_account_id)
             .field("youtube_access_token", &redact(&self.youtube_access_token))
             .field(
                 "youtube_refresh_token",
@@ -465,6 +471,7 @@ impl Default for AccountSettings {
             spotify_client_id: String::new(),
             spotify_connected: false,
             spotify_user_name: String::new(),
+            spotify_user_id: String::new(),
             spotify_access_token: String::new(),
             spotify_refresh_token: String::new(),
             spotify_playlist_count: 0,
@@ -477,6 +484,7 @@ impl Default for AccountSettings {
             youtube_client_secret: String::new(),
             youtube_connected: false,
             youtube_channel_name: String::new(),
+            youtube_account_id: String::new(),
             youtube_access_token: String::new(),
             youtube_refresh_token: String::new(),
             youtube_playlist_count: 0,
@@ -514,6 +522,51 @@ impl AccountSettings {
     pub fn zeroize_subsonic_secrets(&mut self) {
         crate::secrets::zeroize_string(&mut self.subsonic_password);
     }
+}
+
+/// Persistent offline download metadata stored in `filesDir/ferric/offline_downloads/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfflineDownloadRecord {
+    pub track_id: String,
+    pub local_path: String,
+    pub size_bytes: u64,
+    pub codec: String,
+    pub quality: String,
+    pub downloaded_at: i64,
+}
+
+/// Timestamped qualified playback event persisted in `play_history`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayHistoryEntry {
+    pub id: i64,
+    pub track_id: String,
+    pub artist: String,
+    pub played_at: i64,
+    pub listened_ms: u64,
+}
+
+/// Aggregated listening statistics and daily streak summary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListeningStatsSummary {
+    pub total_plays: u64,
+    pub total_listened_ms: u64,
+    pub current_streak_days: u32,
+    pub longest_streak_days: u32,
+    pub top_artists: Vec<(String, u64)>,
+    pub top_track_ids: Vec<(String, u64)>,
+}
+
+/// True when a playback session qualifies to be logged in `play_history`:
+/// listened `>= 30s`, or `>= 50%` of a short track (`< 60s`) with at least 5 seconds heard.
+#[must_use]
+pub fn qualifies_as_play(listened_ms: u64, duration_ms: u64) -> bool {
+    if listened_ms >= 30_000 {
+        return true;
+    }
+    if duration_ms > 0 && duration_ms < 60_000 && listened_ms >= 5_000 {
+        return listened_ms.saturating_mul(2) >= duration_ms;
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

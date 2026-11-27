@@ -3,10 +3,72 @@
 
 use crate::{CoreError, CoreResult};
 use std::sync::atomic::{Ordering, compiler_fence};
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub const DPAPI_PREFIX: &str = "dpapi:v1:";
+pub const KEYSTORE_PREFIX: &str = "keystore:v1:";
 #[cfg(target_os = "windows")]
 const DPAPI_ENTROPY: &[u8] = b"Ferric.Accounts.DPAPI.v1";
+
+/// Pluggable platform secret cipher (e.g., Android Keystore AES-256-GCM vault).
+pub trait SecretCipher: Send + Sync {
+    fn prefix(&self) -> &'static str;
+    fn encrypt(&self, plain: &[u8]) -> Result<Vec<u8>, String>;
+    fn decrypt(&self, cipher: &[u8]) -> Result<Vec<u8>, String>;
+}
+
+static PLATFORM_SECRET_CIPHER: OnceLock<RwLock<Option<Arc<dyn SecretCipher>>>> = OnceLock::new();
+
+fn platform_cipher_lock() -> &'static RwLock<Option<Arc<dyn SecretCipher>>> {
+    PLATFORM_SECRET_CIPHER.get_or_init(|| RwLock::new(None))
+}
+
+/// Register a platform-native at-rest secret cipher (call before opening `LibraryDb` on Android).
+pub fn register_platform_secret_cipher(cipher: Arc<dyn SecretCipher>) {
+    let mut guard = platform_cipher_lock()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(cipher);
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SECRET_CIPHER: std::cell::RefCell<Option<Arc<dyn SecretCipher>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct ScopedTestCipherGuard;
+
+#[cfg(test)]
+impl Drop for ScopedTestCipherGuard {
+    fn drop(&mut self) {
+        TEST_SECRET_CIPHER.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_scoped_secret_cipher_for_test(
+    cipher: Arc<dyn SecretCipher>,
+) -> ScopedTestCipherGuard {
+    TEST_SECRET_CIPHER.with(|slot| {
+        *slot.borrow_mut() = Some(cipher);
+    });
+    ScopedTestCipherGuard
+}
+
+fn active_platform_cipher() -> Option<Arc<dyn SecretCipher>> {
+    #[cfg(test)]
+    if let Some(test_cipher) = TEST_SECRET_CIPHER.with(|slot| slot.borrow().clone()) {
+        return Some(test_cipher);
+    }
+    platform_cipher_lock()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
 
 const B64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -308,11 +370,24 @@ pub struct UnprotectOutcome {
     pub failed: bool,
 }
 
-/// Encrypt a non-empty secret string for storage at rest using per-user Windows DPAPI.
-/// Fails closed with `CoreError::SecretProtection` if DPAPI encryption fails so callers never
-/// silently overwrite stored credentials with an empty string.
+/// Encrypt a non-empty secret string for storage at rest using either the registered platform
+/// cipher (e.g., Android Keystore `keystore:v1:`) or per-user Windows DPAPI (`dpapi:v1:`).
+/// Fails closed with `CoreError::SecretProtection` on failure so callers never clobber credentials.
 pub fn protect_secret(plain: &str) -> CoreResult<String> {
-    if plain.is_empty() || plain.starts_with(DPAPI_PREFIX) {
+    if plain.is_empty() {
+        return Ok(String::new());
+    }
+    if let Some(cipher) = active_platform_cipher() {
+        let prefix = cipher.prefix();
+        if plain.starts_with(prefix) {
+            return Ok(plain.to_string());
+        }
+        let ct = cipher
+            .encrypt(plain.as_bytes())
+            .map_err(CoreError::SecretProtection)?;
+        return Ok(format!("{prefix}{}", b64_encode(&ct)));
+    }
+    if plain.starts_with(DPAPI_PREFIX) || plain.starts_with(KEYSTORE_PREFIX) {
         return Ok(plain.to_string());
     }
     #[cfg(target_os = "windows")]
@@ -328,14 +403,68 @@ pub fn protect_secret(plain: &str) -> CoreResult<String> {
     }
 }
 
-/// Decrypt a stored secret string and report whether decryption failed (e.g., transient DPAPI error
-/// or cross-user ciphertext) so callers avoid overwriting existing DB entries during auto-migration.
+/// Decrypt a stored secret string and report whether decryption failed (e.g., transient Keystore/DPAPI
+/// error or corrupted envelope) so callers avoid overwriting existing DB entries during auto-migration.
 pub fn unprotect_secret_checked(stored: &str) -> UnprotectOutcome {
     if stored.is_empty() {
         return UnprotectOutcome {
             plaintext: String::new(),
             needs_migration: false,
             failed: false,
+        };
+    }
+    if let Some(cipher) = active_platform_cipher() {
+        let prefix = cipher.prefix();
+        if let Some(b64_payload) = stored.strip_prefix(prefix) {
+            let Ok(ct) = b64_decode(b64_payload) else {
+                return UnprotectOutcome {
+                    plaintext: String::new(),
+                    needs_migration: false,
+                    failed: true,
+                };
+            };
+            let Ok(plain_bytes) = cipher.decrypt(&ct) else {
+                return UnprotectOutcome {
+                    plaintext: String::new(),
+                    needs_migration: false,
+                    failed: true,
+                };
+            };
+            return match String::from_utf8(plain_bytes) {
+                Ok(plain) => UnprotectOutcome {
+                    plaintext: plain,
+                    needs_migration: false,
+                    failed: false,
+                },
+                Err(err) => {
+                    let mut raw = err.into_bytes();
+                    zeroize_bytes(&mut raw);
+                    UnprotectOutcome {
+                        plaintext: String::new(),
+                        needs_migration: false,
+                        failed: true,
+                    }
+                }
+            };
+        }
+        if stored.starts_with(DPAPI_PREFIX) || stored.starts_with(KEYSTORE_PREFIX) {
+            return UnprotectOutcome {
+                plaintext: String::new(),
+                needs_migration: false,
+                failed: true,
+            };
+        }
+        return UnprotectOutcome {
+            plaintext: stored.to_string(),
+            needs_migration: true,
+            failed: false,
+        };
+    }
+    if stored.starts_with(KEYSTORE_PREFIX) {
+        return UnprotectOutcome {
+            plaintext: String::new(),
+            needs_migration: false,
+            failed: true,
         };
     }
     if let Some(b64_payload) = stored.strip_prefix(DPAPI_PREFIX) {
@@ -382,7 +511,7 @@ pub fn unprotect_secret_checked(stored: &str) -> UnprotectOutcome {
             }
         }
     } else {
-        // Legacy plaintext entry: return in-memory value and flag for automatic DPAPI upgrade.
+        // Legacy plaintext entry: return in-memory value and flag for automatic encryption upgrade.
         UnprotectOutcome {
             plaintext: stored.to_string(),
             needs_migration: cfg!(target_os = "windows"),
@@ -458,5 +587,45 @@ mod tests {
         let (legacy_plain, needs_mig) = unprotect_secret("legacy_plain_token");
         assert_eq!(legacy_plain, "legacy_plain_token");
         assert_eq!(needs_mig, cfg!(target_os = "windows"));
+    }
+
+    #[test]
+    fn custom_secret_cipher_roundtrips_and_fails_closed_on_tamper() {
+        struct XorTestCipher;
+        impl SecretCipher for XorTestCipher {
+            fn prefix(&self) -> &'static str {
+                KEYSTORE_PREFIX
+            }
+            fn encrypt(&self, plain: &[u8]) -> Result<Vec<u8>, String> {
+                Ok(plain.iter().map(|b| b ^ 0x5A).collect())
+            }
+            fn decrypt(&self, cipher: &[u8]) -> Result<Vec<u8>, String> {
+                if cipher.is_empty() {
+                    return Err("empty ciphertext".to_string());
+                }
+                Ok(cipher.iter().map(|b| b ^ 0x5A).collect())
+            }
+        }
+
+        let _guard = register_scoped_secret_cipher_for_test(std::sync::Arc::new(XorTestCipher));
+        let secret = "sp_dc=android_keystore_secret_token";
+        let protected = protect_secret(secret).expect("protect with keystore cipher");
+        assert!(protected.starts_with(KEYSTORE_PREFIX));
+        assert!(!protected.contains("android_keystore_secret_token"));
+
+        let ok = unprotect_secret_checked(&protected);
+        assert_eq!(ok.plaintext, secret);
+        assert!(!ok.needs_migration);
+        assert!(!ok.failed);
+
+        let corrupt = unprotect_secret_checked("keystore:v1:NOT_VALID_BASE64!");
+        assert!(corrupt.plaintext.is_empty());
+        assert!(corrupt.failed);
+        assert!(!corrupt.needs_migration);
+
+        let legacy = unprotect_secret_checked("plaintext_before_keystore");
+        assert_eq!(legacy.plaintext, "plaintext_before_keystore");
+        assert!(legacy.needs_migration);
+        assert!(!legacy.failed);
     }
 }

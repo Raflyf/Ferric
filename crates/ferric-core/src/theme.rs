@@ -26,6 +26,14 @@ fn default_adaptive_acrylic_tint() -> bool {
     true
 }
 
+fn default_font_family() -> String {
+    "Inter".to_string()
+}
+
+fn default_player_layout() -> String {
+    "standard".to_string()
+}
+
 /// Derive a deep, moody (or soft pastel-light) translucent Acrylic glass tint RGB `[0..1]`
 /// from the currently playing song's extracted cover accent color, keeping high WCAG text contrast.
 pub fn derive_acrylic_tint_from_accent(accent_rgb: [f32; 3], is_light: bool) -> [f32; 3] {
@@ -100,6 +108,15 @@ pub struct ThemeConfig {
     /// Dynamically tint Native Acrylic glass smoothly from the currently playing cover art.
     #[serde(default = "default_adaptive_acrylic_tint")]
     pub adaptive_acrylic_tint: bool,
+    /// Editorial typographic layout mode (combinable with any theme palette; additive for Desktop v0.1.2 compat).
+    #[serde(default)]
+    pub editorial_mode: bool,
+    /// Selectable UI font family (`Inter`, `Plus Jakarta Sans`, `DM Sans`, `Space Grotesk`, `JetBrains Mono`).
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
+    /// Mobile player visual layout (`standard`, `full_bleed`, `liquid_glass`).
+    #[serde(default = "default_player_layout")]
+    pub player_layout: String,
 }
 
 impl Default for ThemeConfig {
@@ -125,6 +142,9 @@ impl Default for ThemeConfig {
             acrylic_opacity: 0.72,
             acrylic_tint_hex: default_acrylic_tint_hex(),
             adaptive_acrylic_tint: true,
+            editorial_mode: false,
+            font_family: default_font_family(),
+            player_layout: default_player_layout(),
         }
     }
 }
@@ -146,6 +166,16 @@ impl ThemeConfig {
             acrylic_enabled: true,
             acrylic_opacity: 0.72,
             ..Self::default()
+        }
+    }
+
+    /// Android Liquid Glass preset mapped onto `BackgroundMode::NativeAcrylic` for Desktop v0.1.2 JSON compatibility.
+    pub fn liquid_glass() -> Self {
+        Self {
+            name: "Liquid Glass".to_string(),
+            corner_radius_px: 20.0,
+            player_layout: "liquid_glass".to_string(),
+            ..Self::native_acrylic()
         }
     }
 
@@ -260,6 +290,16 @@ impl ThemeConfig {
             out.acrylic_opacity.clamp(0.18, 0.94)
         } else {
             default_acrylic_opacity()
+        };
+        out.font_family = match out.font_family.trim() {
+            "Inter" | "Plus Jakarta Sans" | "DM Sans" | "Space Grotesk" | "JetBrains Mono" => {
+                out.font_family.trim().to_string()
+            }
+            _ => default_font_family(),
+        };
+        out.player_layout = match out.player_layout.trim() {
+            "standard" | "full_bleed" | "liquid_glass" => out.player_layout.trim().to_string(),
+            _ => default_player_layout(),
         };
         out
     }
@@ -645,5 +685,25 @@ mod tests {
                 "light adaptive acrylic tint {light_u8:?} must keep AAA contrast for dark text"
             );
         }
+    }
+
+    #[test]
+    fn liquid_glass_theme_preserves_desktop_v012_json_compatibility() {
+        let glass = ThemeConfig::liquid_glass();
+        assert_eq!(glass.background_mode, BackgroundMode::NativeAcrylic);
+        assert!(glass.acrylic_enabled);
+        assert_eq!(glass.player_layout, "liquid_glass");
+        assert_eq!(glass.font_family, "Inter");
+        assert!(!glass.editorial_mode);
+
+        let json = serde_json::to_string(&glass).expect("serialize liquid glass");
+        assert!(json.contains("\"NativeAcrylic\""));
+
+        // Desktop v0.1.2 JSON lacking new mobile fields must deserialize cleanly with defaults.
+        let desktop_json = r#"{"name":"AMOLED Black","background_mode":"AmoledSolid","acrylic_enabled":false}"#;
+        let parsed: ThemeConfig = serde_json::from_str(desktop_json).expect("parse desktop theme");
+        assert_eq!(parsed.font_family, "Inter");
+        assert_eq!(parsed.player_layout, "standard");
+        assert!(!parsed.editorial_mode);
     }
 }

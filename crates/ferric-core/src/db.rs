@@ -1,8 +1,8 @@
 use crate::CoreResult;
 use crate::eq::EqConfig;
 use crate::models::{
-    AccountSettings, DiscordRpcSettings, PlaybackDspSettings, Playlist, SessionResumeState, Track,
-    TrackSource, UpdateSettings,
+    AccountSettings, DiscordRpcSettings, ListeningStatsSummary, OfflineDownloadRecord,
+    PlaybackDspSettings, Playlist, SessionResumeState, Track, TrackSource, UpdateSettings,
 };
 use crate::theme::ThemeConfig;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -33,6 +33,10 @@ impl LibraryDb {
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
+    }
+
+    pub fn open_in_dir(dir: &Path) -> CoreResult<Self> {
+        Self::open(&dir.join("ferric.db"))
     }
 
     pub fn open_in_memory() -> CoreResult<Self> {
@@ -129,6 +133,25 @@ impl LibraryDb {
                 device_name TEXT NOT NULL,
                 last_seen_utc INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );
+
+            CREATE TABLE IF NOT EXISTS offline_downloads (
+                track_id TEXT PRIMARY KEY,
+                local_path TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                codec TEXT NOT NULL DEFAULT '',
+                quality TEXT NOT NULL DEFAULT 'high',
+                downloaded_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS play_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                played_at INTEGER NOT NULL,
+                listened_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_play_history_played_at
+                ON play_history(played_at);
             "#,
         )?;
         // Checked schema upgrades for existing user databases (never silently swallow real SQLite errors).
@@ -985,6 +1008,193 @@ impl LibraryDb {
         Ok(())
     }
 
+    pub fn upsert_offline_download(&self, rec: &OfflineDownloadRecord) -> CoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO offline_downloads (
+                track_id, local_path, size_bytes, codec, quality, downloaded_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                rec.track_id,
+                rec.local_path,
+                rec.size_bytes as i64,
+                rec.codec,
+                rec.quality,
+                rec.downloaded_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_offline_download(&self, track_id: &str) -> CoreResult<Option<OfflineDownloadRecord>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT track_id, local_path, size_bytes, codec, quality, downloaded_at FROM offline_downloads WHERE track_id = ?1",
+                [track_id],
+                |r| {
+                    Ok(OfflineDownloadRecord {
+                        track_id: r.get(0)?,
+                        local_path: r.get(1)?,
+                        size_bytes: r.get::<_, i64>(2)?.max(0) as u64,
+                        codec: r.get(3)?,
+                        quality: r.get(4)?,
+                        downloaded_at: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn list_offline_downloads(&self) -> CoreResult<Vec<OfflineDownloadRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT track_id, local_path, size_bytes, codec, quality, downloaded_at FROM offline_downloads ORDER BY downloaded_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(OfflineDownloadRecord {
+                track_id: r.get(0)?,
+                local_path: r.get(1)?,
+                size_bytes: r.get::<_, i64>(2)?.max(0) as u64,
+                codec: r.get(3)?,
+                quality: r.get(4)?,
+                downloaded_at: r.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        out.shrink_to_fit();
+        Ok(out)
+    }
+
+    pub fn delete_offline_download(&self, track_id: &str) -> CoreResult<()> {
+        self.conn.execute(
+            "DELETE FROM offline_downloads WHERE track_id = ?1",
+            [track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_offline_downloads(&self) -> CoreResult<usize> {
+        let removed = self.conn.execute("DELETE FROM offline_downloads", [])?;
+        Ok(removed)
+    }
+
+    pub fn offline_downloads_total_bytes(&self) -> CoreResult<u64> {
+        let sum: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM offline_downloads",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(sum.max(0) as u64)
+    }
+
+    pub fn record_play_history(
+        &self,
+        track_id: &str,
+        artist: &str,
+        played_at: i64,
+        listened_ms: u64,
+    ) -> CoreResult<()> {
+        if track_id.trim().is_empty() || listened_ms == 0 {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO play_history (track_id, artist, played_at, listened_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![track_id, artist.trim(), played_at, listened_ms as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_listening_stats(
+        &self,
+        now_unix_secs: i64,
+        tz_offset_secs: i64,
+    ) -> CoreResult<ListeningStatsSummary> {
+        let (total_plays, total_listened_ms): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(listened_ms), 0) FROM play_history",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+
+        let mut day_set = std::collections::BTreeSet::<i64>::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT played_at FROM play_history ORDER BY played_at ASC")?;
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            for row in rows {
+                let ts = row?;
+                day_set.insert(ts.saturating_add(tz_offset_secs).div_euclid(86_400));
+            }
+        }
+
+        let mut longest_streak = 0u32;
+        let mut run = 0u32;
+        let mut prev_day: Option<i64> = None;
+        for &d in &day_set {
+            if prev_day.is_some_and(|p| d == p + 1) {
+                run = run.saturating_add(1);
+            } else {
+                run = 1;
+            }
+            if run > longest_streak {
+                longest_streak = run;
+            }
+            prev_day = Some(d);
+        }
+
+        let today = now_unix_secs.saturating_add(tz_offset_secs).div_euclid(86_400);
+        let mut current_streak = 0u32;
+        if let Some(&last_day) = day_set.iter().next_back()
+            && (last_day == today || last_day == today - 1)
+        {
+            let mut cursor = last_day;
+            while day_set.contains(&cursor) {
+                current_streak = current_streak.saturating_add(1);
+                cursor -= 1;
+            }
+        }
+
+        let mut top_artists = Vec::with_capacity(10);
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT artist, COUNT(*) AS cnt FROM play_history WHERE artist != '' GROUP BY artist ORDER BY cnt DESC, artist COLLATE NOCASE ASC LIMIT 10",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+            })?;
+            for row in rows {
+                top_artists.push(row?);
+            }
+        }
+
+        let mut top_track_ids = Vec::with_capacity(10);
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT track_id, COUNT(*) AS cnt FROM play_history GROUP BY track_id ORDER BY cnt DESC, track_id ASC LIMIT 10",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+            })?;
+            for row in rows {
+                top_track_ids.push(row?);
+            }
+        }
+
+        Ok(ListeningStatsSummary {
+            total_plays: total_plays.max(0) as u64,
+            total_listened_ms: total_listened_ms.max(0) as u64,
+            current_streak_days: current_streak,
+            longest_streak_days: longest_streak,
+            top_artists,
+            top_track_ids,
+        })
+    }
+
     fn set_setting<T: serde::Serialize>(&self, key: &str, value: &T) -> CoreResult<()> {
         let json = serde_json::to_string(value)?;
         self.conn.execute(
@@ -1513,5 +1723,86 @@ mod tests {
             .expect("tracks");
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, t1.id);
+    }
+
+    #[test]
+    fn offline_downloads_and_play_history_streak_work_end_to_end() {
+        use crate::models::{OfflineDownloadRecord, qualifies_as_play};
+
+        let dir = std::env::temp_dir().join(format!("ferric_db_m1_test_{}", std::process::id()));
+        let db = LibraryDb::open_in_dir(&dir).expect("open_in_dir");
+
+        // Offline downloads CRUD + isolated size accounting
+        let dl = OfflineDownloadRecord {
+            track_id: "yt:video:abc12345678".to_string(),
+            local_path: dir
+                .join("offline_downloads")
+                .join("abc12345678.opus")
+                .to_string_lossy()
+                .into_owned(),
+            size_bytes: 4_200_000,
+            codec: "OPUS".to_string(),
+            quality: "high".to_string(),
+            downloaded_at: 1_795_000_000,
+        };
+        db.upsert_offline_download(&dl).expect("upsert dl");
+        assert_eq!(
+            db.get_offline_download("yt:video:abc12345678")
+                .expect("get dl")
+                .as_ref()
+                .map(|r| r.size_bytes),
+            Some(4_200_000)
+        );
+        assert_eq!(db.offline_downloads_total_bytes().expect("total"), 4_200_000);
+        assert_eq!(db.list_offline_downloads().expect("list dls").len(), 1);
+        db.delete_offline_download("yt:video:abc12345678")
+            .expect("delete dl");
+        assert_eq!(db.offline_downloads_total_bytes().expect("total after"), 0);
+
+        // Play qualification rules: >= 30s or >= 50% for tracks < 60s
+        assert!(!qualifies_as_play(15_000, 180_000));
+        assert!(qualifies_as_play(30_000, 180_000));
+        assert!(qualifies_as_play(20_000, 35_000));
+        assert!(!qualifies_as_play(10_000, 35_000));
+
+        // 3 consecutive UTC days (day 1, day 2 x2 plays, day 3) -> streak 3, total 4 qualified plays
+        let day: i64 = 86_400;
+        let base_day: i64 = 20_000 * day + 3_600;
+        db.record_play_history("t1", "Bruno Mars", base_day, 180_000)
+            .expect("d1");
+        db.record_play_history("t2", "Bruno Mars", base_day + day, 200_000)
+            .expect("d2a");
+        db.record_play_history("t3", "Lady Gaga", base_day + day + 500, 150_000)
+            .expect("d2b");
+        db.record_play_history("t1", "Bruno Mars", base_day + 2 * day, 180_000)
+            .expect("d3");
+
+        let stats = db
+            .get_listening_stats(base_day + 2 * day + 60, 0)
+            .expect("stats");
+        assert_eq!(stats.total_plays, 4);
+        assert_eq!(stats.total_listened_ms, 710_000);
+        assert_eq!(stats.current_streak_days, 3);
+        assert_eq!(stats.longest_streak_days, 3);
+        assert_eq!(
+            stats.top_artists.first().map(|(a, c)| (a.as_str(), *c)),
+            Some(("Bruno Mars", 3))
+        );
+
+        // AccountSettings stable IDs persist cleanly
+        let acct = AccountSettings {
+            spotify_connected: true,
+            spotify_user_id: "rafly_spotify_id_01".to_string(),
+            youtube_connected: true,
+            youtube_account_id: "rafly@example.com".to_string(),
+            ..AccountSettings::default()
+        };
+        db.save_accounts(&acct).expect("save accounts");
+        let loaded = db.load_accounts().expect("load accounts");
+        assert_eq!(loaded.spotify_user_id, "rafly_spotify_id_01");
+        assert_eq!(loaded.youtube_account_id, "rafly@example.com");
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

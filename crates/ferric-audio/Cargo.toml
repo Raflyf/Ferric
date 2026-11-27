@@ -13,6 +13,11 @@ ferric-core = { path = "../ferric-core" }
 symphonia.workspace = true
 symphonia-opus.workspace = true
 rubato.workspace = true
-cpal.workspace = true
 rtrb.workspace = true
 biquad.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+cpal.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+oboe.workspace = true

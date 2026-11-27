@@ -683,6 +683,29 @@ fn parse_profile_display_name(val: &Value) -> String {
         .to_string()
 }
 
+/// Extract a stable, rename-resistant Spotify account ID from Pathfinder `profileAttributes`.
+#[must_use]
+pub fn parse_profile_user_id(val: &Value) -> String {
+    if let Some(username) = val
+        .pointer("/data/me/profile/username")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return username.to_string();
+    }
+    if let Some(uri_id) = val
+        .pointer("/data/me/profile/uri")
+        .and_then(Value::as_str)
+        .and_then(|u| u.trim().strip_prefix("spotify:user:"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return uri_id.to_string();
+    }
+    String::new()
+}
+
 fn parse_library_tracks_page(val: &Value) -> (Vec<Track>, Option<usize>) {
     let total = val
         .pointer("/data/me/library/tracks/totalCount")
@@ -891,6 +914,7 @@ pub fn sync_spotify_web_catalog_with_prefix(
         json!({}),
     )?;
     let display_name = parse_profile_display_name(&profile_val);
+    let account_id = parse_profile_user_id(&profile_val);
 
     let mut liked_tracks = Vec::new();
     let mut liked_ids = HashSet::new();
@@ -1070,6 +1094,7 @@ pub fn sync_spotify_web_catalog_with_prefix(
 
     Ok(CloudSyncReport {
         display_name,
+        account_id,
         liked_tracks,
         playlists,
         etag_skipped,
@@ -1832,6 +1857,7 @@ mod tests {
             "data": { "me": { "profile": { "name": "Rafly", "username": "u123" } } }
         });
         assert_eq!(parse_profile_display_name(&profile), "Rafly");
+        assert_eq!(parse_profile_user_id(&profile), "u123");
 
         let liked = json!({
             "data": {

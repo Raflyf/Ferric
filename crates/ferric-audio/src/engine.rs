@@ -2,6 +2,7 @@ use crate::dsp::{
     BassSwapMixer, SpectrumAnalyzer8, StereoEqProcessor, db_to_linear, smooth_fade_envelope,
 };
 use crate::{AudioError, AudioResult};
+#[cfg(not(target_os = "android"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ferric_core::eq::EqConfig;
 use ferric_core::models::{FadeCurve, PlaybackDspSettings};
@@ -9,11 +10,10 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{
     Adjustable, Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters, WindowFunction,
 };
-use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
@@ -133,6 +133,9 @@ pub enum EngineCommand {
     Stop,
     SeekMs(u64),
     SetVolume(f32),
+    /// Multiplicative audio-focus ducking (`true` ramps smoothly to `0.25x`, `false` restores `1.0x`)
+    /// without altering the user's persisted volume setting.
+    SetDucking(bool),
     SetEq(EqConfig),
     SetCrossfadeMs(u32),
     SetDspSettings(PlaybackDspSettings),
@@ -145,7 +148,7 @@ pub enum EngineCommand {
 }
 
 #[inline]
-fn pop_epoch_frame(
+pub(crate) fn pop_epoch_frame(
     consumer: &mut rtrb::Consumer<(u32, [f32; 2])>,
     active_epoch: u32,
     max_skip: usize,
@@ -160,28 +163,120 @@ fn pop_epoch_frame(
     [0.0, 0.0]
 }
 
-type RingFrame = (u32, [f32; 2]);
-type OutputStreamBundle = (cpal::Stream, rtrb::Producer<RingFrame>, u32, String);
+pub(crate) type RingFrame = (u32, [f32; 2]);
+
+/// Smooth multiplicative gain ramp for Android transient audio-focus ducking.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DuckingState {
+    ducked: bool,
+    current_gain: f32,
+}
+
+impl Default for DuckingState {
+    fn default() -> Self {
+        Self {
+            ducked: false,
+            current_gain: 1.0,
+        }
+    }
+}
+
+impl DuckingState {
+    const DUCK_TARGET_GAIN: f32 = 0.25;
+    const RAMP_SECS: f32 = 0.12;
+
+    pub(crate) fn set_ducked(&mut self, ducked: bool) {
+        self.ducked = ducked;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_gain(self) -> f32 {
+        self.current_gain
+    }
+
+    pub(crate) fn step_block(&mut self, frames: usize, out_rate: u32) {
+        let target = if self.ducked {
+            Self::DUCK_TARGET_GAIN
+        } else {
+            1.0
+        };
+        let diff = target - self.current_gain;
+        if diff.abs() < 1e-4 {
+            self.current_gain = target;
+            return;
+        }
+        let ramp_frames = (out_rate.max(8_000) as f32 * Self::RAMP_SECS).max(1.0);
+        let max_delta = (frames as f32 / ramp_frames).clamp(0.005, 1.0);
+        if diff > 0.0 {
+            self.current_gain = (self.current_gain + max_delta).min(target);
+        } else {
+            self.current_gain = (self.current_gain - max_delta).max(target);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn effective_volume(self, user_volume: f32) -> f32 {
+        (user_volume * self.current_gain).clamp(0.0, 1.5)
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+struct PlatformOutputStream(cpal::Stream);
+
+#[cfg(not(target_os = "android"))]
+impl PlatformOutputStream {
+    fn play(&mut self) -> Result<(), String> {
+        self.0.play().map_err(|e| e.to_string())
+    }
+
+    fn pause(&mut self) -> Result<(), String> {
+        self.0.pause().map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(target_os = "android")]
+struct PlatformOutputStream(crate::android_oboe::AndroidOutputStream);
+
+#[cfg(target_os = "android")]
+impl PlatformOutputStream {
+    fn play(&mut self) -> Result<(), String> {
+        self.0.play()
+    }
+
+    fn pause(&mut self) -> Result<(), String> {
+        self.0.pause()
+    }
+}
+
+type OutputStreamBundle = (PlatformOutputStream, rtrb::Producer<RingFrame>, u32, String);
 
 /// Enumerate available audio output device names on the host (deduplicated, sorted).
 pub fn list_output_devices() -> Vec<String> {
-    let host = cpal::default_host();
-    let Ok(devices) = host.output_devices() else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    for dev in devices {
-        if let Ok(desc) = dev.description() {
-            let name = desc.name().trim().to_string();
-            if !name.is_empty() && !names.iter().any(|existing: &String| existing == &name) {
-                names.push(name);
+    #[cfg(target_os = "android")]
+    {
+        crate::android_oboe::list_output_devices()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let host = cpal::default_host();
+        let Ok(devices) = host.output_devices() else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        for dev in devices {
+            if let Ok(desc) = dev.description() {
+                let name = desc.name().trim().to_string();
+                if !name.is_empty() && !names.iter().any(|existing: &String| existing == &name) {
+                    names.push(name);
+                }
             }
         }
+        names.sort_by(|a, b| ferric_core::text::cmp_ascii_icase(a, b));
+        names
     }
-    names.sort_by(|a, b| ferric_core::text::cmp_ascii_icase(a, b));
-    names
 }
 
+#[cfg(not(target_os = "android"))]
 fn select_output_device(
     host: &cpal::Host,
     preferred_name: Option<&str>,
@@ -210,6 +305,22 @@ fn select_output_device(
     Ok((device, active_name))
 }
 
+#[cfg(target_os = "android")]
+fn build_output_stream_and_producer(
+    telemetry: &Arc<AudioTelemetry>,
+    preferred_device: Option<&str>,
+    start_playing: bool,
+) -> AudioResult<OutputStreamBundle> {
+    let (stream, producer, out_rate, name) =
+        crate::android_oboe::build_output_stream_and_producer(
+            telemetry,
+            preferred_device,
+            start_playing,
+        )?;
+    Ok((PlatformOutputStream(stream), producer, out_rate, name))
+}
+
+#[cfg(not(target_os = "android"))]
 fn build_output_stream_and_producer(
     telemetry: &Arc<AudioTelemetry>,
     preferred_device: Option<&str>,
@@ -332,38 +443,112 @@ fn build_output_stream_and_producer(
     }
     .map_err(|e| AudioError::Device(e.to_string()))?;
 
+    let mut wrapped = PlatformOutputStream(stream);
     if start_playing {
-        stream
-            .play()
-            .map_err(|e| AudioError::Device(e.to_string()))?;
+        wrapped.play().map_err(AudioError::Device)?;
     }
 
-    Ok((stream, producer, out_rate, active_name))
+    Ok((wrapped, producer, out_rate, active_name))
 }
 
-pub struct AudioEngine {
-    cmd_tx: Sender<EngineCommand>,
-    telemetry: Arc<AudioTelemetry>,
-    output_stream: Option<cpal::Stream>,
-    stream_paused: AtomicBool,
-    decode_handle: Option<thread::JoinHandle<()>>,
-    headless: bool,
+struct OutputSlotState {
+    stream: Option<PlatformOutputStream>,
     preferred_device: Option<String>,
     active_device_name: String,
     last_recovery_attempt: Option<std::time::Instant>,
 }
 
+fn poll_recovery_inner(
+    slot_lock: &Mutex<OutputSlotState>,
+    stream_paused: &AtomicBool,
+    telemetry: &Arc<AudioTelemetry>,
+    cmd_tx: &Sender<EngineCommand>,
+) -> bool {
+    let mut slot = slot_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !stream_paused.load(Ordering::Acquire)
+        && telemetry.idle_silent.load(Ordering::Acquire)
+        && !telemetry.is_playing.load(Ordering::Acquire)
+        && let Some(stream) = slot.stream.as_mut()
+    {
+        let _ = stream.pause();
+        stream_paused.store(true, Ordering::Release);
+    }
+    if !telemetry.device_lost.load(Ordering::Acquire) {
+        return false;
+    }
+    let now = std::time::Instant::now();
+    if let Some(prev) = slot.last_recovery_attempt
+        && now.duration_since(prev) < Duration::from_millis(1_500)
+    {
+        return false;
+    }
+    slot.last_recovery_attempt = Some(now);
+    slot.stream = None;
+    let want_play = telemetry.is_playing.load(Ordering::Acquire);
+    match build_output_stream_and_producer(telemetry, slot.preferred_device.as_deref(), want_play) {
+        Ok((new_stream, new_producer, new_rate, active_name)) => {
+            slot.stream = Some(new_stream);
+            stream_paused.store(!want_play, Ordering::Release);
+            telemetry.device_lost.store(false, Ordering::Release);
+            slot.active_device_name = active_name;
+            let _ = cmd_tx.send(EngineCommand::ReplaceOutputRing {
+                producer: new_producer,
+                out_rate: new_rate,
+            });
+            true
+        }
+        Err(_) => {
+            telemetry.is_playing.store(false, Ordering::Release);
+            stream_paused.store(true, Ordering::Release);
+            false
+        }
+    }
+}
+
+pub struct AudioEngine {
+    cmd_tx: Sender<EngineCommand>,
+    telemetry: Arc<AudioTelemetry>,
+    output_slot: Arc<Mutex<OutputSlotState>>,
+    stream_paused: Arc<AtomicBool>,
+    decode_handle: Option<thread::JoinHandle<()>>,
+    supervisor_stop: Arc<AtomicBool>,
+    supervisor_handle: Option<thread::JoinHandle<()>>,
+    headless: bool,
+    preferred_device: Option<String>,
+    active_device_name: String,
+}
+
 impl AudioEngine {
-    /// Start the real-time WASAPI/cpal output stream on the system default device.
+    /// Start the real-time output stream on the system default device.
     pub fn start(initial_eq: EqConfig) -> AudioResult<Self> {
         Self::start_with_device(initial_eq, None)
     }
 
-    /// Start the real-time WASAPI/cpal output stream on `preferred_device` (falling back to the
+    /// Start the real-time output stream on `preferred_device` with an internal background
+    /// supervisor thread that handles idle-silent suspension and Bluetooth/headset disconnect
+    /// recovery even when no UI frame loop is running (recommended for Android background service).
+    pub fn start_supervised(
+        initial_eq: EqConfig,
+        preferred_device: Option<String>,
+    ) -> AudioResult<Self> {
+        Self::start_internal(initial_eq, preferred_device, true)
+    }
+
+    /// Start the real-time output stream on `preferred_device` (falling back to the
     /// system default device when `None` or unavailable) and dedicated dual-deck decode+DSP thread.
     pub fn start_with_device(
         initial_eq: EqConfig,
         preferred_device: Option<String>,
+    ) -> AudioResult<Self> {
+        Self::start_internal(initial_eq, preferred_device, false)
+    }
+
+    fn start_internal(
+        initial_eq: EqConfig,
+        preferred_device: Option<String>,
+        with_supervisor: bool,
     ) -> AudioResult<Self> {
         let telemetry = Arc::new(AudioTelemetry::default());
         telemetry.idle_silent.store(true, Ordering::Relaxed);
@@ -390,16 +575,44 @@ impl AudioEngine {
                 );
             })?;
 
+        let output_slot = Arc::new(Mutex::new(OutputSlotState {
+            stream: Some(stream),
+            preferred_device: cleaned_pref.clone(),
+            active_device_name: active_device_name.clone(),
+            last_recovery_attempt: None,
+        }));
+        let stream_paused = Arc::new(AtomicBool::new(true));
+        let supervisor_stop = Arc::new(AtomicBool::new(false));
+        let supervisor_handle = if with_supervisor {
+            let sup_slot = Arc::clone(&output_slot);
+            let sup_paused = Arc::clone(&stream_paused);
+            let sup_tel = Arc::clone(&telemetry);
+            let sup_tx = cmd_tx.clone();
+            let sup_stop = Arc::clone(&supervisor_stop);
+            thread::Builder::new()
+                .name("ferric-audio-sup".to_string())
+                .spawn(move || {
+                    while !sup_stop.load(Ordering::Acquire) {
+                        poll_recovery_inner(&sup_slot, &sup_paused, &sup_tel, &sup_tx);
+                        thread::sleep(Duration::from_millis(450));
+                    }
+                })
+                .ok()
+        } else {
+            None
+        };
+
         Ok(Self {
             cmd_tx,
             telemetry,
-            output_stream: Some(stream),
-            stream_paused: AtomicBool::new(true),
+            output_slot,
+            stream_paused,
             decode_handle: Some(handle),
+            supervisor_stop,
+            supervisor_handle,
             headless: false,
             preferred_device: cleaned_pref,
             active_device_name,
-            last_recovery_attempt: None,
         })
     }
 
@@ -419,13 +632,19 @@ impl AudioEngine {
         Self {
             cmd_tx,
             telemetry,
-            output_stream: None,
-            stream_paused: AtomicBool::new(true),
+            output_slot: Arc::new(Mutex::new(OutputSlotState {
+                stream: None,
+                preferred_device: None,
+                active_device_name: "Headless (No Audio Device)".to_string(),
+                last_recovery_attempt: None,
+            })),
+            stream_paused: Arc::new(AtomicBool::new(true)),
             decode_handle: handle,
+            supervisor_stop: Arc::new(AtomicBool::new(true)),
+            supervisor_handle: None,
             headless: true,
             preferred_device: None,
             active_device_name: "Headless (No Audio Device)".to_string(),
-            last_recovery_attempt: None,
         }
     }
 
@@ -435,13 +654,13 @@ impl AudioEngine {
         &self.active_device_name
     }
 
-    /// Configured preferred device (`None` means Windows System Default).
+    /// Configured preferred device (`None` means System Default).
     #[must_use]
     pub fn preferred_device(&self) -> Option<&str> {
         self.preferred_device.as_deref()
     }
 
-    /// Hot-switch the live WASAPI output stream to a specific device name (`None` = System Default)
+    /// Hot-switch the live output stream to a specific device name (`None` = System Default)
     /// without restarting the application or losing playback position.
     pub fn switch_output_device(
         &mut self,
@@ -452,22 +671,28 @@ impl AudioEngine {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(ToOwned::to_owned);
-        self.preferred_device = cleaned_pref;
+        self.preferred_device = cleaned_pref.clone();
         if self.headless {
             return Ok(self.active_device_name.clone());
         }
         let want_play = self.telemetry.is_playing.load(Ordering::Acquire);
-        // Drop old stream first so exclusive/shared WASAPI sessions release cleanly before re-opening.
-        self.output_stream = None;
+        let mut slot = self
+            .output_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.preferred_device = cleaned_pref;
+        // Drop old stream first so exclusive/shared audio sessions release cleanly before re-opening.
+        slot.stream = None;
         match build_output_stream_and_producer(
             &self.telemetry,
-            self.preferred_device.as_deref(),
+            slot.preferred_device.as_deref(),
             want_play,
         ) {
             Ok((new_stream, new_producer, new_rate, active_name)) => {
-                self.output_stream = Some(new_stream);
+                slot.stream = Some(new_stream);
                 self.stream_paused.store(!want_play, Ordering::Release);
                 self.telemetry.device_lost.store(false, Ordering::Release);
+                slot.active_device_name = active_name.clone();
                 self.active_device_name = active_name.clone();
                 let _ = self.cmd_tx.send(EngineCommand::ReplaceOutputRing {
                     producer: new_producer,
@@ -483,57 +708,28 @@ impl AudioEngine {
         }
     }
 
-    /// Detect WASAPI audio device disconnects/stalls (e.g., USB DAC or Bluetooth headset unplugged)
+    /// Detect audio device disconnects/stalls (e.g., USB DAC or Bluetooth headset unplugged)
     /// and rebuild the output stream on the preferred or default device without wedging decode.
-    /// Also suspends the WASAPI output stream once paused/stopped audio finishes draining so idle
+    /// Also suspends the host output stream once paused/stopped audio finishes draining so idle
     /// CPU drops to 0 Hz.
     pub fn poll_device_recovery(&mut self) -> bool {
         if self.headless {
             return false;
         }
-        if !self.stream_paused.load(Ordering::Acquire)
-            && self.telemetry.idle_silent.load(Ordering::Acquire)
-            && !self.telemetry.is_playing.load(Ordering::Acquire)
-            && let Some(stream) = &self.output_stream
-        {
-            let _ = stream.pause();
-            self.stream_paused.store(true, Ordering::Release);
-        }
-        if !self.telemetry.device_lost.load(Ordering::Acquire) {
-            return false;
-        }
-        let now = std::time::Instant::now();
-        if let Some(prev) = self.last_recovery_attempt
-            && now.duration_since(prev) < Duration::from_millis(1_500)
-        {
-            return false;
-        }
-        self.last_recovery_attempt = Some(now);
-        self.output_stream = None;
-        let want_play = self.telemetry.is_playing.load(Ordering::Acquire);
-        match build_output_stream_and_producer(
+        let recovered = poll_recovery_inner(
+            &self.output_slot,
+            &self.stream_paused,
             &self.telemetry,
-            self.preferred_device.as_deref(),
-            want_play,
-        ) {
-            Ok((new_stream, new_producer, new_rate, active_name)) => {
-                self.output_stream = Some(new_stream);
-                self.stream_paused.store(!want_play, Ordering::Release);
-                self.telemetry.device_lost.store(false, Ordering::Release);
-                self.active_device_name = active_name;
-                let _ = self.cmd_tx.send(EngineCommand::ReplaceOutputRing {
-                    producer: new_producer,
-                    out_rate: new_rate,
-                });
-                true
-            }
-            Err(_) => {
-                // No output device currently available; pause playback cleanly so UI stays responsive.
-                self.telemetry.is_playing.store(false, Ordering::Release);
-                self.stream_paused.store(true, Ordering::Release);
-                false
-            }
+            &self.cmd_tx,
+        );
+        if recovered {
+            let slot = self
+                .output_slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.active_device_name = slot.active_device_name.clone();
         }
+        recovered
     }
 
     pub fn send(&self, cmd: EngineCommand) {
@@ -547,12 +743,17 @@ impl AudioEngine {
         );
         if needs_audio_wake {
             self.telemetry.idle_silent.store(false, Ordering::Release);
-            if self.stream_paused.swap(false, Ordering::AcqRel)
-                && let Some(stream) = &self.output_stream
-                && stream.play().is_err()
-            {
-                self.stream_paused.store(true, Ordering::Release);
-                self.telemetry.device_lost.store(true, Ordering::Release);
+            if self.stream_paused.swap(false, Ordering::AcqRel) {
+                let mut slot = self
+                    .output_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(stream) = slot.stream.as_mut()
+                    && stream.play().is_err()
+                {
+                    self.stream_paused.store(true, Ordering::Release);
+                    self.telemetry.device_lost.store(true, Ordering::Release);
+                }
             }
         }
         let _ = self.cmd_tx.send(cmd);
@@ -569,8 +770,18 @@ impl AudioEngine {
 
 impl Drop for AudioEngine {
     fn drop(&mut self) {
+        self.supervisor_stop.store(true, Ordering::Release);
         let _ = self.cmd_tx.send(EngineCommand::Shutdown);
-        self.output_stream = None;
+        if let Some(sup) = self.supervisor_handle.take() {
+            let _ = sup.join();
+        }
+        {
+            let mut slot = self
+                .output_slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.stream = None;
+        }
         if let Some(handle) = self.decode_handle.take() {
             let _ = handle.join();
         }
@@ -710,7 +921,7 @@ impl ActiveDeck {
         fallback_duration_ms: u64,
         codecs: &CodecRegistry,
     ) -> AudioResult<Self> {
-        let file = File::open(path)?;
+        let file = crate::content::open_audio_file(path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -1495,6 +1706,7 @@ fn decode_loop(
     let mut rt = DecodeRuntime::new(out_rate, &eq_config);
     let mut target_volume = 0.85_f32;
     let mut smoothed_volume = 0.85_f32;
+    let mut ducking = DuckingState::default();
     let mut dsp_scratch = Vec::with_capacity(2048);
 
     let mut pending_cmd: Option<EngineCommand> = None;
@@ -1679,6 +1891,9 @@ fn decode_loop(
                     if v.is_finite() {
                         target_volume = v.clamp(0.0, 1.5);
                     }
+                }
+                EngineCommand::SetDucking(ducked) => {
+                    ducking.set_ducked(ducked);
                 }
                 EngineCommand::SetEq(cfg) => {
                     eq_config = cfg.sanitized();
@@ -2031,10 +2246,12 @@ fn decode_loop(
         }
 
         if !dsp_scratch.is_empty() {
+            ducking.step_block(dsp_scratch.len() / 2, out_rate);
+            let effective_target = ducking.effective_volume(target_volume);
             rt.eq.process_interleaved_stereo_ramped(
                 &mut dsp_scratch,
                 &mut smoothed_volume,
-                target_volume,
+                effective_target,
             );
             telemetry.store_spectrum(rt.spectrum.analyze_interleaved(&dsp_scratch));
             if !headless {
@@ -2183,6 +2400,72 @@ mod tests {
             "Deck B must finish promoting cleanly with exactly one track_finished_seq increment"
         );
 
+        engine.send(EngineCommand::Shutdown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ducking_attenuates_independently_and_restores_exact_volume() {
+        let mut duck = DuckingState::default();
+        assert!((duck.current_gain() - 1.0).abs() < 1e-6);
+        assert!((duck.effective_volume(0.85) - 0.85).abs() < 1e-6);
+
+        duck.set_ducked(true);
+        for _ in 0..120 {
+            duck.step_block(256, 48_000);
+        }
+        assert!(duck.current_gain() <= 0.27 && duck.current_gain() >= 0.23);
+        // Changing user volume while ducked must scale proportionally without corrupting stored volume.
+        assert!((duck.effective_volume(0.60) - 0.15).abs() < 0.02);
+
+        duck.set_ducked(false);
+        for _ in 0..160 {
+            duck.step_block(256, 48_000);
+        }
+        assert!((duck.current_gain() - 1.0).abs() < 1e-3);
+        assert!((duck.effective_volume(0.60) - 0.60).abs() < 1e-3);
+    }
+
+    #[test]
+    fn content_opener_decodes_content_uri_in_headless_engine() {
+        use crate::content::{ContentOpener, register_scoped_content_opener_for_test};
+
+        let dir = std::env::temp_dir().join(format!("ferric_content_uri_{}", std::process::id()));
+        let tracks = ensure_demo_tracks(&dir).expect("demo wav");
+        let wav_path = tracks[0].path.clone().expect("wav path");
+
+        struct MapOpener(PathBuf);
+        impl ContentOpener for MapOpener {
+            fn open_file(&self, uri: &str) -> std::io::Result<std::fs::File> {
+                if uri == "content://ferric-test/track0.wav" {
+                    std::fs::File::open(&self.0)
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "unknown test content uri",
+                    ))
+                }
+            }
+        }
+
+        let _guard = register_scoped_content_opener_for_test(Arc::new(MapOpener(wav_path)));
+        let engine = AudioEngine::start_headless(EqConfig::default());
+        engine.send(EngineCommand::SetDucking(true));
+        engine.send(EngineCommand::LoadAndPlay(PathBuf::from(
+            "content://ferric-test/track0.wav",
+        )));
+
+        let mut started = false;
+        for _ in 0..100 {
+            let s = engine.telemetry();
+            if s.is_playing && s.duration_ms > 0 {
+                started = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started, "content:// URI must decode via registered ContentOpener");
+        engine.send(EngineCommand::SetDucking(false));
         engine.send(EngineCommand::Shutdown);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -218,6 +218,7 @@ pub struct YtmHomeFeed {
 #[derive(Debug, Clone)]
 pub struct YtmAccountLibrary {
     pub display_name: String,
+    pub account_id: String,
     pub visitor_data: String,
     pub liked_tracks: Vec<Track>,
     pub playlists: Vec<(Playlist, Vec<Track>)>,
@@ -3768,6 +3769,7 @@ pub fn fetch_account_library(session: &YtmSession) -> ProviderResult<YtmAccountL
     let visitor_data = extract_visitor_data(&menu_root, &session.visitor_data);
     let display_name =
         find_account_name(&menu_root).unwrap_or_else(|| "Google Account".to_string());
+    let account_id = find_youtube_account_id(&menu_root).unwrap_or_default();
 
     let mut auth_sess = session.clone();
     auth_sess.visitor_data = visitor_data.clone();
@@ -3833,6 +3835,7 @@ pub fn fetch_account_library(session: &YtmSession) -> ProviderResult<YtmAccountL
 
     Ok(YtmAccountLibrary {
         display_name,
+        account_id,
         visitor_data,
         liked_tracks,
         playlists,
@@ -4892,6 +4895,75 @@ fn find_account_name(val: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn find_header_field_text(val: &Value, field: &str) -> Option<String> {
+    match val {
+        Value::Object(map) => {
+            if let Some(hdr) = map.get("activeAccountHeaderRenderer")
+                && let Some(text) = extract_runs_text(hdr.get(field))
+            {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_ascii_lowercase());
+                }
+            }
+            for child in map.values() {
+                if let Some(found) = find_header_field_text(child, field) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                if let Some(found) = find_header_field_text(child, field) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn find_uc_channel_browse_id(val: &Value) -> Option<String> {
+    match val {
+        Value::Object(map) => {
+            if let Some(ep) = map.get("browseEndpoint")
+                && let Some(bid) = ep.get("browseId").and_then(Value::as_str)
+            {
+                let trimmed = bid.trim();
+                if trimmed.starts_with("UC") && trimmed.len() >= 10 {
+                    return Some(trimmed.to_ascii_lowercase());
+                }
+            }
+            for child in map.values() {
+                if let Some(found) = find_uc_channel_browse_id(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                if let Some(found) = find_uc_channel_browse_id(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extract a stable, canonical YouTube / Google account identifier from `account/account_menu`:
+/// prefers account email, then `@channelHandle`, then `UC...` channel browse ID.
+#[must_use]
+pub fn find_youtube_account_id(val: &Value) -> Option<String> {
+    find_header_field_text(val, "email")
+        .or_else(|| find_header_field_text(val, "channelHandle"))
+        .or_else(|| find_uc_channel_browse_id(val))
 }
 
 fn collect_playlist_refs(val: &Value, limit: usize, out: &mut Vec<(String, String)>) {
@@ -6395,5 +6467,52 @@ mod tests {
                 "Recently shown station artist '{norm}' should be excluded when fresh artists exist"
             );
         }
+    }
+
+    #[test]
+    fn find_youtube_account_id_prefers_email_or_channel_handle_over_display_name() {
+        let menu_email = json!({
+            "actions": [{
+                "openPopupAction": {
+                    "popup": {
+                        "multiPageMenuRenderer": {
+                            "header": {
+                                "activeAccountHeaderRenderer": {
+                                    "accountName": { "simpleText": "Rafly Display" },
+                                    "email": { "simpleText": "Rafly@Example.COM" },
+                                    "channelHandle": { "simpleText": "@raflyhandle" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }]
+        });
+        assert_eq!(
+            find_youtube_account_id(&menu_email).as_deref(),
+            Some("rafly@example.com")
+        );
+
+        let menu_handle = json!({
+            "activeAccountHeaderRenderer": {
+                "accountName": { "simpleText": "Rafly Display" },
+                "channelHandle": { "simpleText": "@RaflyHandle" }
+            }
+        });
+        assert_eq!(
+            find_youtube_account_id(&menu_handle).as_deref(),
+            Some("@raflyhandle")
+        );
+
+        let menu_uc = json!({
+            "activeAccountHeaderRenderer": {
+                "accountName": { "simpleText": "Rafly Display" }
+            },
+            "endpoint": { "browseEndpoint": { "browseId": "UC1234567890abcdef" } }
+        });
+        assert_eq!(
+            find_youtube_account_id(&menu_uc).as_deref(),
+            Some("uc1234567890abcdef")
+        );
     }
 }

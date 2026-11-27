@@ -195,6 +195,8 @@ pub struct SyncedPlaylistBundle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudSyncReport {
     pub display_name: String,
+    #[serde(default)]
+    pub account_id: String,
     pub liked_tracks: Vec<Track>,
     pub playlists: Vec<SyncedPlaylistBundle>,
     pub etag_skipped: usize,
@@ -1126,6 +1128,7 @@ pub fn sync_spotify_catalog_with_snapshots(
         web_session,
     )
     .map_err(SpotifyFetchError::into_provider_error)?;
+    let account_id = profile.id.trim().to_string();
     let display_name = profile
         .display_name
         .map(|s| s.trim().to_string())
@@ -1255,6 +1258,7 @@ pub fn sync_spotify_catalog_with_snapshots(
 
     Ok(CloudSyncReport {
         display_name,
+        account_id,
         liked_tracks,
         playlists,
         etag_skipped,
@@ -1426,6 +1430,8 @@ struct YouTubeListResponse<T> {
 
 #[derive(Debug, Deserialize)]
 struct YouTubeChannelItem {
+    #[serde(default)]
+    id: String,
     snippet: Option<YouTubeChannelSnippet>,
 }
 
@@ -1604,10 +1610,13 @@ pub fn sync_youtube_catalog(
         "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
         access_token,
     )?;
-    let display_name = channels
-        .items
-        .into_iter()
-        .next()
+    let first_channel = channels.items.into_iter().next();
+    let account_id = first_channel
+        .as_ref()
+        .map(|c| c.id.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let display_name = first_channel
         .and_then(|c| c.snippet)
         .and_then(|s| s.title)
         .map(|t| t.trim().to_string())
@@ -1774,6 +1783,7 @@ pub fn sync_youtube_catalog(
 
     Ok(CloudSyncReport {
         display_name,
+        account_id,
         liked_tracks,
         playlists,
         etag_skipped,

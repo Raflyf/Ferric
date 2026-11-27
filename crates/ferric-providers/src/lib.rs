@@ -34,12 +34,15 @@ pub fn shared_http_agent() -> &'static ureq::Agent {
     })
 }
 
-/// Process-wide shared IPv4-only HTTP client for endpoints (e.g. Spotify Pathfinder, YouTube
-/// InnerTube IPv4 fallback) where Windows IPv6 sockets suffer intermittent resets.
+/// Process-wide shared HTTP client tuned for endpoints (e.g. Spotify Pathfinder, YouTube
+/// InnerTube retry) where Windows IPv6 sockets suffer intermittent resets.
+/// On Android / non-Windows, dual-stack is preserved so IPv6-only 4G/5G cellular carriers work.
 pub fn shared_http_agent_ipv4() -> &'static ureq::Agent {
     SHARED_HTTP_AGENT_IPV4.get_or_init(|| {
-        let cfg = ureq::Agent::config_builder()
-            .ip_family(ureq::config::IpFamily::Ipv4Only)
+        let builder = ureq::Agent::config_builder();
+        #[cfg(target_os = "windows")]
+        let builder = builder.ip_family(ureq::config::IpFamily::Ipv4Only);
+        let cfg = builder
             .max_redirects(0)
             .max_redirects_will_error(false)
             .timeout_connect(Some(Duration::from_secs(8)))

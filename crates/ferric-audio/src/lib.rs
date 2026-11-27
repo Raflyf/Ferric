@@ -1,3 +1,6 @@
+#[cfg(target_os = "android")]
+mod android_oboe;
+pub mod content;
 pub mod demo_synth;
 pub mod dsp;
 pub mod engine;

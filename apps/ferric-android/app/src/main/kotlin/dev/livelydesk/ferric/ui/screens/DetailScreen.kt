@@ -100,9 +100,11 @@ fun DetailScreen(
         FfiDetailSort.DURATION -> "Duration"
     }
     val heroBg = if (palette.isLight) {
-        palette.surface.copy(alpha = 0.92f)
+        palette.surface.copy(alpha = if (palette.isLiquidGlass) (palette.glassOpacity + 0.16f).coerceIn(0.40f, 0.96f) else 0.92f)
+    } else if (palette.isLiquidGlass) {
+        palette.glassTint.copy(alpha = (palette.glassOpacity * 0.88f).coerceIn(0.10f, 0.88f))
     } else {
-        palette.elevated.copy(alpha = if (palette.isLiquidGlass) 0.56f else 0.90f)
+        palette.elevated.copy(alpha = (palette.glassOpacity * 0.92f).coerceIn(0.45f, 0.96f))
     }
 
     LazyColumn(
@@ -148,8 +150,9 @@ fun DetailScreen(
         }
 
         item(key = "detail_hero") {
+            val thumbRadius = (palette.cornerRadiusDp.value * 0.85f).coerceIn(0f, 24f).dp
             Surface(
-                shape = RoundedCornerShape(22.dp),
+                shape = RoundedCornerShape(palette.cornerRadiusDp),
                 color = heroBg,
                 border = BorderStroke(1.dp, palette.border.copy(alpha = 0.45f)),
                 modifier = Modifier.fillMaxWidth(),
@@ -159,7 +162,7 @@ fun DetailScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        ArtworkThumb(url = detail.thumbnailUrl, size = 92.dp, cornerRadius = 14.dp)
+                        ArtworkThumb(url = detail.thumbnailUrl, size = 92.dp, cornerRadius = thumbRadius)
                         Spacer(Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(

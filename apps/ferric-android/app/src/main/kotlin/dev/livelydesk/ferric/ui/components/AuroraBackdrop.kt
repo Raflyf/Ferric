@@ -20,6 +20,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -69,52 +71,62 @@ fun AuroraBackdrop(
         remember { mutableFloatStateOf(0.6f) }
     }
 
-    val orb1Stops = remember(colors.orb1, intensity) {
-        listOf(colors.orb1.copy(alpha = 0.50f * intensity), Color.Transparent)
+    var canvasRadius by remember { mutableFloatStateOf(720f) }
+    val orb1Brush = remember(colors.orb1, intensity, canvasRadius) {
+        Brush.radialGradient(
+            colors = listOf(colors.orb1.copy(alpha = 0.50f * intensity), Color.Transparent),
+            center = Offset.Zero,
+            radius = canvasRadius,
+        )
     }
-    val orb2Stops = remember(colors.orb2, intensity) {
-        listOf(colors.orb2.copy(alpha = 0.42f * intensity), Color.Transparent)
+    val orb2Brush = remember(colors.orb2, intensity, canvasRadius) {
+        Brush.radialGradient(
+            colors = listOf(colors.orb2.copy(alpha = 0.42f * intensity), Color.Transparent),
+            center = Offset.Zero,
+            radius = canvasRadius,
+        )
     }
-    val orb3Stops = remember(colors.orb3, intensity) {
-        listOf(colors.orb3.copy(alpha = 0.30f * intensity), Color.Transparent)
+    val orb3Brush = remember(colors.orb3, intensity, canvasRadius) {
+        val r3 = (canvasRadius * 0.85f).coerceAtLeast(1f)
+        Brush.radialGradient(
+            colors = listOf(colors.orb3.copy(alpha = 0.30f * intensity), Color.Transparent),
+            center = Offset.Zero,
+            radius = r3,
+        )
     }
 
-    Canvas(modifier = modifier.fillMaxSize()) {
+    Canvas(
+        modifier = modifier
+            .fillMaxSize()
+            .onSizeChanged {
+                val r = maxOf(it.width, it.height) * 0.72f
+                if (r > 16f && kotlin.math.abs(r - canvasRadius) > 24f) {
+                    canvasRadius = r
+                }
+            },
+    ) {
         drawRect(baseCanvas)
         val w = size.width
         val h = size.height
         if (w <= 0f || h <= 0f) return@Canvas
 
-        // Read animated value inside draw phase only so Compose never recomposes at 60-120Hz.
+        // Read animated value inside draw phase only and reuse cached brushes (0 per-frame allocations).
         val phase = phaseState.value
-        val c1 = Offset(
-            x = w * (0.28f + 0.14f * cos(phase)),
-            y = h * (0.18f + 0.10f * sin(phase)),
-        )
-        val c2 = Offset(
-            x = w * (0.78f + 0.12f * sin(phase * 0.8f)),
-            y = h * (0.56f + 0.12f * cos(phase * 0.9f)),
-        )
-        val c3 = Offset(
-            x = w * (0.44f + 0.15f * cos(phase * 1.1f + 1.4f)),
-            y = h * (0.84f + 0.08f * sin(phase * 0.7f)),
-        )
-        val radius = maxOf(w, h) * 0.72f
+        val c1x = w * (0.28f + 0.14f * cos(phase))
+        val c1y = h * (0.18f + 0.10f * sin(phase))
+        val c2x = w * (0.78f + 0.12f * sin(phase * 0.8f))
+        val c2y = h * (0.56f + 0.12f * cos(phase * 0.9f))
+        val c3x = w * (0.44f + 0.15f * cos(phase * 1.1f + 1.4f))
+        val c3y = h * (0.84f + 0.08f * sin(phase * 0.7f))
 
-        drawCircle(
-            brush = Brush.radialGradient(colors = orb1Stops, center = c1, radius = radius),
-            center = c1,
-            radius = radius,
-        )
-        drawCircle(
-            brush = Brush.radialGradient(colors = orb2Stops, center = c2, radius = radius),
-            center = c2,
-            radius = radius,
-        )
-        drawCircle(
-            brush = Brush.radialGradient(colors = orb3Stops, center = c3, radius = radius * 0.85f),
-            center = c3,
-            radius = radius * 0.85f,
-        )
+        translate(left = c1x, top = c1y) {
+            drawCircle(brush = orb1Brush, radius = canvasRadius, center = Offset.Zero)
+        }
+        translate(left = c2x, top = c2y) {
+            drawCircle(brush = orb2Brush, radius = canvasRadius, center = Offset.Zero)
+        }
+        translate(left = c3x, top = c3y) {
+            drawCircle(brush = orb3Brush, radius = canvasRadius * 0.85f, center = Offset.Zero)
+        }
     }
 }

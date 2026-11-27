@@ -90,6 +90,7 @@ data class PlaybackUiState(
         stations = emptyList(),
         shelves = emptyList(),
         isLoading = false,
+        isLoadingMore = false,
     ),
     val searchResults: FfiSearchResults = FfiSearchResults(
         query = "",
@@ -139,6 +140,8 @@ data class PlaybackUiState(
     ),
     val currentTrack: FfiTrack? = null,
     val upNext: List<FfiTrack> = emptyList(),
+    val isExtendingQueue: Boolean = false,
+    val miniPlayerDismissed: Boolean = false,
     val isPlaying: Boolean = false,
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
@@ -315,8 +318,13 @@ class CoreStateStore(private val appContext: Context) {
 
         override fun onNowPlayingChanged(track: FfiTrack?) {
             val prevId = _uiState.value.currentTrack?.id
-            _uiState.update { PlaybackStateReducer.applyNowPlaying(it, track) }
-            if (track != null && track.id != prevId) {
+            _uiState.update {
+                val next = PlaybackStateReducer.applyNowPlaying(it, track)
+                if (track != null) next.copy(miniPlayerDismissed = false) else next
+            }
+            if (track == null) {
+                _playbackProgress.update { PlaybackProgress() }
+            } else if (track.id != prevId) {
                 _playbackProgress.update {
                     it.copy(
                         positionMs = 0L,
@@ -342,7 +350,7 @@ class CoreStateStore(private val appContext: Context) {
         }
 
         override fun onQueueChanged(upNext: List<FfiTrack>) {
-            _uiState.update { it.copy(upNext = upNext) }
+            _uiState.update { it.copy(upNext = upNext, isExtendingQueue = false) }
         }
 
         override fun onLibraryChanged() {
@@ -520,6 +528,7 @@ class CoreStateStore(private val appContext: Context) {
 
     fun playTrack(trackId: String) {
         if (!PlaybackFocusCoordinator.requestFocusForPlayback()) return
+        _uiState.update { it.copy(miniPlayerDismissed = false) }
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             runCatching { handle.playTrack(trackId) }
@@ -530,6 +539,7 @@ class CoreStateStore(private val appContext: Context) {
     fun playQueue(tracks: List<FfiTrack>, startIndex: Int, context: String) {
         if (tracks.isEmpty()) return
         if (!PlaybackFocusCoordinator.requestFocusForPlayback()) return
+        _uiState.update { it.copy(miniPlayerDismissed = false) }
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             val idx = startIndex.coerceIn(0, tracks.lastIndex).toUInt()
@@ -541,11 +551,45 @@ class CoreStateStore(private val appContext: Context) {
     fun shuffleQueue(tracks: List<FfiTrack>, context: String) {
         if (tracks.isEmpty()) return
         if (!PlaybackFocusCoordinator.requestFocusForPlayback()) return
+        _uiState.update { it.copy(miniPlayerDismissed = false) }
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             val shuffled = tracks.shuffled()
             runCatching { handle.playQueue(shuffled, 0u, context) }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun stopAndDismissMiniPlayer() {
+        PlaybackFocusCoordinator.onExplicitPause()
+        _uiState.update {
+            it.copy(
+                miniPlayerDismissed = true,
+                isPlaying = false,
+                currentTrack = null,
+                upNext = emptyList(),
+                isExtendingQueue = false,
+            )
+        }
+        _playbackProgress.update { PlaybackProgress() }
+        FerricWidgetUpdater.updateAll(appContext, _uiState.value)
+        scope.launch {
+            runCatching { getOrCreateCore()?.stopPlayback() }
+        }
+    }
+
+    fun extendQueueUpNext() {
+        val snap = _uiState.value
+        if (snap.isExtendingQueue || snap.currentTrack == null) return
+        _uiState.update { it.copy(isExtendingQueue = true) }
+        scope.launch {
+            val handle = getOrCreateCore()
+            val started = handle?.let {
+                runCatching { it.extendQueueUpNext() }.getOrDefault(false)
+            } ?: false
+            if (!started) {
+                _uiState.update { it.copy(isExtendingQueue = false) }
+            }
         }
     }
 
@@ -798,6 +842,10 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    fun previewTheme(theme: FfiThemeConfig) {
+        _uiState.update { it.copy(themeConfig = theme) }
+    }
+
     fun updateTheme(theme: FfiThemeConfig) {
         _uiState.update { it.copy(themeConfig = theme) }
         scope.launch {
@@ -838,6 +886,12 @@ class CoreStateStore(private val appContext: Context) {
 
     fun loadHome(forceRefresh: Boolean, moodIdx: Int? = null) {
         scope.launch { getOrCreateCore()?.loadHome(forceRefresh, moodIdx?.toUInt()) }
+    }
+
+    fun loadHomeMore() {
+        val snap = _uiState.value.homeState
+        if (snap.isLoading || snap.isLoadingMore) return
+        scope.launch { getOrCreateCore()?.loadHomeMore() }
     }
 
     fun openStation(stationId: String) {
@@ -1430,7 +1484,7 @@ class CoreStateStore(private val appContext: Context) {
         val albums = runCatching { handle.listAlbums() }.getOrDefault(emptyList())
         val artists = runCatching { handle.listArtists() }.getOrDefault(emptyList())
         val current = handle.getCurrentTrack()
-        val upNext = handle.getUpNext(50u)
+        val upNext = handle.getUpNext(250u)
         _uiState.update {
             it.copy(
                 tracks = songs,

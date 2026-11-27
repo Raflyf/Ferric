@@ -132,7 +132,7 @@ fn mobile_ffi_seeds_plays_and_persists_liquid_glass_theme() {
     let glass = core
         .apply_theme_preset("Liquid Glass".to_string())
         .expect("liquid glass");
-    assert_eq!(glass.player_layout, "liquid_glass");
+    assert_eq!(glass.player_layout, "full_bleed");
     let theme_json = core.export_theme_json().expect("export theme");
     assert!(theme_json.contains("NativeAcrylic"));
     let imported_theme = core.import_theme_json(theme_json).expect("import theme");

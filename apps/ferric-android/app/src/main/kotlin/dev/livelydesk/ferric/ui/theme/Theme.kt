@@ -1,5 +1,6 @@
 package dev.livelydesk.ferric.ui.theme
 
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -58,6 +59,9 @@ data class FerricVisualPalette(
     val fontFamilyName: String = "DM Sans",
     val playerLayout: String = "liquid_glass",
 )
+
+val FerricEaseOut = CubicBezierEasing(0.22f, 1.0f, 0.36f, 1.0f)
+const val FERRIC_MOTION_MS = 320
 
 val LocalFerricPalette = staticCompositionLocalOf { FerricVisualPalette() }
 val LocalHazeState = compositionLocalOf<HazeState?> { null }
@@ -173,9 +177,9 @@ fun buildVisualPalette(
         accent = safeAccent,
         isLight = isLight,
         isLiquidGlass = isLiquidGlass,
-        glassOpacity = theme.acrylicOpacity.coerceIn(0.25f, 0.92f),
+        glassOpacity = theme.acrylicOpacity.coerceIn(0.15f, 0.95f),
         glassTint = glassTint,
-        cornerRadiusDp = theme.cornerRadiusPx.coerceIn(8f, 26f).dp,
+        cornerRadiusDp = theme.cornerRadiusPx.coerceIn(0f, 28f).dp,
         editorialMode = theme.editorialMode,
         fontFamilyName = theme.fontFamily,
         playerLayout = theme.playerLayout,
@@ -194,19 +198,40 @@ fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography 
     val bodyFamily = resolveUiFontFamily(fontName)
     val headlineFamily = if (editorialMode) FontFamily.Serif else bodyFamily
     return Typography(
+        displayLarge = TextStyle(
+            fontFamily = headlineFamily,
+            fontWeight = if (editorialMode) FontWeight.Normal else FontWeight.Light,
+            fontSize = 40.sp,
+            lineHeight = 46.sp,
+            letterSpacing = if (editorialMode) (-0.8).sp else (-0.5).sp,
+        ),
+        displayMedium = TextStyle(
+            fontFamily = headlineFamily,
+            fontWeight = if (editorialMode) FontWeight.Normal else FontWeight.Light,
+            fontSize = 34.sp,
+            lineHeight = 40.sp,
+            letterSpacing = if (editorialMode) (-0.7).sp else (-0.4).sp,
+        ),
         displaySmall = TextStyle(
             fontFamily = headlineFamily,
             fontWeight = if (editorialMode) FontWeight.Normal else FontWeight.Light,
+            fontSize = if (editorialMode) 32.sp else 30.sp,
+            lineHeight = 38.sp,
+            letterSpacing = if (editorialMode) (-0.7).sp else (-0.4).sp,
+        ),
+        headlineLarge = TextStyle(
+            fontFamily = headlineFamily,
+            fontWeight = if (editorialMode) FontWeight.Medium else FontWeight.SemiBold,
             fontSize = 30.sp,
             lineHeight = 36.sp,
-            letterSpacing = (-0.6).sp,
+            letterSpacing = (-0.4).sp,
         ),
         headlineMedium = TextStyle(
             fontFamily = headlineFamily,
-            fontWeight = if (editorialMode) FontWeight.SemiBold else FontWeight.SemiBold,
+            fontWeight = if (editorialMode) FontWeight.Medium else FontWeight.SemiBold,
             fontSize = if (editorialMode) 28.sp else 26.sp,
             lineHeight = 32.sp,
-            letterSpacing = (-0.4).sp,
+            letterSpacing = (-0.35).sp,
         ),
         headlineSmall = TextStyle(
             fontFamily = headlineFamily,
@@ -217,17 +242,23 @@ fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography 
         ),
         titleLarge = TextStyle(
             fontFamily = headlineFamily,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = if (editorialMode) 20.sp else 19.sp,
-            lineHeight = 24.sp,
-            letterSpacing = (-0.2).sp,
+            fontWeight = if (editorialMode) FontWeight.Medium else FontWeight.SemiBold,
+            fontSize = if (editorialMode) 21.sp else 19.sp,
+            lineHeight = 25.sp,
+            letterSpacing = if (editorialMode) (-0.3).sp else (-0.2).sp,
         ),
         titleMedium = TextStyle(
-            fontFamily = bodyFamily,
+            fontFamily = if (editorialMode) headlineFamily else bodyFamily,
             fontWeight = FontWeight.Medium,
             fontSize = 15.sp,
             lineHeight = 20.sp,
             letterSpacing = (-0.1).sp,
+        ),
+        titleSmall = TextStyle(
+            fontFamily = bodyFamily,
+            fontWeight = FontWeight.Medium,
+            fontSize = 14.sp,
+            lineHeight = 19.sp,
         ),
         bodyLarge = TextStyle(
             fontFamily = bodyFamily,
@@ -240,6 +271,12 @@ fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography 
             fontWeight = FontWeight.Normal,
             fontSize = 13.sp,
             lineHeight = 18.sp,
+        ),
+        bodySmall = TextStyle(
+            fontFamily = bodyFamily,
+            fontWeight = FontWeight.Normal,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
         ),
         labelLarge = TextStyle(
             fontFamily = bodyFamily,
@@ -254,7 +291,7 @@ fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography 
             lineHeight = 16.sp,
         ),
         labelSmall = TextStyle(
-            fontFamily = JetBrainsMonoFamily,
+            fontFamily = bodyFamily,
             fontWeight = FontWeight.Medium,
             fontSize = 11.sp,
             lineHeight = 14.sp,

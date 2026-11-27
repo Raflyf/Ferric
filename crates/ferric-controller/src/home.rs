@@ -18,12 +18,183 @@ use ferric_providers::spotify_web::{
 };
 use ferric_providers::ytmusic::{
     RecommendedStation, YtmHomeTasteProfile, build_algorithmic_recommended_stations_rotated,
-    expand_recommended_station_tracks, fetch_browse_detail, fetch_rich_home, fetch_rich_search,
+    expand_recommended_station_tracks, fetch_browse_detail, fetch_home_continuation,
+    fetch_rich_home, fetch_rich_search, is_low_quality_radio_candidate, primary_artist_key,
     search_music,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::thread;
+
+fn clean_home_tracks(tracks: Vec<Track>) -> Vec<Track> {
+    tracks
+        .into_iter()
+        .filter(|t| {
+            !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                && !contains_ascii_icase(&t.album, "watching")
+                && !contains_ascii_icase(&t.artist, "watching")
+        })
+        .collect()
+}
+
+/// Build the exact Desktop/Spotify-parity weighted taste profile over the entire SQLite library:
+/// sublinear play weighting + exponential recency decay + liked boost + cross-library artist
+/// frequency + evenly strided 400-track library sample so Home matches Desktop quality 1:1.
+fn build_home_taste_profile(
+    st: &crate::ControllerState,
+    lib: &[Track],
+    apply_exclusions: bool,
+) -> YtmHomeTasteProfile {
+    let mut by_id: HashMap<&str, usize> = HashMap::with_capacity(lib.len());
+    for (idx, t) in lib.iter().enumerate() {
+        by_id.insert(t.id.as_str(), idx);
+    }
+    let mut scored_tracks: Vec<(i32, usize)> = Vec::with_capacity(96);
+    let mut seen_ids: HashSet<&str> = HashSet::with_capacity(128);
+
+    let play_weight = |plays: u32| -> i32 { ((1.0 + plays as f32).ln() * 22.0).round() as i32 };
+
+    for (pos, id) in st.session.recent_track_ids.iter().enumerate() {
+        if let Some(&idx) = by_id.get(id.as_str())
+            && seen_ids.insert(lib[idx].id.as_str())
+        {
+            let plays = st.session.track_play_counts.get(id).copied().unwrap_or(1);
+            let recency = (44.0 * (-0.09 * pos as f32).exp()).round() as i32;
+            let liked_bonus = if lib[idx].liked { 18 } else { 0 };
+            scored_tracks.push((play_weight(plays) + recency + liked_bonus, idx));
+        }
+    }
+    for (id, &plays) in &st.session.track_play_counts {
+        if let Some(&idx) = by_id.get(id.as_str())
+            && seen_ids.insert(lib[idx].id.as_str())
+        {
+            let liked_bonus = if lib[idx].liked { 18 } else { 0 };
+            scored_tracks.push((play_weight(plays) + liked_bonus, idx));
+        }
+    }
+    for (idx, t) in lib.iter().enumerate() {
+        if t.liked && seen_ids.insert(t.id.as_str()) {
+            scored_tracks.push((24, idx));
+        }
+    }
+
+    let mut lib_artist_freq: HashMap<String, (String, i32, usize)> = HashMap::new();
+    for (idx, t) in lib.iter().enumerate() {
+        let key = primary_artist_key(&t.artist);
+        if key.is_empty() || key.eq_ignore_ascii_case("unknown artist") {
+            continue;
+        }
+        let norm = key.to_ascii_lowercase();
+        lib_artist_freq
+            .entry(norm)
+            .and_modify(|e| {
+                e.1 += if t.liked { 5 } else { 2 };
+                if lib[e.2].youtube_video_id.is_none() && t.youtube_video_id.is_some() {
+                    e.2 = idx;
+                }
+            })
+            .or_insert_with(|| (key, if t.liked { 10 } else { 5 }, idx));
+    }
+    let mut lib_artists_sorted: Vec<(String, i32, usize)> = lib_artist_freq.into_values().collect();
+    lib_artists_sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
+    for (_, freq_score, rep_idx) in lib_artists_sorted.iter().take(64) {
+        if seen_ids.insert(lib[*rep_idx].id.as_str()) {
+            scored_tracks.push(((*freq_score).min(20), *rep_idx));
+        }
+    }
+
+    scored_tracks.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let top_tracks: Vec<Track> = scored_tracks
+        .into_iter()
+        .take(60)
+        .map(|(_, idx)| lib[idx].clone())
+        .collect();
+
+    // Stratified evenly strided sample up to 400 tracks across the whole library
+    let total_lib = lib.len();
+    let mut library_tracks: Vec<Track> = Vec::with_capacity(total_lib.min(400));
+    let mut lib_seen: HashSet<&str> = HashSet::with_capacity(total_lib.min(400));
+    if total_lib > 0 {
+        let stride = (total_lib / 240).max(1);
+        for t in lib.iter().step_by(stride) {
+            if (t.youtube_video_id.is_some() || t.liked) && lib_seen.insert(t.id.as_str()) {
+                library_tracks.push(t.clone());
+                if library_tracks.len() >= 240 {
+                    break;
+                }
+            }
+        }
+        if library_tracks.len() < 400 {
+            let stride2 = (total_lib / 320).max(1);
+            for t in lib.iter().step_by(stride2) {
+                if lib_seen.insert(t.id.as_str()) {
+                    library_tracks.push(t.clone());
+                    if library_tracks.len() >= 400 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut artist_scores: HashMap<String, (String, i32)> = HashMap::new();
+    for (artist, &cnt) in &st.session.artist_play_counts {
+        let key = primary_artist_key(artist);
+        if !key.is_empty() {
+            let norm = key.to_ascii_lowercase();
+            let entry = artist_scores.entry(norm).or_insert((key, 0));
+            entry.1 += play_weight(cnt);
+        }
+    }
+    for (idx, t) in top_tracks.iter().enumerate() {
+        let key = primary_artist_key(&t.artist);
+        if !key.is_empty() {
+            let norm = key.to_ascii_lowercase();
+            let w = 28_i32.saturating_sub((idx as i32) / 2).max(4) + if t.liked { 10 } else { 0 };
+            let entry = artist_scores.entry(norm).or_insert((key, 0));
+            entry.1 += w;
+        }
+    }
+    for (disp, freq_score, _) in lib_artists_sorted.into_iter().take(56) {
+        let norm = disp.to_ascii_lowercase();
+        let entry = artist_scores.entry(norm).or_insert((disp, 0));
+        entry.1 += freq_score.min(24);
+    }
+    let mut artist_list: Vec<(String, i32)> = artist_scores.into_values().collect();
+    artist_list.sort_by_key(|a| std::cmp::Reverse(a.1));
+    let top_artists: Vec<String> = artist_list.into_iter().take(48).map(|(a, _)| a).collect();
+
+    let refresh_mood_params = if !st.home_cache.chips.is_empty() {
+        let idx = st.home_more_cycle % st.home_cache.chips.len();
+        Some(st.home_cache.chips[idx].params.clone())
+    } else {
+        None
+    };
+
+    YtmHomeTasteProfile {
+        top_tracks,
+        library_tracks,
+        top_artists,
+        recent_searches: st.session.recent_searches.clone(),
+        excluded_track_ids: if apply_exclusions {
+            st.home_excluded_tracks.clone()
+        } else {
+            HashSet::new()
+        },
+        excluded_card_ids: if apply_exclusions {
+            st.home_excluded_cards.clone()
+        } else {
+            HashSet::new()
+        },
+        excluded_artists: if apply_exclusions {
+            st.home_excluded_artists.clone()
+        } else {
+            HashSet::new()
+        },
+        continuation_token: st.home_continuation.clone(),
+        refresh_mood_params,
+    }
+}
 
 fn track_share_url_for_browse(browse_id: &str, kind: CardKind) -> Option<String> {
     let bid = browse_id.trim();
@@ -78,22 +249,24 @@ impl FerricController {
             return Ok(all.into_iter().take(60).collect());
         }
         let tokens: Vec<&str> = q.split_whitespace().collect();
-        let mut hits: Vec<Track> = all
-            .into_iter()
-            .filter(|t| {
-                tokens.iter().all(|tok| {
-                    contains_ascii_icase(&t.title, tok)
-                        || contains_ascii_icase(&t.artist, tok)
-                        || contains_ascii_icase(&t.album, tok)
-                })
-            })
-            .collect();
-        hits.truncate(80);
+        let mut hits: Vec<Track> = Vec::with_capacity(80);
+        for t in all {
+            if tokens.iter().all(|tok| {
+                contains_ascii_icase(&t.title, tok)
+                    || contains_ascii_icase(&t.artist, tok)
+                    || contains_ascii_icase(&t.album, tok)
+            }) {
+                hits.push(t);
+                if hits.len() >= 80 {
+                    break;
+                }
+            }
+        }
         Ok(hits)
     }
 
     /// Load or weighted-refresh the Home screen asynchronously (Mood Chips, Quick Picks,
-    /// Dual-Engine Recommended Stations, and personalized shelves).
+    /// Dual-Engine Recommended Stations, and personalized shelves matching Desktop).
     pub fn load_home(self: &Arc<Self>, force_refresh: bool, mood_idx: Option<usize>) {
         let (
             gen_id,
@@ -110,52 +283,18 @@ impl FerricController {
             let gen_val = st.home_gen;
             if force_refresh {
                 st.station_rotation_epoch = st.station_rotation_epoch.wrapping_add(1);
+                st.home_more_cycle = st.home_more_cycle.wrapping_add(1);
             }
+            st.is_loading_more_home = false;
             let lib: Vec<Track> = st
                 .db
                 .list_tracks("")
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|t| !t.id.starts_with("demo:"))
+                .filter(|t| {
+                    !t.id.starts_with("demo:") && !contains_ascii_icase(&t.album, "watching")
+                })
                 .collect();
-
-            let mut top_tracks: Vec<(u32, Track)> = Vec::new();
-            let recent_set: HashSet<&str> = st
-                .session
-                .recent_track_ids
-                .iter()
-                .map(String::as_str)
-                .collect();
-            for t in &lib {
-                let plays = st
-                    .session
-                    .track_play_counts
-                    .get(&t.id)
-                    .copied()
-                    .unwrap_or(0);
-                let mut weight = plays.saturating_mul(4);
-                if t.liked {
-                    weight = weight.saturating_add(6);
-                }
-                if recent_set.contains(t.id.as_str()) {
-                    weight = weight.saturating_add(5);
-                }
-                if weight > 0 {
-                    top_tracks.push((weight, t.clone()));
-                }
-            }
-            top_tracks.sort_by_key(|a| std::cmp::Reverse(a.0));
-            let top_tracks: Vec<Track> = top_tracks.into_iter().take(48).map(|(_, t)| t).collect();
-
-            let mut artist_scores: HashMap<String, u32> = st.session.artist_play_counts.clone();
-            for t in &top_tracks {
-                let entry = artist_scores.entry(t.artist.clone()).or_insert(0);
-                *entry = entry.saturating_add(1);
-            }
-            let mut top_artists: Vec<(String, u32)> = artist_scores.into_iter().collect();
-            top_artists.sort_by_key(|a| std::cmp::Reverse(a.1));
-            let top_artists: Vec<String> =
-                top_artists.into_iter().take(24).map(|(a, _)| a).collect();
 
             let chips_snapshot = st.home_cache.chips.clone();
             let mood_params = mood_idx
@@ -163,33 +302,10 @@ impl FerricController {
                 .map(|c| c.params.clone())
                 .filter(|p| !p.is_empty());
 
-            let refresh_mood_params = None;
-
-            let taste = YtmHomeTasteProfile {
-                top_tracks,
-                library_tracks: lib.iter().take(120).cloned().collect(),
-                top_artists,
-                recent_searches: st.session.recent_searches.clone(),
-                excluded_track_ids: if force_refresh {
-                    st.home_excluded_tracks.clone()
-                } else {
-                    HashSet::new()
-                },
-                excluded_card_ids: if force_refresh {
-                    st.home_excluded_cards.clone()
-                } else {
-                    HashSet::new()
-                },
-                excluded_artists: if force_refresh {
-                    st.home_excluded_artists.clone()
-                } else {
-                    HashSet::new()
-                },
-                continuation_token: st.home_continuation.clone(),
-                refresh_mood_params,
-            };
+            let taste = build_home_taste_profile(&st, &lib, force_refresh);
 
             st.home_cache.is_loading = true;
+            st.home_cache.is_loading_more = false;
             st.home_cache.selected_mood_idx = mood_idx;
             let loading_snap = st.home_cache.clone();
             let sess = active_ytm_session(&st.accounts);
@@ -216,7 +332,7 @@ impl FerricController {
                 let ytm_res =
                     fetch_rich_home(&session, mood_params.as_deref(), force_refresh, &taste);
 
-                let mut stations: Vec<RecommendedStation> = Vec::new();
+                let mut stations: Vec<RecommendedStation> = Vec::with_capacity(12);
                 if let Some(tok) = spotify_token.as_deref() {
                     match fetch_spotify_recommended_stations(tok) {
                         Ok(sp_cards) => {
@@ -253,10 +369,14 @@ impl FerricController {
                         } else {
                             rich.chips.into_iter().map(Into::into).collect()
                         };
-                        let quick_picks = if rich.quick_picks.is_empty() {
-                            library_tracks.iter().take(12).cloned().collect()
+                        let cleaned_picks = clean_home_tracks(rich.quick_picks);
+                        let quick_picks = if cleaned_picks.is_empty() {
+                            clean_home_tracks(taste.top_tracks.clone())
+                                .into_iter()
+                                .take(24)
+                                .collect()
                         } else {
-                            rich.quick_picks
+                            cleaned_picks
                         };
                         let shelves: Vec<HomeShelfSnapshot> =
                             rich.shelves.into_iter().map(Into::into).collect();
@@ -305,13 +425,13 @@ impl FerricController {
                                 stations: station_snaps,
                                 shelves,
                                 is_loading: false,
+                                is_loading_more: false,
                             };
                             st.home_cache.clone()
                         };
                         this.sink.on_home_updated(final_snap);
                     }
                     Err(err) => {
-                        // Offline or transient network fallback: keep local library Quick Picks & stations usable.
                         let algo = build_algorithmic_recommended_stations_rotated(
                             &taste,
                             &library_tracks,
@@ -331,11 +451,14 @@ impl FerricController {
                             }
                             st.stations_cache = stations;
                             if st.home_cache.quick_picks.is_empty() {
-                                st.home_cache.quick_picks =
-                                    library_tracks.iter().take(12).cloned().collect();
+                                st.home_cache.quick_picks = clean_home_tracks(taste.top_tracks)
+                                    .into_iter()
+                                    .take(24)
+                                    .collect();
                             }
                             st.home_cache.stations = station_snaps;
                             st.home_cache.is_loading = false;
+                            st.home_cache.is_loading_more = false;
                             st.home_cache.clone()
                         };
                         this.sink.on_home_updated(fallback_snap);
@@ -344,6 +467,159 @@ impl FerricController {
                     }
                 }
             });
+    }
+
+    /// Endless scroll continuation for Home: appends fresh YTM continuation shelves, personalized
+    /// deep-catalog artist mixes, and additional Quick Picks mirroring Desktop `Load More`.
+    pub fn load_home_more(self: &Arc<Self>) -> bool {
+        let (gen_id, session, taste, fallback_mood, lib_pool) = {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if st.is_loading_more_home
+                || st.home_cache.is_loading
+                || st.home_cache.shelves.len() >= 48
+            {
+                return false;
+            }
+            let lib: Vec<Track> = st
+                .db
+                .list_tracks("")
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| {
+                    !t.id.starts_with("demo:") && !contains_ascii_icase(&t.album, "watching")
+                })
+                .collect();
+            let taste = build_home_taste_profile(&st, &lib, true);
+            let mood = if !st.home_cache.chips.is_empty() {
+                let idx = st.home_more_cycle % st.home_cache.chips.len();
+                st.home_more_cycle = st.home_more_cycle.wrapping_add(1);
+                Some(st.home_cache.chips[idx].params.clone())
+            } else {
+                None
+            };
+            st.is_loading_more_home = true;
+            st.home_cache.is_loading_more = true;
+            let snap = st.home_cache.clone();
+            let sess = active_ytm_session(&st.accounts);
+            let gen_val = st.home_gen;
+            drop(st);
+            self.sink.on_home_updated(snap);
+            (gen_val, sess, taste, mood, lib)
+        };
+
+        let this = Arc::clone(self);
+        let spawn_res = thread::Builder::new()
+            .name("ferric-home-more".to_string())
+            .spawn(move || {
+                let cont_tok = taste.continuation_token.clone();
+                let res = fetch_home_continuation(
+                    &session,
+                    cont_tok.as_deref(),
+                    fallback_mood.as_deref(),
+                    &taste,
+                );
+
+                let final_snap = {
+                    let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
+                    st.is_loading_more_home = false;
+                    st.home_cache.is_loading_more = false;
+                    if st.home_gen != gen_id {
+                        return;
+                    }
+
+                    match res {
+                        Ok(more) => {
+                            st.home_continuation = more.continuation_token;
+                            if !more.visitor_data.is_empty() {
+                                st.accounts.youtube_visitor_data = more.visitor_data;
+                            }
+
+                            let mut existing_qp: HashSet<String> = st
+                                .home_cache
+                                .quick_picks
+                                .iter()
+                                .map(|t| t.id.clone())
+                                .collect();
+                            for t in clean_home_tracks(more.quick_picks) {
+                                if existing_qp.insert(t.id.clone())
+                                    && st.home_cache.quick_picks.len() < 48
+                                {
+                                    st.home_excluded_tracks.insert(t.id.clone());
+                                    if let Some(vid) = &t.youtube_video_id {
+                                        st.home_excluded_tracks.insert(vid.clone());
+                                    }
+                                    st.home_cache.quick_picks.push(t);
+                                }
+                            }
+
+                            let mut existing_shelves: HashSet<String> = st
+                                .home_cache
+                                .shelves
+                                .iter()
+                                .map(|s| s.title.to_ascii_lowercase())
+                                .collect();
+                            for sh in more.shelves {
+                                if !sh.cards.is_empty()
+                                    && existing_shelves.insert(sh.title.to_ascii_lowercase())
+                                {
+                                    for c in &sh.cards {
+                                        st.home_excluded_cards.insert(c.id.clone());
+                                    }
+                                    st.home_cache.shelves.push(sh.into());
+                                    if st.home_cache.shelves.len() >= 48 {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Offline / transient fallback: synthesize a fresh artist spotlight shelf from library
+                            let shown_titles: HashSet<String> = st
+                                .home_cache
+                                .shelves
+                                .iter()
+                                .map(|s| s.title.to_ascii_lowercase())
+                                .collect();
+                            if let Some(artist) = taste.top_artists.iter().find(|a| {
+                                !shown_titles
+                                    .contains(&format!("more from {}", a.to_ascii_lowercase()))
+                            }) {
+                                let cards: Vec<ShelfCardSnapshot> = lib_pool
+                                    .into_iter()
+                                    .filter(|t| contains_ascii_icase(&t.artist, artist))
+                                    .take(12)
+                                    .map(|t| ShelfCardSnapshot {
+                                        id: t.id.clone(),
+                                        title: t.title,
+                                        subtitle: t.artist,
+                                        kind: CardKind::Song,
+                                        browse_id: None,
+                                        video_id: t.youtube_video_id,
+                                        thumbnail_url: t.thumbnail_url,
+                                    })
+                                    .collect();
+                                if cards.len() >= 2 {
+                                    st.home_cache.shelves.push(HomeShelfSnapshot {
+                                        title: format!("More from {artist}"),
+                                        cards,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    st.home_cache.clone()
+                };
+                this.sink.on_home_updated(final_snap);
+            });
+
+        if spawn_res.is_err() {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.is_loading_more_home = false;
+            st.home_cache.is_loading_more = false;
+            return false;
+        }
+        true
     }
 
     /// Expand a Recommended Station (Spotify Pathfinder playlist or algorithmic YTM co-listening radio)

@@ -1,26 +1,26 @@
 package dev.livelydesk.ferric.ui.components
 
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -56,29 +56,47 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.size.Precision
 import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
+import dev.livelydesk.ferric.ui.theme.FerricEaseOut
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.StateFlow
 import uniffi.ferric_mobile_ffi.FfiPlaylist
 import uniffi.ferric_mobile_ffi.FfiTrack
@@ -108,6 +126,11 @@ fun ArtworkThumb(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val targetPx = remember(size, density.density) {
+        with(density) { size.roundToPx().coerceIn(48, 860) }
+    }
     Box(
         modifier = modifier
             .size(size)
@@ -128,8 +151,15 @@ fun ArtworkThumb(
             modifier = Modifier.size((size.value * 0.42f).dp),
         )
         if (!url.isNullOrBlank()) {
+            val req = remember(url, targetPx) {
+                ImageRequest.Builder(context)
+                    .data(url)
+                    .size(targetPx, targetPx)
+                    .precision(Precision.INEXACT)
+                    .build()
+            }
             AsyncImage(
-                model = url,
+                model = req,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
@@ -356,92 +386,82 @@ fun FloatingLiquidGlassDock(
     onTogglePlayPause: () -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
+    onDismissStop: () -> Unit,
     onToggleLike: (String) -> Unit,
     onOpenFullPlayer: () -> Unit,
     onOpenConnect: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val palette = LocalFerricPalette.current
-    val hasActiveTrack = state.currentTrack != null ||
-        (!state.connectState.isLocalActiveSpeaker && state.connectState.peers.any { it.connected })
-    val compactMode = isCollapsed && hasActiveTrack && !isDetailOpen
+    val hasActiveTrack = !state.miniPlayerDismissed && (
+        state.currentTrack != null ||
+            (!state.connectState.isLocalActiveSpeaker && state.connectState.peers.any { it.connected })
+        )
+    // Collapse works uniformly across all tabs AND Detail / Radio Station screens with one unified curve.
+    val compactMode = isCollapsed
+    val morphFraction by animateFloatAsState(
+        targetValue = if (compactMode) 1f else 0f,
+        animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+        label = "dock_morph_fraction",
+    )
+    val miniVisible by animateFloatAsState(
+        targetValue = if (hasActiveTrack) 1f else 0f,
+        animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+        label = "mini_player_visible",
+    )
 
-    AnimatedContent(
-        targetState = compactMode,
-        transitionSpec = { fadeIn() togetherWith fadeOut() },
-        label = "floating_glass_dock",
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 10.dp),
-    ) { compact ->
-        if (compact) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                // Compact active-tab circular Liquid Glass orb (tap expands full 4-tab pill).
-                Box(
-                    modifier = Modifier
-                        .size(58.dp)
-                        .ferricLiquidGlass(
-                            cornerRadius = 29.dp,
-                            blurRadius = 16.dp,
-                            refractionHeight = 16.dp,
-                            refractionAmount = 14.dp,
-                            chromaticDispersion = 0.62f,
-                            alwaysGlass = palette.isLiquidGlass,
-                        )
-                        .clickable(onClick = onExpandDock),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = activeTab.icon,
-                        contentDescription = "Expand navigation",
-                        tint = palette.textPrimary,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
+    ) {
+        val fullW = maxWidth
+        val shrinkT = (morphFraction * 1.25f).coerceIn(0f, 1f)
+        val slideT = ((morphFraction - 0.12f) / 0.88f).coerceIn(0f, 1f)
+        val navW = lerp(fullW, 58.dp, shrinkT)
+        val navH = lerp(64.dp, 58.dp, morphFraction)
+        val extraMiniH = lerp(70.dp, 0.dp, slideT) * miniVisible
+        val dockHeight = navH + extraMiniH
+        val miniX = lerp(0.dp, 68.dp, slideT)
+        val miniBottom = lerp(74.dp, 0.dp, slideT)
+        val hideOffsetY = 86.dp * (1f - miniVisible)
+        val miniW = (fullW - miniX).coerceAtLeast(120.dp)
 
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(dockHeight),
+        ) {
+            if (miniVisible > 0.01f) {
                 FloatingMiniPlayerPill(
                     state = state,
                     progressFlow = progressFlow,
-                    compact = true,
+                    compact = morphFraction > 0.45f,
                     onTogglePlayPause = onTogglePlayPause,
                     onNext = onNext,
                     onPrev = onPrev,
+                    onDismissStop = onDismissStop,
                     onToggleLike = onToggleLike,
                     onOpenFullPlayer = onOpenFullPlayer,
                     onOpenConnect = onOpenConnect,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .offset(x = miniX, y = -miniBottom + hideOffsetY)
+                        .width(miniW),
                 )
             }
-        } else {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                if (hasActiveTrack) {
-                    FloatingMiniPlayerPill(
-                        state = state,
-                        progressFlow = progressFlow,
-                        compact = false,
-                        onTogglePlayPause = onTogglePlayPause,
-                        onNext = onNext,
-                        onPrev = onPrev,
-                        onToggleLike = onToggleLike,
-                        onOpenFullPlayer = onOpenFullPlayer,
-                        onOpenConnect = onOpenConnect,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                FloatingNavPill(
-                    activeTab = activeTab,
-                    isDetailOpen = isDetailOpen,
-                    onSelectTab = onSelectTab,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
+
+            FloatingNavPill(
+                activeTab = activeTab,
+                isDetailOpen = isDetailOpen,
+                compactMode = compactMode,
+                morphFraction = morphFraction,
+                onSelectTab = onSelectTab,
+                onExpandDock = onExpandDock,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .width(navW)
+                    .height(navH),
+            )
         }
     }
 }
@@ -450,82 +470,286 @@ fun FloatingLiquidGlassDock(
 private fun FloatingNavPill(
     activeTab: FerricTab,
     isDetailOpen: Boolean,
+    compactMode: Boolean,
+    morphFraction: Float,
     onSelectTab: (FerricTab) -> Unit,
+    onExpandDock: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
-    val pillHighlight = if (palette.isLight) {
-        Color.Black.copy(alpha = 0.09f)
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val currentOnSelectTab by rememberUpdatedState(onSelectTab)
+    val currentOnExpandDock by rememberUpdatedState(onExpandDock)
+    val isCompactNow by rememberUpdatedState(compactMode)
+    val currentMorph by rememberUpdatedState(morphFraction)
+    val tabs = FerricTab.entries
+
+    var expandedWidthPx by remember { mutableIntStateOf(0) }
+    var isDragging by remember { mutableStateOf(false) }
+    var rawDragX by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(compactMode) {
+        if (compactMode) {
+            isDragging = false
+        }
+    }
+
+    val selectedIndex = tabs.indexOf(activeTab).coerceIn(0, tabs.lastIndex)
+    val slotWidthPx = if (expandedWidthPx > 0) expandedWidthPx / tabs.size.toFloat() else 0f
+    val targetCenterPx = if (isDragging && slotWidthPx > 0f) {
+        rawDragX.coerceIn(slotWidthPx * 0.42f, expandedWidthPx - slotWidthPx * 0.42f)
+    } else {
+        (selectedIndex + 0.5f) * slotWidthPx
+    }
+
+    val animatedCenterPx by animateFloatAsState(
+        targetValue = targetCenterPx,
+        animationSpec = if (isDragging) {
+            tween(durationMillis = 36)
+        } else {
+            tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)
+        },
+        label = "nav_lens_center",
+    )
+    val lensScale by animateFloatAsState(
+        targetValue = if (isDragging) 1.15f else 1.0f,
+        animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+        label = "nav_lens_scale",
+    )
+    val dragFocus by animateFloatAsState(
+        targetValue = if (isDragging) 1f else 0f,
+        animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+        label = "nav_drag_focus",
+    )
+
+    val hoveredIndex = if (isDragging && slotWidthPx > 0f) {
+        (rawDragX / slotWidthPx).toInt().coerceIn(0, tabs.lastIndex)
+    } else {
+        selectedIndex
+    }
+
+    val restPillBg = if (palette.isLight) {
+        Color.Black.copy(alpha = 0.08f)
     } else {
         Color.White.copy(alpha = 0.14f)
     }
+    val glassRadius = lerp(32.dp, 29.dp, morphFraction)
+    val expandedAlpha = (1f - morphFraction * 2.15f).coerceIn(0f, 1f)
+    val compactAlpha = ((morphFraction - 0.35f) / 0.50f).coerceIn(0f, 1f)
 
-    Row(
+    Box(
         modifier = modifier
-            .height(64.dp)
             .ferricLiquidGlass(
-                cornerRadius = 32.dp,
-                blurRadius = 18.dp,
-                refractionHeight = 20.dp,
-                refractionAmount = 16.dp,
-                chromaticDispersion = 0.65f,
+                cornerRadius = glassRadius,
+                blurRadius = 15.dp,
+                refractionHeight = 16.dp,
+                refractionAmount = 14.dp,
+                chromaticDispersion = 0.62f,
                 alwaysGlass = palette.isLiquidGlass,
             )
-            .padding(horizontal = 6.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceEvenly,
-    ) {
-        FerricTab.entries.forEach { tab ->
-            val selected = activeTab == tab && !isDetailOpen
-            val contentColor by animateColorAsState(
-                targetValue = if (selected) {
-                    if (palette.isLiquidGlass) palette.textPrimary else palette.accent
-                } else {
-                    palette.textSecondary
-                },
-                label = "nav_tab_color",
-            )
-            val indicatorPad by animateDpAsState(
-                targetValue = if (selected) 0.dp else 4.dp,
-                animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                label = "nav_tab_pad",
-            )
-            val interactionSource = remember { MutableInteractionSource() }
+            .onSizeChanged {
+                if (!isCompactNow && currentMorph < 0.05f && it.width > 0) {
+                    expandedWidthPx = it.width
+                } else if (expandedWidthPx == 0 && it.width > 0) {
+                    expandedWidthPx = it.width
+                }
+            }
+            .pointerInput(tabs.size) {
+                awaitEachGesture {
+                    try {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        if (isCompactNow || currentMorph > 0.55f) {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                if (change == null || !change.pressed || event.changes.none { it.pressed }) {
+                                    if (change != null &&
+                                        change.position.x in 0f..size.width.toFloat() &&
+                                        change.position.y in 0f..size.height.toFloat()
+                                    ) {
+                                        change.consume()
+                                        currentOnExpandDock()
+                                    }
+                                    break
+                                }
+                            }
+                            return@awaitEachGesture
+                        }
 
+                        val touchSlop = viewConfiguration.touchSlop
+                        val startX = down.position.x
+                        val downTime = down.uptimeMillis
+                        var dragged = false
+                        var lastEmittedIdx = -1
+                        rawDragX = startX
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change == null || !change.pressed || event.changes.none { it.pressed }) {
+                                isDragging = false
+                                if (change != null && !change.pressed && event.changes.size <= 1) {
+                                    val w = expandedWidthPx.toFloat().coerceAtLeast(size.width.toFloat()).coerceAtLeast(1f)
+                                    val idx = ((change.position.x / w) * tabs.size)
+                                        .toInt()
+                                        .coerceIn(0, tabs.lastIndex)
+                                    change.consume()
+                                    currentOnSelectTab(tabs[idx])
+                                }
+                                break
+                            }
+
+                            if (event.changes.count { it.pressed } > 1) {
+                                isDragging = false
+                                break
+                            }
+
+                            val movedDist = abs(change.position.x - startX)
+                            val heldLong = (change.uptimeMillis - downTime) > 110L
+                            val w = expandedWidthPx.toFloat().coerceAtLeast(size.width.toFloat()).coerceAtLeast(1f)
+                            if (!dragged && (movedDist > touchSlop * 0.6f || heldLong)) {
+                                dragged = true
+                                isDragging = true
+                                val idx = ((change.position.x / w) * tabs.size)
+                                    .toInt()
+                                    .coerceIn(0, tabs.lastIndex)
+                                lastEmittedIdx = idx
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                currentOnSelectTab(tabs[idx])
+                            }
+                            if (dragged) {
+                                change.consume()
+                                rawDragX = change.position.x
+                                val idx = ((change.position.x / w) * tabs.size)
+                                    .toInt()
+                                    .coerceIn(0, tabs.lastIndex)
+                                if (idx != lastEmittedIdx) {
+                                    lastEmittedIdx = idx
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    currentOnSelectTab(tabs[idx])
+                                }
+                            }
+                        }
+                    } finally {
+                        isDragging = false
+                    }
+                }
+            },
+    ) {
+        if (expandedAlpha > 0.01f) {
             Box(
                 modifier = Modifier
-                    .weight(1f)
                     .fillMaxSize()
-                    .padding(horizontal = indicatorPad)
-                    .clip(RoundedCornerShape(26.dp))
-                    .background(if (selected) pillHighlight else Color.Transparent)
-                    .clickable(
-                        interactionSource = interactionSource,
-                        indication = null,
-                        onClick = { onSelectTab(tab) },
-                    ),
-                contentAlignment = Alignment.Center,
+                    .graphicsLayer { alpha = expandedAlpha },
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Icon(
-                        imageVector = tab.icon,
-                        contentDescription = tab.label,
-                        tint = contentColor,
-                        modifier = Modifier.size(22.dp),
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = tab.label,
-                        fontSize = 11.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        color = contentColor,
-                        maxLines = 1,
-                        softWrap = false,
+                // Smooth convex lens pill sits beneath icons so glyphs stay razor-sharp.
+                if (slotWidthPx > 0f && (!isDetailOpen || isDragging)) {
+                    val bubbleW = with(density) { (slotWidthPx * 0.92f).toDp() }
+                    val bubbleOffsetX = (animatedCenterPx - (slotWidthPx * 0.46f)).roundToInt()
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .offset { IntOffset(x = bubbleOffsetX, y = 0) }
+                            .width(bubbleW)
+                            .height(54.dp)
+                            .graphicsLayer {
+                                scaleX = lensScale
+                                scaleY = lensScale
+                            }
+                            .clip(RoundedCornerShape(27.dp))
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.White.copy(alpha = if (palette.isLight) 0.14f else 0.12f * dragFocus),
+                                        restPillBg.copy(alpha = restPillBg.alpha + 0.08f * dragFocus),
+                                        palette.accent.copy(alpha = 0.22f * dragFocus),
+                                    ),
+                                ),
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = Color.White.copy(alpha = 0.48f * dragFocus),
+                                shape = RoundedCornerShape(27.dp),
+                            ),
                     )
                 }
+
+                // Tab labels & icons drawn razor-sharp above the optical lens bubble.
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 6.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    tabs.forEachIndexed { idx, tab ->
+                        val activeSlot = (if (isDragging) hoveredIndex else selectedIndex) == idx
+                        val selected = activeSlot && (!isDetailOpen || isDragging)
+                        val iconScale by animateFloatAsState(
+                            targetValue = if (isDragging && activeSlot) 1.14f else 1.0f,
+                            animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                            label = "nav_tab_scale",
+                        )
+                        val contentColor by animateColorAsState(
+                            targetValue = if (selected) {
+                                if (palette.isLiquidGlass) palette.textPrimary else palette.accent
+                            } else {
+                                palette.textSecondary
+                            },
+                            animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                            label = "nav_tab_color",
+                        )
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .graphicsLayer {
+                                    scaleX = iconScale
+                                    scaleY = iconScale
+                                },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Icon(
+                                imageVector = tab.icon,
+                                contentDescription = tab.label,
+                                tint = contentColor,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = tab.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 11.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                color = contentColor,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (compactAlpha > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = compactAlpha
+                        val s = 0.72f + 0.28f * compactAlpha
+                        scaleX = s
+                        scaleY = s
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = activeTab.icon,
+                    contentDescription = "Expand navigation",
+                    tint = palette.textPrimary,
+                    modifier = Modifier.size(24.dp),
+                )
             }
         }
     }
@@ -539,12 +763,14 @@ private fun FloatingMiniPlayerPill(
     onTogglePlayPause: () -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
+    onDismissStop: () -> Unit,
     onToggleLike: (String) -> Unit,
     onOpenFullPlayer: () -> Unit,
     onOpenConnect: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
+    val haptic = LocalHapticFeedback.current
     val cur = state.currentTrack
     val activeRemotePeer = if (!state.connectState.isLocalActiveSpeaker) {
         state.connectState.peers.firstOrNull {
@@ -563,14 +789,32 @@ private fun FloatingMiniPlayerPill(
     val displayThumb = activeRemotePeer?.nowPlayingThumbnailUrl ?: cur?.thumbnailUrl
     val displayPlaying = activeRemotePeer?.isPlaying ?: state.isPlaying
 
+    var visualDragX by remember { mutableFloatStateOf(0f) }
+    var visualDragY by remember { mutableFloatStateOf(0f) }
+    val animDragX by animateFloatAsState(
+        targetValue = visualDragX,
+        animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+        label = "mini_drag_x",
+    )
+    val animDragY by animateFloatAsState(
+        targetValue = visualDragY,
+        animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+        label = "mini_drag_y",
+    )
+
     Box(
         modifier = modifier
             .height(60.dp)
+            .graphicsLayer {
+                translationX = animDragX * 0.42f
+                translationY = if (animDragY > 0f) animDragY * 0.65f else animDragY * 0.28f
+                alpha = if (animDragY > 0f) (1f - (animDragY / 210f)).coerceIn(0.45f, 1f) else 1f
+            }
             .ferricLiquidGlass(
                 cornerRadius = 30.dp,
-                blurRadius = 18.dp,
-                refractionHeight = 18.dp,
-                refractionAmount = 15.dp,
+                blurRadius = 15.dp,
+                refractionHeight = 16.dp,
+                refractionAmount = 14.dp,
                 chromaticDispersion = 0.60f,
                 alwaysGlass = palette.isLiquidGlass,
             )
@@ -581,25 +825,37 @@ private fun FloatingMiniPlayerPill(
                     onDragStart = {
                         dragX = 0f
                         dragY = 0f
+                        visualDragX = 0f
+                        visualDragY = 0f
                     },
                     onDragEnd = {
-                        if (dragY < -52f && abs(dragY) > abs(dragX)) {
-                            onOpenFullPlayer()
-                        } else if (dragX < -68f) {
-                            onNext()
-                        } else if (dragX > 68f) {
-                            onPrev()
+                        val absX = abs(dragX)
+                        val absY = abs(dragY)
+                        when {
+                            dragY > 62f && absY > absX -> {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onDismissStop()
+                            }
+                            dragY < -50f && absY > absX -> onOpenFullPlayer()
+                            dragX < -64f -> onNext()
+                            dragX > 64f -> onPrev()
                         }
                         dragX = 0f
                         dragY = 0f
+                        visualDragX = 0f
+                        visualDragY = 0f
                     },
                     onDragCancel = {
                         dragX = 0f
                         dragY = 0f
+                        visualDragX = 0f
+                        visualDragY = 0f
                     },
                     onDrag = { _, dragAmount ->
                         dragX += dragAmount.x
                         dragY += dragAmount.y
+                        visualDragX = dragX.coerceIn(-120f, 120f)
+                        visualDragY = dragY.coerceIn(-90f, 130f)
                     },
                 )
             }

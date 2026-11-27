@@ -20,8 +20,8 @@ const VISIONOS_VERSION: &str = "1.02";
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 const STREAM_CHUNK_BYTES: u64 = 512 * 1024;
 const STREAM_CONCURRENCY: usize = 3;
-const MAX_SINGLE_STREAM_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_STREAM_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SINGLE_STREAM_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_STREAM_CACHE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
 use std::sync::{Mutex, OnceLock};
@@ -2145,15 +2145,43 @@ pub fn fetch_rich_home(
             }
         }
     } else {
-        // Cold-start or Mood-chip view
-        quick_picks = raw_home_picks;
+        // Cold-start or Mood-chip view: still sanitize low-quality long compilations and dedup in O(n)
+        let mut qp_seen: HashSet<String> = HashSet::with_capacity(32);
+        let mut clean_picks = Vec::with_capacity(32);
+        for t in raw_home_picks {
+            if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                || contains_ascii_icase(&t.album, b"watching")
+                || contains_ascii_icase(&t.artist, b"watching")
+            {
+                continue;
+            }
+            if !allow_indonesian
+                && taste_locale == MusicLocale::GlobalEn
+                && has_taste
+                && detect_track_locale(&t.title, &t.artist, &t.album) == MusicLocale::Indonesian
+            {
+                continue;
+            }
+            let k = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+            if qp_seen.insert(k) {
+                clean_picks.push(t);
+            }
+        }
+        quick_picks = clean_picks;
         shelves = raw_home_shelves;
         if taste_locale == MusicLocale::GlobalEn && has_taste && !allow_indonesian {
             shelves.retain(|s| {
                 !is_regional_geoip_chart_shelf(&s.title, &s.cards, taste_locale, allow_indonesian)
             });
         }
-        all_tracks.extend(quick_picks.iter().cloned());
+        let mut all_seen: HashSet<String> =
+            HashSet::with_capacity(quick_picks.len() + all_tracks.len());
+        for t in &quick_picks {
+            all_seen.insert(t.id.clone());
+        }
+        for t in &quick_picks {
+            all_tracks.push(t.clone());
+        }
         if (fresh_seed || !session.is_signed_in()) && quick_picks.len() > 4 {
             fastrand::shuffle(&mut quick_picks);
             if !taste.excluded_track_ids.is_empty() {
@@ -2169,14 +2197,31 @@ pub fn fetch_rich_home(
                 }
             }
         }
+        if quick_picks.len() < 12 {
+            for t in &all_tracks {
+                if quick_picks.len() >= 24 {
+                    break;
+                }
+                let k = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+                if qp_seen.insert(k)
+                    && !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                {
+                    quick_picks.push(t.clone());
+                }
+            }
+        }
+        let _ = all_seen;
     }
 
     if quick_picks.len() < 12 {
+        let mut seen_fb: HashSet<String> = quick_picks.iter().map(|q| q.id.clone()).collect();
         for t in &all_tracks {
             if quick_picks.len() >= 24 {
                 break;
             }
-            if !quick_picks.iter().any(|q| q.id == t.id) {
+            if !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                && seen_fb.insert(t.id.clone())
+            {
                 quick_picks.push(t.clone());
             }
         }
@@ -2296,6 +2341,11 @@ pub fn fetch_home_continuation(
     if let Ok(root) = cont_res {
         visitor_data = extract_visitor_data(&root, &session.visitor_data);
         collect_home_shelves(&root, &mut quick_picks, &mut seen_tracks, &mut shelves);
+        quick_picks.retain(|t| {
+            !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                && !contains_ascii_icase(&t.album, b"watching")
+                && !contains_ascii_icase(&t.artist, b"watching")
+        });
         all_tracks.extend(quick_picks.iter().cloned());
         collect_music_items(
             &root,
@@ -2340,11 +2390,18 @@ pub fn fetch_home_continuation(
                     },
                 );
             }
-            for t in res.tracks.into_iter().take(10) {
-                if !quick_picks.iter().any(|q| q.id == t.id) {
+            let mut qp_set: HashSet<String> = quick_picks.iter().map(|q| q.id.clone()).collect();
+            let mut all_set: HashSet<String> = all_tracks.iter().map(|a| a.id.clone()).collect();
+            for t in res.tracks.into_iter().take(12) {
+                if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                    || contains_ascii_icase(&t.album, b"watching")
+                {
+                    continue;
+                }
+                if qp_set.insert(t.id.clone()) && quick_picks.len() < 24 {
                     quick_picks.push(t.clone());
                 }
-                if !all_tracks.iter().any(|a| a.id == t.id) {
+                if all_set.insert(t.id.clone()) {
                     all_tracks.push(t);
                 }
             }
@@ -2445,7 +2502,7 @@ pub fn fetch_browse_detail(
 
 static RADIO_FRESH_TICK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn normalize_core_title(title: &str) -> String {
+pub fn normalize_core_title(title: &str) -> String {
     let mut base = title.trim();
     for sep in ["(", "[", "|", " - ", " \u{2013} ", " \u{2014} "] {
         if let Some((head, _)) = base.split_once(sep) {
@@ -2492,7 +2549,7 @@ fn normalize_core_title(title: &str) -> String {
     out.trim().to_string()
 }
 
-fn is_same_song_variant(seed_core: &str, cand_core: &str) -> bool {
+pub fn is_same_song_variant(seed_core: &str, cand_core: &str) -> bool {
     if seed_core.is_empty() || cand_core.is_empty() {
         return false;
     }
@@ -2529,7 +2586,7 @@ fn extract_artist_tokens(artist: &str) -> Vec<String> {
         .collect()
 }
 
-fn primary_artist_key(artist: &str) -> String {
+pub fn primary_artist_key(artist: &str) -> String {
     extract_artist_tokens(artist)
         .into_iter()
         .next()
@@ -2548,7 +2605,7 @@ fn contains_ascii_icase(haystack: &str, needle_lower: &[u8]) -> bool {
         .any(|w| w.eq_ignore_ascii_case(needle_lower))
 }
 
-fn is_low_quality_radio_candidate(
+pub fn is_low_quality_radio_candidate(
     title: &str,
     artist: &str,
     seed_title: &str,
@@ -2635,9 +2692,42 @@ fn is_low_quality_radio_candidate(
                 "top hits radio",
                 "hits playlist",
                 "nonstop",
+                "[playlist]",
+                "[full album]",
+                "full album",
+                "greatest hits",
+                "the complete",
+                "top 2024",
+                "top 2025",
+                "top 2026",
+                "top songs",
+                "best songs",
+                "essential mix",
+                "late night songs",
+                "ultimate playlist",
+                "songs playlist",
+                "playlist |",
+                "| playlist",
+                "(playlist)",
+                "& playlist",
+                "spotify &",
+                "complete collection",
+                "best songs playlist",
+                "top 100 songs",
+                "top 50 songs",
+                "megamix",
+                "mega mix",
+                "mixtape",
+                "music mix",
+                "hits 2024",
+                "hits 2025",
+                "hits 2026",
             ])
             .expect("static radio filter patterns must compile")
     });
+    if title.matches('|').count() >= 2 && contains_ascii_icase(title, b"songs") {
+        return true;
+    }
     matcher.is_match(title) || matcher.is_match(artist)
 }
 
@@ -4759,7 +4849,7 @@ fn download_ranged_parallel(url: &str, content_length: u64, dest: &Path) -> Prov
     }
     if content_length > MAX_SINGLE_STREAM_BYTES {
         return Err(ProviderError::Http(
-            "Audio stream exceeds 64 MiB cache safety cap".to_string(),
+            "Audio stream exceeds 256 MiB cache safety cap".to_string(),
         ));
     }
     if content_length == 0 {
@@ -6518,5 +6608,33 @@ mod tests {
             find_youtube_account_id(&menu_uc).as_deref(),
             Some("uc1234567890abcdef")
         );
+    }
+
+    #[test]
+    fn low_quality_radio_candidate_filters_compilations_and_playlists() {
+        assert!(is_low_quality_radio_candidate(
+            "Bruno Mars | Top Songs 2024 Playlist",
+            "Music9910",
+            "Natalie",
+            0,
+        ));
+        assert!(is_low_quality_radio_candidate(
+            "Best Songs & Late Night Songs | Essential",
+            "Essential Mix 2026 JVKE",
+            "Natalie",
+            0,
+        ));
+        assert!(is_low_quality_radio_candidate(
+            "[Playlist] Era Moreugetda BIGBANG",
+            "BIGBANG",
+            "Natalie",
+            0,
+        ));
+        assert!(!is_low_quality_radio_candidate(
+            "Talking to the Moon",
+            "Bruno Mars",
+            "Natalie",
+            217_000,
+        ));
     }
 }

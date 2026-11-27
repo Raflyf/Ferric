@@ -127,6 +127,7 @@ pub struct HomeSnapshot {
     pub stations: Vec<StationCardSnapshot>,
     pub shelves: Vec<HomeShelfSnapshot>,
     pub is_loading: bool,
+    pub is_loading_more: bool,
 }
 
 #[derive(Debug, Clone, Default)]

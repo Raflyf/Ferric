@@ -35,6 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -71,8 +72,8 @@ private val UI_FONTS = listOf(
 )
 
 private val PLAYER_LAYOUTS = listOf(
-    "liquid_glass" to "Liquid Glass",
     "full_bleed" to "Full-Bleed",
+    "liquid_glass" to "Liquid Glass",
     "standard" to "Standard",
 )
 
@@ -83,26 +84,30 @@ fun ThemeStudioSheet(
     onDismiss: () -> Unit,
     onApplyPreset: (String) -> Unit,
     onUpdateTheme: (FfiThemeConfig) -> Unit,
+    onPreviewTheme: (FfiThemeConfig) -> Unit = onUpdateTheme,
     onImportThemeJson: () -> Unit,
     onExportThemeJson: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var draftOpacity by remember(themeConfig?.acrylicOpacity) {
-        mutableFloatStateOf((themeConfig?.acrylicOpacity ?: 0.62f).coerceIn(0.25f, 0.92f))
+        mutableFloatStateOf((themeConfig?.acrylicOpacity ?: 0.62f).coerceIn(0.15f, 0.95f))
     }
     var draftRadius by remember(themeConfig?.cornerRadiusPx) {
-        mutableFloatStateOf((themeConfig?.cornerRadiusPx ?: 20f).coerceIn(8f, 24f))
+        mutableFloatStateOf((themeConfig?.cornerRadiusPx ?: 20f).coerceIn(0f, 28f))
     }
     LaunchedEffect(themeConfig?.acrylicOpacity) {
-        if (themeConfig != null) draftOpacity = themeConfig.acrylicOpacity.coerceIn(0.25f, 0.92f)
+        if (themeConfig != null) draftOpacity = themeConfig.acrylicOpacity.coerceIn(0.15f, 0.95f)
     }
     LaunchedEffect(themeConfig?.cornerRadiusPx) {
-        if (themeConfig != null) draftRadius = themeConfig.cornerRadiusPx.coerceIn(8f, 24f)
+        if (themeConfig != null) draftRadius = themeConfig.cornerRadiusPx.coerceIn(0f, 28f)
     }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = palette.surface,
+        sheetState = sheetState,
+        containerColor = palette.surface.copy(alpha = if (palette.isLiquidGlass) (palette.glassOpacity + 0.14f).coerceIn(0.45f, 0.96f) else 1f),
+        scrimColor = Color.Black.copy(alpha = 0.24f),
     ) {
         Column(
             modifier = Modifier
@@ -122,7 +127,7 @@ fun ThemeStudioSheet(
                 items(THEME_PRESETS, key = { it.name }) { preset ->
                     val selected = themeConfig?.name.equals(preset.name, ignoreCase = true)
                     Surface(
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(palette.cornerRadiusDp),
                         color = palette.elevated,
                         border = BorderStroke(
                             width = if (selected) 2.dp else 1.dp,
@@ -209,16 +214,19 @@ fun ThemeStudioSheet(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text("Glass Frost Opacity", color = palette.textPrimary)
+                    Text("Glass Frost Opacity", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                     Text("${(draftOpacity * 100).toInt()}%", color = palette.accent, style = MaterialTheme.typography.labelSmall)
                 }
                 Slider(
                     value = draftOpacity,
-                    onValueChange = { draftOpacity = it },
+                    onValueChange = { next ->
+                        draftOpacity = next
+                        onPreviewTheme(themeConfig.copy(acrylicOpacity = next))
+                    },
                     onValueChangeFinished = {
                         onUpdateTheme(themeConfig.copy(acrylicOpacity = draftOpacity))
                     },
-                    valueRange = 0.25f..0.92f,
+                    valueRange = 0.15f..0.95f,
                     colors = SliderDefaults.colors(
                         thumbColor = palette.accent,
                         activeTrackColor = palette.accent,
@@ -230,22 +238,63 @@ fun ThemeStudioSheet(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text("Card Corner Radius", color = palette.textPrimary)
+                    Text("Card Corner Radius", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                     Text("${draftRadius.toInt()} dp", color = palette.accent, style = MaterialTheme.typography.labelSmall)
                 }
                 Slider(
                     value = draftRadius,
-                    onValueChange = { draftRadius = it },
+                    onValueChange = { next ->
+                        draftRadius = next
+                        onPreviewTheme(themeConfig.copy(cornerRadiusPx = next))
+                    },
                     onValueChangeFinished = {
                         onUpdateTheme(themeConfig.copy(cornerRadiusPx = draftRadius))
                     },
-                    valueRange = 8f..24f,
+                    valueRange = 0f..28f,
                     colors = SliderDefaults.colors(
                         thumbColor = palette.accent,
                         activeTrackColor = palette.accent,
                         inactiveTrackColor = palette.border,
                     ),
                 )
+
+                // Live tactile preview reflecting active Font, Corner Radius, Accent, and Frost Opacity
+                Surface(
+                    shape = RoundedCornerShape(draftRadius.dp),
+                    color = palette.glassTint.copy(alpha = (draftOpacity * 0.90f).coerceIn(0.14f, 0.92f)),
+                    border = BorderStroke(1.5.dp, palette.accent.copy(alpha = 0.75f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Live Surface Preview",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = palette.textPrimary,
+                            )
+                            Text(
+                                text = "${themeConfig.fontFamily} · ${draftRadius.toInt()}dp radius · ${(draftOpacity * 100).toInt()}% frost",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = palette.textSecondary,
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape((draftRadius * 0.7f).coerceIn(0f, 18f).dp),
+                            color = palette.accent,
+                        ) {
+                            Text(
+                                text = if (themeConfig.editorialMode) "Serif" else "Sans",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = Color.Black,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -289,7 +338,7 @@ private fun ThemeToggleRow(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = palette.textPrimary)
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = palette.textPrimary)
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,

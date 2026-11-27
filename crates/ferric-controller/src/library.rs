@@ -1032,9 +1032,9 @@ impl FerricController {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.queue.insert_play_next(track.clone());
             if st.queue.current().is_some() {
-                st.queue.peek_upcoming(50).into_iter().cloned().collect()
+                st.queue.peek_upcoming(250).into_iter().cloned().collect()
             } else {
-                st.queue.tracks().iter().take(50).cloned().collect()
+                st.queue.tracks().iter().take(250).cloned().collect()
             }
         };
         self.queue_upcoming_deck_b();
@@ -1047,9 +1047,9 @@ impl FerricController {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.queue.append_single_to_end(track.clone());
             if st.queue.current().is_some() {
-                st.queue.peek_upcoming(50).into_iter().cloned().collect()
+                st.queue.peek_upcoming(250).into_iter().cloned().collect()
             } else {
-                st.queue.tracks().iter().take(50).cloned().collect()
+                st.queue.tracks().iter().take(250).cloned().collect()
             }
         };
         self.queue_upcoming_deck_b();
@@ -1064,7 +1064,7 @@ impl FerricController {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let next_t = st.queue.jump_to_upcoming(offset).cloned();
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
-            let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
+            let upcoming: Vec<Track> = st.queue.peek_upcoming(250).into_iter().cloned().collect();
             (next_t, upcoming, st.resolve_gen)
         };
         self.sink.on_now_playing(target.clone());
@@ -1080,7 +1080,7 @@ impl FerricController {
         let (moved, up_next) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let ok = st.queue.move_upcoming_up(offset);
-            let list: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
+            let list: Vec<Track> = st.queue.peek_upcoming(250).into_iter().cloned().collect();
             (ok, list)
         };
         if moved {
@@ -1098,7 +1098,7 @@ impl FerricController {
         let (removed, up_next) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let ok = st.queue.remove_upcoming(offset).is_some();
-            let list: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
+            let list: Vec<Track> = st.queue.peek_upcoming(250).into_iter().cloned().collect();
             (ok, list)
         };
         if removed {

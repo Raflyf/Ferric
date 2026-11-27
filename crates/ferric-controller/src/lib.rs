@@ -23,10 +23,13 @@ use ferric_core::queue::PlayQueue;
 use ferric_core::theme::ThemeConfig;
 use ferric_providers::subsonic::{SubsonicCredentials, download_and_cache_subsonic_stream};
 use ferric_providers::ytmusic::{
-    RecommendedStation, resolve_and_cache_audio_stream_with_quality,
-    resolve_best_video_id_for_track,
+    MusicLocale, RecommendedStation, detect_track_locale, fetch_radio_up_next_for_track,
+    is_low_quality_radio_candidate, is_same_song_variant, normalize_core_title, primary_artist_key,
+    resolve_and_cache_audio_stream_with_quality, resolve_best_video_id_for_track,
 };
-use std::collections::HashSet;
+
+const UP_NEXT_EMIT_LIMIT: usize = 250;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -89,16 +92,21 @@ struct ControllerState {
     home_excluded_cards: HashSet<String>,
     home_excluded_artists: HashSet<String>,
     station_rotation_epoch: usize,
+    home_more_cycle: usize,
+    is_loading_more_home: bool,
     home_gen: u64,
     search_gen: u64,
     detail_gen: u64,
     prefetch_gen: u64,
+    extend_queue_gen: u64,
+    is_extending_queue: bool,
     lyrics_gen: u64,
     video_gen: u64,
     lyrics_offset_ms: i64,
     lyrics_cache: LyricsSnapshot,
     pending_handoff_seek_ms: Option<u64>,
     paused_while_resolving: bool,
+    last_emitted_idle: bool,
     sleep_timer_end: Option<Instant>,
     last_tick_at: Option<Instant>,
     connect_sync_ticks: u8,
@@ -187,16 +195,21 @@ impl FerricController {
                 home_excluded_cards: HashSet::new(),
                 home_excluded_artists: HashSet::new(),
                 station_rotation_epoch: 0,
+                home_more_cycle: 0,
+                is_loading_more_home: false,
                 home_gen: 0,
                 search_gen: 0,
                 detail_gen: 0,
                 prefetch_gen: 0,
+                extend_queue_gen: 0,
+                is_extending_queue: false,
                 lyrics_gen: 0,
                 video_gen: 0,
                 lyrics_offset_ms: 0,
                 lyrics_cache: LyricsSnapshot::default(),
                 pending_handoff_seek_ms: None,
                 paused_while_resolving: false,
+                last_emitted_idle: false,
                 sleep_timer_end: None,
                 last_tick_at: None,
                 connect_sync_ticks: 0,
@@ -356,15 +369,27 @@ impl FerricController {
         self.ensure_audio_started()?;
         let clamped_idx = start_index.min(tracks.len() - 1);
         let current_seq = self.telemetry().track_finished_seq;
-        let (current, up_next, gen_id) = {
+        let (current, up_next, gen_id, should_auto_extend) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.queue.set_tracks(tracks, Some(clamped_idx));
             st.queue_context = context;
             st.last_finished_seq = current_seq;
             st.paused_while_resolving = false;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
+            st.extend_queue_gen = st.extend_queue_gen.wrapping_add(1);
+            st.is_extending_queue = false;
             let cur = st.queue.current().cloned();
-            let next_list: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
+            let next_list: Vec<Track> = st
+                .queue
+                .peek_upcoming(UP_NEXT_EMIT_LIMIT)
+                .into_iter()
+                .cloned()
+                .collect();
+            let auto_ext = next_list.len() < 8
+                && st.queue.repeat != RepeatMode::All
+                && cur.as_ref().is_some_and(|t| {
+                    t.source != TrackSource::Local || t.youtube_video_id.is_some()
+                });
             if let Some(t) = &cur {
                 st.play_tracker = Some(ActivePlayTracker {
                     track_id: t.id.clone(),
@@ -374,7 +399,7 @@ impl FerricController {
                     logged: false,
                 });
             }
-            (cur, next_list, st.resolve_gen)
+            (cur, next_list, st.resolve_gen, auto_ext)
         };
 
         self.sink.on_now_playing(current.clone());
@@ -382,6 +407,9 @@ impl FerricController {
 
         if let Some(track) = current {
             self.dispatch_track_playback(&track, gen_id)?;
+        }
+        if should_auto_extend {
+            let _ = self.extend_queue_up_next();
         }
         self.push_connect_playback_snapshot();
         self.wake_monitor();
@@ -755,13 +783,23 @@ impl FerricController {
     pub(crate) fn next_local_only(self: &Arc<Self>) -> ControllerResult<()> {
         self.ensure_audio_started()?;
         let current_seq = self.telemetry().track_finished_seq;
-        let (next_track, up_next, gen_id) = {
+        let (next_track, up_next, gen_id, should_extend) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let next_t = st.queue.next_track_manual().cloned();
             st.last_finished_seq = current_seq;
             st.paused_while_resolving = false;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
-            let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
+            let upcoming: Vec<Track> = st
+                .queue
+                .peek_upcoming(UP_NEXT_EMIT_LIMIT)
+                .into_iter()
+                .cloned()
+                .collect();
+            let auto_ext = upcoming.len() <= 5
+                && st.queue.repeat != RepeatMode::All
+                && next_t.as_ref().is_some_and(|t| {
+                    t.source != TrackSource::Local || t.youtube_video_id.is_some()
+                });
             if let Some(t) = &next_t {
                 st.play_tracker = Some(ActivePlayTracker {
                     track_id: t.id.clone(),
@@ -771,16 +809,232 @@ impl FerricController {
                     logged: false,
                 });
             }
-            (next_t, upcoming, st.resolve_gen)
+            (next_t, upcoming, st.resolve_gen, auto_ext)
         };
         self.sink.on_now_playing(next_track.clone());
         self.sink.on_queue_changed(up_next);
         if let Some(t) = next_track {
             self.dispatch_track_playback(&t, gen_id)?;
         }
+        if should_extend {
+            let _ = self.extend_queue_up_next();
+        }
         self.push_connect_playback_snapshot();
         self.wake_monitor();
         Ok(())
+    }
+
+    /// Halt playback, clear the active queue & session tracker, and dismiss Now Playing UI.
+    pub fn stop_playback(&self) {
+        self.send_audio(EngineCommand::Pause);
+        self.send_audio(EngineCommand::QueueNext(None));
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.resolve_gen = st.resolve_gen.wrapping_add(1);
+            st.prefetch_gen = st.prefetch_gen.wrapping_add(1);
+            st.extend_queue_gen = st.extend_queue_gen.wrapping_add(1);
+            st.is_extending_queue = false;
+            st.paused_while_resolving = true;
+            st.pending_handoff_seek_ms = None;
+            st.play_tracker = None;
+            st.queue.set_tracks(Vec::new(), None);
+            st.queue_context.clear();
+        }
+        self.sink.on_now_playing(None);
+        self.sink.on_queue_changed(Vec::new());
+        self.push_connect_playback_snapshot();
+        self.wake_monitor();
+    }
+
+    /// Extend the active Up Next queue using Desktop Anchor + Horizon triangulation combined with
+    /// Spotify-style cohesive sequencing (80% cohesive multi-seed radio + 20% affinity library mix,
+    /// strict 3-slot artist cooldown ring, normalized title deduplication, and album de-clumping).
+    pub fn extend_queue_up_next(self: &Arc<Self>) -> bool {
+        let (
+            anchor_seed,
+            horizon_seed,
+            seed_locale,
+            session,
+            existing_ids,
+            existing_cores,
+            tail_artists,
+            tail_album,
+            top_artist_norms,
+            library_pool,
+            req_gen,
+        ) = {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if st.is_extending_queue {
+                return false;
+            }
+            let upcoming: Vec<Track> = st
+                .queue
+                .peek_upcoming(UP_NEXT_EMIT_LIMIT)
+                .into_iter()
+                .cloned()
+                .collect();
+            let cur = st.queue.current().cloned();
+            let tail = upcoming
+                .last()
+                .cloned()
+                .or_else(|| st.queue.tracks().last().cloned());
+            // Anchor on currently playing song when available so Up Next never drifts off-vibe;
+            // bridge smoothly with the tail song when its artist differs.
+            let Some(anchor) = cur.clone().or_else(|| tail.clone()) else {
+                return false;
+            };
+            let horizon = tail.filter(|t| {
+                t.id != anchor.id
+                    && primary_artist_key(&t.artist) != primary_artist_key(&anchor.artist)
+            });
+            let locale = detect_track_locale(&anchor.title, &anchor.artist, &anchor.album);
+
+            let q_tracks = st.queue.tracks();
+            let existing: HashSet<String> = q_tracks.iter().map(|t| t.id.clone()).collect();
+            let cores: Vec<String> = q_tracks
+                .iter()
+                .rev()
+                .take(40)
+                .map(|t| normalize_core_title(&t.title))
+                .filter(|c| !c.is_empty())
+                .collect();
+            let recent_tail_artists: Vec<String> = upcoming
+                .iter()
+                .rev()
+                .take(3)
+                .chain(cur.iter())
+                .map(|t| primary_artist_key(&t.artist))
+                .filter(|a| !a.is_empty())
+                .collect();
+            let last_alb = upcoming
+                .last()
+                .or(cur.as_ref())
+                .map(|t| t.album.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+
+            let mut top_art_scores: Vec<(&String, u32)> = st
+                .session
+                .artist_play_counts
+                .iter()
+                .map(|(k, &v)| (k, v))
+                .collect();
+            top_art_scores.sort_by_key(|a| std::cmp::Reverse(a.1));
+            let top_artists: HashSet<String> = top_art_scores
+                .into_iter()
+                .take(32)
+                .map(|(a, _)| primary_artist_key(a))
+                .filter(|a| !a.is_empty())
+                .collect();
+
+            let lib = st.db.list_tracks("").unwrap_or_default();
+            st.extend_queue_gen = st.extend_queue_gen.wrapping_add(1);
+            st.is_extending_queue = true;
+            (
+                anchor,
+                horizon,
+                locale,
+                active_ytm_session(&st.accounts),
+                existing,
+                cores,
+                recent_tail_artists,
+                last_alb,
+                top_artists,
+                lib,
+                st.extend_queue_gen,
+            )
+        };
+
+        let this = Arc::clone(self);
+        let spawn_res = thread::Builder::new()
+            .name("ferric-queue-extend".to_string())
+            .spawn(move || {
+                let mut radio_pools: Vec<Vec<Track>> = Vec::with_capacity(2);
+                for seed_opt in [Some(anchor_seed.clone()), horizon_seed] {
+                    let Some(candidate) = seed_opt else {
+                        continue;
+                    };
+                    let vid = candidate
+                        .youtube_video_id
+                        .clone()
+                        .or_else(|| {
+                            candidate
+                                .id
+                                .strip_prefix("yt:video:")
+                                .map(ToOwned::to_owned)
+                        })
+                        .or_else(|| {
+                            resolve_best_video_id_for_track(
+                                &session,
+                                &candidate.artist,
+                                &candidate.title,
+                            )
+                            .ok()
+                            .flatten()
+                        });
+                    if let Some(video_id) = vid
+                        && let Ok(batch) = fetch_radio_up_next_for_track(
+                            &session,
+                            &video_id,
+                            &candidate.title,
+                            &candidate.artist,
+                            &candidate.album,
+                            28,
+                            true,
+                        )
+                        && !batch.is_empty()
+                    {
+                        radio_pools.push(batch);
+                    }
+                }
+
+                let sequenced = sequence_spotify_up_next(
+                    &radio_pools,
+                    library_pool,
+                    seed_locale,
+                    &anchor_seed.title,
+                    &existing_ids,
+                    &existing_cores,
+                    &tail_artists,
+                    &tail_album,
+                    &top_artist_norms,
+                    28,
+                );
+
+                let appended_upcoming = {
+                    let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
+                    let valid_gen = st.extend_queue_gen == req_gen;
+                    st.is_extending_queue = false;
+                    if !valid_gen || st.queue.is_empty() || sequenced.is_empty() {
+                        None
+                    } else {
+                        let added = st.queue.append_tracks(sequenced);
+                        if added > 0 {
+                            Some(
+                                st.queue
+                                    .peek_upcoming(UP_NEXT_EMIT_LIMIT)
+                                    .into_iter()
+                                    .cloned()
+                                    .collect::<Vec<Track>>(),
+                            )
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                if let Some(upcoming) = appended_upcoming {
+                    this.queue_upcoming_deck_b();
+                    this.sink.on_queue_changed(upcoming);
+                    this.push_connect_playback_snapshot();
+                }
+            });
+
+        if spawn_res.is_err() {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.is_extending_queue = false;
+            return false;
+        }
+        true
     }
 
     pub fn prev(self: &Arc<Self>) -> ControllerResult<()> {
@@ -805,7 +1059,12 @@ impl FerricController {
             st.last_finished_seq = current_seq;
             st.paused_while_resolving = false;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
-            let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
+            let upcoming: Vec<Track> = st
+                .queue
+                .peek_upcoming(UP_NEXT_EMIT_LIMIT)
+                .into_iter()
+                .cloned()
+                .collect();
             if let Some(t) = &prev_t {
                 st.play_tracker = Some(ActivePlayTracker {
                     track_id: t.id.clone(),
@@ -863,7 +1122,12 @@ impl FerricController {
             let next_val = !st.queue.shuffle;
             st.queue.set_shuffle(next_val);
             st.session.shuffle = next_val;
-            let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
+            let upcoming: Vec<Track> = st
+                .queue
+                .peek_upcoming(UP_NEXT_EMIT_LIMIT)
+                .into_iter()
+                .cloned()
+                .collect();
             (next_val, upcoming)
         };
         if self.is_controlling_remote() {
@@ -883,7 +1147,12 @@ impl FerricController {
             let next_mode = st.queue.repeat.next();
             st.queue.repeat = next_mode;
             st.session.repeat = next_mode;
-            let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
+            let upcoming: Vec<Track> = st
+                .queue
+                .peek_upcoming(UP_NEXT_EMIT_LIMIT)
+                .into_iter()
+                .cloned()
+                .collect();
             (next_mode, upcoming)
         };
         if self.is_controlling_remote() {
@@ -1047,6 +1316,7 @@ impl FerricController {
         let snap = self.telemetry();
         let mut track_changed: Option<(Option<Track>, Vec<Track>, bool, u64)> = None;
         let mut sleep_expired = false;
+        let emit_telemetry;
 
         {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -1099,8 +1369,12 @@ impl FerricController {
                 st.last_finished_seq = snap.track_finished_seq;
                 let next_t = st.queue.next_track().cloned();
                 st.resolve_gen = st.resolve_gen.wrapping_add(1);
-                let upcoming: Vec<Track> =
-                    st.queue.peek_upcoming(50).into_iter().cloned().collect();
+                let upcoming: Vec<Track> = st
+                    .queue
+                    .peek_upcoming(UP_NEXT_EMIT_LIMIT)
+                    .into_iter()
+                    .cloned()
+                    .collect();
                 if let Some(t) = &next_t {
                     st.play_tracker = Some(ActivePlayTracker {
                         track_id: t.id.clone(),
@@ -1114,6 +1388,17 @@ impl FerricController {
                 }
                 track_changed = Some((next_t, upcoming, snap.auto_transitioned, st.resolve_gen));
             }
+
+            // Avoid redundant JNI callbacks every 5s while playback is idle/paused.
+            if snap.is_playing || track_changed.is_some() || sleep_expired {
+                st.last_emitted_idle = false;
+                emit_telemetry = true;
+            } else if !st.last_emitted_idle {
+                st.last_emitted_idle = true;
+                emit_telemetry = true;
+            } else {
+                emit_telemetry = false;
+            }
         }
 
         if sleep_expired {
@@ -1122,9 +1407,15 @@ impl FerricController {
                 .on_toast("Sleep timer finished; playback paused".to_string());
         }
 
-        self.sink.on_telemetry(snap);
+        if emit_telemetry {
+            self.sink.on_telemetry(snap);
+        }
 
         if let Some((next_track, up_next, auto_transitioned, gen_id)) = track_changed {
+            let should_extend = up_next.len() <= 5
+                && next_track.as_ref().is_some_and(|t| {
+                    t.source != TrackSource::Local || t.youtube_video_id.is_some()
+                });
             self.sink.on_now_playing(next_track.clone());
             self.sink.on_queue_changed(up_next);
             if auto_transitioned {
@@ -1132,6 +1423,9 @@ impl FerricController {
                 self.prefetch_upcoming_online_track();
             } else if let Some(t) = next_track {
                 let _ = self.dispatch_track_playback(&t, gen_id);
+            }
+            if should_extend {
+                let _ = self.extend_queue_up_next();
             }
             self.push_connect_playback_snapshot();
         } else if snap.is_playing {
@@ -1206,6 +1500,289 @@ impl Drop for FerricController {
             let _ = handle.join();
         }
     }
+}
+
+/// Score and sequence Up Next candidates using Spotify-style blend (80% cohesive radio
+/// discovery + 20% personal affinity mix) and strict 3-slot artist cooldown separation.
+#[allow(clippy::too_many_arguments)]
+fn sequence_spotify_up_next(
+    radio_pools: &[Vec<Track>],
+    library_pool: Vec<Track>,
+    seed_locale: MusicLocale,
+    seed_title: &str,
+    existing_ids: &HashSet<String>,
+    existing_cores: &[String],
+    tail_artists: &[String],
+    tail_album: &str,
+    top_artist_norms: &HashSet<String>,
+    limit: usize,
+) -> Vec<Track> {
+    let seed_core = normalize_core_title(seed_title);
+    let mut seen_ids: HashSet<String> = HashSet::with_capacity(64);
+    let mut seen_cores: Vec<String> = Vec::with_capacity(64);
+
+    struct RankedCand {
+        track: Track,
+        artist_key: String,
+        album_low: String,
+        score: i32,
+        hits: usize,
+        from_affinity: bool,
+    }
+
+    let mut by_id: HashMap<String, RankedCand> = HashMap::with_capacity(64);
+
+    let is_duplicate_variant = |core: &str, extras: &[String]| -> bool {
+        if core.is_empty() {
+            return false;
+        }
+        if is_same_song_variant(&seed_core, core) {
+            return true;
+        }
+        existing_cores
+            .iter()
+            .chain(extras.iter())
+            .any(|ec| is_same_song_variant(ec, core))
+    };
+
+    for (pool_idx, pool) in radio_pools.iter().enumerate() {
+        let mut seen_in_pool: HashSet<&str> = HashSet::with_capacity(pool.len());
+        for (rank, t) in pool.iter().enumerate() {
+            if existing_ids.contains(&t.id)
+                || !seen_in_pool.insert(t.id.as_str())
+                || is_low_quality_radio_candidate(&t.title, &t.artist, seed_title, t.duration_ms)
+            {
+                continue;
+            }
+            let cand_core = normalize_core_title(&t.title);
+            let cand_locale = detect_track_locale(&t.title, &t.artist, &t.album);
+            let artist_key = primary_artist_key(&t.artist);
+            let locale_score = if cand_locale == seed_locale {
+                24
+            } else if seed_locale == MusicLocale::GlobalEn && cand_locale == MusicLocale::Indonesian
+            {
+                -42
+            } else if cand_locale == MusicLocale::GlobalEn {
+                8
+            } else {
+                -6
+            };
+            let rank_score = 32_i32.saturating_sub(rank as i32).max(4);
+            let affinity_score = if top_artist_norms.contains(&artist_key) {
+                14
+            } else {
+                0
+            } + if t.liked { 10 } else { 0 };
+            let anchor_bonus = if pool_idx == 0 { 10 } else { 4 };
+
+            let entry = by_id.entry(t.id.clone()).or_insert_with(|| RankedCand {
+                track: t.clone(),
+                artist_key,
+                album_low: t.album.trim().to_ascii_lowercase(),
+                score: fastrand::i32(-6..=8),
+                hits: 0,
+                from_affinity: false,
+            });
+            entry.hits += 1;
+            let consensus = if entry.hits >= 2 { 22 } else { 0 };
+            entry.score += rank_score + locale_score + affinity_score + anchor_bonus + consensus;
+            let _ = cand_core;
+        }
+    }
+
+    // Inject Spotify-style personal affinity bridges (~20% mix) from unseen library tracks
+    let mut lib_candidates: Vec<(i32, Track)> = Vec::with_capacity(32);
+    for t in library_pool {
+        if existing_ids.contains(&t.id)
+            || by_id.contains_key(&t.id)
+            || is_low_quality_radio_candidate(&t.title, &t.artist, seed_title, t.duration_ms)
+        {
+            continue;
+        }
+        let loc = detect_track_locale(&t.title, &t.artist, &t.album);
+        if seed_locale == MusicLocale::GlobalEn && loc == MusicLocale::Indonesian && !t.liked {
+            continue;
+        }
+        let ak = primary_artist_key(&t.artist);
+        let s = if t.liked { 26 } else { 8 }
+            + if loc == seed_locale { 22 } else { 0 }
+            + if top_artist_norms.contains(&ak) {
+                16
+            } else {
+                0
+            }
+            + fastrand::i32(0..=14);
+        lib_candidates.push((s, t));
+    }
+    lib_candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
+    for (score, t) in lib_candidates.into_iter().take(12) {
+        let ak = primary_artist_key(&t.artist);
+        let alb = t.album.trim().to_ascii_lowercase();
+        by_id.insert(
+            t.id.clone(),
+            RankedCand {
+                track: t,
+                artist_key: ak,
+                album_low: alb,
+                score,
+                hits: 1,
+                from_affinity: true,
+            },
+        );
+    }
+
+    let mut radio_bucket: Vec<RankedCand> = Vec::with_capacity(by_id.len());
+    let mut affinity_bucket: Vec<RankedCand> = Vec::with_capacity(12);
+    for c in by_id.into_values() {
+        if c.from_affinity {
+            affinity_bucket.push(c);
+        } else {
+            radio_bucket.push(c);
+        }
+    }
+    radio_bucket.sort_by_key(|c| std::cmp::Reverse(c.score));
+    affinity_bucket.sort_by_key(|c| std::cmp::Reverse(c.score));
+
+    let mut artist_window: VecDeque<String> = VecDeque::with_capacity(4);
+    for a in tail_artists.iter().rev().take(3) {
+        artist_window.push_back(a.clone());
+    }
+    let mut prev_album = tail_album.to_string();
+    let mut out = Vec::with_capacity(limit);
+
+    let pop_next_coherent = |bucket: &mut Vec<RankedCand>,
+                             window: &VecDeque<String>,
+                             prev_alb: &str,
+                             seen_id_set: &HashSet<String>,
+                             seen_core_list: &[String],
+                             strict_cooldown: usize|
+     -> Option<RankedCand> {
+        let idx = bucket.iter().position(|c| {
+            if seen_id_set.contains(&c.track.id) {
+                return false;
+            }
+            let core = normalize_core_title(&c.track.title);
+            if is_duplicate_variant(&core, seen_core_list) {
+                return false;
+            }
+            let cooldown_violation = !c.artist_key.is_empty()
+                && window
+                    .iter()
+                    .rev()
+                    .take(strict_cooldown)
+                    .any(|w| *w == c.artist_key);
+            if cooldown_violation {
+                return false;
+            }
+            if strict_cooldown >= 2
+                && !prev_alb.is_empty()
+                && !c.album_low.is_empty()
+                && c.album_low == prev_alb
+            {
+                return false;
+            }
+            true
+        });
+        idx.map(|i| bucket.remove(i))
+    };
+
+    // Spotify cadence: 4 radio discovery tracks -> 1 affinity bridge track, respecting 3-artist cooldown.
+    let mut slot = 0usize;
+    while out.len() < limit && (!radio_bucket.is_empty() || !affinity_bucket.is_empty()) {
+        let prefer_affinity =
+            slot % 5 == 4 && !affinity_bucket.is_empty() && !radio_bucket.is_empty();
+        let picked = if prefer_affinity {
+            pop_next_coherent(
+                &mut affinity_bucket,
+                &artist_window,
+                &prev_album,
+                &seen_ids,
+                &seen_cores,
+                3,
+            )
+            .or_else(|| {
+                pop_next_coherent(
+                    &mut radio_bucket,
+                    &artist_window,
+                    &prev_album,
+                    &seen_ids,
+                    &seen_cores,
+                    3,
+                )
+            })
+        } else {
+            pop_next_coherent(
+                &mut radio_bucket,
+                &artist_window,
+                &prev_album,
+                &seen_ids,
+                &seen_cores,
+                3,
+            )
+            .or_else(|| {
+                pop_next_coherent(
+                    &mut affinity_bucket,
+                    &artist_window,
+                    &prev_album,
+                    &seen_ids,
+                    &seen_cores,
+                    3,
+                )
+            })
+            .or_else(|| {
+                pop_next_coherent(
+                    &mut radio_bucket,
+                    &artist_window,
+                    &prev_album,
+                    &seen_ids,
+                    &seen_cores,
+                    1,
+                )
+            })
+            .or_else(|| {
+                pop_next_coherent(
+                    &mut affinity_bucket,
+                    &artist_window,
+                    &prev_album,
+                    &seen_ids,
+                    &seen_cores,
+                    1,
+                )
+            })
+            .or_else(|| {
+                pop_next_coherent(
+                    &mut radio_bucket,
+                    &artist_window,
+                    &prev_album,
+                    &seen_ids,
+                    &seen_cores,
+                    0,
+                )
+            })
+        };
+
+        let Some(cand) = picked else {
+            break;
+        };
+        let core = normalize_core_title(&cand.track.title);
+        if !core.is_empty() {
+            seen_cores.push(core);
+        }
+        seen_ids.insert(cand.track.id.clone());
+        if !cand.artist_key.is_empty() {
+            if artist_window.len() >= 3 {
+                artist_window.pop_front();
+            }
+            artist_window.push_back(cand.artist_key);
+        }
+        if !cand.album_low.is_empty() {
+            prev_album = cand.album_low;
+        }
+        out.push(cand.track);
+        slot += 1;
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -1360,7 +1937,7 @@ mod tests {
 
         // Reopen on the same directory and verify persisted theme & stats survive restart.
         let ctrl2 = FerricController::new(cfg, sink).expect("reopen ctrl");
-        assert_eq!(ctrl2.get_theme().player_layout, "liquid_glass");
+        assert_eq!(ctrl2.get_theme().player_layout, "full_bleed");
         assert!(ctrl2.get_theme().editorial_mode);
         assert_eq!(ctrl2.get_listening_stats(0).expect("stats2").total_plays, 1);
         ctrl2.shutdown();
@@ -1460,8 +2037,93 @@ mod tests {
         assert_eq!(saved_q.track_count, 2);
         assert!(ctrl.copy_queue_tracklist().contains("Ferric Queue"));
         ctrl.clear_up_next();
+        ctrl.play_next(all_songs[0].clone());
+        ctrl.stop_playback();
+        assert!(ctrl.current_track().is_none());
+        assert!(ctrl.up_next(10).is_empty());
 
         ctrl.shutdown();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn spotify_up_next_sequencer_enforces_cooldown_variants_and_mix() {
+        let mk = |id: &str, title: &str, artist: &str, album: &str, liked: bool| Track {
+            id: id.to_string(),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: album.to_string(),
+            duration_ms: 210_000,
+            path: None,
+            source: TrackSource::YouTubeMusic,
+            codec: "OPUS".to_string(),
+            sample_rate: 48_000,
+            bit_depth: 16,
+            bitrate_kbps: 128,
+            isrc: None,
+            spotify_id: None,
+            youtube_video_id: Some(id.to_string()),
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked,
+        };
+
+        let radio_pool = vec![
+            mk("r0", "[Playlist] Long Mix 1 Hour", "Spammer", "Mix", false),
+            mk(
+                "r1",
+                "Glimpse of Us (Official Video)",
+                "Joji",
+                "Smithereens",
+                false,
+            ),
+            mk("r2", "Sanctuary", "Joji", "Nectar", false),
+            mk("r3", "Slow Dancing in the Dark", "Joji", "BALLADS 1", false),
+            mk("r4", "Attention", "Charlie Puth", "Voicenotes", false),
+            mk(
+                "r5",
+                "Espresso",
+                "Sabrina Carpenter",
+                "Short n' Sweet",
+                false,
+            ),
+            mk("r6", "Kill Bill", "SZA", "SOS", false),
+            mk("r7", "Die For You", "The Weeknd", "Starboy", false),
+        ];
+        let lib_pool = vec![
+            mk("l1", "Back to Friends", "sombr", "Singles", true),
+            mk("l2", "Glimpse of Us", "Joji", "Smithereens", true),
+        ];
+
+        let existing_ids: HashSet<String> = ["cur"].into_iter().map(String::from).collect();
+        let existing_cores = vec!["glimpse of us".to_string()];
+        let tail_artists = vec!["joji".to_string()];
+        let top_artists: HashSet<String> = ["sombr".to_string()].into_iter().collect();
+
+        let seq = sequence_spotify_up_next(
+            &[radio_pool],
+            lib_pool,
+            MusicLocale::GlobalEn,
+            "Glimpse of Us",
+            &existing_ids,
+            &existing_cores,
+            &tail_artists,
+            "",
+            &top_artists,
+            10,
+        );
+
+        assert!(!seq.iter().any(|t| t.title.contains("[Playlist]")));
+        assert!(!seq.iter().any(|t| t.id == "r1" || t.id == "l2"));
+        assert!(seq.iter().any(|t| t.id == "l1"));
+        for w in seq.windows(2) {
+            assert_ne!(
+                primary_artist_key(&w[0].artist),
+                primary_artist_key(&w[1].artist),
+                "consecutive tracks must enforce artist cooldown: {} vs {}",
+                w[0].artist,
+                w[1].artist
+            );
+        }
     }
 }

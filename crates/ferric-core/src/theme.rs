@@ -178,7 +178,7 @@ impl ThemeConfig {
             border_hex: "#282C3C".to_string(),
             corner_radius_px: 22.0,
             acrylic_opacity: 0.62,
-            player_layout: "liquid_glass".to_string(),
+            player_layout: "full_bleed".to_string(),
             ..Self::native_acrylic()
         }
     }
@@ -695,7 +695,7 @@ mod tests {
         let glass = ThemeConfig::liquid_glass();
         assert_eq!(glass.background_mode, BackgroundMode::NativeAcrylic);
         assert!(glass.acrylic_enabled);
-        assert_eq!(glass.player_layout, "liquid_glass");
+        assert_eq!(glass.player_layout, "full_bleed");
         assert_eq!(glass.font_family, "Inter");
         assert!(!glass.editorial_mode);
 

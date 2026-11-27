@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
@@ -69,18 +70,23 @@ fun rememberFerricBackdropState(): FerricBackdropState {
  * Captures the underlying scrollable surface into [backdrop] so sibling overlays above it can
  * render genuine optical Liquid Glass refraction over live scrolling content.
  */
-fun Modifier.ferricBackdropSource(backdrop: FerricBackdropState): Modifier =
+fun Modifier.ferricBackdropSource(
+    backdrop: FerricBackdropState,
+    enabled: Boolean = true,
+): Modifier =
     this
         .onGloballyPositioned { coords ->
-            backdrop.rootOffset = coords.positionInRoot()
+            if (enabled) backdrop.rootOffset = coords.positionInRoot()
         }
         .drawWithContent {
-            if (size.width >= 1f && size.height >= 1f) {
+            if (enabled && size.width >= 1f && size.height >= 1f) {
                 backdrop.graphicsLayer.record {
                     this@drawWithContent.drawContent()
                 }
                 backdrop.hasRecorded = true
                 drawLayer(backdrop.graphicsLayer)
+            } else if (!enabled) {
+                drawContent()
             } else {
                 drawContent()
             }
@@ -189,10 +195,15 @@ private class GlassCache {
     var lastSize: IntSize = IntSize.Zero
     var lastBlurPx: Float = -1f
     var lastRadiusPx: Float = -1f
+    var lastRefractionHeightPx: Float = -1f
+    var lastRefractionAmountPx: Float = -1f
     var lastLightMode: Boolean = false
     var lastDispersion: Float = -1f
     var lastAccent: Color = Color.Unspecified
-    var cachedEffect: androidx.compose.ui.graphics.RenderEffect? = null
+    var lastGlassOpacity: Float = -1f
+    var lastGlassTint: Color = Color.Unspecified
+    var cachedBlurEffect: androidx.compose.ui.graphics.RenderEffect? = null
+    var cachedRefractEffect: androidx.compose.ui.graphics.RenderEffect? = null
     var refractionShader: Any? = null
     var rimShader: Any? = null
     var cachedRimBrush: ShaderBrush? = null
@@ -203,11 +214,10 @@ private class GlassCache {
 
 @RequiresApi(Build.VERSION_CODES.S)
 private fun buildVibrancyEffect(isLight: Boolean): RenderEffect {
-    val sat = if (isLight) 1.24f else 1.42f
+    val sat = if (isLight) 1.24f else 1.40f
     val matrix = ColorMatrix().apply {
         setSaturation(sat)
     }
-    // Subtle contrast/luminance balance so refracted covers look luminous rather than grey.
     val gain = if (isLight) 1.04f else 1.08f
     val bias = if (isLight) 6f else 4f
     val lift = ColorMatrix(
@@ -222,17 +232,23 @@ private fun buildVibrancyEffect(isLight: Boolean): RenderEffect {
     return RenderEffect.createColorFilterEffect(ColorMatrixColorFilter(matrix))
 }
 
+@RequiresApi(Build.VERSION_CODES.S)
+private fun buildDecoupledBlurEffect(blurPx: Float, isLight: Boolean): androidx.compose.ui.graphics.RenderEffect {
+    val clampedBlur = blurPx.coerceIn(2f, 46f)
+    val blur = RenderEffect.createBlurEffect(clampedBlur, clampedBlur, Shader.TileMode.CLAMP)
+    val vibrancy = buildVibrancyEffect(isLight)
+    return RenderEffect.createChainEffect(blur, vibrancy).asComposeRenderEffect()
+}
+
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-private fun buildApi33LiquidGlassEffect(
+private fun buildDecoupledRefractionEffect(
     cache: GlassCache,
     widthPx: Float,
     heightPx: Float,
     radiusPx: Float,
-    blurPx: Float,
     refractionHeightPx: Float,
     refractionAmountPx: Float,
     dispersion: Float,
-    isLight: Boolean,
 ): androidx.compose.ui.graphics.RenderEffect {
     val shader = (cache.refractionShader as? RuntimeShader)
         ?: RuntimeShader(REFRACTION_DISPERSION_AGSL).also { cache.refractionShader = it }
@@ -247,16 +263,7 @@ private fun buildApi33LiquidGlassEffect(
     shader.setFloatUniform("refractionAmount", refractionAmountPx.coerceAtLeast(0f))
     shader.setFloatUniform("depthEffect", 1.0f)
     shader.setFloatUniform("chromaticAberration", dispersion.coerceIn(0f, 1.0f))
-
-    val vibrancy = buildVibrancyEffect(isLight)
-    val blur = RenderEffect.createBlurEffect(
-        blurPx.coerceAtLeast(1f),
-        blurPx.coerceAtLeast(1f),
-        Shader.TileMode.CLAMP,
-    )
-    val frosted = RenderEffect.createChainEffect(blur, vibrancy)
-    val refracted = RenderEffect.createRuntimeShaderEffect(shader, "content")
-    return RenderEffect.createChainEffect(refracted, frosted).asComposeRenderEffect()
+    return RenderEffect.createRuntimeShaderEffect(shader, "content").asComposeRenderEffect()
 }
 
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
@@ -324,18 +331,29 @@ fun Modifier.ferricLiquidGlass(
             .border(width = 1.dp, color = palette.border, shape = shape)
     }
 
+    val blurLayer = rememberGraphicsLayer()
     val glassLayer = rememberGraphicsLayer()
     val cache = remember { GlassCache() }
     val shape = RoundedCornerShape(cornerRadius)
+    val opacityNorm = palette.glassOpacity.coerceIn(0.15f, 0.95f)
     val effectiveTintAlpha = tintAlpha ?: if (palette.isLight) {
-        (palette.glassOpacity * 0.68f).coerceIn(0.46f, 0.72f)
+        (opacityNorm * 0.88f).coerceIn(0.12f, 0.88f)
     } else {
-        (palette.glassOpacity * 0.56f).coerceIn(0.30f, 0.56f)
+        (opacityNorm * 0.80f).coerceIn(0.08f, 0.80f)
     }
     val tintColor = if (palette.isLight) {
         Color.White.copy(alpha = effectiveTintAlpha)
     } else {
         palette.glassTint.copy(alpha = effectiveTintAlpha)
+    }
+    val sheenBrush = remember(palette.isLight) {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color.White.copy(alpha = if (palette.isLight) 0.34f else 0.12f),
+                Color.Transparent,
+                Color.Black.copy(alpha = if (palette.isLight) 0.04f else 0.14f),
+            ),
+        )
     }
     val fallbackRimBrush = remember(palette.isLight, palette.border) {
         Brush.linearGradient(
@@ -367,8 +385,15 @@ fun Modifier.ferricLiquidGlass(
                 return@drawWithContent
             }
             val intSize = IntSize(w.roundToInt().coerceAtLeast(1), h.roundToInt().coerceAtLeast(1))
+            val halfW = (intSize.width / 2).coerceAtLeast(1)
+            val halfH = (intSize.height / 2).coerceAtLeast(1)
+            val halfSize = IntSize(halfW, halfH)
             val radiusPx = min(cornerRadius.toPx(), min(w, h) * 0.5f)
-            val blurPx = blurRadius.toPx()
+            val opacityBlurScale = (0.35f + palette.glassOpacity.coerceIn(0.15f, 0.95f) * 1.15f)
+            val blurPx = (blurRadius.toPx() * opacityBlurScale).coerceIn(2f, 52f)
+            val halfBlurPx = (blurPx * 0.5f).coerceIn(1.5f, 26f)
+            val refHeightPx = refractionHeight.toPx()
+            val refAmountPx = refractionAmount.toPx()
 
             if (cache.cachedPathSize != size || cache.cachedPathRadius != radiusPx) {
                 cache.cachedPath.reset()
@@ -390,41 +415,42 @@ fun Modifier.ferricLiquidGlass(
                 val dx = cache.elementOffset.x - backdrop.rootOffset.x
                 val dy = cache.elementOffset.y - backdrop.rootOffset.y
 
-                val needsRebuild = cache.cachedEffect == null ||
+                val needsRebuild = cache.cachedBlurEffect == null ||
                     cache.lastSize != intSize ||
-                    cache.lastBlurPx != blurPx ||
+                    cache.lastBlurPx != halfBlurPx ||
                     cache.lastRadiusPx != radiusPx ||
+                    cache.lastRefractionHeightPx != refHeightPx ||
+                    cache.lastRefractionAmountPx != refAmountPx ||
                     cache.lastLightMode != palette.isLight ||
                     cache.lastDispersion != chromaticDispersion ||
-                    cache.lastAccent != palette.accent
+                    cache.lastAccent != palette.accent ||
+                    cache.lastGlassOpacity != palette.glassOpacity ||
+                    cache.lastGlassTint != palette.glassTint
 
                 if (needsRebuild) {
                     cache.lastSize = intSize
-                    cache.lastBlurPx = blurPx
+                    cache.lastBlurPx = halfBlurPx
                     cache.lastRadiusPx = radiusPx
+                    cache.lastRefractionHeightPx = refHeightPx
+                    cache.lastRefractionAmountPx = refAmountPx
                     cache.lastLightMode = palette.isLight
                     cache.lastDispersion = chromaticDispersion
                     cache.lastAccent = palette.accent
-                    cache.cachedEffect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        buildApi33LiquidGlassEffect(
+                    cache.lastGlassOpacity = palette.glassOpacity
+                    cache.lastGlassTint = palette.glassTint
+                    cache.cachedBlurEffect = buildDecoupledBlurEffect(halfBlurPx, palette.isLight)
+                    cache.cachedRefractEffect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && refAmountPx > 0.5f) {
+                        buildDecoupledRefractionEffect(
                             cache = cache,
                             widthPx = w,
                             heightPx = h,
                             radiusPx = radiusPx,
-                            blurPx = blurPx,
-                            refractionHeightPx = refractionHeight.toPx(),
-                            refractionAmountPx = refractionAmount.toPx(),
+                            refractionHeightPx = refHeightPx,
+                            refractionAmountPx = refAmountPx,
                             dispersion = chromaticDispersion,
-                            isLight = palette.isLight,
                         )
                     } else {
-                        val blur = RenderEffect.createBlurEffect(
-                            blurPx.coerceAtLeast(1f),
-                            blurPx.coerceAtLeast(1f),
-                            Shader.TileMode.CLAMP,
-                        )
-                        val vibrancy = buildVibrancyEffect(palette.isLight)
-                        RenderEffect.createChainEffect(blur, vibrancy).asComposeRenderEffect()
+                        null
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         buildApi33RimBrush(
@@ -438,28 +464,39 @@ fun Modifier.ferricLiquidGlass(
                     }
                 }
 
-                glassLayer.clip = true
-                glassLayer.renderEffect = cache.cachedEffect
-                glassLayer.record(size = intSize) {
-                    translate(left = -dx, top = -dy) {
-                        drawLayer(backdrop.graphicsLayer)
+                // Step 1: 0.5x downsampled Gaussian blur + vibrancy cuts GPU fill-rate & VRAM by 75%.
+                val scaleXUp = w / halfW.toFloat()
+                val scaleYUp = h / halfH.toFloat()
+                blurLayer.clip = true
+                blurLayer.renderEffect = cache.cachedBlurEffect
+                blurLayer.record(size = halfSize) {
+                    scale(scaleX = 0.5f, scaleY = 0.5f, pivot = Offset.Zero) {
+                        translate(left = -dx, top = -dy) {
+                            drawLayer(backdrop.graphicsLayer)
+                        }
                     }
                 }
 
                 clipPath(cache.cachedPath) {
-                    drawLayer(glassLayer)
-                    // Subtle optical wash for WCAG >= 4.5:1 legibility over vivid album covers.
+                    val refractFx = cache.cachedRefractEffect
+                    if (refractFx != null) {
+                        glassLayer.clip = true
+                        glassLayer.renderEffect = refractFx
+                        glassLayer.record(size = intSize) {
+                            scale(scaleX = scaleXUp, scaleY = scaleYUp, pivot = Offset.Zero) {
+                                drawLayer(blurLayer)
+                            }
+                        }
+                        drawLayer(glassLayer)
+                    } else {
+                        scale(scaleX = scaleXUp, scaleY = scaleYUp, pivot = Offset.Zero) {
+                            drawLayer(blurLayer)
+                        }
+                    }
+                    // Subtle optical wash scaled dynamically by Theme Studio Glass Frost Opacity.
                     drawRect(color = tintColor)
-                    // Delicate top inner sheen (iOS 26 liquid meniscus highlight).
-                    drawRect(
-                        brush = Brush.verticalGradient(
-                            colors = listOf(
-                                Color.White.copy(alpha = if (palette.isLight) 0.34f else 0.11f),
-                                Color.Transparent,
-                                Color.Black.copy(alpha = if (palette.isLight) 0.04f else 0.12f),
-                            ),
-                        ),
-                    )
+                    // Delicate cached inner sheen (zero per-frame brush allocation).
+                    drawRect(brush = sheenBrush)
                 }
             } else {
                 // API 28-30 or unrecorded fallback: clean frosted translucent surface.

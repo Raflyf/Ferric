@@ -155,9 +155,11 @@ fun SearchScreen(
         }
     }
     val searchPillBg = if (palette.isLight) {
-        palette.surface.copy(alpha = 0.94f)
+        palette.surface.copy(alpha = (palette.glassOpacity + 0.16f).coerceIn(0.40f, 0.96f))
+    } else if (palette.isLiquidGlass) {
+        palette.glassTint.copy(alpha = (palette.glassOpacity * 0.82f).coerceIn(0.10f, 0.85f))
     } else {
-        Color.White.copy(alpha = if (palette.isLiquidGlass) 0.10f else 0.08f)
+        Color.White.copy(alpha = (palette.glassOpacity * 0.22f).coerceIn(0.06f, 0.24f))
     }
 
     LazyColumn(
@@ -276,7 +278,7 @@ fun SearchScreen(
                                 .clip(RoundedCornerShape(999.dp))
                                 .background(
                                     if (selected) {
-                                        if (palette.isLight) palette.textPrimary else Color.White.copy(alpha = 0.16f)
+                                        palette.accent
                                     } else {
                                         Color.Transparent
                                     },
@@ -288,7 +290,7 @@ fun SearchScreen(
                                 text = scopeOpt.label,
                                 style = MaterialTheme.typography.labelLarge,
                                 color = if (selected) {
-                                    if (palette.isLight) Color.White else palette.textPrimary
+                                    Color.Black
                                 } else {
                                     palette.textSecondary
                                 },
@@ -376,7 +378,7 @@ fun SearchScreen(
                         Surface(
                             shape = RoundedCornerShape(999.dp),
                             color = if (selected) {
-                                if (palette.isLight) palette.textPrimary else Color.White
+                                palette.accent
                             } else {
                                 searchPillBg
                             },
@@ -386,7 +388,7 @@ fun SearchScreen(
                                 text = cat.label,
                                 style = MaterialTheme.typography.labelLarge,
                                 color = if (selected) {
-                                    if (palette.isLight) Color.White else Color.Black
+                                    Color.Black
                                 } else {
                                     palette.textPrimary
                                 },
@@ -449,6 +451,7 @@ fun SearchScreen(
                     )
                 }
                 items(BROWSE_GENRES.chunked(2), key = { pair -> "genre_${pair.first().title}" }) { pair ->
+                    val genreRadius = palette.cornerRadiusDp
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -458,7 +461,7 @@ fun SearchScreen(
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(78.dp)
-                                    .clip(RoundedCornerShape(16.dp))
+                                    .clip(RoundedCornerShape(genreRadius))
                                     .background(
                                         Brush.linearGradient(listOf(genre.startColor, genre.endColor)),
                                     )

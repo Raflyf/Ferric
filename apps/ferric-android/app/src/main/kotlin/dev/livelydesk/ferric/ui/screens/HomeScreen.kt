@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -37,7 +38,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,10 +48,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.size.Precision
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.TrackRow
@@ -95,6 +101,7 @@ fun HomeScreen(
     state: PlaybackUiState,
     listState: LazyListState = rememberLazyListState(),
     onRefresh: () -> Unit,
+    onLoadMoreHome: () -> Unit,
     onSelectMood: (Int?) -> Unit,
     onOpenConnect: () -> Unit,
     onOpenStats: () -> Unit,
@@ -114,13 +121,43 @@ fun HomeScreen(
     val palette = LocalFerricPalette.current
     val greeting = remember { timeGreeting() }
     val home = state.homeState
-    val quickPicks = if (home.quickPicks.isNotEmpty()) home.quickPicks else state.tracks.take(12)
+    val quickPicks = remember(home.quickPicks, state.tracks) {
+        if (home.quickPicks.isNotEmpty()) {
+            home.quickPicks
+        } else {
+            state.tracks
+                .filter { t ->
+                    !t.title.contains("[Playlist]", ignoreCase = true) &&
+                        !t.title.contains("[Full Album]", ignoreCase = true) &&
+                        !t.album.contains("watching", ignoreCase = true)
+                }
+                .take(24)
+        }
+    }
     val quickPickPages = remember(quickPicks) { quickPicks.chunked(4) }
     val screenWidthDp = LocalConfiguration.current.screenWidthDp.dp
     val quickPickColWidth = (screenWidthDp - 52.dp).coerceIn(272.dp, 360.dp)
     val activePeer = state.connectState.peers.firstOrNull { it.connected }
     val streakDays = state.listeningStats?.currentStreakDays?.toInt() ?: 0
     val latestTrack = state.recentTracks.firstOrNull() ?: state.currentTrack
+
+    // Endless pagination on scroll (mirrors Desktop Load More): triggers automatically near bottom.
+    LaunchedEffect(listState, home.shelves.size, home.isLoading, home.isLoadingMore) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            lastVisible to info.totalItemsCount
+        }.collect { (lastVisible, totalCount) ->
+            if (!home.isLoading &&
+                !home.isLoadingMore &&
+                home.shelves.size in 1..47 &&
+                totalCount > 2 &&
+                lastVisible >= totalCount - 2
+            ) {
+                onLoadMoreHome()
+            }
+        }
+    }
 
     // Build Spotify-style 2-column quick shortcuts when user has playlists/liked songs.
     val quickShortcuts = remember(state.playlists, state.likedTracks.size) {
@@ -591,6 +628,30 @@ fun HomeScreen(
                 }
             }
         }
+
+        if (home.isLoadingMore) {
+            item(key = "home_load_more_spinner") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = palette.accent,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "Loading more recommendations...",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = palette.textSecondary,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -622,12 +683,12 @@ private fun MoodPillChip(
 ) {
     val palette = LocalFerricPalette.current
     val bg = when {
-        selected -> if (palette.isLight) palette.textPrimary else Color.White
+        selected -> palette.accent
         palette.isLight -> palette.surface.copy(alpha = 0.92f)
-        else -> Color.White.copy(alpha = 0.10f)
+        else -> palette.glassTint.copy(alpha = (palette.glassOpacity * 0.80f).coerceIn(0.10f, 0.86f))
     }
     val fg = when {
-        selected -> if (palette.isLight) Color.White else Color.Black
+        selected -> Color.Black
         else -> palette.textPrimary
     }
     Surface(
@@ -650,15 +711,16 @@ private fun QuickShortcutCard(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
+    val cardRadius = (palette.cornerRadiusDp.value * 0.65f).coerceIn(0f, 18f).dp
     val bg = if (palette.isLight) {
-        palette.surface.copy(alpha = 0.92f)
+        palette.surface.copy(alpha = (palette.glassOpacity + 0.16f).coerceIn(0.35f, 0.98f))
     } else {
-        Color.White.copy(alpha = 0.08f)
+        palette.glassTint.copy(alpha = (palette.glassOpacity * 0.85f).coerceIn(0.10f, 0.88f))
     }
     Row(
         modifier = modifier
             .height(54.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(cardRadius))
             .background(bg)
             .clickable(onClick = tile.onClick),
         verticalAlignment = Alignment.CenterVertically,
@@ -708,6 +770,8 @@ private fun VisualGoToCell(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
+    val context = LocalContext.current
+    val cellRadius = palette.cornerRadiusDp
     Column(
         modifier = modifier
             .clickable(onClick = tile.onClick),
@@ -717,19 +781,26 @@ private fun VisualGoToCell(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(14.dp))
+                .clip(RoundedCornerShape(cellRadius))
                 .background(palette.elevated),
             contentAlignment = Alignment.Center,
         ) {
             if (!tile.thumbnailUrl.isNullOrBlank()) {
+                val req = remember(tile.thumbnailUrl) {
+                    ImageRequest.Builder(context)
+                        .data(tile.thumbnailUrl)
+                        .size(320, 320)
+                        .precision(Precision.INEXACT)
+                        .build()
+                }
                 AsyncImage(
-                    model = tile.thumbnailUrl,
+                    model = req,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                 )
             } else {
-                ArtworkThumb(url = null, size = 56.dp, cornerRadius = 12.dp)
+                ArtworkThumb(url = null, size = 56.dp, cornerRadius = cellRadius)
             }
         }
         Text(
@@ -748,6 +819,7 @@ private fun StationShowcaseCard(
     onClick: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
+    val cardRadius = palette.cornerRadiusDp
     Column(
         modifier = Modifier
             .width(164.dp)
@@ -757,13 +829,13 @@ private fun StationShowcaseCard(
         Box(
             modifier = Modifier
                 .size(164.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(cardRadius))
                 .background(palette.elevated),
         ) {
             ArtworkThumb(
                 url = station.thumbnailUrl,
                 size = 164.dp,
-                cornerRadius = 16.dp,
+                cornerRadius = cardRadius,
             )
             Box(
                 modifier = Modifier
@@ -833,6 +905,7 @@ private fun ShelfShowcaseCard(
 ) {
     val palette = LocalFerricPalette.current
     val isArtist = card.kind == FfiCardKind.ARTIST
+    val cardRadius = palette.cornerRadiusDp
     Column(
         modifier = Modifier
             .width(150.dp)
@@ -843,7 +916,7 @@ private fun ShelfShowcaseCard(
         ArtworkThumb(
             url = card.thumbnailUrl,
             size = 150.dp,
-            cornerRadius = if (isArtist) 75.dp else 14.dp,
+            cornerRadius = if (isArtist) 75.dp else cardRadius,
         )
         Column(
             horizontalAlignment = if (isArtist) Alignment.CenterHorizontally else Alignment.Start,

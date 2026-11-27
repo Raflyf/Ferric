@@ -151,7 +151,7 @@ fun LibraryScreen(
                     }
                     Surface(
                         shape = CircleShape,
-                        color = if (palette.isLight) palette.textPrimary else Color.White.copy(alpha = 0.14f),
+                        color = palette.accent,
                         modifier = Modifier
                             .size(40.dp)
                             .clickable { showCreateMenu = true },
@@ -160,7 +160,7 @@ fun LibraryScreen(
                             Icon(
                                 imageVector = Icons.Rounded.Add,
                                 contentDescription = "Add or import music",
-                                tint = if (palette.isLight) Color.White else palette.textPrimary,
+                                tint = Color.Black,
                                 modifier = Modifier.size(22.dp),
                             )
                         }
@@ -613,10 +613,11 @@ private fun CollectionRowItem(
     onClick: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
+    val itemRadius = (palette.cornerRadiusDp.value * 0.85f).coerceIn(0f, 24f).dp
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(itemRadius))
             .clickable(onClick = onClick)
             .padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -624,7 +625,7 @@ private fun CollectionRowItem(
         Box(
             modifier = Modifier
                 .size(54.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(itemRadius))
                 .background(Brush.linearGradient(gradient)),
             contentAlignment = Alignment.Center,
         ) {
@@ -701,9 +702,10 @@ private fun PlaylistGridCard(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
+    val cardRadius = palette.cornerRadiusDp
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(cardRadius))
             .clickable(onClick = onClick),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -711,12 +713,12 @@ private fun PlaylistGridCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(14.dp)),
+                .clip(RoundedCornerShape(cardRadius)),
         ) {
             ArtworkThumb(
                 url = thumbnailUrl,
                 size = 180.dp,
-                cornerRadius = 14.dp,
+                cornerRadius = cardRadius,
                 modifier = Modifier.fillMaxSize(),
             )
         }

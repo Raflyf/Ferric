@@ -1,8 +1,10 @@
 package dev.livelydesk.ferric.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
@@ -26,6 +29,7 @@ import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,7 +41,10 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -75,10 +82,25 @@ fun QueueSheet(
     onClearUpNext: () -> Unit,
     onSaveQueue: (String) -> Unit,
     onCopyQueue: () -> Unit,
+    onLoadMoreQueue: () -> Unit = {},
 ) {
     val palette = LocalFerricPalette.current
     var showSaveDialog by remember { mutableStateOf(false) }
     var saveName by remember { mutableStateOf("Queue Mix") }
+    val listState = rememberLazyListState()
+
+    val nearEnd by remember {
+        derivedStateOf {
+            val layout = listState.layoutInfo
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index ?: 0
+            layout.totalItemsCount > 0 && lastVisible >= (layout.totalItemsCount - 6)
+        }
+    }
+    LaunchedEffect(nearEnd, state.upNext.size, state.isExtendingQueue) {
+        if (nearEnd && !state.isExtendingQueue && state.currentTrack != null) {
+            onLoadMoreQueue()
+        }
+    }
 
     val totalSongs = (if (state.currentTrack != null) 1 else 0) + state.upNext.size
     val totalMs = (state.currentTrack?.durationMs?.toLong() ?: 0L) +
@@ -94,8 +116,10 @@ fun QueueSheet(
         }
     }
 
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         containerColor = palette.surface,
     ) {
         Column(
@@ -215,21 +239,34 @@ fun QueueSheet(
             }
 
             if (state.upNext.isEmpty()) {
-                Text(
-                    text = "Queue is clear. Add tracks with Play Next or Add to Queue.",
-                    color = palette.textSecondary,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = if (state.isExtendingQueue) {
+                            "Loading personalized Up Next tracks..."
+                        } else {
+                            "Queue is empty. Add tracks or load more recommendations."
+                        },
+                        color = palette.textSecondary,
+                    )
+                    if (state.currentTrack != null && !state.isExtendingQueue) {
+                        TextButton(onClick = onLoadMoreQueue) {
+                            Text("Load Up Next Radio", color = palette.accent)
+                        }
+                    }
+                }
                 Spacer(Modifier.height(16.dp))
             } else {
                 LazyColumn(
+                    state = listState,
                     verticalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.heightIn(max = 360.dp),
+                    modifier = Modifier.heightIn(max = 460.dp),
                 ) {
                     itemsIndexed(state.upNext, key = { idx, _ -> queueKeys[idx] }) { idx, track ->
+                        val rowRadius = (palette.cornerRadiusDp.value * 0.6f).coerceIn(4f, 14f).dp
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
+                                .clip(RoundedCornerShape(rowRadius))
                                 .clickable { onJumpUpcoming(idx) }
                                 .padding(start = 6.dp, end = 2.dp, top = 6.dp, bottom = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -238,9 +275,13 @@ fun QueueSheet(
                                 text = String.format(Locale.US, "%02d", idx + 2),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = palette.textSecondary,
-                                modifier = Modifier.width(24.dp),
+                                modifier = Modifier.width(28.dp),
                             )
-                            ArtworkThumb(url = track.thumbnailUrl, size = 42.dp, cornerRadius = 8.dp)
+                            ArtworkThumb(
+                                url = track.thumbnailUrl,
+                                size = 42.dp,
+                                cornerRadius = (rowRadius.value * 0.7f).coerceIn(4f, 10f).dp,
+                            )
                             Spacer(Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
@@ -258,40 +299,80 @@ fun QueueSheet(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
+                            if (track.durationMs > 0uL) {
+                                Text(
+                                    text = formatDurationMs(track.durationMs.toLong()),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = palette.textSecondary,
+                                    modifier = Modifier.padding(horizontal = 4.dp),
+                                )
+                            }
                             IconButton(
                                 onClick = { onMoveUp(idx) },
                                 enabled = idx > 0,
-                                modifier = Modifier.size(34.dp),
+                                modifier = Modifier.size(30.dp),
                             ) {
                                 Icon(
                                     Icons.Rounded.ArrowUpward,
                                     contentDescription = "Move up",
                                     tint = if (idx > 0) palette.textPrimary else palette.border,
-                                    modifier = Modifier.size(18.dp),
+                                    modifier = Modifier.size(16.dp),
                                 )
                             }
                             IconButton(
                                 onClick = { onMoveDown(idx) },
                                 enabled = idx < state.upNext.lastIndex,
-                                modifier = Modifier.size(34.dp),
+                                modifier = Modifier.size(30.dp),
                             ) {
                                 Icon(
                                     Icons.Rounded.ArrowDownward,
                                     contentDescription = "Move down",
                                     tint = if (idx < state.upNext.lastIndex) palette.textPrimary else palette.border,
-                                    modifier = Modifier.size(18.dp),
+                                    modifier = Modifier.size(16.dp),
                                 )
                             }
                             IconButton(
                                 onClick = { onRemove(idx) },
-                                modifier = Modifier.size(34.dp),
+                                modifier = Modifier.size(30.dp),
                             ) {
                                 Icon(
                                     Icons.Rounded.Close,
                                     contentDescription = "Remove from queue",
                                     tint = palette.textSecondary,
-                                    modifier = Modifier.size(18.dp),
+                                    modifier = Modifier.size(16.dp),
                                 )
+                            }
+                        }
+                    }
+
+                    item(key = "queue_infinite_footer") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (state.isExtendingQueue) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = palette.accent,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "Loading more Up Next...",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = palette.textSecondary,
+                                )
+                            } else {
+                                TextButton(onClick = onLoadMoreQueue) {
+                                    Text(
+                                        text = "Load more Up Next",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = palette.accent,
+                                    )
+                                }
                             }
                         }
                     }

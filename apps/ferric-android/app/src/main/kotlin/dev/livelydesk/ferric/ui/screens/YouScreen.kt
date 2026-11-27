@@ -81,9 +81,11 @@ fun YouScreen(
     val accounts = state.accountStatus
     val connectedPeers = state.connectState.peers.filter { it.connected }
     val cardBg = if (palette.isLight) {
-        palette.surface.copy(alpha = 0.88f)
+        palette.surface.copy(alpha = if (palette.isLiquidGlass) (palette.glassOpacity + 0.16f).coerceIn(0.35f, 0.96f) else 0.90f)
+    } else if (palette.isLiquidGlass) {
+        palette.glassTint.copy(alpha = (palette.glassOpacity * 0.88f).coerceIn(0.10f, 0.88f))
     } else {
-        palette.elevated.copy(alpha = if (palette.isLiquidGlass) 0.56f else 0.88f)
+        palette.elevated.copy(alpha = (palette.glassOpacity * 0.92f).coerceIn(0.45f, 0.96f))
     }
     val dividerColor = palette.border.copy(alpha = if (palette.isLiquidGlass) 0.40f else 0.70f)
 
@@ -206,7 +208,7 @@ fun YouScreen(
 
                 // Compact OpenSubsonic / Navidrome card
                 Surface(
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(palette.cornerRadiusDp),
                     color = cardBg,
                     border = BorderStroke(1.dp, dividerColor),
                     modifier = Modifier
@@ -288,8 +290,9 @@ private fun GroupedHubCard(
     border: Color,
     content: @Composable () -> Unit,
 ) {
+    val palette = LocalFerricPalette.current
     Surface(
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(palette.cornerRadiusDp),
         color = background,
         border = BorderStroke(1.dp, border),
         modifier = Modifier.fillMaxWidth(),
@@ -398,11 +401,11 @@ private fun BrandedAccountTile(
         },
     )
     Surface(
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(palette.cornerRadiusDp),
         color = Color.Transparent,
         border = BorderStroke(1.dp, tintColor.copy(alpha = if (connected) 0.55f else 0.28f)),
         modifier = modifier
-            .clip(RoundedCornerShape(22.dp))
+            .clip(RoundedCornerShape(palette.cornerRadiusDp))
             .background(gradient)
             .clickable(onClick = onCardClick),
     ) {

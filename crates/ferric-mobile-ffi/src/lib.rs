@@ -884,6 +884,14 @@ impl FerricMobileCore {
         self.controller.pause();
     }
 
+    pub fn stop_playback(&self) {
+        self.controller.stop_playback();
+    }
+
+    pub fn extend_queue_up_next(&self) -> bool {
+        self.controller.extend_queue_up_next()
+    }
+
     pub fn next(&self) -> Result<(), FfiError> {
         self.controller.next()?;
         Ok(())
@@ -975,6 +983,10 @@ impl FerricMobileCore {
     pub fn load_home(&self, force_refresh: bool, mood_idx: Option<u32>) {
         self.controller
             .load_home(force_refresh, mood_idx.map(|i| i as usize));
+    }
+
+    pub fn load_home_more(&self) -> bool {
+        self.controller.load_home_more()
     }
 
     pub fn open_station(&self, station_id: String) -> Result<(), FfiError> {

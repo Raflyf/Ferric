@@ -3,16 +3,23 @@ package dev.livelydesk.ferric.ui.screens
 import android.os.SystemClock
 import android.view.ViewGroup
 import androidx.annotation.OptIn
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -78,10 +85,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -103,11 +118,15 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.size.Precision
 import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.formatDurationMs
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.AuroraBackdrop
+import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
+import dev.livelydesk.ferric.ui.theme.FerricEaseOut
 import dev.livelydesk.ferric.ui.theme.LocalBackdropState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricBackdropSource
@@ -172,7 +191,8 @@ fun FullPlayerScreen(
     val displayArtist = activeRemote?.nowPlayingArtist?.ifBlank { null } ?: track?.artist ?: "Pick a track to start"
     val displayThumb = activeRemote?.nowPlayingThumbnailUrl ?: track?.thumbnailUrl
     val displayPlaying = activeRemote?.isPlaying ?: state.isPlaying
-    val isLiquidCardLayout = palette.playerLayout == "liquid_glass" && !showLyrics && mediaMode == MediaMode.AUDIO
+    val isStandardLayout = palette.playerLayout == "standard"
+    val isLiquidBackdropLayout = palette.playerLayout == "liquid_glass" && !showLyrics && mediaMode == MediaMode.AUDIO
     val speed = state.dspSettings?.playbackSpeed ?: 1.0f
 
     val activeTargetId = activeRemote?.deviceId ?: state.connectState.localDeviceId
@@ -193,25 +213,26 @@ fun FullPlayerScreen(
         }
     }
 
-    // Deep cover-derived canvas (Auralys rich atmospheric tone)
-    val deepTone = remember(state.coverShade, palette.isLight) {
-        if (palette.isLight) {
-            palette.canvas
-        } else {
-            Color(
-                red = (state.coverShade.orb1.red * 0.42f + 0.04f).coerceIn(0f, 0.28f),
-                green = (state.coverShade.orb1.green * 0.42f + 0.04f).coerceIn(0f, 0.28f),
-                blue = (state.coverShade.orb1.blue * 0.42f + 0.05f).coerceIn(0f, 0.30f),
+    // Deep cover-derived atmospheric base tone matching Auralys cardless full-bleed gradients
+    val deepTone = remember(state.coverShade, palette.isLight, isStandardLayout, palette.canvas) {
+        when {
+            isStandardLayout -> palette.canvas
+            palette.isLight && showLyrics -> palette.canvas
+            else -> Color(
+                red = (state.coverShade.orb1.red * 0.44f + 0.04f).coerceIn(0f, 0.28f),
+                green = (state.coverShade.orb1.green * 0.44f + 0.04f).coerceIn(0f, 0.28f),
+                blue = (state.coverShade.orb1.blue * 0.44f + 0.05f).coerceIn(0f, 0.30f),
                 alpha = 1f,
             )
         }
     }
-    val onCanvasPrimary = if (palette.isLight && !isLiquidCardLayout && mediaMode == MediaMode.AUDIO && showLyrics) {
+    val onCanvasPrimary = if ((palette.isLight && showLyrics) || (isStandardLayout && palette.isLight)) {
         palette.textPrimary
     } else {
         Color.White
     }
-    val onCanvasSecondary = onCanvasPrimary.copy(alpha = 0.72f)
+    val onCanvasSecondary = onCanvasPrimary.copy(alpha = 0.70f)
+    val artCorner = palette.cornerRadiusDp
 
     CompositionLocalProvider(LocalBackdropState provides playerBackdrop) {
         Box(
@@ -219,56 +240,67 @@ fun FullPlayerScreen(
                 .fillMaxSize()
                 .background(deepTone),
         ) {
-            // Layer 1: Optical backdrop captured into playerBackdrop for true AGSL Liquid Glass pills
+            // Layer 1: Edge-to-edge full-bleed cover art (or atmospheric blurred art) captured cleanly
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .ferricBackdropSource(playerBackdrop),
             ) {
-                if (!showLyrics && mediaMode == MediaMode.AUDIO && !displayThumb.isNullOrBlank()) {
-                    // Full-bleed edge-to-edge artwork (atmospherically blurred under Liquid Glass card
-                    // so faces never double-render; razor-sharp in Full-Bleed layout).
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        AsyncImage(
-                            model = displayThumb,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .then(
-                                    if (isLiquidCardLayout) {
-                                        Modifier
-                                            .fillMaxSize()
-                                            .blur(44.dp)
-                                    } else {
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .aspectRatio(0.92f)
-                                            .align(Alignment.TopCenter)
-                                    },
-                                ),
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(
-                                    Brush.verticalGradient(
-                                        0.0f to Color.Black.copy(alpha = if (isLiquidCardLayout) 0.42f else 0.30f),
-                                        0.20f to deepTone.copy(alpha = if (isLiquidCardLayout) 0.32f else 0.0f),
-                                        0.48f to deepTone.copy(alpha = if (isLiquidCardLayout) 0.56f else 0.28f),
-                                        0.64f to deepTone.copy(alpha = 0.88f),
-                                        0.78f to deepTone,
-                                        1.0f to Color.Black.copy(alpha = 0.92f),
+                when {
+                    !showLyrics && mediaMode == MediaMode.AUDIO && !displayThumb.isNullOrBlank() && !isStandardLayout -> {
+                        val backdropCtx = LocalContext.current
+                        val backdropReq = remember(displayThumb, isLiquidBackdropLayout) {
+                            val dim = if (isLiquidBackdropLayout) 480 else 860
+                            ImageRequest.Builder(backdropCtx)
+                                .data(displayThumb)
+                                .size(dim, dim)
+                                .precision(Precision.INEXACT)
+                                .build()
+                        }
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            AsyncImage(
+                                model = backdropReq,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .then(
+                                        if (isLiquidBackdropLayout) {
+                                            Modifier
+                                                .fillMaxSize()
+                                                .blur(46.dp)
+                                        } else {
+                                            // Full-bleed edge-to-edge cover art melting seamlessly down the canvas
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .fillMaxHeight(0.66f)
+                                                .align(Alignment.TopCenter)
+                                        },
                                     ),
-                                ),
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.verticalGradient(
+                                            0.0f to Color.Black.copy(alpha = if (isLiquidBackdropLayout) 0.38f else 0.28f),
+                                            0.22f to Color.Transparent,
+                                            0.46f to deepTone.copy(alpha = if (isLiquidBackdropLayout) 0.50f else 0.24f),
+                                            0.60f to deepTone.copy(alpha = 0.90f),
+                                            0.72f to deepTone,
+                                            1.0f to Color.Black.copy(alpha = 0.94f),
+                                        ),
+                                    ),
+                            )
+                        }
+                    }
+                    !isStandardLayout -> {
+                        AuroraBackdrop(
+                            colors = state.coverShade,
+                            baseCanvas = deepTone,
+                            isPlaying = displayPlaying,
+                            intensity = 0.80f,
                         )
                     }
-                } else {
-                    AuroraBackdrop(
-                        colors = state.coverShade,
-                        baseCanvas = deepTone,
-                        isPlaying = displayPlaying,
-                        intensity = 0.82f,
-                    )
                 }
             }
 
@@ -370,12 +402,30 @@ fun FullPlayerScreen(
                     }
                 }
 
-                // Middle Stage: Full-Bleed breathing space (or Liquid Glass card), Video, or Synced Lyrics
+                // Middle Stage: Cardless Full-Bleed space, Frameless cover, Video, or Synced Lyrics (swipe down collapses)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
-                        .padding(vertical = 8.dp),
+                        .padding(vertical = 8.dp)
+                        .then(
+                            if (!showLyrics) {
+                                Modifier.pointerInput(Unit) {
+                                    var totalDrag = 0f
+                                    detectVerticalDragGestures(
+                                        onDragStart = { totalDrag = 0f },
+                                        onDragEnd = {
+                                            if (totalDrag > 96f) onCollapse()
+                                            totalDrag = 0f
+                                        },
+                                        onDragCancel = { totalDrag = 0f },
+                                        onVerticalDrag = { _, dy -> totalDrag += dy },
+                                    )
+                                }
+                            } else {
+                                Modifier
+                            },
+                        ),
                     contentAlignment = Alignment.Center,
                 ) {
                     when {
@@ -397,49 +447,26 @@ fun FullPlayerScreen(
                                 onRetry = onResolveVideo,
                             )
                         }
-                        isLiquidCardLayout -> {
-                            // LG3 glowing frosted glass artwork card + live spectrum
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center,
-                                modifier = Modifier.fillMaxSize(),
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(276.dp)
-                                        .ferricLiquidGlass(
-                                            cornerRadius = 28.dp,
-                                            blurRadius = 18.dp,
-                                            refractionHeight = 20.dp,
-                                            refractionAmount = 14.dp,
-                                            chromaticDispersion = 0.55f,
-                                            alwaysGlass = true,
-                                        )
-                                        .padding(10.dp),
-                                ) {
-                                    ArtworkThumb(
-                                        url = displayThumb,
-                                        size = 256.dp,
-                                        cornerRadius = 20.dp,
-                                        isActive = displayPlaying,
-                                        modifier = Modifier.fillMaxSize(),
-                                    )
-                                }
-                                Spacer(Modifier.height(14.dp))
-                                LiveSpectrumRow(
-                                    progressFlow = progressFlow,
-                                    accent = palette.accent,
-                                    trackColor = Color.White.copy(alpha = 0.22f),
-                                )
-                            }
+                        isLiquidBackdropLayout || isStandardLayout -> {
+                            // Frameless rounded square album art floating smoothly without ugly boxes
+                            ArtworkThumb(
+                                url = displayThumb,
+                                size = if (isStandardLayout) 288.dp else 278.dp,
+                                cornerRadius = artCorner,
+                                isActive = displayPlaying,
+                                modifier = Modifier
+                                    .size(if (isStandardLayout) 288.dp else 278.dp)
+                                    .shadow(22.dp, RoundedCornerShape(artCorner), clip = false)
+                                    .clip(RoundedCornerShape(artCorner)),
+                            )
                         }
                         else -> {
-                            // Full-bleed layout leaves upper cover unobstructed; show artwork placeholder if no cover
+                            // Cardless Full-Bleed keeps upper album art 100% open and unobstructed
                             if (displayThumb.isNullOrBlank()) {
                                 ArtworkThumb(
                                     url = null,
                                     size = 240.dp,
-                                    cornerRadius = 24.dp,
+                                    cornerRadius = artCorner,
                                     isActive = displayPlaying,
                                 )
                             }
@@ -447,26 +474,11 @@ fun FullPlayerScreen(
                     }
                 }
 
-                // Bottom Transport Area
+                // Completely Cardless Bottom Transport Controls directly on canvas (Auralys signature!)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .then(
-                            if (isLiquidCardLayout) {
-                                Modifier
-                                    .ferricLiquidGlass(
-                                        cornerRadius = 28.dp,
-                                        blurRadius = 20.dp,
-                                        refractionHeight = 20.dp,
-                                        refractionAmount = 16.dp,
-                                        chromaticDispersion = 0.58f,
-                                        alwaysGlass = true,
-                                    )
-                                    .padding(horizontal = 18.dp, vertical = 16.dp)
-                            } else {
-                                Modifier.padding(horizontal = 2.dp, vertical = 4.dp)
-                            },
-                        ),
+                        .padding(horizontal = 2.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     // Track Title + Artist + Frosted Like & Speed chips
@@ -550,7 +562,7 @@ fun FullPlayerScreen(
                             }
                         },
                         accent = palette.accent,
-                        onCanvasPrimary = onCanvasPrimary,
+                        onCanvasPrimary = if (isStandardLayout) palette.accent else onCanvasPrimary,
                         onCanvasSecondary = onCanvasSecondary,
                         onSeek = onSeek,
                     )
@@ -579,14 +591,14 @@ fun FullPlayerScreen(
                         }
                         Surface(
                             shape = CircleShape,
-                            color = Color.White,
+                            color = if (isStandardLayout || palette.isLight) palette.accent else Color.White,
                             modifier = Modifier.size(66.dp),
                         ) {
                             IconButton(onClick = onTogglePlayPause) {
                                 Icon(
                                     imageVector = if (displayPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                     contentDescription = if (displayPlaying) "Pause" else "Play",
-                                    tint = Color.Black,
+                                    tint = if (isStandardLayout && palette.isLight) Color.White else Color.Black,
                                     modifier = Modifier.size(36.dp),
                                 )
                             }
@@ -944,31 +956,6 @@ private fun SleekScrubSlider(
 }
 
 @Composable
-private fun LiveSpectrumRow(
-    progressFlow: StateFlow<PlaybackProgress>,
-    accent: Color,
-    trackColor: Color,
-) {
-    val progress by progressFlow.collectAsStateWithLifecycle()
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.Bottom,
-        modifier = Modifier.height(26.dp),
-    ) {
-        progress.spectrumBins.forEach { raw ->
-            val frac = (raw / 1000f).coerceIn(0.10f, 1f)
-            Box(
-                modifier = Modifier
-                    .width(7.dp)
-                    .height((26f * frac).dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(if (raw > 30) accent else trackColor),
-            )
-        }
-    }
-}
-
-@Composable
 private fun SyncedLyricsStage(
     state: PlaybackUiState,
     progressFlow: StateFlow<PlaybackProgress>,
@@ -996,15 +983,11 @@ private fun SyncedLyricsStage(
         found
     }
 
-    LaunchedEffect(activeIdx, lyrics.isSynced) {
-        if (lyrics.isSynced && activeIdx >= 0 && !listState.isScrollInProgress) {
-            listState.animateScrollToItem((activeIdx - 2).coerceAtLeast(0))
-        }
-    }
+    val lyricsTextColor = if (palette.isLight && palette.playerLayout == "standard") palette.textPrimary else Color.White
 
     Column(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1021,27 +1004,48 @@ private fun SyncedLyricsStage(
                 } else {
                     "Lyrics"
                 },
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White.copy(alpha = 0.72f),
+                style = MaterialTheme.typography.labelMedium,
+                color = lyricsTextColor.copy(alpha = 0.70f),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (lyrics.isSynced) {
-                    OutlinedButton(
-                        onClick = { onNudgeOffset(-500L) },
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.24f)),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                    ) { Text("-0.5s", color = Color.White, style = MaterialTheme.typography.labelSmall) }
-                    OutlinedButton(
-                        onClick = { onNudgeOffset(500L) },
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.24f)),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                    ) { Text("+0.5s", color = Color.White, style = MaterialTheme.typography.labelSmall) }
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = lyricsTextColor.copy(alpha = 0.14f),
+                        modifier = Modifier.clickable { onNudgeOffset(-500L) },
+                    ) {
+                        Text(
+                            text = "-0.5s",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = lyricsTextColor,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = lyricsTextColor.copy(alpha = 0.14f),
+                        modifier = Modifier.clickable { onNudgeOffset(500L) },
+                    ) {
+                        Text(
+                            text = "+0.5s",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = lyricsTextColor,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
                 }
-                OutlinedButton(
-                    onClick = onOpenShareCard,
-                    border = BorderStroke(1.dp, palette.accent),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                ) { Text("Card", color = palette.accent, style = MaterialTheme.typography.labelSmall) }
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = palette.accent.copy(alpha = 0.22f),
+                    modifier = Modifier.clickable(onClick = onOpenShareCard),
+                ) {
+                    Text(
+                        text = "Card",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = palette.accent,
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
+                    )
+                }
             }
         }
 
@@ -1057,42 +1061,92 @@ private fun SyncedLyricsStage(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    Text("No lyrics found for this track.", color = Color.White.copy(alpha = 0.72f))
+                    Text("No lyrics found for this track.", style = MaterialTheme.typography.bodyLarge, color = lyricsTextColor.copy(alpha = 0.72f))
                     Spacer(Modifier.height(8.dp))
                     TextButton(onClick = onRetry) { Text("Retry Lyrics", color = palette.accent) }
                 }
             }
             else -> {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(vertical = 28.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                        .drawWithContent {
+                            drawContent()
+                            drawRect(
+                                brush = Brush.verticalGradient(
+                                    0.0f to Color.Transparent,
+                                    0.14f to Color.Black,
+                                    0.84f to Color.Black,
+                                    1.0f to Color.Transparent,
+                                ),
+                                blendMode = BlendMode.DstIn,
+                            )
+                        },
                 ) {
-                    itemsIndexed(lyrics.lines, key = { idx, line -> "${idx}_${line.timestampMs}" }) { idx, line ->
-                        val isActive = lyrics.isSynced && idx == activeIdx
-                        val lineAlpha = when {
-                            !lyrics.isSynced -> 0.88f
-                            isActive -> 1.0f
-                            idx < activeIdx -> 0.42f
-                            else -> 0.56f
+                    val density = LocalDensity.current
+                    val halfViewport = (maxHeight * 0.50f).coerceAtLeast(120.dp)
+                    LaunchedEffect(activeIdx, lyrics.isSynced, lyrics.lines.size, state.currentTrack?.id) {
+                        if (lyrics.isSynced && activeIdx >= 0 && !listState.isScrollInProgress) {
+                            val activeItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == activeIdx }
+                            val fallbackItemH = with(density) { 42.dp.roundToPx() }
+                            val itemHalfH = (activeItem?.size ?: fallbackItemH) / 2
+                            listState.animateScrollToItem(index = activeIdx, scrollOffset = itemHalfH)
                         }
-                        Text(
-                            text = line.text,
-                            fontSize = if (isActive) 26.sp else 21.sp,
-                            lineHeight = if (isActive) 34.sp else 28.sp,
-                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.SemiBold,
-                            color = Color.White.copy(alpha = lineAlpha),
-                            textAlign = TextAlign.Start,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable(enabled = lyrics.isSynced) {
-                                    val targetMs = (line.timestampMs.toLong() - lyrics.offsetMs).coerceAtLeast(0L)
-                                    onSeek(targetMs)
-                                }
-                                .padding(horizontal = 6.dp, vertical = 4.dp),
-                        )
+                    }
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(top = halfViewport, bottom = halfViewport),
+                        verticalArrangement = Arrangement.spacedBy(22.dp),
+                    ) {
+                        itemsIndexed(lyrics.lines, key = { idx, line -> "${idx}_${line.timestampMs}" }) { idx, line ->
+                            val isActive = lyrics.isSynced && idx == activeIdx
+                            val dist = if (activeIdx >= 0 && lyrics.isSynced) abs(idx - activeIdx) else 1
+                            val targetAlpha = when {
+                                !lyrics.isSynced -> 0.90f
+                                isActive -> 1.0f
+                                dist == 1 -> 0.56f
+                                dist == 2 -> 0.34f
+                                else -> 0.20f
+                            }
+                            val animColor by animateColorAsState(
+                                targetValue = lyricsTextColor.copy(alpha = targetAlpha),
+                                animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                                label = "lyric_color",
+                            )
+                            val animScale by animateFloatAsState(
+                                targetValue = if (isActive || !lyrics.isSynced) 1.0f else 0.90f,
+                                animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                                label = "lyric_scale",
+                            )
+                            val lyricStyle = MaterialTheme.typography.headlineMedium.copy(
+                                fontSize = if (palette.editorialMode) 27.sp else 25.sp,
+                                lineHeight = 33.sp,
+                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.SemiBold,
+                            )
+
+                            Text(
+                                text = line.text,
+                                style = lyricStyle,
+                                color = animColor,
+                                textAlign = TextAlign.Start,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .graphicsLayer {
+                                        scaleX = animScale
+                                        scaleY = animScale
+                                        transformOrigin = TransformOrigin(0f, 0.5f)
+                                    }
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(enabled = lyrics.isSynced) {
+                                        val targetMs = (line.timestampMs.toLong() - lyrics.offsetMs).coerceAtLeast(0L)
+                                        onSeek(targetMs)
+                                    }
+                                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                            )
+                        }
                     }
                 }
             }

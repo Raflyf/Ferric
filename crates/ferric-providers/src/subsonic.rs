@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 const SUBSONIC_API_VERSION: &str = "1.16.1";
 const SUBSONIC_CLIENT_NAME: &str = "Ferric";
 const MAX_SUBSONIC_JSON_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_SUBSONIC_STREAM_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_SUBSONIC_STREAM_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SUBSONIC_PLAYLISTS: usize = 100;
 const MAX_SUBSONIC_PLAYLIST_TRACKS: usize = 5_000;
 
@@ -921,7 +921,7 @@ pub fn download_and_cache_subsonic_stream(
             drop(out);
             let _ = std::fs::remove_file(&part_path);
             return Err(ProviderError::Http(
-                "Subsonic audio stream exceeded 128 MiB safety cap".to_string(),
+                "Subsonic audio stream exceeded 512 MiB safety cap".to_string(),
             ));
         }
         out.write_all(&buf[..n])?;

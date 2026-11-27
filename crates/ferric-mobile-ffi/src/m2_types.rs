@@ -186,6 +186,7 @@ pub struct FfiHomeState {
     pub stations: Vec<FfiStationCard>,
     pub shelves: Vec<FfiHomeShelf>,
     pub is_loading: bool,
+    pub is_loading_more: bool,
 }
 
 impl From<HomeSnapshot> for FfiHomeState {
@@ -197,6 +198,7 @@ impl From<HomeSnapshot> for FfiHomeState {
             stations: h.stations.into_iter().map(Into::into).collect(),
             shelves: h.shelves.into_iter().map(Into::into).collect(),
             is_loading: h.is_loading,
+            is_loading_more: h.is_loading_more,
         }
     }
 }

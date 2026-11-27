@@ -638,6 +638,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferric-controller"
+version = "0.1.2"
+dependencies = [
+ "fastrand",
+ "ferric-audio",
+ "ferric-core",
+ "ferric-providers",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ferric-core"
 version = "0.1.2"
 dependencies = [

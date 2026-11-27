@@ -1,0 +1,17 @@
+[package]
+name = "ferric-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+ferric-core = { path = "../ferric-core" }
+ferric-audio = { path = "../ferric-audio" }
+ferric-providers = { path = "../ferric-providers" }
+
+[dev-dependencies]
+fastrand.workspace = true

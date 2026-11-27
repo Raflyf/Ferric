@@ -5,6 +5,7 @@ members = [
     "crates/ferric-audio",
     "crates/ferric-providers",
     "crates/ferric-sync",
+    "crates/ferric-controller",
     "apps/ferric-desktop",
 ]
 

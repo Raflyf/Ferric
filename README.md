@@ -31,10 +31,18 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 ## Preview
 
 <p align="center">
-  <img src="assets/screenshots/ferric-home-v0.1.0.png" width="1200" alt="Ferric v0.1.0 desktop workspace showing Library sidebar, Quick Picks, Recommended Stations, Queue panel, and bottom player bar with playback speed control">
+  <img src="assets/screenshots/ferric-home-v0.1.1.png" width="1200" alt="Ferric v0.1.1 desktop workspace with Windows 11 Native Acrylic, Adaptive Acrylic Tint, synced Spotify playlists, Quick Picks, Recommended Stations, Queue panel, and bottom player bar">
 </p>
 
-*Captured from Ferric `v0.1.0` (`1600x975`, matching `v0.1.1` UI layout, Native Acrylic flattened over `#0B0C11`). Album artwork and track titles belong to their respective owners and are not bundled with the application.*
+*Desktop workspace (`v0.1.1`): Windows 11 Native Acrylic with Adaptive Acrylic Tint synchronized to the active album cover, synced Spotify playlists, Quick Picks, Recommended Stations, live Queue History / Up Next, and bottom player bar (`1.0x`, `OPUS 144k`).*
+
+<p align="center">
+  <img src="assets/screenshots/ferric-lyrics-v0.1.1.png" width="1200" alt="Ferric v0.1.1 Fullscreen Synced Lyrics stage showing live signal path telemetry, LRCLIB time-synced lyrics, ambient aurora backdrop, audio visualizer, and cover or video controls">
+</p>
+
+*Fullscreen Synced Lyrics (`v0.1.1`): adaptive cover-colored aurora stage with real-time signal path telemetry (`OPUS 16b/44.1k -> 10.0s Bass-Swap Automix -> 10-Band EQ -> WASAPI 48.0 kHz`), `LRCLIB` time-synced lyrics, timing offset controls (`-0.5s` / `+0.5s`), and docked video clip toggle.*
+
+*Album artwork and track titles shown above belong to their respective owners and are not bundled with the application.*
 
 ## Features
 
@@ -49,12 +57,31 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 
 ## Resource use
 
-| State | Private Working Set | CPU | GPU | Capture notes |
-| :--- | ---: | ---: | ---: | :--- |
-| UI open, idle (10 s after launch) | 6.0 MB | 0.00% | 0.0% | `v0.1.1` (`8.3 MB` Working Set, `168.3 MB` Commit), iGPU only (`0` dGPU DLLs loaded) |
-| Active streaming playback, UI open | 35.5 – 49.5 MB | 0.59 – 0.82% | 2.0 – 2.7% | `v0.1.1` across 5 track switches + reopen, cover art & synced lyrics active |
-| Fullscreen Lyrics active (6 s) | 47.1 MB | 0.90% | 39.6% | `v0.1.1` live ambient aurora shader on Intel iGPU (`67.0 MB` shared GPU memory) |
-| Minimized to system tray, playing | 6.5 – 17.1 MB | 0.14% | 0.0% | `v0.1.1` across 4 real track switches in tray (`53.5 MB` flat shared GPU memory) |
+| State | Memory (Task Manager / PrivWS) | CPU | Disk / GPU notes |
+| :--- | ---: | ---: | :--- |
+| UI open, idle (10 s after launch) | 6.0 MB | 0.0% | `0.0%` GPU, iGPU only (`0` dGPU DLLs loaded) |
+| Active streaming playback, UI open | 49.0 MB | 0.3% | `0 MB/s` Disk, `0 Mbps` steady after buffer (`35.5 - 49.5 MB` across switches) |
+| Fullscreen Synced Lyrics active | 51.6 MB | 2.8% | `0 MB/s` Disk, live ambient aurora shader + real-time visualizer on iGPU |
+| Minimized to system tray, playing | 13.3 MB | 0.5% | `0.0%` GPU, working set trimmed automatically (`6.5 - 17.1 MB` across switches) |
+
+<p align="center">
+  <img src="assets/screenshots/ferric-taskmgr-playing-v0.1.1.png" width="930" alt="Windows Task Manager showing Ferric v0.1.1 during active streaming playback at 0.3% CPU, 49.0 MB memory, and 0 MB/s disk">
+</p>
+
+*Windows Task Manager (`v0.1.1`): active streaming playback with desktop UI open (`0.3%` CPU, `49.0 MB` memory, `0 MB/s` disk).*
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="assets/screenshots/ferric-taskmgr-lyrics-v0.1.1.jpg" alt="Windows Task Manager side-by-side with Ferric v0.1.1 Fullscreen Synced Lyrics showing 2.8% CPU and 51.6 MB memory">
+      <br><sub><strong>Fullscreen Synced Lyrics + visualizer:</strong> <code>2.8%</code> CPU · <code>51.6 MB</code> memory</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="assets/screenshots/ferric-taskmgr-tray-v0.1.1.jpg" alt="Windows Task Manager and system tray showing Ferric v0.1.1 playing in the background at 0.5% CPU and 13.3 MB memory">
+      <br><sub><strong>Minimized to system tray, playing:</strong> <code>0.5%</code> CPU · <code>13.3 MB</code> memory</sub>
+    </td>
+  </tr>
+</table>
 
 *Observed on the author's Windows 11 laptop (`x86_64`, Intel iGPU + hybrid dGPU), not fixed ceilings or guarantees. Memory, CPU, and GPU vary with display scaling, graphics driver, library size, streaming codec, and whether Fullscreen Lyrics or video clips are active.*
 

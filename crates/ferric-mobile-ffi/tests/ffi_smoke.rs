@@ -1,5 +1,6 @@
 use ferric_mobile_ffi::{
-    FerricMobileCore, FfiBackgroundMode, FfiContentOpener, FfiError, FfiEventSink, FfiSecretCipher,
+    FerricMobileCore, FfiAccountStatus, FfiBackgroundMode, FfiCollectionDetail, FfiContentOpener,
+    FfiError, FfiEventSink, FfiHomeState, FfiLocalScanEntry, FfiSearchResults, FfiSecretCipher,
     FfiTelemetry, FfiTrack,
 };
 use std::sync::Arc;
@@ -36,6 +37,11 @@ impl FfiEventSink for TestSink {
     }
     fn on_queue_changed(&self, _up_next: Vec<FfiTrack>) {}
     fn on_library_changed(&self) {}
+    fn on_home_updated(&self, _home: FfiHomeState) {}
+    fn on_search_results(&self, _results: FfiSearchResults) {}
+    fn on_detail_loaded(&self, _detail: FfiCollectionDetail) {}
+    fn on_accounts_changed(&self, _status: FfiAccountStatus) {}
+    fn on_spotify_auth_expired(&self) {}
     fn on_toast(&self, _message: String) {}
 }
 
@@ -86,6 +92,27 @@ fn mobile_ffi_seeds_plays_and_persists_liquid_glass_theme() {
     core.set_theme(theme).expect("save theme");
     assert_eq!(core.get_theme().player_layout, "liquid_glass");
     assert!(core.get_theme().editorial_mode);
+
+    let scanned = core
+        .scan_local_entries(vec![FfiLocalScanEntry {
+            uri: "content://media/external/audio/media/901".to_string(),
+            title: "Glass Horizon".to_string(),
+            artist: "Ferric Test".to_string(),
+            album: "M2 Suite".to_string(),
+            duration_ms: 185_000,
+            codec: "FLAC".to_string(),
+            sample_rate: 48_000,
+            bit_depth: 24,
+            bitrate_kbps: 1411,
+        }])
+        .expect("scan local");
+    assert_eq!(scanned, 1);
+    let hits = core
+        .instant_search_local("glass".to_string())
+        .expect("instant search");
+    assert_eq!(hits.len(), 1);
+    assert!(core.toggle_like(hits[0].id.clone()).expect("like"));
+    assert!(!core.get_account_status().spotify_connected);
 
     core.shutdown();
     let _ = std::fs::remove_dir_all(&root);

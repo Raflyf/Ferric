@@ -2,10 +2,16 @@
 
 #[cfg(target_os = "android")]
 mod android_jni;
+pub mod m2_types;
+
+pub use m2_types::*;
 
 use ferric_audio::content::{ContentOpener, register_content_opener};
 use ferric_audio::engine::TelemetrySnapshot;
 use ferric_controller::events::ControllerEventSink;
+use ferric_controller::types::{
+    AccountStatusSnapshot, CollectionDetailSnapshot, HomeSnapshot, SearchSnapshot,
+};
 use ferric_controller::{ControllerConfig, ControllerError, FerricController};
 use ferric_core::eq::{EqBand, EqConfig, EqFilterKind};
 use ferric_core::models::{
@@ -605,6 +611,11 @@ pub trait FfiEventSink: Send + Sync {
     fn on_now_playing_changed(&self, track: Option<FfiTrack>);
     fn on_queue_changed(&self, up_next: Vec<FfiTrack>);
     fn on_library_changed(&self);
+    fn on_home_updated(&self, home: FfiHomeState);
+    fn on_search_results(&self, results: FfiSearchResults);
+    fn on_detail_loaded(&self, detail: FfiCollectionDetail);
+    fn on_accounts_changed(&self, status: FfiAccountStatus);
+    fn on_spotify_auth_expired(&self);
     fn on_toast(&self, message: String);
 }
 
@@ -673,6 +684,26 @@ impl ControllerEventSink for EventSinkBridge {
 
     fn on_library_changed(&self) {
         self.0.on_library_changed();
+    }
+
+    fn on_home_updated(&self, home: HomeSnapshot) {
+        self.0.on_home_updated(home.into());
+    }
+
+    fn on_search_results(&self, results: SearchSnapshot) {
+        self.0.on_search_results(results.into());
+    }
+
+    fn on_detail_loaded(&self, detail: CollectionDetailSnapshot) {
+        self.0.on_detail_loaded(detail.into());
+    }
+
+    fn on_accounts_changed(&self, status: AccountStatusSnapshot) {
+        self.0.on_accounts_changed(status.into());
+    }
+
+    fn on_spotify_auth_expired(&self) {
+        self.0.on_spotify_auth_expired();
     }
 
     fn on_toast(&self, message: String) {
@@ -869,6 +900,356 @@ impl FerricMobileCore {
 
     pub fn trim_memory(&self) {
         self.controller.trim_memory();
+    }
+
+    // --- M2 Home, Search & Discovery ---
+
+    pub fn get_cached_home(&self) -> FfiHomeState {
+        self.controller.get_cached_home().into()
+    }
+
+    pub fn load_home(&self, force_refresh: bool, mood_idx: Option<u32>) {
+        self.controller
+            .load_home(force_refresh, mood_idx.map(|i| i as usize));
+    }
+
+    pub fn open_station(&self, station_id: String) -> Result<(), FfiError> {
+        self.controller.open_station(&station_id)?;
+        Ok(())
+    }
+
+    pub fn open_browse_detail(
+        &self,
+        browse_id: String,
+        kind_hint: FfiCardKind,
+    ) -> Result<(), FfiError> {
+        self.controller
+            .open_browse_detail(browse_id, kind_hint.into())?;
+        Ok(())
+    }
+
+    pub fn instant_search_local(&self, query: String) -> Result<Vec<FfiTrack>, FfiError> {
+        let hits = self.controller.instant_search_local(&query)?;
+        Ok(hits.into_iter().map(Into::into).collect())
+    }
+
+    pub fn search_online(&self, query: String) -> Result<(), FfiError> {
+        self.controller.search_online(query)?;
+        Ok(())
+    }
+
+    pub fn recent_searches(&self) -> Vec<String> {
+        self.controller.recent_searches()
+    }
+
+    pub fn clear_recent_searches(&self) -> Result<(), FfiError> {
+        self.controller.clear_recent_searches()?;
+        Ok(())
+    }
+
+    pub fn import_public_url(&self, url: String) -> Result<(), FfiError> {
+        self.controller.import_public_url(url)?;
+        Ok(())
+    }
+
+    // --- M2 Library, Local Scan, Collections & Queue ---
+
+    pub fn scan_local_entries(&self, entries: Vec<FfiLocalScanEntry>) -> Result<u32, FfiError> {
+        let converted = entries.into_iter().map(Into::into).collect();
+        let count = self.controller.scan_local_entries(converted)?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    pub fn list_liked_songs(&self) -> Result<Vec<FfiTrack>, FfiError> {
+        Ok(self
+            .controller
+            .list_liked_songs()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn list_local_songs(&self) -> Result<Vec<FfiTrack>, FfiError> {
+        Ok(self
+            .controller
+            .list_local_songs()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn list_recent_songs(&self) -> Result<Vec<FfiTrack>, FfiError> {
+        Ok(self
+            .controller
+            .list_recent_songs()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn list_albums(&self) -> Result<Vec<FfiAlbumSummary>, FfiError> {
+        Ok(self
+            .controller
+            .list_albums()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn list_artists(&self) -> Result<Vec<FfiArtistSummary>, FfiError> {
+        Ok(self
+            .controller
+            .list_artists()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn list_playlists_filtered(
+        &self,
+        source: FfiPlaylistSourceFilter,
+        sort: FfiPlaylistSort,
+    ) -> Result<Vec<FfiPlaylist>, FfiError> {
+        Ok(self
+            .controller
+            .list_playlists_filtered(source.into(), sort.into())?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn get_playlist_detail(
+        &self,
+        playlist_id: String,
+        sort: FfiDetailSort,
+    ) -> Result<FfiCollectionDetail, FfiError> {
+        Ok(self
+            .controller
+            .get_playlist_detail(&playlist_id, sort.into())?
+            .into())
+    }
+
+    pub fn get_album_detail(
+        &self,
+        album_name: String,
+        artist_name: String,
+        sort: FfiDetailSort,
+    ) -> Result<FfiCollectionDetail, FfiError> {
+        Ok(self
+            .controller
+            .get_album_detail(&album_name, &artist_name, sort.into())?
+            .into())
+    }
+
+    pub fn get_artist_detail(
+        &self,
+        artist_name: String,
+        sort: FfiDetailSort,
+    ) -> Result<FfiCollectionDetail, FfiError> {
+        Ok(self
+            .controller
+            .get_artist_detail(&artist_name, sort.into())?
+            .into())
+    }
+
+    pub fn get_liked_detail(&self, sort: FfiDetailSort) -> Result<FfiCollectionDetail, FfiError> {
+        Ok(self.controller.get_liked_detail(sort.into())?.into())
+    }
+
+    pub fn create_playlist(
+        &self,
+        name: String,
+        description: String,
+        track_ids: Vec<String>,
+    ) -> Result<FfiPlaylist, FfiError> {
+        Ok(self
+            .controller
+            .create_playlist(name, description, track_ids)?
+            .into())
+    }
+
+    pub fn rename_playlist(&self, playlist_id: String, new_name: String) -> Result<(), FfiError> {
+        self.controller.rename_playlist(playlist_id, new_name)?;
+        Ok(())
+    }
+
+    pub fn delete_playlist(&self, playlist_id: String) -> Result<(), FfiError> {
+        self.controller.delete_playlist(playlist_id)?;
+        Ok(())
+    }
+
+    pub fn add_track_to_playlist(
+        &self,
+        playlist_id: String,
+        track: FfiTrack,
+    ) -> Result<(), FfiError> {
+        self.controller
+            .add_track_to_playlist(playlist_id, track.into())?;
+        Ok(())
+    }
+
+    pub fn remove_track_from_playlist(
+        &self,
+        playlist_id: String,
+        track_id: String,
+    ) -> Result<(), FfiError> {
+        self.controller
+            .remove_track_from_playlist(playlist_id, track_id)?;
+        Ok(())
+    }
+
+    pub fn deduplicate_playlist(&self, playlist_id: String) -> Result<u32, FfiError> {
+        let removed = self.controller.deduplicate_playlist(playlist_id)?;
+        Ok(u32::try_from(removed).unwrap_or(u32::MAX))
+    }
+
+    pub fn push_local_playlist_to_cloud(&self, playlist_id: String) -> Result<(), FfiError> {
+        self.controller.push_local_playlist_to_cloud(playlist_id)?;
+        Ok(())
+    }
+
+    pub fn toggle_like(&self, track_id: String) -> Result<bool, FfiError> {
+        Ok(self.controller.toggle_like(&track_id)?)
+    }
+
+    pub fn track_share_link(&self, track: FfiTrack) -> Option<String> {
+        let t: Track = track.into();
+        self.controller.track_share_link(&t)
+    }
+
+    pub fn format_share_tracklist(
+        &self,
+        title: String,
+        share_url: Option<String>,
+        tracks: Vec<FfiTrack>,
+    ) -> String {
+        let converted: Vec<Track> = tracks.into_iter().map(Into::into).collect();
+        self.controller
+            .format_share_tracklist(&title, share_url.as_deref(), &converted)
+    }
+
+    pub fn format_share_csv(&self, tracks: Vec<FfiTrack>) -> String {
+        let converted: Vec<Track> = tracks.into_iter().map(Into::into).collect();
+        self.controller.format_share_csv(&converted)
+    }
+
+    pub fn import_playlist_text(
+        &self,
+        playlist_name: String,
+        raw_text: String,
+    ) -> Result<FfiPlaylist, FfiError> {
+        Ok(self
+            .controller
+            .import_playlist_text(playlist_name, raw_text)?
+            .into())
+    }
+
+    pub fn play_next(&self, track: FfiTrack) {
+        self.controller.play_next(track.into());
+    }
+
+    pub fn append_to_queue(&self, track: FfiTrack) {
+        self.controller.append_to_queue(track.into());
+    }
+
+    pub fn jump_to_upcoming(&self, offset: u32) -> Result<(), FfiError> {
+        self.controller.jump_to_upcoming(offset as usize)?;
+        Ok(())
+    }
+
+    pub fn move_queue_item_up(&self, offset: u32) -> bool {
+        self.controller.move_queue_item_up(offset as usize)
+    }
+
+    pub fn move_queue_item_down(&self, offset: u32) -> bool {
+        self.controller.move_queue_item_down(offset as usize)
+    }
+
+    pub fn remove_queue_item(&self, offset: u32) -> bool {
+        self.controller.remove_queue_item(offset as usize)
+    }
+
+    pub fn clear_up_next(&self) {
+        self.controller.clear_up_next();
+    }
+
+    pub fn save_queue_as_playlist(&self, name: String) -> Result<FfiPlaylist, FfiError> {
+        Ok(self.controller.save_queue_as_playlist(name)?.into())
+    }
+
+    pub fn copy_queue_tracklist(&self) -> String {
+        self.controller.copy_queue_tracklist()
+    }
+
+    // --- M2 Accounts & Two-Way Sync ---
+
+    pub fn get_account_status(&self) -> FfiAccountStatus {
+        self.controller.get_account_status().into()
+    }
+
+    pub fn set_spotify_session(
+        &self,
+        access_token: String,
+        cookie: String,
+        user_name: String,
+        user_id: String,
+        trigger_sync: bool,
+    ) -> Result<(), FfiError> {
+        self.controller.set_spotify_session(
+            access_token,
+            cookie,
+            user_name,
+            user_id,
+            trigger_sync,
+        )?;
+        Ok(())
+    }
+
+    pub fn sync_spotify_account(&self) {
+        self.controller.sync_spotify_account();
+    }
+
+    pub fn logout_spotify(&self) -> Result<(), FfiError> {
+        self.controller.logout_spotify()?;
+        Ok(())
+    }
+
+    pub fn set_ytm_session(
+        &self,
+        cookie: String,
+        sapisid: String,
+        visitor_data: String,
+        channel_name: String,
+        account_id: String,
+    ) -> Result<(), FfiError> {
+        self.controller
+            .set_ytm_session(cookie, sapisid, visitor_data, channel_name, account_id)?;
+        Ok(())
+    }
+
+    pub fn sync_ytm_account(&self) {
+        self.controller.sync_ytm_account();
+    }
+
+    pub fn logout_ytm(&self) -> Result<(), FfiError> {
+        self.controller.logout_ytm()?;
+        Ok(())
+    }
+
+    pub fn sync_subsonic(
+        &self,
+        base_url: String,
+        username: String,
+        password: String,
+    ) -> Result<(), FfiError> {
+        self.controller
+            .sync_subsonic(base_url, username, password)?;
+        Ok(())
+    }
+
+    pub fn logout_subsonic(&self) -> Result<(), FfiError> {
+        self.controller.logout_subsonic()?;
+        Ok(())
     }
 
     pub fn shutdown(&self) {

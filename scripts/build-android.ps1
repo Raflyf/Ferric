@@ -1,6 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
+    [switch]$FastDev,
     [switch]$SkipTests,
     [switch]$SkipLint,
     [string]$VersionOverride,
@@ -9,6 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+if ($FastDev) {
+    $Abis = @('arm64-v8a')
+}
 
 $ws = (Resolve-Path (Split-Path -Parent $PSScriptRoot)).ProviderPath
 $cargoTomlPath = Join-Path $ws 'Cargo.toml'
@@ -90,8 +95,12 @@ try {
     $ndkArgs += @(
         '--platform', '28',
         '-o', $jniLibsDir,
-        'build', '--release', '-p', 'ferric-mobile-ffi', '--locked'
+        'build'
     )
+    if (-not $FastDev) {
+        $ndkArgs += '--release'
+    }
+    $ndkArgs += @('-p', 'ferric-mobile-ffi', '--locked')
     & cargo @ndkArgs
     if ($LASTEXITCODE -ne 0) {
         throw "cargo ndk build failed (exit $LASTEXITCODE)."
@@ -159,14 +168,27 @@ try {
     if (-not $SkipLint) {
         $gradleTasks += 'lintDebug'
     }
-    $gradleTasks += 'assembleRelease'
-    $gradleTasks += '--no-daemon'
+    if ($FastDev) {
+        $gradleTasks += 'assembleDebug'
+    } else {
+        $gradleTasks += 'assembleRelease'
+        $gradleTasks += '--no-daemon'
+    }
 
     & .\gradlew.bat @gradleTasks
     if ($LASTEXITCODE -ne 0) {
         throw "Gradle build failed (exit $LASTEXITCODE)."
     }
     Pop-Location
+
+    if ($FastDev) {
+        $dbgApk = Join-Path $ws 'apps\ferric-android\app\build\outputs\apk\debug\app-arm64-v8a-debug.apk'
+        if (Test-Path -LiteralPath $dbgApk -PathType Leaf) {
+            $item = Get-Item -LiteralPath $dbgApk
+            Write-Host ("[FastDev] Ready: {0} ({1} MB)" -f $item.FullName, [Math]::Round($item.Length / 1MB, 2))
+        }
+        return
+    }
 
     Write-Host '[5/5] Staging APKs, verifying APK native contents, and writing SHA256SUMS.txt'
     $apkOutDir = Join-Path $ws 'apps\ferric-android\app\build\outputs\apk\release'

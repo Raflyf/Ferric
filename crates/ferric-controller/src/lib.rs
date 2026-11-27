@@ -1,18 +1,29 @@
 //! Headless playback, queue, library, settings, and persistence orchestrator shared by Ferric mobile frontends.
 
+pub mod accounts;
 pub mod events;
+pub mod home;
+pub mod library;
+pub mod types;
 
+use crate::accounts::active_ytm_session;
 use crate::events::ControllerEventSink;
+use crate::types::HomeSnapshot;
 use ferric_audio::engine::{AudioEngine, EngineCommand, TelemetrySnapshot};
 use ferric_core::db::LibraryDb;
 use ferric_core::eq::EqConfig;
 use ferric_core::models::{
     AccountSettings, ListeningStatsSummary, PlaybackDspSettings, Playlist, RepeatMode,
-    SessionResumeState, Track, qualifies_as_play,
+    SessionResumeState, Track, TrackSource, qualifies_as_play,
 };
 use ferric_core::queue::PlayQueue;
 use ferric_core::theme::ThemeConfig;
-use ferric_providers::ytmusic::{YtmSession, resolve_and_cache_audio_stream_with_quality};
+use ferric_providers::subsonic::{SubsonicCredentials, download_and_cache_subsonic_stream};
+use ferric_providers::ytmusic::{
+    RecommendedStation, resolve_and_cache_audio_stream_with_quality,
+    resolve_best_video_id_for_track,
+};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -64,6 +75,17 @@ struct ControllerState {
     last_finished_seq: u64,
     play_tracker: Option<ActivePlayTracker>,
     resolve_gen: u64,
+    home_cache: HomeSnapshot,
+    stations_cache: Vec<RecommendedStation>,
+    home_continuation: Option<String>,
+    home_excluded_tracks: HashSet<String>,
+    home_excluded_cards: HashSet<String>,
+    home_excluded_artists: HashSet<String>,
+    station_rotation_epoch: usize,
+    home_gen: u64,
+    search_gen: u64,
+    detail_gen: u64,
+    prefetch_gen: u64,
 }
 
 /// Thread-safe headless Ferric controller owning SQLite persistence, PlayQueue, lazy `AudioEngine`,
@@ -137,6 +159,17 @@ impl FerricController {
                 last_finished_seq: 0,
                 play_tracker: None,
                 resolve_gen: 0,
+                home_cache: HomeSnapshot::default(),
+                stations_cache: Vec::new(),
+                home_continuation: None,
+                home_excluded_tracks: HashSet::new(),
+                home_excluded_cards: HashSet::new(),
+                home_excluded_artists: HashSet::new(),
+                station_rotation_epoch: 0,
+                home_gen: 0,
+                search_gen: 0,
+                detail_gen: 0,
+                prefetch_gen: 0,
             }),
             audio: Mutex::new(None),
             wake_lock: Mutex::new(false),
@@ -301,6 +334,7 @@ impl FerricController {
                 fallback_duration_ms: track.duration_ms,
             });
             self.queue_upcoming_deck_b();
+            self.prefetch_upcoming_online_track();
             return Ok(());
         }
 
@@ -332,60 +366,94 @@ impl FerricController {
             .cloned()
     }
 
-    fn resolve_online_track_worker(&self, track: Track, gen_id: u64) {
-        let (session, quality, cache_dir) = {
+    fn resolve_stream_path_blocking(
+        &self,
+        track: &Track,
+    ) -> Result<(PathBuf, Option<String>, String, u32, u64), String> {
+        let (session, quality, cache_dir, subsonic_creds) = {
             let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let sess = if st.accounts.youtube_connected && !st.accounts.youtube_cookie.is_empty() {
-                YtmSession {
-                    cookie: st.accounts.youtube_cookie.clone(),
-                    sapisid: st.accounts.youtube_sapisid.clone(),
-                    visitor_data: st.accounts.youtube_visitor_data.clone(),
-                }
-            } else {
-                YtmSession::guest(st.accounts.youtube_visitor_data.clone())
-            };
+            let sub_creds =
+                if st.accounts.subsonic_connected && !st.accounts.subsonic_url.is_empty() {
+                    Some(SubsonicCredentials {
+                        base_url: st.accounts.subsonic_url.clone(),
+                        username: st.accounts.subsonic_username.clone(),
+                        password: st.accounts.subsonic_password.clone(),
+                    })
+                } else {
+                    None
+                };
             (
-                sess,
+                active_ytm_session(&st.accounts),
                 st.dsp.audio_quality,
                 self.cfg.cache_dir.join("stream_cache"),
+                sub_creds,
             )
         };
 
-        let video_id = track
+        if track.source == TrackSource::Subsonic {
+            let creds =
+                subsonic_creds.ok_or_else(|| "Subsonic server is not connected".to_string())?;
+            let cached =
+                download_and_cache_subsonic_stream(&creds, &track.id, &track.codec, &cache_dir)
+                    .map_err(|e| e.to_string())?;
+            return Ok((
+                cached.path,
+                None,
+                cached.codec,
+                track.bitrate_kbps,
+                track.duration_ms,
+            ));
+        }
+
+        let mut video_id = track
             .youtube_video_id
             .clone()
             .or_else(|| track.id.strip_prefix("yt:video:").map(ToOwned::to_owned));
-        let Some(vid) = video_id else {
-            self.sink
-                .on_toast(format!("No playable stream source for {}", track.title));
-            return;
-        };
+        if video_id.is_none() {
+            video_id = resolve_best_video_id_for_track(&session, &track.artist, &track.title)
+                .map_err(|e| e.to_string())?;
+        }
+        let vid =
+            video_id.ok_or_else(|| format!("No playable stream source for {}", track.title))?;
+        let cached =
+            resolve_and_cache_audio_stream_with_quality(&vid, &session, &cache_dir, quality)
+                .map_err(|e| e.to_string())?;
+        Ok((
+            cached.path,
+            Some(vid),
+            cached.codec,
+            cached.bitrate_kbps,
+            cached.duration_ms,
+        ))
+    }
 
-        match resolve_and_cache_audio_stream_with_quality(&vid, &session, &cache_dir, quality) {
-            Ok(cached) => {
+    fn resolve_online_track_worker(self: &Arc<Self>, track: Track, gen_id: u64) {
+        match self.resolve_stream_path_blocking(&track) {
+            Ok((path, vid, codec, bitrate_kbps, duration_ms)) => {
                 let is_still_current = {
                     let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
                     st.queue.update_track_cached_stream(
                         &track.id,
-                        cached.path.clone(),
-                        Some(vid),
-                        &cached.codec,
-                        cached.bitrate_kbps,
-                        cached.duration_ms,
+                        path.clone(),
+                        vid,
+                        &codec,
+                        bitrate_kbps,
+                        duration_ms,
                     );
                     st.resolve_gen == gen_id
                 };
                 if is_still_current {
                     self.send_audio(EngineCommand::LoadAndPlayTrack {
-                        path: cached.path,
+                        path,
                         replay_gain_db: track.replay_gain_db,
-                        fallback_duration_ms: if cached.duration_ms > 0 {
-                            cached.duration_ms
+                        fallback_duration_ms: if duration_ms > 0 {
+                            duration_ms
                         } else {
                             track.duration_ms
                         },
                     });
                     self.queue_upcoming_deck_b();
+                    self.prefetch_upcoming_online_track();
                     self.wake_monitor();
                 }
             }
@@ -393,6 +461,57 @@ impl FerricController {
                 self.sink.on_toast(format!("Stream failed: {err}"));
             }
         }
+    }
+
+    /// Background prefetch for the next uncached online track so Deck B loads seamlessly.
+    fn prefetch_upcoming_online_track(self: &Arc<Self>) {
+        let (candidate, gen_id) = {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let next_track = st.queue.peek_upcoming(1).into_iter().next().cloned();
+            let needs_fetch = next_track.filter(|next| {
+                let has_offline = st
+                    .db
+                    .get_offline_download(&next.id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|d| is_playable_local_path(&PathBuf::from(d.local_path)));
+                let has_local = next
+                    .path
+                    .as_ref()
+                    .is_some_and(|p| is_playable_local_path(p));
+                !has_offline && !has_local
+            });
+            let Some(track) = needs_fetch else {
+                return;
+            };
+            st.prefetch_gen = st.prefetch_gen.wrapping_add(1);
+            (track, st.prefetch_gen)
+        };
+
+        let this = Arc::clone(self);
+        let _ = thread::Builder::new()
+            .name("ferric-deckb-pre".to_string())
+            .spawn(move || {
+                if let Ok((path, vid, codec, bitrate_kbps, duration_ms)) =
+                    this.resolve_stream_path_blocking(&candidate)
+                {
+                    let still_relevant = {
+                        let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
+                        st.queue.update_track_cached_stream(
+                            &candidate.id,
+                            path,
+                            vid,
+                            &codec,
+                            bitrate_kbps,
+                            duration_ms,
+                        );
+                        st.prefetch_gen == gen_id
+                    };
+                    if still_relevant {
+                        this.queue_upcoming_deck_b();
+                    }
+                }
+            });
     }
 
     fn queue_upcoming_deck_b(&self) {
@@ -585,7 +704,11 @@ impl FerricController {
     #[must_use]
     pub fn up_next(&self, limit: usize) -> Vec<Track> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        st.queue.peek_upcoming(limit).into_iter().cloned().collect()
+        if st.queue.current().is_some() {
+            st.queue.peek_upcoming(limit).into_iter().cloned().collect()
+        } else {
+            st.queue.tracks().iter().take(limit).cloned().collect()
+        }
     }
 
     #[must_use]
@@ -763,6 +886,7 @@ impl FerricController {
             self.sink.on_queue_changed(up_next);
             if auto_transitioned {
                 self.queue_upcoming_deck_b();
+                self.prefetch_upcoming_online_track();
             } else if let Some(t) = next_track {
                 let _ = self.dispatch_track_playback(&t, gen_id);
             }
@@ -971,6 +1095,104 @@ mod tests {
         assert!(ctrl2.get_theme().editorial_mode);
         assert_eq!(ctrl2.get_listening_stats(0).expect("stats2").total_plays, 1);
         ctrl2.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn controller_scans_local_entries_searches_groups_and_manages_playlists_and_queue() {
+        use crate::types::LocalScanEntry;
+        use ferric_core::collections::{DetailSortOrder, PlaylistSortOrder, PlaylistSourceFilter};
+
+        let (root, cfg) = temp_cfg("m2_lib");
+        let sink = Arc::new(RecordingSink::default());
+        let ctrl = FerricController::new(cfg, Arc::clone(&sink) as Arc<dyn ControllerEventSink>)
+            .expect("ctrl");
+
+        let scanned = ctrl
+            .scan_local_entries(vec![
+                LocalScanEntry {
+                    uri: "content://media/external/audio/media/101".to_string(),
+                    title: "Midnight Tape".to_string(),
+                    artist: "Lively Studio".to_string(),
+                    album: "Analog Nights".to_string(),
+                    duration_ms: 210_000,
+                    codec: "FLAC".to_string(),
+                    sample_rate: 96_000,
+                    bit_depth: 24,
+                    bitrate_kbps: 2400,
+                },
+                LocalScanEntry {
+                    uri: "content://media/external/audio/media/102".to_string(),
+                    title: "Dawn Chorus".to_string(),
+                    artist: "Lively Studio".to_string(),
+                    album: "Analog Nights".to_string(),
+                    duration_ms: 195_000,
+                    codec: "FLAC".to_string(),
+                    sample_rate: 48_000,
+                    bit_depth: 24,
+                    bitrate_kbps: 1500,
+                },
+            ])
+            .expect("scan local");
+        assert_eq!(scanned, 2);
+        assert_eq!(ctrl.list_local_songs().expect("local").len(), 2);
+        assert_eq!(ctrl.list_albums().expect("albums").len(), 1);
+        assert_eq!(ctrl.list_artists().expect("artists").len(), 1);
+
+        let hits = ctrl
+            .instant_search_local("midnight lively")
+            .expect("instant search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Midnight Tape");
+
+        let liked_now = ctrl.toggle_like(&hits[0].id).expect("like");
+        assert!(liked_now);
+        assert_eq!(ctrl.list_liked_songs().expect("liked").len(), 1);
+
+        let all_songs = ctrl.list_songs("").expect("songs");
+        let pl = ctrl
+            .create_playlist(
+                "Studio Mix".to_string(),
+                "Hi-Res".to_string(),
+                vec![
+                    all_songs[0].id.clone(),
+                    all_songs[1].id.clone(),
+                    all_songs[0].id.clone(),
+                ],
+            )
+            .expect("create pl");
+        let removed_dups = ctrl.deduplicate_playlist(pl.id.clone()).expect("dedup");
+        assert_eq!(removed_dups, 1);
+
+        let detail = ctrl
+            .get_playlist_detail(&pl.id, DetailSortOrder::Title)
+            .expect("detail");
+        assert_eq!(detail.tracks.len(), 2);
+        assert_eq!(detail.tracks[0].title, "Dawn Chorus");
+
+        let csv = ctrl.format_share_csv(&detail.tracks);
+        let imported = ctrl
+            .import_playlist_text("CSV Copy".to_string(), csv)
+            .expect("import csv");
+        assert_eq!(imported.track_count, 2);
+
+        let filtered = ctrl
+            .list_playlists_filtered(PlaylistSourceFilter::Local, PlaylistSortOrder::NameAZ)
+            .expect("filtered");
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].name, "CSV Copy");
+
+        // Queue editing: play_next, move_up/down, remove, save, copy.
+        ctrl.play_next(all_songs[0].clone());
+        ctrl.append_to_queue(all_songs[1].clone());
+        let saved_q = ctrl
+            .save_queue_as_playlist("Saved Q".to_string())
+            .expect("save queue");
+        assert_eq!(saved_q.track_count, 2);
+        assert!(ctrl.copy_queue_tracklist().contains("Ferric Queue"));
+        ctrl.clear_up_next();
+
+        ctrl.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -6,8 +6,81 @@ use serde::{Deserialize, Deserializer, Serialize};
 const SUBSONIC_API_VERSION: &str = "1.16.1";
 const SUBSONIC_CLIENT_NAME: &str = "Ferric";
 const MAX_SUBSONIC_JSON_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SUBSONIC_STREAM_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_SUBSONIC_PLAYLISTS: usize = 100;
 const MAX_SUBSONIC_PLAYLIST_TRACKS: usize = 5_000;
+
+static SUBSONIC_HTTP_AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone)]
+pub struct CachedSubsonicStream {
+    pub path: std::path::PathBuf,
+    pub codec: String,
+}
+
+#[cfg(target_os = "android")]
+fn load_android_system_and_user_certs() -> Vec<ureq::tls::Certificate<'static>> {
+    use ureq::tls::{Certificate, PemItem, parse_pem};
+    let mut certs = Vec::new();
+    let dirs = [
+        "/apex/com.android.conscrypt/cacerts",
+        "/system/etc/security/cacerts",
+        "/data/misc/user/0/cacerts-added",
+    ];
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            if bytes.is_empty() || bytes.len() > 256 * 1024 {
+                continue;
+            }
+            let mut parsed_any = false;
+            for item in parse_pem(&bytes).flatten() {
+                if let PemItem::Certificate(c) = item {
+                    certs.push(c);
+                    parsed_any = true;
+                }
+            }
+            if !parsed_any && bytes.first() == Some(&0x30) {
+                certs.push(Certificate::from_der(&bytes).to_owned());
+            }
+        }
+    }
+    certs
+}
+
+/// Shared HTTP client for OpenSubsonic / Navidrome servers.
+/// On Android, trusts Android system + user-installed CA certificates so home-lab HTTPS servers
+/// with private LAN CAs work fail-closed without disabling TLS verification.
+pub fn subsonic_http_agent() -> &'static ureq::Agent {
+    SUBSONIC_HTTP_AGENT.get_or_init(|| {
+        let builder = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .timeout_connect(Some(std::time::Duration::from_secs(8)))
+            .timeout_recv_response(Some(std::time::Duration::from_secs(25)))
+            .timeout_per_read(Some(std::time::Duration::from_secs(20)))
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .http_status_as_error(false);
+        #[cfg(target_os = "android")]
+        let builder = {
+            let android_certs = load_android_system_and_user_certs();
+            if !android_certs.is_empty() {
+                let tls = ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::new_with_certs(&android_certs))
+                    .build();
+                builder.tls_config(tls)
+            } else {
+                builder
+            }
+        };
+        ureq::Agent::new_with_config(builder.build())
+    })
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubsonicCredentials {
@@ -614,7 +687,7 @@ pub fn sync_subsonic_catalog(
     let (base, is_https, host, port) = parse_validated_host_port(&creds.base_url)?;
     verify_resolved_subsonic_target(&host, port, is_https)?;
 
-    let agent = crate::shared_http_agent();
+    let agent = subsonic_http_agent();
 
     let search_url = format!(
         "{base}/rest/search3.view?query=&songCount=200&artistCount=0&albumCount=0&{}",
@@ -688,6 +761,180 @@ pub fn sync_subsonic_catalog(
     Ok((catalog_tracks, bundles))
 }
 
+fn sanitize_subsonic_ext(suffix_hint: &str, content_type: Option<&str>) -> &'static str {
+    let hint = suffix_hint.trim().trim_start_matches('.');
+    if hint.eq_ignore_ascii_case("flac") {
+        return "flac";
+    }
+    if hint.eq_ignore_ascii_case("mp3") {
+        return "mp3";
+    }
+    if hint.eq_ignore_ascii_case("m4a")
+        || hint.eq_ignore_ascii_case("aac")
+        || hint.eq_ignore_ascii_case("alac")
+    {
+        return "m4a";
+    }
+    if hint.eq_ignore_ascii_case("opus") {
+        return "opus";
+    }
+    if hint.eq_ignore_ascii_case("ogg") {
+        return "ogg";
+    }
+    if hint.eq_ignore_ascii_case("wav") {
+        return "wav";
+    }
+    if hint.eq_ignore_ascii_case("aiff") || hint.eq_ignore_ascii_case("aif") {
+        return "aiff";
+    }
+    if let Some(ct) = content_type {
+        let low = ct.to_ascii_lowercase();
+        if low.contains("flac") {
+            return "flac";
+        }
+        if low.contains("mpeg") || low.contains("mp3") {
+            return "mp3";
+        }
+        if low.contains("mp4") || low.contains("aac") {
+            return "m4a";
+        }
+        if low.contains("ogg") || low.contains("opus") {
+            return "ogg";
+        }
+        if low.contains("wav") {
+            return "wav";
+        }
+    }
+    "flac"
+}
+
+fn subsonic_cache_key(base_url: &str, raw_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(base_url.as_bytes());
+    hasher.update(b"|");
+    hasher.update(raw_id.as_bytes());
+    let digest = hasher.finalize();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(24);
+    for &b in &digest[..12] {
+        out.push(char::from(HEX[usize::from(b >> 4)]));
+        out.push(char::from(HEX[usize::from(b & 0x0F)]));
+    }
+    out
+}
+
+/// Download and cache an OpenSubsonic / Navidrome audio stream to `cache_dir` atomically.
+pub fn download_and_cache_subsonic_stream(
+    creds: &SubsonicCredentials,
+    song_id: &str,
+    suffix_hint: &str,
+    cache_dir: &std::path::Path,
+) -> ProviderResult<CachedSubsonicStream> {
+    use std::io::{Read, Write};
+
+    let (base, is_https, host, port) = parse_validated_host_port(&creds.base_url)?;
+    verify_resolved_subsonic_target(&host, port, is_https)?;
+    let raw_id = song_id.strip_prefix("subsonic:").unwrap_or(song_id).trim();
+    if raw_id.is_empty() {
+        return Err(ProviderError::Http("Empty Subsonic song ID".to_string()));
+    }
+
+    std::fs::create_dir_all(cache_dir)?;
+    let key = subsonic_cache_key(&base, raw_id);
+    let hint_ext = sanitize_subsonic_ext(suffix_hint, None);
+    let candidate = cache_dir.join(format!("subsonic_{key}.{hint_ext}"));
+    if let Ok(meta) = std::fs::metadata(&candidate)
+        && meta.is_file()
+        && meta.len() >= 1024
+    {
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&candidate) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+        return Ok(CachedSubsonicStream {
+            path: candidate,
+            codec: hint_ext.to_ascii_uppercase(),
+        });
+    }
+
+    let url = format!(
+        "{base}/rest/stream.view?id={}&{}",
+        url_encode(raw_id),
+        build_auth_query(creds)
+    );
+    let resp = subsonic_http_agent()
+        .get(&url)
+        .header("User-Agent", concat!("Ferric/", env!("CARGO_PKG_VERSION")))
+        .call()
+        .map_err(|e| ProviderError::Http(format!("Subsonic stream request failed: {e}")))?;
+
+    let status = resp.status().as_u16();
+    if status != 200 {
+        return Err(ProviderError::Http(format!(
+            "Subsonic stream returned HTTP {status}"
+        )));
+    }
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(ToOwned::to_owned);
+    if let Some(ct) = content_type.as_deref() {
+        let low = ct.to_ascii_lowercase();
+        if low.starts_with("application/json")
+            || low.starts_with("text/")
+            || low.starts_with("application/xml")
+        {
+            return Err(ProviderError::Http(format!(
+                "Subsonic stream returned non-audio content-type: {ct}"
+            )));
+        }
+    }
+
+    let final_ext = sanitize_subsonic_ext(suffix_hint, content_type.as_deref());
+    let dest_path = cache_dir.join(format!("subsonic_{key}.{final_ext}"));
+    let part_path = cache_dir.join(format!("subsonic_{key}_{}.part", fastrand::u64(..)));
+
+    let mut reader = resp.into_body().into_reader();
+    let mut out = std::fs::File::create(&part_path)?;
+    let mut buf = vec![0u8; 32 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total = total.saturating_add(n as u64);
+        if total > MAX_SUBSONIC_STREAM_BYTES {
+            drop(out);
+            let _ = std::fs::remove_file(&part_path);
+            return Err(ProviderError::Http(
+                "Subsonic audio stream exceeded 128 MiB safety cap".to_string(),
+            ));
+        }
+        out.write_all(&buf[..n])?;
+    }
+    out.flush()?;
+    drop(out);
+
+    if total < 256 {
+        let _ = std::fs::remove_file(&part_path);
+        return Err(ProviderError::Http(
+            "Subsonic stream returned empty/truncated audio".to_string(),
+        ));
+    }
+
+    if let Err(err) = std::fs::rename(&part_path, &dest_path) {
+        let _ = std::fs::remove_file(&dest_path);
+        std::fs::rename(&part_path, &dest_path).map_err(|_| err)?;
+    }
+
+    Ok(CachedSubsonicStream {
+        path: dest_path,
+        codec: final_ext.to_ascii_uppercase(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,5 +1004,66 @@ mod tests {
         assert_eq!(track.duration_ms, 544_000);
         assert_eq!(track.isrc.as_deref(), Some("USQX91300103"));
         assert!(track.liked);
+    }
+
+    #[test]
+    fn subsonic_stream_download_caches_and_rejects_json_errors() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let payload = [0x66u8, 0x4c, 0x61, 0x43].repeat(400); // 1600 bytes fake FLAC
+        let payload_server = payload.clone();
+
+        let handle = std::thread::spawn(move || {
+            for idx in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut req_buf = [0u8; 1024];
+                let _ = stream.read(&mut req_buf);
+                if idx == 0 {
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload_server.len()
+                    );
+                    stream.write_all(hdr.as_bytes()).expect("hdr");
+                    stream.write_all(&payload_server).expect("body");
+                } else {
+                    let body = br#"{"subsonic-response":{"status":"failed"}}"#;
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(hdr.as_bytes()).expect("hdr2");
+                    stream.write_all(body).expect("body2");
+                }
+            }
+        });
+
+        let creds = SubsonicCredentials {
+            base_url: format!("http://127.0.0.1:{port}"),
+            username: "tester".to_string(),
+            password: "pw".to_string(),
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "ferric_subsonic_dl_{}_{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        let first = download_and_cache_subsonic_stream(&creds, "subsonic:s1", "FLAC", &dir)
+            .expect("download audio");
+        assert!(first.path.is_file());
+        assert_eq!(std::fs::read(&first.path).expect("read"), payload);
+
+        // Second call hits local cache without contacting server.
+        let cached = download_and_cache_subsonic_stream(&creds, "subsonic:s1", "FLAC", &dir)
+            .expect("cache hit");
+        assert_eq!(cached.path, first.path);
+
+        // JSON error body on a new song ID must be rejected fail-closed.
+        assert!(download_and_cache_subsonic_stream(&creds, "subsonic:err", "FLAC", &dir).is_err());
+
+        handle.join().expect("server thread");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -9,9 +9,8 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+sha2.workspace = true
+fastrand.workspace = true
 ferric-core = { path = "../ferric-core" }
 ferric-audio = { path = "../ferric-audio" }
 ferric-providers = { path = "../ferric-providers" }
-
-[dev-dependencies]
-fastrand.workspace = true

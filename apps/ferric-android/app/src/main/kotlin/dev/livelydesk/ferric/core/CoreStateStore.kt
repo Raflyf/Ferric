@@ -1,6 +1,10 @@
 package dev.livelydesk.ferric.core
 
 import android.content.Context
+import android.net.Uri
+import dev.livelydesk.ferric.auth.SilentSpotifyRefresher
+import dev.livelydesk.ferric.auth.WebCookieCleaner
+import dev.livelydesk.ferric.local.LocalMediaScanner
 import dev.livelydesk.ferric.playback.OutputRouteHelper
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -11,14 +15,66 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.ferric_mobile_ffi.FerricMobileCore
+import uniffi.ferric_mobile_ffi.FfiAccountStatus
+import uniffi.ferric_mobile_ffi.FfiAlbumSummary
+import uniffi.ferric_mobile_ffi.FfiArtistSummary
+import uniffi.ferric_mobile_ffi.FfiCardKind
+import uniffi.ferric_mobile_ffi.FfiCollectionDetail
+import uniffi.ferric_mobile_ffi.FfiDetailSort
 import uniffi.ferric_mobile_ffi.FfiEventSink
+import uniffi.ferric_mobile_ffi.FfiHomeState
+import uniffi.ferric_mobile_ffi.FfiPlaylist
+import uniffi.ferric_mobile_ffi.FfiPlaylistSort
+import uniffi.ferric_mobile_ffi.FfiPlaylistSourceFilter
 import uniffi.ferric_mobile_ffi.FfiRepeatMode
+import uniffi.ferric_mobile_ffi.FfiSearchResults
 import uniffi.ferric_mobile_ffi.FfiTelemetry
 import uniffi.ferric_mobile_ffi.FfiTrack
 
 data class PlaybackUiState(
     val tracks: List<FfiTrack> = emptyList(),
+    val likedTracks: List<FfiTrack> = emptyList(),
+    val recentTracks: List<FfiTrack> = emptyList(),
+    val localTracks: List<FfiTrack> = emptyList(),
+    val playlists: List<FfiPlaylist> = emptyList(),
+    val albums: List<FfiAlbumSummary> = emptyList(),
+    val artists: List<FfiArtistSummary> = emptyList(),
+    val playlistSourceFilter: FfiPlaylistSourceFilter = FfiPlaylistSourceFilter.ALL,
+    val playlistSort: FfiPlaylistSort = FfiPlaylistSort.NEWEST,
+    val homeState: FfiHomeState = FfiHomeState(
+        chips = emptyList(),
+        selectedMoodIdx = null,
+        quickPicks = emptyList(),
+        stations = emptyList(),
+        shelves = emptyList(),
+        isLoading = false,
+    ),
+    val searchResults: FfiSearchResults = FfiSearchResults(
+        query = "",
+        localTracks = emptyList(),
+        onlineTracks = emptyList(),
+        onlineCards = emptyList(),
+        isLoading = false,
+    ),
+    val recentSearches: List<String> = emptyList(),
+    val activeDetail: FfiCollectionDetail? = null,
+    val detailSort: FfiDetailSort = FfiDetailSort.ORIGINAL,
+    val accountStatus: FfiAccountStatus = FfiAccountStatus(
+        spotifyConnected = false,
+        spotifyUserName = "",
+        spotifyUserId = "",
+        spotifyPlaylistCount = 0u,
+        spotifyLikedCount = 0u,
+        youtubeConnected = false,
+        youtubeChannelName = "",
+        youtubeAccountId = "",
+        youtubePlaylistCount = 0u,
+        subsonicConnected = false,
+        subsonicUrl = "",
+        subsonicUsername = "",
+    ),
     val currentTrack: FfiTrack? = null,
     val upNext: List<FfiTrack> = emptyList(),
     val isPlaying: Boolean = false,
@@ -77,6 +133,18 @@ class CoreStateStore(private val appContext: Context) {
     )
     val uiState: StateFlow<PlaybackUiState> = _uiState.asStateFlow()
 
+    private val silentSpotifyRefresher = SilentSpotifyRefresher(
+        appContext = appContext,
+        onRefreshed = { token, cookie ->
+            completeSpotifyLogin(accessToken = token, cookie = cookie, triggerSync = true)
+        },
+        onFailed = {
+            _uiState.update {
+                it.copy(statusMessage = "Spotify session expired. Tap Accounts to sign in again.")
+            }
+        },
+    )
+
     private val eventSink = object : FfiEventSink {
         override fun onPlaybackTelemetry(telemetry: FfiTelemetry) {
             _uiState.update { PlaybackStateReducer.applyTelemetry(it, telemetry) }
@@ -94,13 +162,35 @@ class CoreStateStore(private val appContext: Context) {
             scope.launch { refreshLibraryInternal() }
         }
 
+        override fun onHomeUpdated(home: FfiHomeState) {
+            _uiState.update { it.copy(homeState = home) }
+        }
+
+        override fun onSearchResults(results: FfiSearchResults) {
+            val recent = runCatching { core?.recentSearches().orEmpty() }.getOrDefault(emptyList())
+            _uiState.update { it.copy(searchResults = results, recentSearches = recent) }
+        }
+
+        override fun onDetailLoaded(detail: FfiCollectionDetail) {
+            _uiState.update { it.copy(activeDetail = detail, detailSort = FfiDetailSort.ORIGINAL) }
+        }
+
+        override fun onAccountsChanged(status: FfiAccountStatus) {
+            _uiState.update { it.copy(accountStatus = status) }
+        }
+
+        override fun onSpotifyAuthExpired() {
+            silentSpotifyRefresher.triggerRefresh()
+        }
+
         override fun onToast(message: String) {
             _uiState.update { it.copy(statusMessage = message) }
         }
     }
 
     /**
-     * Initialize Rust SQLite + library lazily without opening an Android audio stream yet.
+     * Initialize Rust SQLite + library lazily without opening an Android audio stream yet,
+     * then kick off non-blocking Home discovery load.
      */
     fun bootstrapLibrary() {
         scope.launch {
@@ -108,7 +198,16 @@ class CoreStateStore(private val appContext: Context) {
             try {
                 handle.seedDemoIfEmpty()
                 refreshLibraryInternal()
-                _uiState.update { it.copy(isReady = true) }
+                val accounts = handle.getAccountStatus()
+                val recentSearches = handle.recentSearches()
+                _uiState.update {
+                    it.copy(
+                        accountStatus = accounts,
+                        recentSearches = recentSearches,
+                        isReady = true,
+                    )
+                }
+                handle.loadHome(forceRefresh = false, moodIdx = null)
             } catch (err: Exception) {
                 _uiState.update { it.copy(statusMessage = "Init failed: ${err.message}") }
             }
@@ -150,10 +249,32 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    // --- Playback & Queue ---
+
     fun playTrack(trackId: String) {
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             runCatching { handle.playTrack(trackId) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun playQueue(tracks: List<FfiTrack>, startIndex: Int, context: String) {
+        if (tracks.isEmpty()) return
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            val idx = startIndex.coerceIn(0, tracks.lastIndex).toUInt()
+            runCatching { handle.playQueue(tracks, idx, context) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun shuffleQueue(tracks: List<FfiTrack>, context: String) {
+        if (tracks.isEmpty()) return
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            val shuffled = tracks.shuffled()
+            runCatching { handle.playQueue(shuffled, 0u, context) }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
         }
     }
@@ -183,35 +304,25 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun pause() {
-        scope.launch {
-            core?.pause()
-        }
+        scope.launch { core?.pause() }
     }
 
     fun next() {
-        scope.launch {
-            runCatching { getOrCreateCore()?.next() }
-        }
+        scope.launch { runCatching { getOrCreateCore()?.next() } }
     }
 
     fun prev() {
-        scope.launch {
-            runCatching { getOrCreateCore()?.prev() }
-        }
+        scope.launch { runCatching { getOrCreateCore()?.prev() } }
     }
 
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceAtLeast(0L)
         _uiState.update { it.copy(positionMs = clamped) }
-        scope.launch {
-            core?.seekMs(clamped.toULong())
-        }
+        scope.launch { core?.seekMs(clamped.toULong()) }
     }
 
     fun setDucking(duck: Boolean) {
-        scope.launch {
-            core?.setDucking(duck)
-        }
+        scope.launch { core?.setDucking(duck) }
     }
 
     fun toggleShuffle() {
@@ -230,6 +341,446 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    fun playNext(track: FfiTrack) {
+        scope.launch { getOrCreateCore()?.playNext(track) }
+    }
+
+    fun appendToQueue(track: FfiTrack) {
+        scope.launch { getOrCreateCore()?.appendToQueue(track) }
+    }
+
+    fun jumpToUpcoming(offset: Int) {
+        if (offset < 0) return
+        scope.launch {
+            runCatching { getOrCreateCore()?.jumpToUpcoming(offset.toUInt()) }
+        }
+    }
+
+    fun moveQueueItemUp(offset: Int) {
+        if (offset <= 0) return
+        scope.launch { getOrCreateCore()?.moveQueueItemUp(offset.toUInt()) }
+    }
+
+    fun moveQueueItemDown(offset: Int) {
+        if (offset < 0) return
+        scope.launch { getOrCreateCore()?.moveQueueItemDown(offset.toUInt()) }
+    }
+
+    fun removeQueueItem(offset: Int) {
+        if (offset < 0) return
+        scope.launch { getOrCreateCore()?.removeQueueItem(offset.toUInt()) }
+    }
+
+    fun clearUpNext() {
+        scope.launch { getOrCreateCore()?.clearUpNext() }
+    }
+
+    fun saveQueueAsPlaylist(name: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.saveQueueAsPlaylist(name) }
+                .onSuccess { pl -> _uiState.update { it.copy(statusMessage = "Saved queue as \"${pl.name}\"") } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun buildQueueShareText(onReady: (String) -> Unit) {
+        scope.launch {
+            val text = getOrCreateCore()?.copyQueueTracklist().orEmpty()
+            if (text.isNotEmpty()) {
+                withContext(Dispatchers.Main) { onReady(text) }
+            }
+        }
+    }
+
+    // --- Home & Search ---
+
+    fun loadHome(forceRefresh: Boolean, moodIdx: Int? = null) {
+        scope.launch {
+            getOrCreateCore()?.loadHome(forceRefresh, moodIdx?.toUInt())
+        }
+    }
+
+    fun openStation(stationId: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            _uiState.update { it.copy(statusMessage = "Loading station...") }
+            runCatching { handle.openStation(stationId) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun openBrowseDetail(browseId: String, kind: FfiCardKind) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            _uiState.update { it.copy(statusMessage = "Loading collection...") }
+            runCatching { handle.openBrowseDetail(browseId, kind) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun instantSearchLocal(query: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            val hits = runCatching { handle.instantSearchLocal(query) }.getOrDefault(emptyList())
+            _uiState.update { st ->
+                st.copy(
+                    searchResults = st.searchResults.copy(
+                        query = query,
+                        localTracks = hits,
+                    ),
+                )
+            }
+        }
+    }
+
+    fun searchOnline(query: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.searchOnline(query) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun clearRecentSearches() {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.clearRecentSearches() }
+            _uiState.update { it.copy(recentSearches = emptyList()) }
+        }
+    }
+
+    fun importPublicUrl(url: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            _uiState.update { it.copy(statusMessage = "Importing URL...") }
+            runCatching { handle.importPublicUrl(url) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    // --- Library, Local Lossless & Collection Detail ---
+
+    fun setPlaylistFilter(source: FfiPlaylistSourceFilter) {
+        _uiState.update { it.copy(playlistSourceFilter = source) }
+        scope.launch { refreshLibraryInternal() }
+    }
+
+    fun cyclePlaylistSort() {
+        val next = when (_uiState.value.playlistSort) {
+            FfiPlaylistSort.NEWEST -> FfiPlaylistSort.OLDEST
+            FfiPlaylistSort.OLDEST -> FfiPlaylistSort.NAME_AZ
+            FfiPlaylistSort.NAME_AZ -> FfiPlaylistSort.NEWEST
+        }
+        _uiState.update { it.copy(playlistSort = next) }
+        scope.launch { refreshLibraryInternal() }
+    }
+
+    fun openPlaylistDetail(playlistId: String, sort: FfiDetailSort = FfiDetailSort.ORIGINAL) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.getPlaylistDetail(playlistId, sort) }
+                .onSuccess { detail ->
+                    _uiState.update { it.copy(activeDetail = detail, detailSort = sort) }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun openAlbumDetail(albumName: String, artistName: String, sort: FfiDetailSort = FfiDetailSort.ORIGINAL) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.getAlbumDetail(albumName, artistName, sort) }
+                .onSuccess { detail ->
+                    _uiState.update { it.copy(activeDetail = detail, detailSort = sort) }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun openArtistDetail(artistName: String, sort: FfiDetailSort = FfiDetailSort.ORIGINAL) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.getArtistDetail(artistName, sort) }
+                .onSuccess { detail ->
+                    _uiState.update { it.copy(activeDetail = detail, detailSort = sort) }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun openLikedDetail(sort: FfiDetailSort = FfiDetailSort.ORIGINAL) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.getLikedDetail(sort) }
+                .onSuccess { detail ->
+                    _uiState.update { it.copy(activeDetail = detail, detailSort = sort) }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun closeDetail() {
+        _uiState.update { it.copy(activeDetail = null) }
+    }
+
+    fun cycleDetailSort() {
+        val cur = _uiState.value.activeDetail ?: return
+        val next = when (_uiState.value.detailSort) {
+            FfiDetailSort.ORIGINAL -> FfiDetailSort.TITLE
+            FfiDetailSort.TITLE -> FfiDetailSort.ARTIST
+            FfiDetailSort.ARTIST -> FfiDetailSort.DURATION
+            FfiDetailSort.DURATION -> FfiDetailSort.ORIGINAL
+        }
+        val sorted = when (next) {
+            FfiDetailSort.ORIGINAL -> cur.tracks
+            FfiDetailSort.TITLE -> cur.tracks.sortedBy { it.title.lowercase() }
+            FfiDetailSort.ARTIST -> cur.tracks.sortedBy { it.artist.lowercase() }
+            FfiDetailSort.DURATION -> cur.tracks.sortedBy { it.durationMs }
+        }
+        _uiState.update {
+            it.copy(
+                detailSort = next,
+                activeDetail = cur.copy(tracks = sorted),
+            )
+        }
+    }
+
+    fun createPlaylist(name: String, description: String = "", trackIds: List<String> = emptyList()) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.createPlaylist(name, description, trackIds) }
+                .onSuccess { pl -> _uiState.update { it.copy(statusMessage = "Created \"${pl.name}\"") } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun renamePlaylist(playlistId: String, newName: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.renamePlaylist(playlistId, newName) }
+                .onSuccess {
+                    if (_uiState.value.activeDetail?.id == playlistId) {
+                        openPlaylistDetail(playlistId, _uiState.value.detailSort)
+                    }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun deletePlaylist(playlistId: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.deletePlaylist(playlistId) }
+                .onSuccess {
+                    if (_uiState.value.activeDetail?.id == playlistId) {
+                        closeDetail()
+                    }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun addTrackToPlaylist(playlistId: String, track: FfiTrack) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.addTrackToPlaylist(playlistId, track) }
+                .onSuccess { _uiState.update { it.copy(statusMessage = "Added \"${track.title}\" to playlist") } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun removeTrackFromPlaylist(playlistId: String, trackId: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.removeTrackFromPlaylist(playlistId, trackId) }
+                .onSuccess {
+                    if (_uiState.value.activeDetail?.id == playlistId) {
+                        openPlaylistDetail(playlistId, _uiState.value.detailSort)
+                    }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun deduplicatePlaylist(playlistId: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.deduplicatePlaylist(playlistId) }
+                .onSuccess {
+                    if (_uiState.value.activeDetail?.id == playlistId) {
+                        openPlaylistDetail(playlistId, _uiState.value.detailSort)
+                    }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun pushLocalPlaylistToCloud(playlistId: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            _uiState.update { it.copy(statusMessage = "Syncing playlist to account...") }
+            runCatching { handle.pushLocalPlaylistToCloud(playlistId) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun toggleLike(trackId: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.toggleLike(trackId) }
+                .onSuccess { liked ->
+                    _uiState.update { st ->
+                        val detail = st.activeDetail?.let { d ->
+                            d.copy(
+                                tracks = d.tracks.map { t ->
+                                    if (t.id == trackId) t.copy(liked = liked) else t
+                                },
+                            )
+                        }
+                        st.copy(activeDetail = detail)
+                    }
+                }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun scanDeviceMediaStore() {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            _uiState.update { it.copy(statusMessage = "Scanning local audio...") }
+            val entries = runCatching { LocalMediaScanner.scanMediaStore(appContext) }
+                .getOrDefault(emptyList())
+            if (entries.isEmpty()) {
+                _uiState.update { it.copy(statusMessage = "No local audio files found in MediaStore") }
+                return@launch
+            }
+            runCatching { handle.scanLocalEntries(entries) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun scanSafFolder(treeUri: Uri) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            _uiState.update { it.copy(statusMessage = "Scanning selected music folder...") }
+            val entries = runCatching { LocalMediaScanner.scanSafTree(appContext, treeUri) }
+                .getOrDefault(emptyList())
+            if (entries.isEmpty()) {
+                _uiState.update { it.copy(statusMessage = "No supported audio files found in folder") }
+                return@launch
+            }
+            runCatching { handle.scanLocalEntries(entries) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun importPlaylistText(name: String, rawText: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.importPlaylistText(name, rawText) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun buildTrackShareLink(track: FfiTrack, onReady: (String?) -> Unit) {
+        scope.launch {
+            val link = getOrCreateCore()?.trackShareLink(track)
+            withContext(Dispatchers.Main) { onReady(link) }
+        }
+    }
+
+    fun buildDetailShareTracklist(detail: FfiCollectionDetail, onReady: (String) -> Unit) {
+        scope.launch {
+            val txt = getOrCreateCore()
+                ?.formatShareTracklist(detail.title, detail.shareUrl, detail.tracks)
+                .orEmpty()
+            if (txt.isNotEmpty()) {
+                withContext(Dispatchers.Main) { onReady(txt) }
+            }
+        }
+    }
+
+    fun buildDetailCsv(detail: FfiCollectionDetail, onReady: (String) -> Unit) {
+        scope.launch {
+            val csv = getOrCreateCore()?.formatShareCsv(detail.tracks).orEmpty()
+            if (csv.isNotEmpty()) {
+                withContext(Dispatchers.Main) { onReady(csv) }
+            }
+        }
+    }
+
+    // --- Accounts ---
+
+    fun completeSpotifyLogin(accessToken: String, cookie: String, triggerSync: Boolean) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching {
+                handle.setSpotifySession(
+                    accessToken = accessToken,
+                    cookie = cookie,
+                    userName = "",
+                    userId = "",
+                    triggerSync = triggerSync,
+                )
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message) }
+            }
+        }
+    }
+
+    fun syncSpotify() {
+        scope.launch { getOrCreateCore()?.syncSpotifyAccount() }
+    }
+
+    fun logoutSpotify() {
+        scope.launch {
+            WebCookieCleaner.clearAllWebAuthData()
+            runCatching { getOrCreateCore()?.logoutSpotify() }
+        }
+    }
+
+    fun completeYtmLogin(cookie: String, sapisid: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching {
+                handle.setYtmSession(
+                    cookie = cookie,
+                    sapisid = sapisid,
+                    visitorData = "",
+                    channelName = "",
+                    accountId = "",
+                )
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message) }
+            }
+        }
+    }
+
+    fun syncYtm() {
+        scope.launch { getOrCreateCore()?.syncYtmAccount() }
+    }
+
+    fun logoutYtm() {
+        scope.launch {
+            WebCookieCleaner.clearAllWebAuthData()
+            runCatching { getOrCreateCore()?.logoutYtm() }
+        }
+    }
+
+    fun syncSubsonic(url: String, username: String, password: String) {
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            _uiState.update { it.copy(statusMessage = "Connecting to Subsonic...") }
+            runCatching { handle.syncSubsonic(url, username, password) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
+    fun logoutSubsonic() {
+        scope.launch { runCatching { getOrCreateCore()?.logoutSubsonic() } }
+    }
+
     fun refreshOutputRoute() {
         val label = OutputRouteHelper.activeOutputLabel(appContext)
         _uiState.update { it.copy(activeOutputRoute = label) }
@@ -240,9 +791,7 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun onTrimMemory() {
-        scope.launch {
-            core?.trimMemory()
-        }
+        scope.launch { core?.trimMemory() }
     }
 
     fun shutdown() {
@@ -254,12 +803,26 @@ class CoreStateStore(private val appContext: Context) {
 
     private fun refreshLibraryInternal() {
         val handle = core ?: return
+        val filter = _uiState.value.playlistSourceFilter
+        val sort = _uiState.value.playlistSort
         val songs = runCatching { handle.listSongs("") }.getOrDefault(emptyList())
+        val liked = runCatching { handle.listLikedSongs() }.getOrDefault(emptyList())
+        val recent = runCatching { handle.listRecentSongs() }.getOrDefault(emptyList())
+        val local = runCatching { handle.listLocalSongs() }.getOrDefault(emptyList())
+        val playlists = runCatching { handle.listPlaylistsFiltered(filter, sort) }.getOrDefault(emptyList())
+        val albums = runCatching { handle.listAlbums() }.getOrDefault(emptyList())
+        val artists = runCatching { handle.listArtists() }.getOrDefault(emptyList())
         val current = handle.getCurrentTrack()
         val upNext = handle.getUpNext(50u)
         _uiState.update {
             it.copy(
                 tracks = songs,
+                likedTracks = liked,
+                recentTracks = recent,
+                localTracks = local,
+                playlists = playlists,
+                albums = albums,
+                artists = artists,
                 currentTrack = current ?: it.currentTrack,
                 upNext = upNext,
             )

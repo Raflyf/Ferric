@@ -1,79 +1,84 @@
 package dev.livelydesk.ferric
 
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
-import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.BorderStroke
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.GraphicEq
-import androidx.compose.material.icons.rounded.MusicNote
-import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Repeat
-import androidx.compose.material.icons.rounded.RepeatOne
-import androidx.compose.material.icons.rounded.Shuffle
-import androidx.compose.material.icons.rounded.SkipNext
-import androidx.compose.material.icons.rounded.SkipPrevious
-import androidx.compose.material.icons.rounded.Speaker
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.LibraryMusic
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Surface
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
-import com.google.common.util.concurrent.MoreExecutors
+import dev.livelydesk.ferric.auth.WebLoginActivity
+import dev.livelydesk.ferric.auth.WebLoginTarget
 import dev.livelydesk.ferric.core.CoreStateStore
-import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.playback.FerricPlaybackService
 import dev.livelydesk.ferric.playback.OutputRouteHelper
+import dev.livelydesk.ferric.ui.components.AddToPlaylistDialog
+import dev.livelydesk.ferric.ui.components.MiniPlayerBar
+import dev.livelydesk.ferric.ui.screens.AccountsSheet
+import dev.livelydesk.ferric.ui.screens.DetailScreen
+import dev.livelydesk.ferric.ui.screens.HomeScreen
+import dev.livelydesk.ferric.ui.screens.LibraryScreen
+import dev.livelydesk.ferric.ui.screens.QueueSheet
+import dev.livelydesk.ferric.ui.screens.SearchScreen
 import dev.livelydesk.ferric.ui.theme.AmoledBlack
 import dev.livelydesk.ferric.ui.theme.FerricOrange
 import dev.livelydesk.ferric.ui.theme.FerricTheme
-import dev.livelydesk.ferric.ui.theme.HairlineBorder
 import dev.livelydesk.ferric.ui.theme.ObsidianElevated
 import dev.livelydesk.ferric.ui.theme.ObsidianSurface
 import dev.livelydesk.ferric.ui.theme.TextPrimary
 import dev.livelydesk.ferric.ui.theme.TextSecondary
-import uniffi.ferric_mobile_ffi.FfiRepeatMode
 import uniffi.ferric_mobile_ffi.FfiTrack
+
+private enum class BottomTab(val label: String) {
+    HOME("Home"),
+    SEARCH("Search"),
+    LIBRARY("Library"),
+}
 
 class MainActivity : ComponentActivity() {
     private var controllerFuture: ListenableFuture<MediaController>? = null
@@ -89,20 +94,25 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             FerricTheme {
-                val state by store.uiState.collectAsStateWithLifecycle()
-                FerricM1HomeScreen(state = state, store = store)
+                FerricMainShell(
+                    store = store,
+                    onLaunchWebLogin = { target ->
+                        startActivity(WebLoginActivity.createIntent(this, target))
+                    },
+                    onOpenOutputSwitcher = {
+                        OutputRouteHelper.openSystemOutputSwitcher(this)
+                        store.refreshOutputRoute()
+                    },
+                )
             }
         }
     }
 
     override fun onStart() {
         super.onStart()
-        val store = (application as FerricApp).store
-        store.refreshOutputRoute()
         val token = SessionToken(this, ComponentName(this, FerricPlaybackService::class.java))
-        controllerFuture = MediaController.Builder(this, token).buildAsync().also { future ->
-            future.addListener({ runCatching { future.get() } }, MoreExecutors.directExecutor())
-        }
+        controllerFuture = MediaController.Builder(this, token).buildAsync()
+        (application as FerricApp).store.refreshOutputRoute()
     }
 
     override fun onStop() {
@@ -113,310 +123,378 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun FerricM1HomeScreen(
-    state: PlaybackUiState,
+private fun FerricMainShell(
     store: CoreStateStore,
+    onLaunchWebLogin: (WebLoginTarget) -> Unit,
+    onOpenOutputSwitcher: () -> Unit,
 ) {
     val context = LocalContext.current
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AmoledBlack)
-            .statusBarsPadding()
-            .navigationBarsPadding(),
-    ) {
-        // Top Header + System Output Switcher pill
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column {
-                Text(
-                    text = "Ferric",
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = TextPrimary,
-                )
-                Text(
-                    text = "Rust Oboe Engine · M1 Preview",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = FerricOrange,
-                )
-            }
-            Surface(
-                onClick = {
-                    OutputRouteHelper.openSystemOutputSwitcher(context)
-                    store.refreshOutputRoute()
-                },
-                shape = RoundedCornerShape(20.dp),
-                color = ObsidianElevated,
-                border = BorderStroke(1.dp, HairlineBorder),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Speaker,
-                        contentDescription = "Audio output device",
-                        tint = FerricOrange,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = state.activeOutputRoute,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
+    val state by store.uiState.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
 
-        state.statusMessage?.let { msg ->
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp)
-                    .clickable { store.clearStatusMessage() },
-                shape = RoundedCornerShape(10.dp),
-                color = ObsidianElevated,
-                border = BorderStroke(1.dp, FerricOrange.copy(alpha = 0.5f)),
-            ) {
-                Text(
-                    text = msg,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextPrimary,
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
-        }
+    var activeTab by rememberSaveable { mutableStateOf(BottomTab.HOME) }
+    var showQueueSheet by rememberSaveable { mutableStateOf(false) }
+    var showAccountsSheet by rememberSaveable { mutableStateOf(false) }
+    var showCreatePlaylistDialog by rememberSaveable { mutableStateOf(false) }
+    var newPlaylistName by rememberSaveable { mutableStateOf("") }
+    var pendingTrackForPlaylist by remember { mutableStateOf<FfiTrack?>(null) }
+    var pendingCsvContent by remember { mutableStateOf<String?>(null) }
 
-        // Quick Picks Track List
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            item {
-                Text(
-                    text = "Quick picks",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = TextPrimary,
-                    modifier = Modifier.padding(vertical = 4.dp),
-                )
-            }
-            items(state.tracks, key = { it.id }) { track ->
-                val isCurrent = state.currentTrack?.id == track.id
-                TrackRowCard(
-                    track = track,
-                    isActive = isCurrent,
-                    isPlaying = isCurrent && state.isPlaying,
-                    onClick = { store.playTrack(track.id) },
-                )
-            }
-        }
-
-        // Bottom Player Control Deck
-        PlayerDock(state = state, store = store)
+    val audioPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
     }
-}
 
-@Composable
-private fun TrackRowCard(
-    track: FfiTrack,
-    isActive: Boolean,
-    isPlaying: Boolean,
-    onClick: () -> Unit,
-) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        color = if (isActive) ObsidianElevated else ObsidianSurface,
-        border = BorderStroke(1.dp, if (isActive) FerricOrange else HairlineBorder),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (isActive) FerricOrange.copy(alpha = 0.2f) else AmoledBlack),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Rounded.GraphicEq else Icons.Rounded.MusicNote,
-                    contentDescription = null,
-                    tint = if (isActive) FerricOrange else TextSecondary,
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = track.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = if (isActive) FerricOrange else TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = "${track.artist} · ${track.album}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "${track.codec} ${(track.sampleRate.toInt() / 1000.0).let { if (it > 0) String.format(Locale.US, "%.1fk", it) else "" }}".trim(),
-                style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary,
-            )
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            store.scanDeviceMediaStore()
+        } else {
+            snackbarHostState.currentSnackbarData?.dismiss()
         }
     }
-}
 
-@Composable
-private fun PlayerDock(
-    state: PlaybackUiState,
-    store: CoreStateStore,
-) {
-    Surface(
-        shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
-        color = ObsidianSurface,
-        border = BorderStroke(1.dp, HairlineBorder),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = state.currentTrack?.title ?: "Tap a track to play",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = state.currentTrack?.artist ?: "Native Rust dual-deck engine ready",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                if (state.outputRate > 0) {
-                    Text(
-                        text = "${state.outputRate / 1000} kHz",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = FerricOrange,
-                    )
+    val safFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            store.scanSafFolder(uri)
+        }
+    }
+
+    val importPlaylistLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            val text = runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()
+            if (!text.isNullOrBlank()) {
+                val baseName = uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.')
+                    ?.ifBlank { "Imported Playlist" } ?: "Imported Playlist"
+                store.importPlaylistText(baseName, text)
+            }
+        }
+    }
+
+    val exportCsvLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv"),
+    ) { uri ->
+        val content = pendingCsvContent
+        pendingCsvContent = null
+        if (uri != null && !content.isNullOrEmpty()) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                    it.write(content)
                 }
             }
+        }
+    }
 
-            val maxDuration = state.durationMs.coerceAtLeast(1L)
-            val progress = (state.positionMs.toFloat() / maxDuration.toFloat()).coerceIn(0f, 1f)
-            Slider(
-                value = progress,
-                onValueChange = { frac -> store.seekTo((frac * maxDuration).toLong()) },
-                colors = SliderDefaults.colors(
-                    thumbColor = FerricOrange,
-                    activeTrackColor = FerricOrange,
-                    inactiveTrackColor = HairlineBorder,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
+    fun copyToClipboard(label: String, text: String) {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        cm.setPrimaryClip(ClipData.newPlainText(label, text))
+    }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+    LaunchedEffect(state.statusMessage) {
+        val msg = state.statusMessage
+        if (!msg.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(msg)
+            store.clearStatusMessage()
+        }
+    }
+
+    BackHandler(enabled = state.activeDetail != null) {
+        store.closeDetail()
+    }
+
+    Scaffold(
+        containerColor = AmoledBlack,
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+        bottomBar = {
+            Column(
+                modifier = Modifier
+                    .background(AmoledBlack)
+                    .navigationBarsPadding(),
             ) {
-                Text(formatDurationMs(state.positionMs), style = MaterialTheme.typography.labelSmall, color = TextSecondary)
-                Text(formatDurationMs(state.durationMs), style = MaterialTheme.typography.labelSmall, color = TextSecondary)
-            }
-
-            Spacer(Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = { store.toggleShuffle() }, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        imageVector = Icons.Rounded.Shuffle,
-                        contentDescription = "Shuffle",
-                        tint = if (state.shuffle) FerricOrange else TextSecondary,
+                MiniPlayerBar(
+                    state = state,
+                    onTogglePlayPause = { store.togglePlayPause() },
+                    onNext = { store.next() },
+                    onPrev = { store.prev() },
+                    onOpenQueue = { showQueueSheet = true },
+                )
+                NavigationBar(containerColor = ObsidianSurface) {
+                    val items = listOf(
+                        Triple(BottomTab.HOME, "Home", Icons.Rounded.Home),
+                        Triple(BottomTab.SEARCH, "Search", Icons.Rounded.Search),
+                        Triple(BottomTab.LIBRARY, "Library", Icons.Rounded.LibraryMusic),
                     )
-                }
-                IconButton(onClick = { store.prev() }, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        imageVector = Icons.Rounded.SkipPrevious,
-                        contentDescription = "Previous",
-                        tint = TextPrimary,
-                    )
-                }
-                Surface(
-                    onClick = { store.togglePlayPause() },
-                    shape = CircleShape,
-                    color = FerricOrange,
-                    modifier = Modifier.size(56.dp),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = if (state.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = if (state.isPlaying) "Pause" else "Play",
-                            tint = AmoledBlack,
-                            modifier = Modifier.size(30.dp),
+                    items.forEach { (tab, label, icon) ->
+                        NavigationBarItem(
+                            selected = activeTab == tab && state.activeDetail == null,
+                            onClick = {
+                                store.closeDetail()
+                                activeTab = tab
+                            },
+                            icon = { Icon(icon, contentDescription = label) },
+                            label = { Text(label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = FerricOrange,
+                                selectedTextColor = FerricOrange,
+                                unselectedIconColor = TextSecondary,
+                                unselectedTextColor = TextSecondary,
+                                indicatorColor = ObsidianElevated,
+                            ),
                         )
                     }
                 }
-                IconButton(onClick = { store.next() }, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        imageVector = Icons.Rounded.SkipNext,
-                        contentDescription = "Next",
-                        tint = TextPrimary,
-                    )
-                }
-                IconButton(onClick = { store.cycleRepeat() }, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        imageVector = if (state.repeatMode == FfiRepeatMode.ONE) {
-                            Icons.Rounded.RepeatOne
-                        } else {
-                            Icons.Rounded.Repeat
+            }
+        },
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(innerPadding),
+        ) {
+            val detail = state.activeDetail
+            if (detail != null) {
+                DetailScreen(
+                    detail = detail,
+                    detailSort = state.detailSort,
+                    currentTrackId = state.currentTrack?.id,
+                    onBack = { store.closeDetail() },
+                    onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
+                    onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
+                    onCycleSort = { store.cycleDetailSort() },
+                    onDeduplicate = { store.deduplicatePlaylist(detail.id) },
+                    onSyncToAccount = { store.pushLocalPlaylistToCloud(detail.id) },
+                    onCopyShareLink = {
+                        detail.shareUrl?.let { copyToClipboard("Ferric Link", it) }
+                    },
+                    onCopyTracklist = {
+                        store.buildDetailShareTracklist(detail) { txt ->
+                            copyToClipboard("Ferric Tracklist", txt)
+                        }
+                    },
+                    onExportCsv = {
+                        store.buildDetailCsv(detail) { csv ->
+                            pendingCsvContent = csv
+                            exportCsvLauncher.launch("${detail.title.replace(' ', '_')}.csv")
+                        }
+                    },
+                    onRenamePlaylist = { name -> store.renamePlaylist(detail.id, name) },
+                    onDeletePlaylist = { store.deletePlaylist(detail.id) },
+                    onToggleLike = { id -> store.toggleLike(id) },
+                    onPlayNext = { t -> store.playNext(t) },
+                    onAddToQueue = { t -> store.appendToQueue(t) },
+                    onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
+                    onCopyTrackLink = { t ->
+                        store.buildTrackShareLink(t) { link ->
+                            if (link != null) copyToClipboard("Track Link", link)
+                        }
+                    },
+                    onOpenArtist = { artist -> store.openArtistDetail(artist) },
+                    onRemoveFromPlaylist = { trackId -> store.removeTrackFromPlaylist(detail.id, trackId) },
+                )
+            } else {
+                when (activeTab) {
+                    BottomTab.HOME -> HomeScreen(
+                        state = state,
+                        onRefresh = { store.loadHome(forceRefresh = true, moodIdx = null) },
+                        onSelectMood = { idx -> store.loadHome(forceRefresh = false, moodIdx = idx) },
+                        onOpenAccounts = { showAccountsSheet = true },
+                        onOpenOutputSwitcher = onOpenOutputSwitcher,
+                        onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
+                        onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
+                        onOpenStation = { id -> store.openStation(id) },
+                        onOpenShelfCard = { card ->
+                            val bid = card.browseId
+                            if (!bid.isNullOrBlank()) {
+                                store.openBrowseDetail(bid, card.kind)
+                            }
                         },
-                        contentDescription = "Repeat",
-                        tint = if (state.repeatMode != FfiRepeatMode.OFF) FerricOrange else TextSecondary,
+                        onToggleLike = { id -> store.toggleLike(id) },
+                        onPlayNext = { t -> store.playNext(t) },
+                        onAddToQueue = { t -> store.appendToQueue(t) },
+                        onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
+                        onCopyTrackLink = { t ->
+                            store.buildTrackShareLink(t) { link ->
+                                if (link != null) copyToClipboard("Track Link", link)
+                            }
+                        },
+                        onOpenArtist = { artist -> store.openArtistDetail(artist) },
+                    )
+
+                    BottomTab.SEARCH -> SearchScreen(
+                        state = state,
+                        onInstantLocalSearch = { q -> store.instantSearchLocal(q) },
+                        onOnlineSearch = { q -> store.searchOnline(q) },
+                        onClearRecentSearches = { store.clearRecentSearches() },
+                        onImportUrl = { url -> store.importPublicUrl(url) },
+                        onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
+                        onOpenCard = { card ->
+                            val bid = card.browseId
+                            if (!bid.isNullOrBlank()) {
+                                store.openBrowseDetail(bid, card.kind)
+                            }
+                        },
+                        onToggleLike = { id -> store.toggleLike(id) },
+                        onPlayNext = { t -> store.playNext(t) },
+                        onAddToQueue = { t -> store.appendToQueue(t) },
+                        onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
+                        onCopyTrackLink = { t ->
+                            store.buildTrackShareLink(t) { link ->
+                                if (link != null) copyToClipboard("Track Link", link)
+                            }
+                        },
+                        onOpenArtist = { artist -> store.openArtistDetail(artist) },
+                    )
+
+                    BottomTab.LIBRARY -> LibraryScreen(
+                        state = state,
+                        onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
+                        onOpenPlaylist = { id -> store.openPlaylistDetail(id) },
+                        onOpenAlbum = { alb, art -> store.openAlbumDetail(alb, art) },
+                        onOpenArtist = { art -> store.openArtistDetail(art) },
+                        onOpenLikedDetail = { store.openLikedDetail() },
+                        onSetPlaylistFilter = { f -> store.setPlaylistFilter(f) },
+                        onCyclePlaylistSort = { store.cyclePlaylistSort() },
+                        onCreatePlaylistRequest = {
+                            newPlaylistName = ""
+                            showCreatePlaylistDialog = true
+                        },
+                        onImportPlaylistFile = {
+                            importPlaylistLauncher.launch(arrayOf("*/*"))
+                        },
+                        onScanPhoneMusic = {
+                            val hasPerm = ContextCompat.checkSelfPermission(
+                                context,
+                                audioPermission,
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (hasPerm) {
+                                store.scanDeviceMediaStore()
+                            } else {
+                                audioPermissionLauncher.launch(audioPermission)
+                            }
+                        },
+                        onPickSafFolder = { safFolderLauncher.launch(null) },
+                        onToggleLike = { id -> store.toggleLike(id) },
+                        onPlayNext = { t -> store.playNext(t) },
+                        onAddToQueue = { t -> store.appendToQueue(t) },
+                        onAddToPlaylist = { t -> pendingTrackForPlaylist = t },
+                        onCopyTrackLink = { t ->
+                            store.buildTrackShareLink(t) { link ->
+                                if (link != null) copyToClipboard("Track Link", link)
+                            }
+                        },
                     )
                 }
             }
         }
     }
+
+    if (showQueueSheet) {
+        QueueSheet(
+            state = state,
+            onDismiss = { showQueueSheet = false },
+            onSeek = { pos -> store.seekTo(pos) },
+            onToggleShuffle = { store.toggleShuffle() },
+            onCycleRepeat = { store.cycleRepeat() },
+            onJumpUpcoming = { idx -> store.jumpToUpcoming(idx) },
+            onMoveUp = { idx -> store.moveQueueItemUp(idx) },
+            onMoveDown = { idx -> store.moveQueueItemDown(idx) },
+            onRemove = { idx -> store.removeQueueItem(idx) },
+            onClearUpNext = { store.clearUpNext() },
+            onSaveQueue = { name -> store.saveQueueAsPlaylist(name) },
+            onCopyQueue = {
+                store.buildQueueShareText { txt -> copyToClipboard("Ferric Queue", txt) }
+            },
+        )
+    }
+
+    if (showAccountsSheet) {
+        AccountsSheet(
+            status = state.accountStatus,
+            onDismiss = { showAccountsSheet = false },
+            onSignInSpotify = {
+                showAccountsSheet = false
+                onLaunchWebLogin(WebLoginTarget.SPOTIFY)
+            },
+            onSyncSpotify = { store.syncSpotify() },
+            onLogoutSpotify = { store.logoutSpotify() },
+            onSignInYtm = {
+                showAccountsSheet = false
+                onLaunchWebLogin(WebLoginTarget.YOUTUBE_MUSIC)
+            },
+            onSyncYtm = { store.syncYtm() },
+            onLogoutYtm = { store.logoutYtm() },
+            onSyncSubsonic = { url, user, pass -> store.syncSubsonic(url, user, pass) },
+            onLogoutSubsonic = { store.logoutSubsonic() },
+        )
+    }
+
+    pendingTrackForPlaylist?.let { track ->
+        AddToPlaylistDialog(
+            track = track,
+            playlists = state.playlists,
+            onDismiss = { pendingTrackForPlaylist = null },
+            onSelectPlaylist = { plId ->
+                store.addTrackToPlaylist(plId, track)
+                pendingTrackForPlaylist = null
+            },
+            onCreateNewPlaylist = {
+                pendingTrackForPlaylist = null
+                newPlaylistName = ""
+                showCreatePlaylistDialog = true
+            },
+        )
+    }
+
+    if (showCreatePlaylistDialog) {
+        AlertDialog(
+            onDismissRequest = { showCreatePlaylistDialog = false },
+            containerColor = ObsidianElevated,
+            title = { Text("New Playlist", color = TextPrimary) },
+            text = {
+                OutlinedTextField(
+                    value = newPlaylistName,
+                    onValueChange = { newPlaylistName = it },
+                    singleLine = true,
+                    label = { Text("Playlist name") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (newPlaylistName.isNotBlank()) {
+                            store.createPlaylist(newPlaylistName.trim())
+                            showCreatePlaylistDialog = false
+                        }
+                    },
+                ) { Text("Create", color = FerricOrange) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreatePlaylistDialog = false }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+        )
+    }
 }
 
-internal fun formatDurationMs(ms: Long): String {
-    val totalSecs = (ms / 1_000L).coerceAtLeast(0L)
-    val mins = totalSecs / 60L
-    val secs = totalSecs % 60L
-    return "%d:%02d".format(mins, secs)
+fun formatDurationMs(ms: Long): String {
+    val totalSec = (ms / 1_000L).coerceAtLeast(0L)
+    val mins = totalSec / 60L
+    val secs = totalSec % 60L
+    return String.format(java.util.Locale.US, "%d:%02d", mins, secs)
 }

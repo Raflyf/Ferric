@@ -1,5 +1,6 @@
 //! Typed async event sink emitted by [`crate::FerricController`] to platform frontends (Kotlin StateFlow, tests).
 
+use crate::types::{AccountStatusSnapshot, CollectionDetailSnapshot, HomeSnapshot, SearchSnapshot};
 use ferric_audio::engine::TelemetrySnapshot;
 use ferric_core::models::Track;
 
@@ -9,6 +10,11 @@ pub trait ControllerEventSink: Send + Sync {
     fn on_now_playing(&self, _track: Option<Track>) {}
     fn on_queue_changed(&self, _up_next: Vec<Track>) {}
     fn on_library_changed(&self) {}
+    fn on_home_updated(&self, _home: HomeSnapshot) {}
+    fn on_search_results(&self, _results: SearchSnapshot) {}
+    fn on_detail_loaded(&self, _detail: CollectionDetailSnapshot) {}
+    fn on_accounts_changed(&self, _status: AccountStatusSnapshot) {}
+    fn on_spotify_auth_expired(&self) {}
     fn on_toast(&self, _message: String) {}
 }
 

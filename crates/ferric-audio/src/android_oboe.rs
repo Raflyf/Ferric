@@ -4,7 +4,7 @@
 use crate::engine::{AudioTelemetry, RingFrame, pop_epoch_frame};
 use crate::{AudioError, AudioResult};
 use oboe::{
-    AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync,
+    AudioOutputCallback, AudioOutputStream, AudioOutputStreamSafe, AudioStream, AudioStreamAsync,
     AudioStreamBase, AudioStreamBuilder, ContentType, DataCallbackResult, Output,
     PerformanceMode, SharingMode, Stereo, Usage,
 };

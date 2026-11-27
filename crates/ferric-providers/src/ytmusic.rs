@@ -3012,7 +3012,7 @@ fn primary_artist_display(raw: &str) -> String {
 fn clean_station_song_label(title: &str) -> String {
     let mut s = title.trim().to_string();
     for sep in [" (feat.", " (ft.", " (with ", " [Official", " (Official"] {
-        if let Some(pos) = s.to_ascii_lowercase().find(&sep.to_ascii_lowercase())
+        if let Some(pos) = ferric_core::text::find_ascii_icase(&s, sep)
             && pos >= 2
         {
             s.truncate(pos);
@@ -4976,13 +4976,12 @@ pub fn collect_music_items(
 }
 
 fn is_non_music_subtitle(subtitle: &str) -> bool {
-    let low = subtitle.to_ascii_lowercase();
-    low.contains("watching")
-        || low.contains("live now")
-        || low.contains("livestream")
-        || low.starts_with("episode •")
-        || low.contains("• episode •")
-        || low.contains("podcast")
+    ferric_core::text::contains_ascii_icase(subtitle, "watching")
+        || ferric_core::text::contains_ascii_icase(subtitle, "live now")
+        || ferric_core::text::contains_ascii_icase(subtitle, "livestream")
+        || ferric_core::text::starts_with_ascii_icase(subtitle, "episode •")
+        || ferric_core::text::contains_ascii_icase(subtitle, "• episode •")
+        || ferric_core::text::contains_ascii_icase(subtitle, "podcast")
 }
 
 fn parse_responsive_item(item: &Value, default_album: &str) -> Option<Track> {
@@ -5243,7 +5242,7 @@ fn collect_home_shelves(
                     for entry in contents {
                         if let Some(resp) = entry.get("musicResponsiveListItemRenderer")
                             && let Some(track) = parse_responsive_item(resp, &shelf_title)
-                            && !track.album.to_ascii_lowercase().contains("watching")
+                            && !ferric_core::text::contains_ascii_icase(&track.album, "watching")
                             && seen_tracks
                                 .insert(track.youtube_video_id.clone().unwrap_or_default())
                         {
@@ -5251,7 +5250,10 @@ fn collect_home_shelves(
                         }
                         if let Some(two_row) = entry.get("musicTwoRowItemRenderer") {
                             if let Some(track) = parse_two_row_song(two_row, &shelf_title)
-                                && !track.album.to_ascii_lowercase().contains("watching")
+                                && !ferric_core::text::contains_ascii_icase(
+                                    &track.album,
+                                    "watching",
+                                )
                                 && seen_tracks
                                     .insert(track.youtube_video_id.clone().unwrap_or_default())
                             {

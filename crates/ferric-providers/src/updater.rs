@@ -70,10 +70,9 @@ pub fn installer_filename(tag: &str) -> Result<String, String> {
 }
 
 pub fn allowed_download_host(host: &str) -> bool {
-    matches!(
-        host.to_ascii_lowercase().as_str(),
-        "github.com" | "objects.githubusercontent.com" | "release-assets.githubusercontent.com"
-    )
+    host.eq_ignore_ascii_case("github.com")
+        || host.eq_ignore_ascii_case("objects.githubusercontent.com")
+        || host.eq_ignore_ascii_case("release-assets.githubusercontent.com")
 }
 
 pub fn validate_https_download_url(url: &str) -> Result<(&str, &str), String> {
@@ -97,15 +96,12 @@ pub fn validate_https_download_url(url: &str) -> Result<(&str, &str), String> {
     }
     if authority.eq_ignore_ascii_case("github.com") {
         let expected_prefix = format!("/{GITHUB_REPO}/");
-        let low_path = path.to_ascii_lowercase();
-        if !path
-            .get(..expected_prefix.len())
-            .is_some_and(|p| p.eq_ignore_ascii_case(&expected_prefix))
+        if !ferric_core::text::starts_with_ascii_icase(path, &expected_prefix)
             || path.contains("..")
             || path.contains('\\')
-            || low_path.contains("%2e")
-            || low_path.contains("%2f")
-            || low_path.contains("%5c")
+            || ferric_core::text::contains_ascii_icase(path, "%2e")
+            || ferric_core::text::contains_ascii_icase(path, "%2f")
+            || ferric_core::text::contains_ascii_icase(path, "%5c")
         {
             return Err("Untrusted GitHub repository path".to_string());
         }

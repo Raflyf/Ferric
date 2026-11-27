@@ -426,10 +426,7 @@ fn score_lrclib_candidate(
     if let Some(name) = cand.track_name.as_deref() {
         if name.trim().eq_ignore_ascii_case(target_title) {
             score += 500;
-        } else if name
-            .to_ascii_lowercase()
-            .contains(&target_title.to_ascii_lowercase())
-        {
+        } else if ferric_core::text::contains_ascii_icase(name, target_title) {
             score += 200;
         }
     }
@@ -439,10 +436,7 @@ fn score_lrclib_candidate(
     {
         if art.trim().eq_ignore_ascii_case(target_artist) {
             score += 500;
-        } else if art
-            .to_ascii_lowercase()
-            .contains(&target_artist.to_ascii_lowercase())
-        {
+        } else if ferric_core::text::contains_ascii_icase(art, target_artist) {
             score += 200;
         }
     }

@@ -178,7 +178,7 @@ pub fn list_output_devices() -> Vec<String> {
             }
         }
     }
-    names.sort_by_key(|a| a.to_ascii_lowercase());
+    names.sort_by(|a, b| ferric_core::text::cmp_ascii_icase(a, b));
     names
 }
 

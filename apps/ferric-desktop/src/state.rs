@@ -79,10 +79,7 @@ impl PlaylistSortOrder {
             Self::Oldest => playlists.reverse(),
             Self::NameAZ => {
                 playlists.sort_by(|a, b| {
-                    a.name
-                        .to_ascii_lowercase()
-                        .cmp(&b.name.to_ascii_lowercase())
-                        .then_with(|| a.id.cmp(&b.id))
+                    cmp_ascii_icase(&a.name, &b.name).then_with(|| a.id.cmp(&b.id))
                 });
             }
         }
@@ -194,37 +191,7 @@ impl DetailSortOrder {
     }
 }
 
-/// Zero-allocation ASCII case-insensitive substring check for hot filter paths.
-#[inline]
-#[must_use]
-pub fn contains_ascii_icase(haystack: &str, needle: &str) -> bool {
-    let nb = needle.as_bytes();
-    if nb.is_empty() {
-        return true;
-    }
-    let hb = haystack.as_bytes();
-    if nb.len() > hb.len() {
-        return false;
-    }
-    hb.windows(nb.len()).any(|win| {
-        win.iter()
-            .zip(nb.iter())
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-    })
-}
-
-/// Zero-allocation ASCII case-insensitive lexicographical comparison for sorting tracks.
-#[inline]
-#[must_use]
-pub fn cmp_ascii_icase(a: &str, b: &str) -> std::cmp::Ordering {
-    for (ba, bb) in a.bytes().zip(b.bytes()) {
-        let ord = ba.to_ascii_lowercase().cmp(&bb.to_ascii_lowercase());
-        if ord != std::cmp::Ordering::Equal {
-            return ord;
-        }
-    }
-    a.len().cmp(&b.len())
-}
+pub use ferric_core::text::{cmp_ascii_icase, contains_ascii_icase};
 
 /// Remove duplicate tracks from a playlist while preserving original order.
 /// Uses `HashSet` membership (`O(N)`) matching canonical ID, Spotify ID, YouTube ID, or `artist|title`.
@@ -657,11 +624,10 @@ pub fn build_album_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
         })
         .collect();
     out.sort_by(|a, b| {
-        b.tracks.len().cmp(&a.tracks.len()).then_with(|| {
-            a.title
-                .to_ascii_lowercase()
-                .cmp(&b.title.to_ascii_lowercase())
-        })
+        b.tracks
+            .len()
+            .cmp(&a.tracks.len())
+            .then_with(|| cmp_ascii_icase(&a.title, &b.title))
     });
     out.shrink_to_fit();
     out
@@ -713,11 +679,10 @@ pub fn build_artist_groups(tracks: &[Track]) -> Vec<CollectionGroup> {
         };
     }
     out.sort_by(|a, b| {
-        b.tracks.len().cmp(&a.tracks.len()).then_with(|| {
-            a.title
-                .to_ascii_lowercase()
-                .cmp(&b.title.to_ascii_lowercase())
-        })
+        b.tracks
+            .len()
+            .cmp(&a.tracks.len())
+            .then_with(|| cmp_ascii_icase(&a.title, &b.title))
     });
     out.shrink_to_fit();
     out

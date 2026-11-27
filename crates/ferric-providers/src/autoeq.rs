@@ -196,26 +196,21 @@ pub fn search_autoeq_profiles(query: &str) -> Vec<&'static AutoEqProfile> {
         return AUTOEQ_PROFILES.iter().collect();
     }
 
-    let lower_query = trimmed.to_ascii_lowercase();
-    let tokens: Vec<&str> = lower_query.split_whitespace().collect();
-
     let mut scored: Vec<(u8, usize, &'static AutoEqProfile)> = Vec::new();
     for (idx, profile) in AUTOEQ_PROFILES.iter().enumerate() {
-        let name_lower = profile.name.to_ascii_lowercase();
-        let cat_lower = profile.category.to_ascii_lowercase();
-
-        let all_match = tokens
-            .iter()
-            .all(|tok| name_lower.contains(tok) || cat_lower.contains(tok));
+        let all_match = trimmed.split_whitespace().all(|tok| {
+            ferric_core::text::contains_ascii_icase(profile.name, tok)
+                || ferric_core::text::contains_ascii_icase(profile.category, tok)
+        });
         if !all_match {
             continue;
         }
 
-        let rank = if name_lower == lower_query {
+        let rank = if profile.name.eq_ignore_ascii_case(trimmed) {
             0
-        } else if name_lower.starts_with(&lower_query) {
+        } else if ferric_core::text::starts_with_ascii_icase(profile.name, trimmed) {
             1
-        } else if name_lower.contains(&lower_query) {
+        } else if ferric_core::text::contains_ascii_icase(profile.name, trimmed) {
             2
         } else {
             3

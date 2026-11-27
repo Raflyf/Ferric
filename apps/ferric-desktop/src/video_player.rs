@@ -96,10 +96,11 @@ mod imp {
                 _ => {}
             }
         }
-        let ext_ok = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "mp4" | "webm" | "mkv"));
+        let ext_ok = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            e.eq_ignore_ascii_case("mp4")
+                || e.eq_ignore_ascii_case("webm")
+                || e.eq_ignore_ascii_case("mkv")
+        });
         ext_ok && path.is_file()
     }
 

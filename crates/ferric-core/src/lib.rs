@@ -3,6 +3,7 @@ pub mod eq;
 pub mod models;
 pub mod queue;
 pub mod secrets;
+pub mod text;
 pub mod theme;
 
 use std::path::PathBuf;

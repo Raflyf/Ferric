@@ -733,10 +733,10 @@ pub fn parse_playlist_import_text(
             .position(|h| h.eq_ignore_ascii_case("Album Name"));
         let idx_artist = headers
             .iter()
-            .position(|h| h.to_ascii_lowercase().starts_with("artist name"));
+            .position(|h| crate::text::starts_with_ascii_icase(h, "artist name"));
         let idx_dur = headers
             .iter()
-            .position(|h| h.to_ascii_lowercase().starts_with("duration"));
+            .position(|h| crate::text::starts_with_ascii_icase(h, "duration"));
         let idx_isrc = headers.iter().position(|h| h.eq_ignore_ascii_case("ISRC"));
 
         for (line_idx, row) in trimmed.lines().skip(1).enumerate() {
@@ -897,11 +897,10 @@ fn sanitize_m3u_local_path(raw_line: &str, base_dir: Option<&std::path::Path>) -
     if s.is_empty() || s.bytes().any(|b| b.is_ascii_control()) {
         return None;
     }
-    let low = s.to_ascii_lowercase();
-    if low.starts_with("http://")
-        || low.starts_with("https://")
-        || low.starts_with("file://")
-        || low.starts_with("ftp://")
+    if crate::text::starts_with_ascii_icase(s, "http://")
+        || crate::text::starts_with_ascii_icase(s, "https://")
+        || crate::text::starts_with_ascii_icase(s, "file://")
+        || crate::text::starts_with_ascii_icase(s, "ftp://")
         || s.starts_with(r"\\")
         || s.starts_with("//")
     {

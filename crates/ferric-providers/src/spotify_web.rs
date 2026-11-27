@@ -1175,22 +1175,19 @@ fn section_title_of(section: &Value) -> String {
 }
 
 fn is_radio_station_section_title(title: &str) -> bool {
-    let lower = title.to_ascii_lowercase();
-    lower.contains("recommended station")
-        || lower.contains("stasiun")
-        || lower.contains("radio station")
-        || lower == "stations"
-        || lower.contains("popular radio")
-        || lower.contains("recommended radio")
+    ferric_core::text::contains_ascii_icase(title, "recommended station")
+        || ferric_core::text::contains_ascii_icase(title, "stasiun")
+        || ferric_core::text::contains_ascii_icase(title, "radio station")
+        || title.eq_ignore_ascii_case("stations")
+        || ferric_core::text::contains_ascii_icase(title, "popular radio")
+        || ferric_core::text::contains_ascii_icase(title, "recommended radio")
 }
 
 fn is_radio_station_card(card: &SpotifyStationCard) -> bool {
-    let lower_title = card.title.to_ascii_lowercase();
-    let lower_sub = card.subtitle.to_ascii_lowercase();
     card.playlist_id.starts_with("37i9dQZF1E4")
         || card.playlist_id.starts_with("37i9dQZF1E8")
-        || lower_title.ends_with(" radio")
-        || lower_sub.starts_with("with ")
+        || ferric_core::text::ends_with_ascii_icase(&card.title, " radio")
+        || ferric_core::text::starts_with_ascii_icase(&card.subtitle, "with ")
 }
 
 fn parse_home_recommended_stations(val: &Value) -> Vec<SpotifyStationCard> {

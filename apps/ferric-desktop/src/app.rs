@@ -7570,22 +7570,20 @@ impl App {
                 + self.rich_home.quick_picks.len()
                 + self.rich_home.all_tracks.len(),
         );
-        let mut seen_gallery = std::collections::HashSet::new();
+        let mut seen_gallery: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for t in self
             .all_tracks
             .iter()
             .chain(self.rich_home.quick_picks.iter())
             .chain(self.rich_home.all_tracks.iter())
         {
-            let low_t = t.title.to_ascii_lowercase();
-            let low_a = t.artist.to_ascii_lowercase();
-            if low_t.contains("minecraft")
-                || low_a.contains("minecraft")
-                || low_a.contains("watching")
+            if contains_ascii_icase(&t.title, "minecraft")
+                || contains_ascii_icase(&t.artist, "minecraft")
+                || contains_ascii_icase(&t.artist, "watching")
             {
                 continue;
             }
-            if seen_gallery.insert(t.id.clone()) {
+            if seen_gallery.insert(t.id.as_str()) {
                 gallery_tracks.push(t.clone());
             }
         }
@@ -7792,11 +7790,11 @@ impl App {
 
     fn resolve_sidebar_library_entries(&self) -> Vec<SidebarLibraryEntry> {
         const MAX_SIDEBAR_SLOTS: usize = 40;
-        let query = self.sidebar_filter_query.trim().to_ascii_lowercase();
+        let query = self.sidebar_filter_query.trim();
         let matches_query = |title: &str, sub: &str| {
             query.is_empty()
-                || title.to_ascii_lowercase().contains(&query)
-                || sub.to_ascii_lowercase().contains(&query)
+                || contains_ascii_icase(title, query)
+                || contains_ascii_icase(sub, query)
         };
         let format_pl_sub = |pl: &Playlist, pinned: bool| {
             let prefix = if pinned { "Pinned · " } else { "" };
@@ -7871,10 +7869,7 @@ impl App {
             PlaylistSortOrder::Oldest => sorted_pls.reverse(),
             PlaylistSortOrder::NameAZ => {
                 sorted_pls.sort_by(|a, b| {
-                    a.name
-                        .to_ascii_lowercase()
-                        .cmp(&b.name.to_ascii_lowercase())
-                        .then_with(|| a.id.cmp(&b.id))
+                    cmp_ascii_icase(&a.name, &b.name).then_with(|| a.id.cmp(&b.id))
                 });
             }
         }
@@ -7925,10 +7920,10 @@ impl App {
             .iter()
             .filter(|t| t.source == TrackSource::Local)
             .count();
-        let query = self.sidebar_filter_query.trim().to_ascii_lowercase();
+        let query = self.sidebar_filter_query.trim();
 
         let liked_vis = self.playlist_source_filter == PlaylistSourceFilter::All
-            && (query.is_empty() || "liked songs".contains(&query));
+            && (query.is_empty() || contains_ascii_icase("Liked Songs", query));
         let liked_act =
             self.active_page == MainPage::Songs && self.active_filter == LibraryFilter::Liked;
         let liked_row = self.ui.view(id!(pin_liked_row));
@@ -7959,7 +7954,7 @@ impl App {
         let local_vis = matches!(
             self.playlist_source_filter,
             PlaylistSourceFilter::All | PlaylistSourceFilter::Local
-        ) && (query.is_empty() || "local lossless".contains(&query));
+        ) && (query.is_empty() || contains_ascii_icase("Local Lossless", query));
         let local_act =
             self.active_page == MainPage::Songs && self.active_filter == LibraryFilter::Local;
         let local_row = self.ui.view(id!(pin_local_row));
@@ -8091,9 +8086,8 @@ impl App {
         };
         raw.iter()
             .filter(|t| {
-                let alb = t.album.to_ascii_lowercase();
-                let art = t.artist.to_ascii_lowercase();
-                !alb.contains("watching") && !art.contains("watching")
+                !contains_ascii_icase(&t.album, "watching")
+                    && !contains_ascii_icase(&t.artist, "watching")
             })
             .cloned()
             .collect()
@@ -13265,20 +13259,19 @@ impl App {
             }
         }
 
-        // Instant zero-latency local + Home feed filtering while live YouTube Music results load
-        let q_low = q.to_ascii_lowercase();
+        // Instant zero-latency, zero-allocation local + Home feed filtering while live YouTube Music results load
         let mut instant_hits = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for t in self
             .all_tracks
             .iter()
             .chain(self.rich_home.quick_picks.iter())
             .chain(self.rich_home.all_tracks.iter())
         {
-            if (t.title.to_ascii_lowercase().contains(&q_low)
-                || t.artist.to_ascii_lowercase().contains(&q_low)
-                || t.album.to_ascii_lowercase().contains(&q_low))
-                && seen.insert(t.id.clone())
+            if (contains_ascii_icase(&t.title, &q)
+                || contains_ascii_icase(&t.artist, &q)
+                || contains_ascii_icase(&t.album, &q))
+                && seen.insert(t.id.as_str())
             {
                 instant_hits.push(t.clone());
             }
@@ -13333,20 +13326,19 @@ impl App {
             .label(id!(search_status_lbl))
             .set_text(cx, &format!("Searching '{query}'..."));
 
-        // Immediate local + cached matches while YouTube Music responds
-        let q_low = query.to_ascii_lowercase();
+        // Immediate local + cached matches while YouTube Music responds (zero-allocation filter)
         let mut local_hits = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for t in self
             .all_tracks
             .iter()
             .chain(self.rich_home.quick_picks.iter())
             .chain(self.rich_home.all_tracks.iter())
         {
-            if (t.title.to_ascii_lowercase().contains(&q_low)
-                || t.artist.to_ascii_lowercase().contains(&q_low)
-                || t.album.to_ascii_lowercase().contains(&q_low))
-                && seen.insert(t.id.clone())
+            if (contains_ascii_icase(&t.title, &query)
+                || contains_ascii_icase(&t.artist, &query)
+                || contains_ascii_icase(&t.album, &query))
+                && seen.insert(t.id.as_str())
             {
                 local_hits.push(t.clone());
             }
@@ -13384,16 +13376,16 @@ impl App {
     fn apply_search_filter(&mut self, cx: &mut Cx, filter: SearchFilter) {
         self.search_filter = filter;
         let query = self.ui.text_input(id!(search_page_input)).text();
-        let q_low = query.trim().to_ascii_lowercase();
+        let q = query.trim();
         let tracks = match filter {
             SearchFilter::Local => self
                 .all_tracks
                 .iter()
                 .filter(|t| {
                     t.source == TrackSource::Local
-                        && (q_low.is_empty()
-                            || t.title.to_ascii_lowercase().contains(&q_low)
-                            || t.artist.to_ascii_lowercase().contains(&q_low))
+                        && (q.is_empty()
+                            || contains_ascii_icase(&t.title, q)
+                            || contains_ascii_icase(&t.artist, q))
                 })
                 .cloned()
                 .collect(),
@@ -13404,9 +13396,9 @@ impl App {
                     self.all_tracks
                         .iter()
                         .filter(|t| {
-                            q_low.is_empty()
-                                || t.title.to_ascii_lowercase().contains(&q_low)
-                                || t.artist.to_ascii_lowercase().contains(&q_low)
+                            q.is_empty()
+                                || contains_ascii_icase(&t.title, q)
+                                || contains_ascii_icase(&t.artist, q)
                         })
                         .cloned()
                         .collect()

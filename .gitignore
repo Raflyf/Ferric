@@ -11,3 +11,7 @@ Thumbs.db
 dist/
 scratch/
 GEMINI.MD
+apps/ferric-android/local.properties
+apps/ferric-android/.gradle/
+apps/ferric-android/**/build/
+apps/ferric-android/app/src/main/jniLibs/

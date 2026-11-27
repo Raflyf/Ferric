@@ -4,9 +4,11 @@
 mod android_jni;
 pub mod m2_types;
 pub mod m3_types;
+pub mod m4_types;
 
 pub use m2_types::*;
 pub use m3_types::*;
+pub use m4_types::*;
 
 use ferric_audio::content::{ContentOpener, register_content_opener};
 use ferric_audio::engine::TelemetrySnapshot;
@@ -620,6 +622,7 @@ pub trait FfiEventSink: Send + Sync {
     fn on_accounts_changed(&self, status: FfiAccountStatus);
     fn on_lyrics_loaded(&self, lyrics: FfiLyricsState);
     fn on_video_streams_loaded(&self, video: FfiVideoStreamsState);
+    fn on_connect_state_changed(&self, state: FfiConnectState);
     fn on_spotify_auth_expired(&self);
     fn on_toast(&self, message: String);
 }
@@ -715,6 +718,10 @@ impl ControllerEventSink for EventSinkBridge {
         self.0.on_video_streams_loaded(video.into());
     }
 
+    fn on_connect_state_changed(&self, state: ferric_sync::ConnectSnapshot) {
+        self.0.on_connect_state_changed(state.into());
+    }
+
     fn on_spotify_auth_expired(&self) {
         self.0.on_spotify_auth_expired();
     }
@@ -730,9 +737,12 @@ pub struct FerricMobileCore {
 }
 
 impl FerricMobileCore {
+    #[allow(clippy::too_many_arguments)]
     fn build(
         data_dir: String,
         cache_dir: String,
+        device_id: String,
+        device_name: String,
         cipher: Box<dyn FfiSecretCipher>,
         content_opener: Box<dyn FfiContentOpener>,
         sink: Box<dyn FfiEventSink>,
@@ -740,9 +750,23 @@ impl FerricMobileCore {
     ) -> Result<Arc<Self>, FfiError> {
         register_platform_secret_cipher(Arc::new(SecretCipherBridge(cipher)));
         register_content_opener(Arc::new(ContentOpenerBridge(content_opener)));
+        let clean_id = if device_id.trim().is_empty() {
+            format!("android_{}", ferric_core::secrets::csprng_hex(6))
+        } else {
+            device_id.trim().to_string()
+        };
+        let clean_name = if device_name.trim().is_empty() {
+            "Ferric Android".to_string()
+        } else {
+            device_name.trim().to_string()
+        };
         let cfg = ControllerConfig {
             data_dir: PathBuf::from(data_dir),
             cache_dir: PathBuf::from(cache_dir),
+            device_id: clean_id,
+            device_name: clean_name,
+            device_kind: ferric_sync::DeviceKind::Phone,
+            enable_connect: true,
             headless_audio,
         };
         let controller = FerricController::new(cfg, Arc::new(EventSinkBridge(sink)))?;
@@ -757,7 +781,16 @@ impl FerricMobileCore {
         content_opener: Box<dyn FfiContentOpener>,
         sink: Box<dyn FfiEventSink>,
     ) -> Result<Arc<Self>, FfiError> {
-        Self::build(data_dir, cache_dir, cipher, content_opener, sink, true)
+        Self::build(
+            data_dir,
+            cache_dir,
+            "test_android_01".to_string(),
+            "Test Android".to_string(),
+            cipher,
+            content_opener,
+            sink,
+            true,
+        )
     }
 }
 
@@ -767,11 +800,22 @@ impl FerricMobileCore {
     pub fn new(
         data_dir: String,
         cache_dir: String,
+        device_id: String,
+        device_name: String,
         cipher: Box<dyn FfiSecretCipher>,
         content_opener: Box<dyn FfiContentOpener>,
         sink: Box<dyn FfiEventSink>,
     ) -> Result<Arc<Self>, FfiError> {
-        Self::build(data_dir, cache_dir, cipher, content_opener, sink, false)
+        Self::build(
+            data_dir,
+            cache_dir,
+            device_id,
+            device_name,
+            cipher,
+            content_opener,
+            sink,
+            false,
+        )
     }
 
     pub fn ensure_audio_started(&self) -> Result<(), FfiError> {
@@ -1317,6 +1361,53 @@ impl FerricMobileCore {
 
     pub fn import_theme_json(&self, raw_json: String) -> Result<FfiThemeConfig, FfiError> {
         Ok(self.controller.import_theme_json(&raw_json)?.into())
+    }
+
+    // --- M4 Zero-Pairing Ferric Connect ---
+
+    pub fn get_connect_state(&self) -> FfiConnectState {
+        self.controller.get_connect_state().into()
+    }
+
+    pub fn notify_mdns_peer(
+        &self,
+        device_id: String,
+        device_name: String,
+        device_kind: FfiDeviceKind,
+        ip: String,
+        tcp_port: u16,
+        room_tags_hex: String,
+    ) {
+        self.controller.notify_mdns_peer(
+            device_id,
+            device_name,
+            device_kind.into(),
+            ip,
+            tcp_port,
+            room_tags_hex,
+        );
+    }
+
+    pub fn connect_switch_speaker(&self, target_device_id: String) {
+        self.controller.connect_switch_speaker(target_device_id);
+    }
+
+    pub fn connect_set_remote_volume(&self, target_device_id: String, volume_norm: f32) {
+        self.controller
+            .connect_set_remote_volume(target_device_id, volume_norm);
+    }
+
+    pub fn connect_pair_qr(&self, uri: String) {
+        self.controller.connect_pair_qr(uri);
+    }
+
+    pub fn connect_get_qr_code(&self, regenerate: bool) -> FfiQrCode {
+        let (uri, size, modules) = self.controller.connect_qr_matrix(regenerate);
+        FfiQrCode {
+            uri,
+            size: u32::try_from(size).unwrap_or(0),
+            modules,
+        }
     }
 
     pub fn shutdown(&self) {

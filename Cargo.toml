@@ -53,6 +53,7 @@ aho-corasick = "1.1.5"
 ureq = { version = "3.5", features = ["json"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 sha2 = "0.10"
+chacha20poly1305 = "0.10"
 postcard = { version = "1.2", features = ["use-std"] }
 makepad-widgets = "1.0.0"
 rfd = "0.18.0"

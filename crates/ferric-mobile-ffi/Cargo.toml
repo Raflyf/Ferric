@@ -21,6 +21,7 @@ uniffi.workspace = true
 ferric-core = { path = "../ferric-core" }
 ferric-audio = { path = "../ferric-audio" }
 ferric-controller = { path = "../ferric-controller" }
+ferric-sync = { path = "../ferric-sync" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true

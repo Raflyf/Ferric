@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
+import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
@@ -116,6 +117,7 @@ fun FullPlayerScreen(
     onOpenQueue: () -> Unit,
     onOpenEqualizer: () -> Unit,
     onOpenThemeStudio: () -> Unit,
+    onOpenConnect: () -> Unit,
     onOpenOutputSwitcher: () -> Unit,
     onLoadLyrics: () -> Unit,
     onNudgeLyricsOffset: (Long) -> Unit,
@@ -413,12 +415,32 @@ fun FullPlayerScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TextButton(onClick = onOpenOutputSwitcher) {
-                        Icon(Icons.Rounded.Speaker, contentDescription = null, tint = palette.accent, modifier = Modifier.size(18.dp))
+                    val activeRemote = if (!state.connectState.isLocalActiveSpeaker) {
+                        state.connectState.peers.firstOrNull {
+                            it.connected && it.deviceId == state.connectState.activeSpeakerId
+                        }
+                    } else {
+                        null
+                    }
+                    TextButton(onClick = onOpenConnect) {
+                        Icon(
+                            imageVector = if (activeRemote != null) Icons.Rounded.Devices else Icons.Rounded.Speaker,
+                            contentDescription = "Ferric Connect",
+                            tint = palette.accent,
+                            modifier = Modifier.size(18.dp),
+                        )
                         Spacer(Modifier.width(4.dp))
-                        Text(state.activeOutputRoute, color = palette.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            text = activeRemote?.deviceName ?: state.activeOutputRoute,
+                            color = palette.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                     Row {
+                        IconButton(onClick = onOpenOutputSwitcher) {
+                            Icon(Icons.Rounded.Speaker, contentDescription = "Audio Output", tint = palette.textSecondary)
+                        }
                         IconButton(onClick = onOpenEqualizer) {
                             Icon(Icons.Rounded.Equalizer, contentDescription = "Equalizer & DSP", tint = palette.textPrimary)
                         }

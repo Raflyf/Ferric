@@ -1,6 +1,7 @@
 //! Headless playback, queue, library, settings, and persistence orchestrator shared by Ferric mobile frontends.
 
 pub mod accounts;
+pub mod connect;
 pub mod events;
 pub mod home;
 pub mod library;
@@ -52,6 +53,10 @@ pub type ControllerResult<T> = Result<T, ControllerError>;
 pub struct ControllerConfig {
     pub data_dir: PathBuf,
     pub cache_dir: PathBuf,
+    pub device_id: String,
+    pub device_name: String,
+    pub device_kind: ferric_sync::DeviceKind,
+    pub enable_connect: bool,
     pub headless_audio: bool,
 }
 
@@ -91,15 +96,18 @@ struct ControllerState {
     video_gen: u64,
     lyrics_offset_ms: i64,
     lyrics_cache: LyricsSnapshot,
+    pending_handoff_seek_ms: Option<u64>,
+    connect_sync_ticks: u8,
 }
 
 /// Thread-safe headless Ferric controller owning SQLite persistence, PlayQueue, lazy `AudioEngine`,
-/// Deck B pre-queuing, online stream cache resolution, and qualified `play_history` logging.
+/// Deck B pre-queuing, online stream cache resolution, Zero-Pairing Connect, and qualified `play_history` logging.
 pub struct FerricController {
     cfg: ControllerConfig,
     sink: Arc<dyn ControllerEventSink>,
     state: Mutex<ControllerState>,
     audio: Mutex<Option<AudioEngine>>,
+    connect: Mutex<Option<Arc<ferric_sync::ConnectEngine>>>,
     wake_lock: Mutex<bool>,
     wake_cv: Condvar,
     shutdown_flag: AtomicBool,
@@ -179,13 +187,18 @@ impl FerricController {
                 video_gen: 0,
                 lyrics_offset_ms: 0,
                 lyrics_cache: LyricsSnapshot::default(),
+                pending_handoff_seek_ms: None,
+                connect_sync_ticks: 0,
             }),
             audio: Mutex::new(None),
+            connect: Mutex::new(None),
             wake_lock: Mutex::new(false),
             wake_cv: Condvar::new(),
             shutdown_flag: AtomicBool::new(false),
             monitor_handle: Mutex::new(None),
         });
+
+        ctrl.start_connect_engine();
 
         let weak = Arc::downgrade(&ctrl);
         if let Ok(handle) = thread::Builder::new()
@@ -299,6 +312,34 @@ impl FerricController {
                 "cannot play empty queue".to_string(),
             ));
         }
+        if self.is_controlling_remote() {
+            let entries: Vec<ferric_sync::QueueEntry> = tracks
+                .iter()
+                .take(200)
+                .map(ferric_sync::QueueEntry::from_track)
+                .collect();
+            let clamped = start_index.min(entries.len().saturating_sub(1));
+            self.forward_remote_action(ferric_sync::RemoteAction::PlayQueue {
+                tracks: entries,
+                start_index: clamped,
+                context,
+            });
+            return Ok(());
+        }
+        self.play_queue_local_only(tracks, start_index, context)
+    }
+
+    pub(crate) fn play_queue_local_only(
+        self: &Arc<Self>,
+        tracks: Vec<Track>,
+        start_index: usize,
+        context: String,
+    ) -> ControllerResult<()> {
+        if tracks.is_empty() {
+            return Err(ControllerError::State(
+                "cannot play empty queue".to_string(),
+            ));
+        }
         self.ensure_audio_started()?;
         let clamped_idx = start_index.min(tracks.len() - 1);
         let (current, up_next, gen_id) = {
@@ -326,6 +367,7 @@ impl FerricController {
         if let Some(track) = current {
             self.dispatch_track_playback(&track, gen_id)?;
         }
+        self.push_connect_playback_snapshot();
         self.wake_monitor();
         Ok(())
     }
@@ -439,7 +481,7 @@ impl FerricController {
     fn resolve_online_track_worker(self: &Arc<Self>, track: Track, gen_id: u64) {
         match self.resolve_stream_path_blocking(&track) {
             Ok((path, vid, codec, bitrate_kbps, duration_ms)) => {
-                let is_still_current = {
+                let (is_still_current, pending_seek) = {
                     let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
                     st.queue.update_track_cached_stream(
                         &track.id,
@@ -449,7 +491,13 @@ impl FerricController {
                         bitrate_kbps,
                         duration_ms,
                     );
-                    st.resolve_gen == gen_id
+                    let current = st.resolve_gen == gen_id;
+                    let seek = if current {
+                        st.pending_handoff_seek_ms.take()
+                    } else {
+                        None
+                    };
+                    (current, seek)
                 };
                 if is_still_current {
                     self.send_audio(EngineCommand::LoadAndPlayTrack {
@@ -461,13 +509,26 @@ impl FerricController {
                             track.duration_ms
                         },
                     });
+                    if let Some(ms) = pending_seek
+                        && ms > 1_000
+                    {
+                        self.send_audio(EngineCommand::SeekMs(ms));
+                    }
                     self.queue_upcoming_deck_b();
                     self.prefetch_upcoming_online_track();
+                    self.push_connect_playback_snapshot();
                     self.wake_monitor();
                 }
             }
             Err(err) => {
-                self.sink.on_toast(format!("Stream failed: {err}"));
+                if track.source == TrackSource::Local && track.path.is_none() {
+                    self.sink.on_toast(format!(
+                        "Track '{}' is stored locally on the other device",
+                        track.title
+                    ));
+                } else {
+                    self.sink.on_toast(format!("Stream failed: {err}"));
+                }
             }
         }
     }
@@ -570,24 +631,55 @@ impl FerricController {
     }
 
     pub fn toggle_play_pause(&self) -> ControllerResult<()> {
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::TogglePlayPause);
+            return Ok(());
+        }
+        self.toggle_play_pause_local_only()
+    }
+
+    pub(crate) fn toggle_play_pause_local_only(&self) -> ControllerResult<()> {
         self.ensure_audio_started()?;
         self.send_audio(EngineCommand::TogglePlayPause);
+        self.push_connect_playback_snapshot();
         self.wake_monitor();
         Ok(())
     }
 
     pub fn play(&self) -> ControllerResult<()> {
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::Play);
+            return Ok(());
+        }
+        self.play_local_only()
+    }
+
+    pub(crate) fn play_local_only(&self) -> ControllerResult<()> {
         self.ensure_audio_started()?;
         self.send_audio(EngineCommand::Play);
+        self.push_connect_playback_snapshot();
         self.wake_monitor();
         Ok(())
     }
 
     pub fn pause(&self) {
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::Pause);
+            return;
+        }
         self.send_audio(EngineCommand::Pause);
+        self.push_connect_playback_snapshot();
     }
 
     pub fn next(self: &Arc<Self>) -> ControllerResult<()> {
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::SkipNext);
+            return Ok(());
+        }
+        self.next_local_only()
+    }
+
+    pub(crate) fn next_local_only(self: &Arc<Self>) -> ControllerResult<()> {
         self.ensure_audio_started()?;
         let (next_track, up_next, gen_id) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -610,14 +702,24 @@ impl FerricController {
         if let Some(t) = next_track {
             self.dispatch_track_playback(&t, gen_id)?;
         }
+        self.push_connect_playback_snapshot();
         self.wake_monitor();
         Ok(())
     }
 
     pub fn prev(self: &Arc<Self>) -> ControllerResult<()> {
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::SkipPrev);
+            return Ok(());
+        }
+        self.prev_local_only()
+    }
+
+    pub(crate) fn prev_local_only(self: &Arc<Self>) -> ControllerResult<()> {
         self.ensure_audio_started()?;
         if self.telemetry().position_ms > 3_500 {
-            self.seek_ms(0);
+            self.send_audio(EngineCommand::SeekMs(0));
+            self.push_connect_playback_snapshot();
             return Ok(());
         }
         let (prev_track, up_next, gen_id) = {
@@ -641,12 +743,20 @@ impl FerricController {
         if let Some(t) = prev_track {
             self.dispatch_track_playback(&t, gen_id)?;
         }
+        self.push_connect_playback_snapshot();
         self.wake_monitor();
         Ok(())
     }
 
     pub fn seek_ms(&self, pos_ms: u64) {
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::SeekTo {
+                position_ms: pos_ms,
+            });
+            return;
+        }
         self.send_audio(EngineCommand::SeekMs(pos_ms));
+        self.push_connect_playback_snapshot();
     }
 
     pub fn set_volume(&self, vol: f32) {
@@ -660,6 +770,7 @@ impl FerricController {
             st.session.volume = clamped;
         }
         self.send_audio(EngineCommand::SetVolume(clamped));
+        self.push_connect_playback_snapshot();
     }
 
     pub fn set_ducking(&self, duck: bool) {
@@ -676,7 +787,12 @@ impl FerricController {
             let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
             (next_val, upcoming)
         };
-        self.queue_upcoming_deck_b();
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::SetShuffle(enabled));
+        } else {
+            self.queue_upcoming_deck_b();
+            self.push_connect_playback_snapshot();
+        }
         self.sink.on_queue_changed(up_next);
         enabled
     }
@@ -691,7 +807,12 @@ impl FerricController {
             let upcoming: Vec<Track> = st.queue.peek_upcoming(50).into_iter().cloned().collect();
             (next_mode, upcoming)
         };
-        self.queue_upcoming_deck_b();
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::SetRepeat(mode));
+        } else {
+            self.queue_upcoming_deck_b();
+            self.push_connect_playback_snapshot();
+        }
         self.sink.on_queue_changed(up_next);
         mode
     }
@@ -823,6 +944,14 @@ impl FerricController {
         {
             let _ = handle.join();
         }
+        if let Some(conn) = self
+            .connect
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            conn.shutdown();
+        }
         {
             let mut audio_guard = self.audio.lock().unwrap_or_else(|p| p.into_inner());
             *audio_guard = None;
@@ -899,6 +1028,16 @@ impl FerricController {
             } else if let Some(t) = next_track {
                 let _ = self.dispatch_track_playback(&t, gen_id);
             }
+            self.push_connect_playback_snapshot();
+        } else if snap.is_playing {
+            let should_sync = {
+                let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                st.connect_sync_ticks = st.connect_sync_ticks.wrapping_add(1);
+                st.connect_sync_ticks.is_multiple_of(5)
+            };
+            if should_sync {
+                self.push_connect_playback_snapshot();
+            }
         }
 
         snap.is_playing
@@ -941,6 +1080,14 @@ impl Drop for FerricController {
     fn drop(&mut self) {
         self.shutdown_flag.store(true, Ordering::Release);
         self.wake_monitor();
+        if let Some(conn) = self
+            .connect
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            conn.shutdown();
+        }
         if let Some(handle) = self
             .monitor_handle
             .lock()
@@ -988,6 +1135,10 @@ mod tests {
         let cfg = ControllerConfig {
             data_dir: root.join("data"),
             cache_dir: root.join("cache"),
+            device_id: format!("test_dev_{label}"),
+            device_name: "Test Phone".to_string(),
+            device_kind: ferric_sync::DeviceKind::Phone,
+            enable_connect: false,
             headless_audio: true,
         };
         (root, cfg)

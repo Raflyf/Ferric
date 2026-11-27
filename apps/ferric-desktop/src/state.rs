@@ -375,6 +375,7 @@ pub enum BgMessage {
         skipped_tracks: usize,
     },
     CloudPlaylistMutationNotice(String),
+    Connect(Box<ferric_sync::ConnectEvent>),
 }
 
 fn resolved_track_thumb(track: &Track) -> Option<String> {

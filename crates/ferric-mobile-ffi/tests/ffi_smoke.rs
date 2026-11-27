@@ -1,7 +1,7 @@
 use ferric_mobile_ffi::{
-    FerricMobileCore, FfiAccountStatus, FfiBackgroundMode, FfiCollectionDetail, FfiContentOpener,
-    FfiError, FfiEventSink, FfiHomeState, FfiLocalScanEntry, FfiLyricsState, FfiSearchResults,
-    FfiSecretCipher, FfiTelemetry, FfiTrack, FfiVideoStreamsState,
+    FerricMobileCore, FfiAccountStatus, FfiBackgroundMode, FfiCollectionDetail, FfiConnectState,
+    FfiContentOpener, FfiError, FfiEventSink, FfiHomeState, FfiLocalScanEntry, FfiLyricsState,
+    FfiSearchResults, FfiSecretCipher, FfiTelemetry, FfiTrack, FfiVideoStreamsState,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -43,6 +43,7 @@ impl FfiEventSink for TestSink {
     fn on_accounts_changed(&self, _status: FfiAccountStatus) {}
     fn on_lyrics_loaded(&self, _lyrics: FfiLyricsState) {}
     fn on_video_streams_loaded(&self, _video: FfiVideoStreamsState) {}
+    fn on_connect_state_changed(&self, _state: FfiConnectState) {}
     fn on_spotify_auth_expired(&self) {}
     fn on_toast(&self, _message: String) {}
 }
@@ -137,6 +138,16 @@ fn mobile_ffi_seeds_plays_and_persists_liquid_glass_theme() {
     assert_eq!(imported_theme.name, "Liquid Glass");
     assert_eq!(core.nudge_lyrics_offset_ms(500), 500);
     assert_eq!(core.nudge_lyrics_offset_ms(-1000), -500);
+
+    // M4: Zero-Pairing Connect snapshot + QR matrix generation
+    let conn = core.get_connect_state();
+    assert_eq!(conn.local_device_id, "test_android_01");
+    assert!(conn.is_local_active_speaker);
+    assert!(conn.local_tcp_port >= 1024);
+    let qr = core.connect_get_qr_code(false);
+    assert!(qr.uri.starts_with("ferric://pair?"));
+    assert!(qr.size >= 21);
+    assert_eq!(qr.modules.len(), (qr.size * qr.size) as usize);
 
     core.shutdown();
     let _ = std::fs::remove_dir_all(&root);

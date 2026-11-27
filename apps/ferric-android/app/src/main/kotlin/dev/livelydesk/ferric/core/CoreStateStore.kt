@@ -2,13 +2,16 @@ package dev.livelydesk.ferric.core
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import dev.livelydesk.ferric.auth.SilentSpotifyRefresher
 import dev.livelydesk.ferric.auth.WebCookieCleaner
+import dev.livelydesk.ferric.connect.ConnectNsdHelper
 import dev.livelydesk.ferric.local.LocalMediaScanner
 import dev.livelydesk.ferric.playback.OutputRouteHelper
 import dev.livelydesk.ferric.ui.theme.CoverShadeColors
 import dev.livelydesk.ferric.ui.theme.CoverShadeExtractor
 import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,7 +28,9 @@ import uniffi.ferric_mobile_ffi.FfiArtistSummary
 import uniffi.ferric_mobile_ffi.FfiAutoEqProfile
 import uniffi.ferric_mobile_ffi.FfiCardKind
 import uniffi.ferric_mobile_ffi.FfiCollectionDetail
+import uniffi.ferric_mobile_ffi.FfiConnectState
 import uniffi.ferric_mobile_ffi.FfiDetailSort
+import uniffi.ferric_mobile_ffi.FfiDeviceKind
 import uniffi.ferric_mobile_ffi.FfiDspSettings
 import uniffi.ferric_mobile_ffi.FfiEqConfig
 import uniffi.ferric_mobile_ffi.FfiEventSink
@@ -34,6 +39,7 @@ import uniffi.ferric_mobile_ffi.FfiLyricsState
 import uniffi.ferric_mobile_ffi.FfiPlaylist
 import uniffi.ferric_mobile_ffi.FfiPlaylistSort
 import uniffi.ferric_mobile_ffi.FfiPlaylistSourceFilter
+import uniffi.ferric_mobile_ffi.FfiQrCode
 import uniffi.ferric_mobile_ffi.FfiRepeatMode
 import uniffi.ferric_mobile_ffi.FfiSearchResults
 import uniffi.ferric_mobile_ffi.FfiTelemetry
@@ -115,7 +121,21 @@ data class PlaybackUiState(
     val spectrumBins: List<Int> = List(8) { 0 },
     val shuffle: Boolean = false,
     val repeatMode: FfiRepeatMode = FfiRepeatMode.OFF,
+    val localVolume: Float = 0.85f,
     val activeOutputRoute: String = "Phone Speaker",
+    val connectState: FfiConnectState = FfiConnectState(
+        localDeviceId = "",
+        localDeviceName = "This phone",
+        localDeviceKind = FfiDeviceKind.PHONE,
+        localIp = "127.0.0.1",
+        localTcpPort = 0u,
+        roomTagsHex = ",",
+        activeSpeakerId = "",
+        isLocalActiveSpeaker = true,
+        isAccountReady = false,
+        peers = emptyList(),
+    ),
+    val connectQrCode: FfiQrCode? = null,
     val statusMessage: String? = null,
     val isReady: Boolean = false,
 )
@@ -177,6 +197,38 @@ class CoreStateStore(private val appContext: Context) {
         },
     )
 
+    private val nsdHelper = ConnectNsdHelper(appContext) { devId, devName, kind, ip, port, tags ->
+        scope.launch {
+            core?.notifyMdnsPeer(
+                deviceId = devId,
+                deviceName = devName,
+                deviceKind = kind,
+                ip = ip,
+                tcpPort = port.toUShort(),
+                roomTagsHex = tags,
+            )
+        }
+    }
+
+    private fun stableDeviceId(): String {
+        val prefs = appContext.getSharedPreferences("ferric_device", Context.MODE_PRIVATE)
+        val existing = prefs.getString("device_id", null)
+        if (!existing.isNullOrBlank()) return existing
+        val generated = "android_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+        prefs.edit().putString("device_id", generated).apply()
+        return generated
+    }
+
+    private fun friendlyDeviceName(): String {
+        val model = Build.MODEL?.trim().orEmpty()
+        val brand = Build.MANUFACTURER?.trim().orEmpty()
+        return when {
+            model.isBlank() -> "Ferric Android"
+            brand.isNotBlank() && !model.startsWith(brand, ignoreCase = true) -> "$brand $model"
+            else -> model
+        }.take(48)
+    }
+
     private val eventSink = object : FfiEventSink {
         override fun onPlaybackTelemetry(telemetry: FfiTelemetry) {
             _uiState.update { PlaybackStateReducer.applyTelemetry(it, telemetry) }
@@ -235,6 +287,18 @@ class CoreStateStore(private val appContext: Context) {
             _uiState.update { it.copy(videoStreams = video) }
         }
 
+        override fun onConnectStateChanged(state: FfiConnectState) {
+            _uiState.update { it.copy(connectState = state) }
+            if (state.localTcpPort.toInt() >= 1024) {
+                nsdHelper.syncRegistration(
+                    deviceId = state.localDeviceId,
+                    deviceName = state.localDeviceName,
+                    tcpPort = state.localTcpPort.toInt(),
+                    roomTagsHex = state.roomTagsHex,
+                )
+            }
+        }
+
         override fun onSpotifyAuthExpired() {
             silentSpotifyRefresher.triggerRefresh()
         }
@@ -266,6 +330,7 @@ class CoreStateStore(private val appContext: Context) {
                 val eqPresets = handle.listEqPresets()
                 val autoEq = handle.searchAutoeq("")
                 val dsp = handle.getDsp()
+                val connect = handle.getConnectState()
                 _uiState.update {
                     it.copy(
                         accountStatus = accounts,
@@ -275,7 +340,16 @@ class CoreStateStore(private val appContext: Context) {
                         eqPresets = eqPresets,
                         autoEqProfiles = autoEq,
                         dspSettings = dsp,
+                        connectState = connect,
                         isReady = true,
+                    )
+                }
+                if (connect.localTcpPort.toInt() >= 1024) {
+                    nsdHelper.syncRegistration(
+                        deviceId = connect.localDeviceId,
+                        deviceName = connect.localDeviceName,
+                        tcpPort = connect.localTcpPort.toInt(),
+                        roomTagsHex = connect.roomTagsHex,
                     )
                 }
                 handle.loadHome(forceRefresh = false, moodIdx = null)
@@ -296,6 +370,8 @@ class CoreStateStore(private val appContext: Context) {
                 val created = FerricMobileCore(
                     dataDir = dataDir.absolutePath,
                     cacheDir = cacheDir.absolutePath,
+                    deviceId = stableDeviceId(),
+                    deviceName = friendlyDeviceName(),
                     cipher = KeystoreVault(),
                     contentOpener = AndroidContentOpener(appContext.contentResolver),
                     sink = eventSink,
@@ -962,6 +1038,41 @@ class CoreStateStore(private val appContext: Context) {
         scope.launch { runCatching { getOrCreateCore()?.logoutSubsonic() } }
     }
 
+    // --- M4 Zero-Pairing Ferric Connect ---
+
+    fun setConnectSheetOpen(open: Boolean) {
+        nsdHelper.setSheetDiscoveryBoost(open)
+    }
+
+    fun switchConnectSpeaker(targetDeviceId: String) {
+        scope.launch {
+            getOrCreateCore()?.connectSwitchSpeaker(targetDeviceId)
+        }
+    }
+
+    fun setConnectVolume(targetDeviceId: String, volumeNorm: Float) {
+        val clamped = volumeNorm.coerceIn(0f, 1.5f)
+        if (targetDeviceId == _uiState.value.connectState.localDeviceId) {
+            _uiState.update { it.copy(localVolume = clamped) }
+        }
+        scope.launch {
+            getOrCreateCore()?.connectSetRemoteVolume(targetDeviceId, clamped)
+        }
+    }
+
+    fun loadConnectQrCode(regenerate: Boolean) {
+        scope.launch {
+            val qr = getOrCreateCore()?.connectGetQrCode(regenerate) ?: return@launch
+            _uiState.update { it.copy(connectQrCode = qr) }
+        }
+    }
+
+    fun pairConnectQrUri(uri: String) {
+        scope.launch {
+            getOrCreateCore()?.connectPairQr(uri)
+        }
+    }
+
     fun refreshOutputRoute() {
         val label = OutputRouteHelper.activeOutputLabel(appContext)
         _uiState.update { it.copy(activeOutputRoute = label) }
@@ -976,6 +1087,7 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun shutdown() {
+        nsdHelper.shutdown()
         synchronized(coreLock) {
             core?.shutdown()
             core = null

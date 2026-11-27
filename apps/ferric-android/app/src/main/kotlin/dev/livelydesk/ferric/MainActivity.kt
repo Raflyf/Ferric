@@ -64,6 +64,7 @@ import dev.livelydesk.ferric.ui.components.AddToPlaylistDialog
 import dev.livelydesk.ferric.ui.components.AuroraBackdrop
 import dev.livelydesk.ferric.ui.components.MiniPlayerBar
 import dev.livelydesk.ferric.ui.screens.AccountsSheet
+import dev.livelydesk.ferric.ui.screens.ConnectSheet
 import dev.livelydesk.ferric.ui.screens.DetailScreen
 import dev.livelydesk.ferric.ui.screens.EqualizerSheet
 import dev.livelydesk.ferric.ui.screens.FullPlayerScreen
@@ -148,6 +149,7 @@ private fun FerricMainShell(
     var showFullPlayer by rememberSaveable { mutableStateOf(false) }
     var showQueueSheet by rememberSaveable { mutableStateOf(false) }
     var showAccountsSheet by rememberSaveable { mutableStateOf(false) }
+    var showConnectSheet by rememberSaveable { mutableStateOf(false) }
     var showEqSheet by rememberSaveable { mutableStateOf(false) }
     var showThemeSheet by rememberSaveable { mutableStateOf(false) }
     var showCreatePlaylistDialog by rememberSaveable { mutableStateOf(false) }
@@ -289,6 +291,7 @@ private fun FerricMainShell(
                 onOpenQueue = { showQueueSheet = true },
                 onOpenEqualizer = { showEqSheet = true },
                 onOpenThemeStudio = { showThemeSheet = true },
+                onOpenConnect = { showConnectSheet = true },
                 onOpenOutputSwitcher = onOpenOutputSwitcher,
                 onLoadLyrics = { store.loadLyricsForCurrent() },
                 onNudgeLyricsOffset = { delta -> store.nudgeLyricsOffsetMs(delta) },
@@ -311,6 +314,7 @@ private fun FerricMainShell(
                             onPrev = { store.prev() },
                             onOpenFullPlayer = { showFullPlayer = true },
                             onOpenQueue = { showQueueSheet = true },
+                            onOpenConnect = { showConnectSheet = true },
                         )
                         NavigationBar(
                             containerColor = if (palette.isLiquidGlass) {
@@ -402,7 +406,7 @@ private fun FerricMainShell(
                                 onOpenAccounts = { showAccountsSheet = true },
                                 onOpenEqualizer = { showEqSheet = true },
                                 onOpenThemeStudio = { showThemeSheet = true },
-                                onOpenOutputSwitcher = onOpenOutputSwitcher,
+                                onOpenConnect = { showConnectSheet = true },
                                 onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
                                 onShuffleQueue = { list, ctx -> store.shuffleQueue(list, ctx) },
                                 onOpenStation = { id -> store.openStation(id) },
@@ -531,6 +535,23 @@ private fun FerricMainShell(
             onLogoutYtm = { store.logoutYtm() },
             onSyncSubsonic = { url, user, pass -> store.syncSubsonic(url, user, pass) },
             onLogoutSubsonic = { store.logoutSubsonic() },
+        )
+    }
+
+    if (showConnectSheet) {
+        ConnectSheet(
+            state = state,
+            onDismiss = { showConnectSheet = false },
+            onSheetVisibilityChanged = { open -> store.setConnectSheetOpen(open) },
+            onSwitchSpeaker = { id -> store.switchConnectSpeaker(id) },
+            onSetVolume = { id, vol -> store.setConnectVolume(id, vol) },
+            onOpenSystemOutputSwitcher = onOpenOutputSwitcher,
+            onLoadQrCode = { regen -> store.loadConnectQrCode(regen) },
+            onCopyPairingUri = { uri ->
+                copyToClipboard("Ferric Connect URI", uri)
+                store.clearStatusMessage()
+            },
+            onPairWithUri = { uri -> store.pairConnectQrUri(uri) },
         )
     }
 

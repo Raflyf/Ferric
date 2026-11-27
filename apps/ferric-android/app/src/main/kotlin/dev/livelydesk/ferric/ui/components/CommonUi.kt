@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
+import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -245,14 +246,33 @@ fun MiniPlayerBar(
     onPrev: () -> Unit,
     onOpenFullPlayer: () -> Unit,
     onOpenQueue: () -> Unit,
+    onOpenConnect: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalFerricPalette.current
     val hazeState = LocalHazeState.current
     val cur = state.currentTrack
+    val activeRemotePeer = if (!state.connectState.isLocalActiveSpeaker) {
+        state.connectState.peers.firstOrNull {
+            it.connected && it.deviceId == state.connectState.activeSpeakerId
+        }
+    } else {
+        null
+    }
+    val hasConnectedPeer = state.connectState.peers.any { it.connected }
+    val displayTitle = activeRemotePeer?.nowPlayingTitle?.ifBlank { null } ?: cur?.title ?: "Ready to play"
+    val displaySubtitle = when {
+        activeRemotePeer != null -> "Playing on ${activeRemotePeer.deviceName} · ${activeRemotePeer.nowPlayingArtist}"
+        cur != null -> "${cur.artist} · ${state.activeOutputRoute}"
+        else -> "Swipe up for Player · left/right to skip"
+    }
+    val displayThumb = activeRemotePeer?.nowPlayingThumbnailUrl ?: cur?.thumbnailUrl
+    val displayPlaying = activeRemotePeer?.isPlaying ?: state.isPlaying
     var dragX by remember { mutableFloatStateOf(0f) }
     var dragY by remember { mutableFloatStateOf(0f) }
-    val progress = if (state.durationMs > 0L) {
+    val progress = if (activeRemotePeer != null && activeRemotePeer.durationMs > 0uL) {
+        (activeRemotePeer.positionMs.toFloat() / activeRemotePeer.durationMs.toFloat()).coerceIn(0f, 1f)
+    } else if (state.durationMs > 0L) {
         (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
     } else {
         0f
@@ -300,34 +320,33 @@ fun MiniPlayerBar(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 ArtworkThumb(
-                    url = cur?.thumbnailUrl,
+                    url = displayThumb,
                     size = 44.dp,
                     cornerRadius = 9.dp,
-                    isActive = state.isPlaying,
+                    isActive = displayPlaying,
                 )
                 Spacer(Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = cur?.title ?: "Ready to play",
+                        text = displayTitle,
                         style = MaterialTheme.typography.titleMedium,
                         color = palette.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = cur?.let { "${it.artist} · ${state.activeOutputRoute}" }
-                            ?: "Swipe up for Player · left/right to skip",
+                        text = displaySubtitle,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = palette.textSecondary,
+                        color = if (activeRemotePeer != null) palette.accent else palette.textSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                IconButton(onClick = onPrev) {
+                IconButton(onClick = onOpenConnect) {
                     Icon(
-                        imageVector = Icons.Rounded.SkipPrevious,
-                        contentDescription = "Previous",
-                        tint = palette.textPrimary,
+                        imageVector = Icons.Rounded.Devices,
+                        contentDescription = "Ferric Connect",
+                        tint = if (hasConnectedPeer) palette.accent else palette.textSecondary,
                     )
                 }
                 Surface(
@@ -337,8 +356,8 @@ fun MiniPlayerBar(
                 ) {
                     IconButton(onClick = onTogglePlayPause) {
                         Icon(
-                            imageVector = if (state.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = if (state.isPlaying) "Pause" else "Play",
+                            imageVector = if (displayPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                            contentDescription = if (displayPlaying) "Pause" else "Play",
                             tint = if (palette.isLight) androidx.compose.ui.graphics.Color.White else ObsidianSurface,
                         )
                     }

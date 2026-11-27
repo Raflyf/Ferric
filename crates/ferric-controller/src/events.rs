@@ -6,6 +6,7 @@ use crate::types::{
 };
 use ferric_audio::engine::TelemetrySnapshot;
 use ferric_core::models::Track;
+use ferric_sync::ConnectSnapshot;
 
 /// Platform event receiver invoked off the UI thread whenever controller state changes.
 pub trait ControllerEventSink: Send + Sync {
@@ -19,6 +20,7 @@ pub trait ControllerEventSink: Send + Sync {
     fn on_accounts_changed(&self, _status: AccountStatusSnapshot) {}
     fn on_lyrics_loaded(&self, _lyrics: LyricsSnapshot) {}
     fn on_video_streams_loaded(&self, _video: VideoStreamsSnapshot) {}
+    fn on_connect_state_changed(&self, _state: ConnectSnapshot) {}
     fn on_spotify_auth_expired(&self) {}
     fn on_toast(&self, _message: String) {}
 }

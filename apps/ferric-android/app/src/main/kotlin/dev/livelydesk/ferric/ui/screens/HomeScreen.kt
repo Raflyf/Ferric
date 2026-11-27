@@ -18,12 +18,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountCircle
+import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shuffle
-import androidx.compose.material.icons.rounded.Speaker
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -68,7 +68,7 @@ fun HomeScreen(
     onOpenAccounts: () -> Unit,
     onOpenEqualizer: () -> Unit,
     onOpenThemeStudio: () -> Unit,
-    onOpenOutputSwitcher: () -> Unit,
+    onOpenConnect: () -> Unit,
     onPlayQueue: (List<FfiTrack>, Int, String) -> Unit,
     onShuffleQueue: (List<FfiTrack>, String) -> Unit,
     onOpenStation: (String) -> Unit,
@@ -129,8 +129,13 @@ fun HomeScreen(
                             tint = if (palette.isLiquidGlass) palette.accent else palette.textPrimary,
                         )
                     }
-                    IconButton(onClick = onOpenOutputSwitcher) {
-                        Icon(Icons.Rounded.Speaker, contentDescription = "Audio Output", tint = palette.textPrimary)
+                    IconButton(onClick = onOpenConnect) {
+                        val hasPeer = state.connectState.peers.any { it.connected }
+                        Icon(
+                            Icons.Rounded.Devices,
+                            contentDescription = "Ferric Connect",
+                            tint = if (hasPeer) palette.accent else palette.textPrimary,
+                        )
                     }
                     IconButton(onClick = onOpenAccounts) {
                         Icon(

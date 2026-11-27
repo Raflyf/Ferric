@@ -95,6 +95,7 @@ impl FerricController {
             account_status_from_settings(&st.accounts)
         };
         self.sink.on_accounts_changed(status);
+        self.sync_connect_accounts();
         if trigger_sync {
             self.sync_spotify_account();
         }
@@ -150,6 +151,7 @@ impl FerricController {
                         account_status_from_settings(&st.accounts)
                     };
                     this.sink.on_accounts_changed(status);
+                    this.sync_connect_accounts();
                     this.sink.on_library_changed();
                     this.sink.on_toast(format!(
                         "Spotify synced: {} playlists, {} liked songs",
@@ -186,6 +188,7 @@ impl FerricController {
             account_status_from_settings(&st.accounts)
         };
         self.sink.on_accounts_changed(status);
+        self.sync_connect_accounts();
         self.sink.on_library_changed();
         self.sink.on_toast("Signed out of Spotify".to_string());
         Ok(())
@@ -230,6 +233,7 @@ impl FerricController {
             account_status_from_settings(&st.accounts)
         };
         self.sink.on_accounts_changed(status);
+        self.sync_connect_accounts();
         self.sync_ytm_account();
         Ok(())
     }
@@ -280,6 +284,7 @@ impl FerricController {
                         account_status_from_settings(&st.accounts)
                     };
                     this.sink.on_accounts_changed(status);
+                    this.sync_connect_accounts();
                     this.sink.on_library_changed();
                     this.sink.on_toast(format!(
                         "YouTube Music synced: {pl_count} playlists, {liked_count} liked songs"
@@ -305,6 +310,7 @@ impl FerricController {
             account_status_from_settings(&st.accounts)
         };
         self.sink.on_accounts_changed(status);
+        self.sync_connect_accounts();
         self.sink.on_library_changed();
         self.sink
             .on_toast("Signed out of YouTube Music".to_string());
@@ -356,6 +362,7 @@ impl FerricController {
                         account_status_from_settings(&st.accounts)
                     };
                     this.sink.on_accounts_changed(status);
+                    this.sync_connect_accounts();
                     this.sink.on_library_changed();
                     this.sink.on_toast(format!(
                         "Subsonic synced: {song_count} songs, {pl_count} playlists"

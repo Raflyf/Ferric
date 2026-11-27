@@ -76,7 +76,8 @@ use ferric_providers::ytmusic::{
     resolve_music_video_streams, set_ytm_track_liked,
 };
 use ferric_sync::{
-    ActiveSpeakerLease, LanDiscoveryBeacon, PairingPayload, QrMatrix, detect_local_lan_ip,
+    ConnectConfig, ConnectEngine, ConnectEvent, ConnectSnapshot, DeviceKind, LocalPlaybackSnapshot,
+    QrMatrix, QueueEntry, RemoteAction, detect_local_lan_ip,
 };
 use makepad_widgets::*;
 use std::cell::RefCell;
@@ -3275,11 +3276,12 @@ live_design! {
                                 spacing: 6,
                                 draw_bg: { base_col: #09090D }
 
-                                // Right Sidebar Header Tabs: [Queue] [Lyrics] + [Radio] [Save] [Copy] [Refresh] [Clear]
+                                // Right Sidebar Header Tabs: [Queue] [Lyrics] [Connect] + [Radio] [Save] [Copy] [Refresh] [Clear]
                                 <View> {
                                     width: Fill, height: 26, flow: Right, align: { y: 0.5 }, spacing: 3,
-                                    rs_tab_queue = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
-                                    rs_tab_lyrics = <FerricChipBtn> { height: 24, padding: { left: 8, right: 8 }, text: "Lyrics" }
+                                    rs_tab_queue = <FerricChipBtn> { height: 24, padding: { left: 7, right: 7 }, text: "Queue", draw_bg: { active: 1.0 }, draw_text: { active: 1.0 } }
+                                    rs_tab_lyrics = <FerricChipBtn> { height: 24, padding: { left: 7, right: 7 }, text: "Lyrics" }
+                                    rs_tab_connect = <FerricChipBtn> { height: 24, padding: { left: 7, right: 7 }, text: "Connect" }
                                     <View> { width: Fill, height: 1 }
                                     rs_radio_btn = <FerricIconBtn> {
                                         width: 24, height: 24,
@@ -3398,6 +3400,66 @@ live_design! {
                                         rs_lyr_copy = <FerricBtn> { height: 24, text: "Copy Lyrics" }
                                         rs_watch_video = <FerricBtn> { height: 24, text: "Video Clip" }
                                     }
+                                }
+
+                                // TAB 3: ZERO-PAIRING FERRIC CONNECT (Spotify-Connect-Style Device Switcher)
+                                rs_connect_view = <FerricScrollYView> {
+                                    visible: false,
+                                    width: Fill,
+                                    height: Fill,
+                                    padding: { top: 4, right: 6, bottom: 10 }
+                                    flow: Down,
+                                    spacing: 8,
+
+                                    card_rs_conn_active = <FerricCard> {
+                                        flow: Down,
+                                        spacing: 6,
+                                        rs_conn_active_lbl = <Label> {
+                                            width: Fill,
+                                            draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.8 } }
+                                            text: "This PC (Active)"
+                                        }
+                                        rs_conn_now_lbl = <Label> {
+                                            width: Fill,
+                                            draw_text: { color: #C2C5D2, text_style: <THEME_FONT_REGULAR> { font_size: 8.4 } }
+                                            text: "Ready to connect on local Wi-Fi"
+                                        }
+                                        <View> {
+                                            width: Fill, height: 20, flow: Right, align: { y: 0.5 }, spacing: 6,
+                                            lbl_m_rs_vol = <Label> {
+                                                draw_text: { color: #8A8EA2, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
+                                                text: "VOL"
+                                            }
+                                            rs_conn_vol_slider = <FerricBarSlider> {
+                                                width: Fill,
+                                                height: 16,
+                                                min: 0.0, max: 1.0, value: 0.85,
+                                                wheel_adjust: true,
+                                                wheel_step: 0.05
+                                            }
+                                        }
+                                    }
+
+                                    lbl_m_rs_switch = <Label> {
+                                        margin: { left: 4, top: 2 }
+                                        draw_text: { color: #8A8EA2, text_style: <THEME_FONT_MEDIUM> { font_size: 7.8 } }
+                                        text: "SWITCH OUTPUT TO"
+                                    }
+
+                                    rs_conn_local_btn = <FerricBtn> { width: Fill, height: 30, text: "This PC (Active)" }
+                                    rs_conn_peer_0 = <FerricBtn> { visible: false, width: Fill, height: 30, text: "Device 1" }
+                                    rs_conn_peer_1 = <FerricBtn> { visible: false, width: Fill, height: 30, text: "Device 2" }
+                                    rs_conn_peer_2 = <FerricBtn> { visible: false, width: Fill, height: 30, text: "Device 3" }
+                                    rs_conn_peer_3 = <FerricBtn> { visible: false, width: Fill, height: 30, text: "Device 4" }
+
+                                    rs_conn_status_lbl = <Label> {
+                                        width: Fill,
+                                        margin: { left: 4, top: 4 }
+                                        draw_text: { color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 8.0 } }
+                                        text: "Sign in to Spotify or YouTube Music on Desktop & Android for automatic LAN link."
+                                    }
+
+                                    rs_conn_qr_btn = <FerricBtn> { width: Fill, height: 28, text: "QR Pairing & LAN Info" }
                                 }
                             }
                         }
@@ -3573,6 +3635,11 @@ live_design! {
                                     width: 28, height: 28,
                                     icon_walk: { width: Fit, height: 15 }
                                     draw_icon: { svg_path: "M3 10H14V12H3V10ZM3 6H14V8H3V6ZM3 14H10V16H3V14ZM16 13V21L22 17L16 13Z" }
+                                }
+                                bar_connect_btn = <FerricIconBtn> {
+                                    width: 28, height: 28,
+                                    icon_walk: { width: Fit, height: 15 }
+                                    draw_icon: { svg_path: "M4 6H22V4H4C2.9 4 2 4.9 2 6V17H0V20H14V17H4V6ZM23 8H17C16.45 8 16 8.45 16 9V19C16 19.55 16.45 20 17 20H23C23.55 20 24 19.55 24 19V9C24 8.45 23.55 8 23 8ZM22 17H18V10H22V17Z" }
                                 }
                                 vol_mute_btn = <FerricVolumeBtn> {
                                     width: 28, height: 28,
@@ -4362,15 +4429,19 @@ pub struct App {
     #[rust]
     startup_trim_stage: u8,
     #[rust]
-    lease: Option<ActiveSpeakerLease>,
+    connect_engine: Option<Arc<ConnectEngine>>,
     #[rust]
-    lan_beacon: Option<LanDiscoveryBeacon>,
+    connect_snap: Option<ConnectSnapshot>,
+    #[rust]
+    connect_peer_ids: [String; 4],
+    #[rust]
+    connect_sync_ticks: u8,
+    #[rust]
+    pending_handoff_seek_ms: Option<u64>,
     #[rust]
     pairing_uri: String,
     #[rust]
     lan_ip: String,
-    #[rust]
-    last_lan_broadcast: Option<Instant>,
     #[rust]
     synced_lyrics: SyncedLyrics,
     #[rust]
@@ -4397,6 +4468,8 @@ pub struct App {
     right_sidebar_open: bool,
     #[rust]
     right_lyrics_tab: bool,
+    #[rust]
+    right_connect_tab: bool,
     #[rust]
     fullscreen_open: bool,
     #[rust]
@@ -5735,15 +5808,36 @@ impl App {
 
         self.smtc = Some(SmtcBridge::try_init());
         self.discord_rpc = Some(DiscordRpcBridge::start(self.discord_settings.clone()));
-        let dev_id = format!("ferric-pc-{}", csprng_hex(6));
-        self.lease = Some(ActiveSpeakerLease::new(dev_id, "Desktop-PC"));
         self.lan_ip = detect_local_lan_ip();
-        // Bind LAN UDP discovery socket lazily only when the user opens Settings > Connect.
-        self.lan_beacon = None;
 
         let (tx, rx) = mpsc::channel();
-        self.bg_tx = Some(tx);
+        self.bg_tx = Some(tx.clone());
         self.bg_rx = Some(rx);
+
+        let dev_id = format!("ferric-pc-{}", csprng_hex(6));
+        let pc_name = std::env::var("COMPUTERNAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Desktop-PC".to_string());
+        let conn_tx = tx;
+        if let Ok(engine) = ConnectEngine::start(
+            ConnectConfig {
+                device_id: dev_id,
+                device_name: pc_name,
+                device_kind: DeviceKind::Desktop,
+                bind_ephemeral_udp: false,
+            },
+            Arc::new(move |ev| {
+                let _ = conn_tx.send(BgMessage::Connect(Box::new(ev)));
+                SignalToUI::set_ui_signal();
+            }),
+        ) {
+            let engine = Arc::new(engine);
+            self.connect_snap = Some(engine.snapshot());
+            self.connect_engine = Some(engine);
+            self.sync_connect_accounts();
+        }
 
         if let Some(brand_buf) = decode_and_downscale_image(BRAND_ICON_PNG, 128) {
             let tex = brand_buf.into_new_texture(cx);
@@ -6136,13 +6230,8 @@ impl App {
             self.refresh_storage_stats(cx);
         } else if tab == SettingsTab::Integrations {
             self.refresh_discord_preview(cx);
-        } else if tab == SettingsTab::Connect && self.lan_beacon.is_none() {
-            let dev_id = self
-                .lease
-                .as_ref()
-                .map(|l| l.local_device_id.clone())
-                .unwrap_or_else(|| format!("ferric-pc-{}", csprng_hex(6)));
-            self.lan_beacon = LanDiscoveryBeacon::bind_default(&dev_id).ok();
+        } else if tab == SettingsTab::Connect {
+            self.refresh_connect_panel(cx);
         }
         self.ui.redraw(cx);
     }
@@ -6168,36 +6257,61 @@ impl App {
     }
 
     fn set_right_sidebar(&mut self, cx: &mut Cx, open: bool, lyrics_tab: bool) {
+        self.set_right_sidebar_mode(cx, open, lyrics_tab, false);
+    }
+
+    fn set_right_sidebar_mode(
+        &mut self,
+        cx: &mut Cx,
+        open: bool,
+        lyrics_tab: bool,
+        connect_tab: bool,
+    ) {
         let z = self.theme.ui_zoom.clamp(0.65, 1.40) as f64;
         self.right_sidebar_open = open;
-        self.right_lyrics_tab = lyrics_tab;
+        self.right_lyrics_tab = lyrics_tab && !connect_tab;
+        self.right_connect_tab = connect_tab;
+        let queue_tab = !self.right_lyrics_tab && !self.right_connect_tab;
         self.right_w_target = if open { 260.0 * z } else { 0.0 };
         if open {
             self.ui.view(id!(right_sidebar)).set_visible(cx, true);
             self.ui.view(id!(right_divider)).set_visible(cx, true);
         }
-        self.ui
-            .view(id!(rs_queue_view))
-            .set_visible(cx, !lyrics_tab);
+        self.ui.view(id!(rs_queue_view)).set_visible(cx, queue_tab);
         self.ui
             .view(id!(rs_lyrics_view))
-            .set_visible(cx, lyrics_tab);
+            .set_visible(cx, self.right_lyrics_tab);
+        self.ui
+            .view(id!(rs_connect_view))
+            .set_visible(cx, self.right_connect_tab);
 
-        self.style_chip_btn(cx, id!(rs_tab_queue), !lyrics_tab);
-        self.style_chip_btn(cx, id!(rs_tab_lyrics), lyrics_tab);
+        self.style_chip_btn(cx, id!(rs_tab_queue), queue_tab);
+        self.style_chip_btn(cx, id!(rs_tab_lyrics), self.right_lyrics_tab);
+        self.style_chip_btn(cx, id!(rs_tab_connect), self.right_connect_tab);
 
         let pal = self.adaptive_palette();
         let accent = rgba_to_vec4(pal.accent);
         let muted = rgba_to_vec4(pal.icon_idle);
+        let has_peer = self
+            .connect_snap
+            .as_ref()
+            .is_some_and(|s| s.peers.iter().any(|p| p.connected));
         self.sync_sidebar_toggle_buttons(cx);
         self.ui.button(id!(bar_lyrics_btn)).apply_over(
             cx,
-            live! { draw_icon: { color: (if open && lyrics_tab { accent } else { muted }) } },
+            live! { draw_icon: { color: (if open && self.right_lyrics_tab { accent } else { muted }) } },
         );
         self.ui.button(id!(bar_queue_btn)).apply_over(
             cx,
-            live! { draw_icon: { color: (if open && !lyrics_tab { accent } else { muted }) } },
+            live! { draw_icon: { color: (if open && queue_tab { accent } else { muted }) } },
         );
+        self.ui.button(id!(bar_connect_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if (open && self.right_connect_tab) || has_peer { accent } else { muted }) } },
+        );
+        if self.right_connect_tab {
+            self.refresh_connect_panel(cx);
+        }
         self.start_motion(cx);
         self.sync_video_bounds(cx);
         let pos_ms = self.audio.as_ref().map_or(0, |a| a.telemetry().position_ms);
@@ -7013,13 +7127,21 @@ impl App {
             cx,
             live! { draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { icon_muted }) } },
         );
+        let has_peer = self
+            .connect_snap
+            .as_ref()
+            .is_some_and(|s| s.peers.iter().any(|p| p.connected));
         self.ui.button(id!(bar_lyrics_btn)).apply_over(
             cx,
             live! { draw_icon: { color: (if self.right_sidebar_open && self.right_lyrics_tab { accent } else { muted }) } },
         );
         self.ui.button(id!(bar_queue_btn)).apply_over(
             cx,
-            live! { draw_icon: { color: (if self.right_sidebar_open && !self.right_lyrics_tab { accent } else { muted }) } },
+            live! { draw_icon: { color: (if self.right_sidebar_open && !self.right_lyrics_tab && !self.right_connect_tab { accent } else { muted }) } },
+        );
+        self.ui.button(id!(bar_connect_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if (self.right_sidebar_open && self.right_connect_tab) || has_peer { accent } else { muted }) } },
         );
         self.ui.button(id!(bar_video_btn)).apply_over(
             cx,
@@ -7213,6 +7335,10 @@ impl App {
                 draw_icon: { color: (if self.session_state.autoplay_radio { accent } else { icon_muted }) }
             },
         );
+        let has_peer = self
+            .connect_snap
+            .as_ref()
+            .is_some_and(|s| s.peers.iter().any(|p| p.connected));
         self.ui.button(id!(bar_lyrics_btn)).apply_over(
             cx,
             live! {
@@ -7222,7 +7348,13 @@ impl App {
         self.ui.button(id!(bar_queue_btn)).apply_over(
             cx,
             live! {
-                draw_icon: { color: (if self.right_sidebar_open && !self.right_lyrics_tab { accent } else { muted }) }
+                draw_icon: { color: (if self.right_sidebar_open && !self.right_lyrics_tab && !self.right_connect_tab { accent } else { muted }) }
+            },
+        );
+        self.ui.button(id!(bar_connect_btn)).apply_over(
+            cx,
+            live! {
+                draw_icon: { color: (if (self.right_sidebar_open && self.right_connect_tab) || has_peer { accent } else { muted }) }
             },
         );
         self.ui.button(id!(bar_video_btn)).apply_over(
@@ -12318,7 +12450,34 @@ impl App {
     }
 
     fn play_track(&mut self, cx: &mut Cx, track: Track) {
+        if self.is_controlling_remote()
+            && let Some(engine) = &self.connect_engine
+        {
+            let entries: Vec<QueueEntry> = self
+                .queue
+                .tracks()
+                .iter()
+                .take(200)
+                .map(QueueEntry::from_track)
+                .collect();
+            let idx = entries
+                .iter()
+                .position(|t| t.track_id == track.id)
+                .unwrap_or(0);
+            let tracks_to_send = if entries.is_empty() {
+                vec![QueueEntry::from_track(&track)]
+            } else {
+                entries
+            };
+            engine.send_remote_action(RemoteAction::PlayQueue {
+                tracks: tracks_to_send,
+                start_index: idx,
+                context: "Desktop".to_string(),
+            });
+            return;
+        }
         self.play_track_inner(cx, track, true);
+        self.push_connect_playback_snapshot();
     }
 
     fn play_track_inner(&mut self, cx: &mut Cx, track: Track, reset_failures: bool) {
@@ -13620,23 +13779,389 @@ impl App {
     }
 
     fn regenerate_pairing_qr(&mut self, cx: &mut Cx) {
-        let tok = csprng_hex(16);
-        let ep = format!("ed25519_{}", csprng_hex(6));
-        let payload = PairingPayload {
-            endpoint_id: ep,
-            token_hex: tok,
-            device_name: "Desktop-PC".to_string(),
+        let (uri, port) = if let Some(engine) = &self.connect_engine {
+            (engine.regenerate_qr_uri(), engine.local_tcp_port())
+        } else {
+            (String::new(), 43821)
         };
-        self.pairing_uri = payload.to_uri();
+        self.pairing_uri = uri;
         if let Ok(qr) = QrMatrix::encode(&self.pairing_uri) {
             self.ui
                 .ferric_qr_view(id!(connect_qr_view))
                 .set_matrix(cx, qr.size, qr.modules);
         }
+        let pc_name = self
+            .connect_snap
+            .as_ref()
+            .map_or("Desktop-PC", |s| s.local_device_name.as_str());
         self.ui.label(id!(connect_lan_ip_lbl)).set_text(
             cx,
-            &format!("LAN: {}:43821 · Desktop-PC Active", self.lan_ip),
+            &format!("LAN: {}:{port} · {pc_name} Ready", self.lan_ip),
         );
+    }
+
+    fn sync_connect_accounts(&self) {
+        let Some(engine) = &self.connect_engine else {
+            return;
+        };
+        let sp_id = if self.accounts.spotify_connected || self.accounts.spotify_web_connected {
+            self.accounts.spotify_user_id.clone()
+        } else {
+            String::new()
+        };
+        let yt_id = if self.accounts.youtube_connected {
+            self.accounts.youtube_account_id.clone()
+        } else {
+            String::new()
+        };
+        engine.update_accounts(sp_id, yt_id);
+    }
+
+    fn is_controlling_remote(&self) -> bool {
+        self.connect_snap
+            .as_ref()
+            .is_some_and(|s| !s.is_local_active_speaker && s.peers.iter().any(|p| p.connected))
+    }
+
+    fn push_connect_playback_snapshot(&self) {
+        let Some(engine) = &self.connect_engine else {
+            return;
+        };
+        let tele = self
+            .audio
+            .as_ref()
+            .map(|a| a.telemetry())
+            .unwrap_or_default();
+        let current_track = self.queue.current().map(QueueEntry::from_track);
+        let queue: Vec<QueueEntry> = self
+            .queue
+            .tracks()
+            .iter()
+            .take(200)
+            .map(QueueEntry::from_track)
+            .collect();
+        let current_index = current_track
+            .as_ref()
+            .and_then(|cur| queue.iter().position(|t| t.track_id == cur.track_id))
+            .unwrap_or(0);
+        let now_utc_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        engine.update_local_playback(LocalPlaybackSnapshot {
+            is_playing: tele.is_playing,
+            current_track,
+            queue,
+            current_index,
+            position_ms: tele.position_ms,
+            volume_norm: self.session_state.volume,
+            repeat_mode: self.queue.repeat,
+            shuffle_enabled: self.queue.shuffle,
+            anchor_utc_ms: now_utc_ms,
+        });
+    }
+
+    fn refresh_connect_panel(&mut self, cx: &mut Cx) {
+        let Some(snap) = self.connect_snap.clone() else {
+            return;
+        };
+        let active_peer = snap
+            .peers
+            .iter()
+            .find(|p| p.connected && p.device_id == snap.active_speaker_id);
+
+        let (active_lbl, now_lbl, slider_vol) =
+            if snap.is_local_active_speaker || active_peer.is_none() {
+                let now = self
+                    .queue
+                    .current()
+                    .map(|t| format!("{} - {}", t.title, t.artist))
+                    .unwrap_or_else(|| "Ready to play on this PC".to_string());
+                (
+                    format!("{} (Active)", snap.local_device_name),
+                    now,
+                    f64::from(self.session_state.volume.clamp(0.0, 1.0)),
+                )
+            } else if let Some(peer) = active_peer {
+                let now = if !peer.now_playing_title.is_empty() {
+                    format!("{} - {}", peer.now_playing_title, peer.now_playing_artist)
+                } else {
+                    "Connected over encrypted LAN".to_string()
+                };
+                (
+                    format!("{} (Playing)", peer.device_name),
+                    now,
+                    f64::from(peer.volume_norm.clamp(0.0, 1.0)),
+                )
+            } else {
+                (
+                    snap.local_device_name.clone(),
+                    "Ready".to_string(),
+                    f64::from(self.session_state.volume.clamp(0.0, 1.0)),
+                )
+            };
+
+        self.ui
+            .label(id!(rs_conn_active_lbl))
+            .set_text(cx, &active_lbl);
+        self.ui
+            .label(id!(rs_conn_now_lbl))
+            .set_text(cx, &clip_text(&now_lbl, 34));
+        self.ui
+            .ferric_bar_slider(id!(rs_conn_vol_slider))
+            .set_value(cx, slider_vol);
+        self.ui.button(id!(rs_conn_local_btn)).set_text(
+            cx,
+            &if snap.is_local_active_speaker {
+                format!("This PC · {} (Active)", snap.local_device_name)
+            } else {
+                format!("Switch to This PC ({})", snap.local_device_name)
+            },
+        );
+
+        let peer_btn_ids = [
+            id!(rs_conn_peer_0),
+            id!(rs_conn_peer_1),
+            id!(rs_conn_peer_2),
+            id!(rs_conn_peer_3),
+        ];
+        self.connect_peer_ids = Default::default();
+        for (idx, btn_id) in peer_btn_ids.iter().enumerate() {
+            if let Some(peer) = snap.peers.get(idx) {
+                self.connect_peer_ids[idx] = peer.device_id.clone();
+                let tag = if peer.device_id == snap.active_speaker_id {
+                    "Active"
+                } else if peer.connected {
+                    "Connected"
+                } else {
+                    "Found"
+                };
+                self.ui
+                    .button(*btn_id)
+                    .set_text(cx, &format!("{} ({tag})", clip_text(&peer.device_name, 18)));
+                self.ui.button(*btn_id).set_visible(cx, true);
+            } else {
+                self.ui.button(*btn_id).set_visible(cx, false);
+            }
+        }
+
+        let status = if snap.is_account_ready {
+            if snap.peers.is_empty() {
+                format!(
+                    "Auto-Connect active ({}:{}) · Waiting for Ferric Android on same Wi-Fi...",
+                    snap.local_ip, snap.local_tcp_port
+                )
+            } else {
+                format!(
+                    "Auto-Connect linked ({} device(s)) · Encrypted ChaCha20 LAN",
+                    snap.peers.len()
+                )
+            }
+        } else {
+            "Sign in to Spotify or YouTube Music on Desktop & Android for zero-pairing Connect."
+                .to_string()
+        };
+        self.ui.label(id!(rs_conn_status_lbl)).set_text(cx, &status);
+
+        let settings_peers = if snap.peers.is_empty() {
+            status
+        } else {
+            snap.peers
+                .iter()
+                .map(|p| {
+                    let st = if p.connected { "Connected" } else { "Found" };
+                    format!("- {} ({st} · {})", p.device_name, p.addr)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        self.ui
+            .label(id!(connect_peers_lbl))
+            .set_text(cx, &settings_peers);
+
+        let pal = self.adaptive_palette();
+        let accent = rgba_to_vec4(pal.accent);
+        let muted = rgba_to_vec4(pal.icon_idle);
+        let has_peer = snap.peers.iter().any(|p| p.connected);
+        self.ui.button(id!(bar_connect_btn)).apply_over(
+            cx,
+            live! { draw_icon: { color: (if (self.right_sidebar_open && self.right_connect_tab) || has_peer { accent } else { muted }) } },
+        );
+    }
+
+    fn handle_connect_event(&mut self, cx: &mut Cx, ev: ConnectEvent) {
+        match ev {
+            ConnectEvent::StateUpdated(snap) => {
+                self.connect_snap = Some(snap);
+                self.refresh_connect_panel(cx);
+                self.ui.redraw(cx);
+            }
+            ConnectEvent::ExecuteRemoteAction(action) => {
+                self.apply_incoming_connect_action(cx, action);
+            }
+            ConnectEvent::BecameActiveSpeaker {
+                state,
+                queue,
+                current_index,
+            } => {
+                let mut tracks = self.hydrate_connect_tracks(queue);
+                if tracks.is_empty()
+                    && let Some(tid) = state.track_id.clone()
+                {
+                    tracks.push(
+                        QueueEntry {
+                            track_id: tid,
+                            title: state.track_title.clone(),
+                            artist: state.track_artist.clone(),
+                            album: String::new(),
+                            duration_ms: state.duration_ms,
+                            spotify_id: None,
+                            youtube_video_id: None,
+                            thumbnail_url: state.track_thumbnail_url.clone(),
+                        }
+                        .into_track(),
+                    );
+                }
+                if !tracks.is_empty() {
+                    let idx = current_index.min(tracks.len() - 1);
+                    let chosen = tracks[idx].clone();
+                    self.queue.repeat = state.repeat_mode;
+                    self.queue.set_shuffle(state.shuffle_enabled);
+                    self.queue.set_tracks(tracks, Some(idx));
+                    let now_utc = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let drift = if state.is_playing && state.anchor_utc_ms > 0 {
+                        u64::try_from((now_utc - state.anchor_utc_ms).clamp(0, 5_000)).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let seek_ms = state.base_position_ms.saturating_add(drift);
+                    self.pending_handoff_seek_ms = Some(seek_ms);
+                    self.play_track_inner(cx, chosen, true);
+                    if seek_ms > 1_000
+                        && let Some(audio) = &self.audio
+                    {
+                        audio.send(EngineCommand::SeekMs(seek_ms));
+                    }
+                    if !state.is_playing
+                        && let Some(audio) = &self.audio
+                    {
+                        audio.send(EngineCommand::Pause);
+                    }
+                    self.show_toast(cx, "Switched playback to Desktop PC");
+                }
+                self.refresh_connect_panel(cx);
+            }
+            ConnectEvent::YieldedActiveSpeaker {
+                new_speaker_name, ..
+            } => {
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::Pause);
+                }
+                self.show_toast(cx, &format!("Playing on {new_speaker_name}"));
+                self.refresh_connect_panel(cx);
+            }
+            ConnectEvent::Toast(msg) => {
+                self.show_toast(cx, &msg);
+            }
+        }
+    }
+
+    fn apply_incoming_connect_action(&mut self, cx: &mut Cx, action: RemoteAction) {
+        match action {
+            RemoteAction::Play => {
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::Play);
+                }
+            }
+            RemoteAction::Pause => {
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::Pause);
+                }
+            }
+            RemoteAction::TogglePlayPause => {
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::TogglePlayPause);
+                }
+            }
+            RemoteAction::SeekTo { position_ms } => {
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::SeekMs(position_ms));
+                }
+            }
+            RemoteAction::SkipNext => {
+                if let Some(next) = self.queue.next_track_manual().cloned() {
+                    self.play_track_inner(cx, next, true);
+                }
+            }
+            RemoteAction::SkipPrev => {
+                if let Some(prev) = self.queue.prev_track().cloned() {
+                    self.play_track_inner(cx, prev, true);
+                }
+            }
+            RemoteAction::JumpToQueueIndex { index } => {
+                let tracks = self.queue.tracks().to_vec();
+                if !tracks.is_empty() {
+                    let idx = index.min(tracks.len() - 1);
+                    let chosen = tracks[idx].clone();
+                    self.queue.set_tracks(tracks, Some(idx));
+                    self.play_track_inner(cx, chosen, true);
+                }
+            }
+            RemoteAction::PlayQueue {
+                tracks,
+                start_index,
+                ..
+            } => {
+                let hydrated = self.hydrate_connect_tracks(tracks);
+                if !hydrated.is_empty() {
+                    let idx = start_index.min(hydrated.len() - 1);
+                    let chosen = hydrated[idx].clone();
+                    self.queue.set_tracks(hydrated, Some(idx));
+                    self.play_track_inner(cx, chosen, true);
+                }
+            }
+            RemoteAction::SetVolume { volume_norm, .. } => {
+                let vol = volume_norm.clamp(0.0, 1.5);
+                self.session_state.volume = vol;
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::SetVolume(vol));
+                }
+                self.sync_controls_from_state(cx);
+                self.mark_session_dirty();
+            }
+            RemoteAction::SetRepeat(mode) => {
+                self.queue.repeat = mode;
+                self.session_state.repeat = mode;
+                self.sync_next_deck_to_engine();
+                self.sync_controls_from_state(cx);
+            }
+            RemoteAction::SetShuffle(enabled) => {
+                self.queue.set_shuffle(enabled);
+                self.session_state.shuffle = enabled;
+                self.sync_next_deck_to_engine();
+                self.sync_controls_from_state(cx);
+            }
+            RemoteAction::TransferActiveSpeaker { .. } | RemoteAction::SetSimulcastMode { .. } => {}
+        }
+        self.push_connect_playback_snapshot();
+    }
+
+    fn hydrate_connect_tracks(&self, entries: Vec<QueueEntry>) -> Vec<Track> {
+        let local_map: HashMap<&str, &Track> =
+            self.all_tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+        entries
+            .into_iter()
+            .map(|e| {
+                if let Some(existing) = local_map.get(e.track_id.as_str()) {
+                    (*existing).clone()
+                } else {
+                    e.into_track()
+                }
+            })
+            .collect()
     }
 
     fn spawn_update_check(&self, cx: &mut Cx, manual: bool) {
@@ -14460,10 +14985,14 @@ impl App {
                     let lib = *lib;
                     self.accounts.youtube_connected = true;
                     self.accounts.youtube_channel_name = lib.display_name.clone();
+                    if !lib.account_id.trim().is_empty() {
+                        self.accounts.youtube_account_id = lib.account_id.clone();
+                    }
                     if !lib.visitor_data.is_empty() {
                         self.accounts.youtube_visitor_data = lib.visitor_data;
                     }
                     self.accounts.youtube_playlist_count = lib.playlists.len();
+                    self.sync_connect_accounts();
                     let liked_n = lib.liked_tracks.len();
                     let pl_n = lib.playlists.len();
                     if let Some(db) = &mut self.db {
@@ -14520,6 +15049,10 @@ impl App {
                             self.accounts.spotify_user_name = report.display_name.clone();
                         }
                     }
+                    if !report.account_id.trim().is_empty() {
+                        self.accounts.spotify_user_id = report.account_id.clone();
+                    }
+                    self.sync_connect_accounts();
                     let liked_n = report.liked_tracks.len();
                     let pl_updated = report.playlists.len();
                     let etag_skipped = report.etag_skipped;
@@ -14844,11 +15377,18 @@ impl App {
                             t.duration_ms.max(stream.duration_ms)
                         });
                         self.send_play_or_crossfade(stream.path, rg, dur_ms);
+                        if let Some(seek_ms) = self.pending_handoff_seek_ms.take()
+                            && seek_ms > 1_000
+                            && let Some(audio) = &self.audio
+                        {
+                            audio.send(EngineCommand::SeekMs(seek_ms));
+                        }
                         self.sync_next_deck_to_engine();
                         self.prefetch_next_online_track();
                         if let Some(tr) = resolved_track {
                             self.update_now_playing_metadata(cx, &tr);
                         }
+                        self.push_connect_playback_snapshot();
                     } else {
                         self.sync_next_deck_to_engine();
                     }
@@ -15031,6 +15571,9 @@ impl App {
                         }
                     }
                 }
+                BgMessage::Connect(ev) => {
+                    self.handle_connect_event(cx, *ev);
+                }
             }
         }
 
@@ -15122,38 +15665,13 @@ impl App {
             }
         }
 
-        // 4. Periodic LAN beacon when Connect settings tab is visible
-        if !window_hidden
-            && self.active_page == MainPage::Settings
-            && self.active_settings_tab == SettingsTab::Connect
+        // 4. Periodic Ferric Connect playback state sync (~1 Hz while playing)
+        if let Some(audio) = &self.audio
+            && audio.telemetry().is_playing
         {
-            let should_ping = self
-                .last_lan_broadcast
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(3));
-            if should_ping {
-                self.last_lan_broadcast = Some(Instant::now());
-                let is_local = self
-                    .lease
-                    .as_ref()
-                    .is_none_or(ActiveSpeakerLease::is_local_active);
-                if let Some(beacon) = &mut self.lan_beacon {
-                    let _ = beacon.broadcast_announce("Desktop-PC", 43821, is_local);
-                    let now_ms = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let peers = beacon.poll_peers(now_ms);
-                    let txt = if peers.is_empty() {
-                        "Listening for Ferric devices on local Wi-Fi...".to_string()
-                    } else {
-                        peers
-                            .iter()
-                            .map(|p| format!("- {} ({})", p.device_name, p.addr))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    };
-                    self.ui.label(id!(connect_peers_lbl)).set_text(cx, &txt);
-                }
+            self.connect_sync_ticks = self.connect_sync_ticks.wrapping_add(1);
+            if self.connect_sync_ticks.is_multiple_of(10) {
+                self.push_connect_playback_snapshot();
             }
         }
 
@@ -16632,12 +17150,62 @@ impl App {
             }
         }
 
-        // 6. RIGHT SIDEBAR (Queue / Lyrics Tabs + History + Up Next Jump!)
+        // 6. RIGHT SIDEBAR (Queue / Lyrics / Connect Tabs + History + Up Next Jump!)
         if self.ui.button(id!(rs_tab_queue)).clicked(actions) {
-            self.set_right_sidebar(cx, true, false);
+            self.set_right_sidebar_mode(cx, true, false, false);
         }
         if self.ui.button(id!(rs_tab_lyrics)).clicked(actions) {
-            self.set_right_sidebar(cx, true, true);
+            self.set_right_sidebar_mode(cx, true, true, false);
+        }
+        if self.ui.button(id!(rs_tab_connect)).clicked(actions) {
+            self.set_right_sidebar_mode(cx, true, false, true);
+        }
+        if self.ui.button(id!(rs_conn_local_btn)).clicked(actions)
+            && let Some(engine) = &self.connect_engine
+        {
+            engine.transfer_active_speaker(engine.local_device_id().to_string());
+        }
+        for (idx, btn_id) in [
+            id!(rs_conn_peer_0),
+            id!(rs_conn_peer_1),
+            id!(rs_conn_peer_2),
+            id!(rs_conn_peer_3),
+        ]
+        .iter()
+        .enumerate()
+        {
+            if self.ui.button(*btn_id).clicked(actions)
+                && !self.connect_peer_ids[idx].is_empty()
+                && let Some(engine) = &self.connect_engine
+            {
+                engine.transfer_active_speaker(self.connect_peer_ids[idx].clone());
+            }
+        }
+        if let Some(cvol) = self
+            .ui
+            .ferric_bar_slider(id!(rs_conn_vol_slider))
+            .changed(actions)
+        {
+            let vol = (cvol as f32).clamp(0.0, 1.0);
+            if self.is_controlling_remote()
+                && let Some(snap) = &self.connect_snap
+                && let Some(engine) = &self.connect_engine
+            {
+                engine.send_remote_action(RemoteAction::SetVolume {
+                    target_device: snap.active_speaker_id.clone(),
+                    volume_norm: vol,
+                });
+            } else {
+                self.session_state.volume = vol;
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::SetVolume(vol));
+                }
+                self.sync_controls_from_state(cx);
+            }
+        }
+        if self.ui.button(id!(rs_conn_qr_btn)).clicked(actions) {
+            self.navigate_to(cx, MainPage::Settings, false);
+            self.switch_settings_tab(cx, SettingsTab::Connect);
         }
         if self.ui.button(id!(rs_radio_btn)).clicked(actions) {
             self.trigger_icon_pulse(cx, id!(rs_radio_btn), 0.0);
@@ -16853,46 +17421,70 @@ impl App {
         }
         if self.ui.button(id!(bar_queue_btn)).clicked(actions) {
             self.trigger_icon_pulse(cx, id!(bar_queue_btn), 0.0);
-            if self.right_sidebar_open && !self.right_lyrics_tab {
-                self.set_right_sidebar(cx, false, false);
+            if self.right_sidebar_open && !self.right_lyrics_tab && !self.right_connect_tab {
+                self.set_right_sidebar_mode(cx, false, false, false);
             } else {
-                self.set_right_sidebar(cx, true, false);
+                self.set_right_sidebar_mode(cx, true, false, false);
             }
         }
-        if (self
+        if self.ui.button(id!(bar_connect_btn)).clicked(actions) {
+            self.trigger_icon_pulse(cx, id!(bar_connect_btn), 0.0);
+            if self.right_sidebar_open && self.right_connect_tab {
+                self.set_right_sidebar_mode(cx, false, false, false);
+            } else {
+                self.set_right_sidebar_mode(cx, true, false, true);
+            }
+        }
+        if self
             .ui
             .ferric_play_btn(id!(play_pause_btn))
             .clicked(actions)
             || self
                 .ui
                 .ferric_play_btn(id!(fs_play_pause_btn))
-                .clicked(actions))
-            && let Some(audio) = &self.audio
+                .clicked(actions)
         {
-            let snap = audio.telemetry();
-            if !snap.is_playing && self.queue.current().is_none() {
-                let pool = self.home_quick_picks_pool();
-                if let Some(first) = pool.first().cloned() {
-                    self.queue.set_tracks(pool, Some(0));
-                    self.play_track(cx, first);
+            if self.is_controlling_remote()
+                && let Some(engine) = &self.connect_engine
+            {
+                engine.send_remote_action(RemoteAction::TogglePlayPause);
+            } else if let Some(audio) = &self.audio {
+                let snap = audio.telemetry();
+                if !snap.is_playing && self.queue.current().is_none() {
+                    let pool = self.home_quick_picks_pool();
+                    if let Some(first) = pool.first().cloned() {
+                        self.queue.set_tracks(pool, Some(0));
+                        self.play_track(cx, first);
+                    } else {
+                        self.load_and_play_demo_suite(cx);
+                    }
                 } else {
-                    self.load_and_play_demo_suite(cx);
+                    audio.send(EngineCommand::TogglePlayPause);
+                    self.push_connect_playback_snapshot();
                 }
-            } else {
-                audio.send(EngineCommand::TogglePlayPause);
             }
         }
-        if (self.ui.button(id!(next_btn)).clicked(actions)
-            || self.ui.button(id!(fs_next_btn)).clicked(actions))
-            && let Some(next) = self.queue.next_track_manual().cloned()
+        if self.ui.button(id!(next_btn)).clicked(actions)
+            || self.ui.button(id!(fs_next_btn)).clicked(actions)
         {
-            self.play_track(cx, next);
+            if self.is_controlling_remote()
+                && let Some(engine) = &self.connect_engine
+            {
+                engine.send_remote_action(RemoteAction::SkipNext);
+            } else if let Some(next) = self.queue.next_track_manual().cloned() {
+                self.play_track(cx, next);
+            }
         }
-        if (self.ui.button(id!(prev_btn)).clicked(actions)
-            || self.ui.button(id!(fs_prev_btn)).clicked(actions))
-            && let Some(prev) = self.queue.prev_track().cloned()
+        if self.ui.button(id!(prev_btn)).clicked(actions)
+            || self.ui.button(id!(fs_prev_btn)).clicked(actions)
         {
-            self.play_track(cx, prev);
+            if self.is_controlling_remote()
+                && let Some(engine) = &self.connect_engine
+            {
+                engine.send_remote_action(RemoteAction::SkipPrev);
+            } else if let Some(prev) = self.queue.prev_track().cloned() {
+                self.play_track(cx, prev);
+            }
         }
         if self.ui.button(id!(shuffle_btn)).clicked(actions)
             || self.ui.button(id!(fs_shuffle_btn)).clicked(actions)
@@ -17272,8 +17864,10 @@ impl App {
             self.accounts.zeroize_youtube_secrets();
             self.accounts.youtube_connected = false;
             self.accounts.youtube_channel_name.clear();
+            self.accounts.youtube_account_id.clear();
             self.accounts.youtube_visitor_data.clear();
             self.accounts.youtube_playlist_count = 0;
+            self.sync_connect_accounts();
             // Offload WebView2 login profile removal to a background thread so UI stays responsive.
             let profile_dir = app_data_dir().join("webview2_profile");
             thread::spawn(move || {
@@ -17318,8 +17912,10 @@ impl App {
                 self.accounts.spotify_web_user_name.clear();
                 self.accounts.spotify_connected = false;
                 self.accounts.spotify_user_name.clear();
+                self.accounts.spotify_user_id.clear();
                 self.accounts.spotify_playlist_count = 0;
                 self.accounts.spotify_liked_count = 0;
+                self.sync_connect_accounts();
                 // Clean up Spotify Web browser profile and any legacy capture file off the UI thread.
                 let sp_profile_dir = app_data_dir().join("spotify_web_profile");
                 let legacy_capture = std::env::temp_dir().join("ferric_spotify_capture.txt");

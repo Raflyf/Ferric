@@ -415,7 +415,6 @@ private fun FerricMainShell(
                                 onRefresh = { store.loadHome(forceRefresh = true, moodIdx = null) },
                                 onSelectMood = { idx -> store.loadHome(forceRefresh = false, moodIdx = idx) },
                                 onOpenAccounts = { showAccountsSheet = true },
-                                onOpenEqualizer = { showEqSheet = true },
                                 onOpenThemeStudio = { showThemeSheet = true },
                                 onOpenConnect = { showConnectSheet = true },
                                 onOpenSettings = { showSettingsSheet = true },

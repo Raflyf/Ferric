@@ -19,7 +19,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.Devices
-import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
@@ -67,7 +66,6 @@ fun HomeScreen(
     onRefresh: () -> Unit,
     onSelectMood: (Int?) -> Unit,
     onOpenAccounts: () -> Unit,
-    onOpenEqualizer: () -> Unit,
     onOpenThemeStudio: () -> Unit,
     onOpenConnect: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -111,27 +109,29 @@ fun HomeScreen(
                         text = greeting,
                         style = MaterialTheme.typography.headlineMedium,
                         color = palette.textPrimary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onRefresh) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh Home", tint = palette.textPrimary)
-                    }
-                    IconButton(onClick = onOpenEqualizer) {
-                        Icon(
-                            Icons.Rounded.Equalizer,
-                            contentDescription = "Equalizer and DSP",
-                            tint = if (state.eqConfig?.enabled == true) palette.accent else palette.textPrimary,
-                        )
-                    }
-                    IconButton(onClick = onOpenThemeStudio) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    IconButton(
+                        onClick = onOpenThemeStudio,
+                        modifier = Modifier.size(40.dp),
+                    ) {
                         Icon(
                             Icons.Rounded.Palette,
                             contentDescription = "Theme Studio",
                             tint = if (palette.isLiquidGlass) palette.accent else palette.textPrimary,
                         )
                     }
-                    IconButton(onClick = onOpenConnect) {
+                    IconButton(
+                        onClick = onOpenConnect,
+                        modifier = Modifier.size(40.dp),
+                    ) {
                         val hasPeer = state.connectState.peers.any { it.connected }
                         Icon(
                             Icons.Rounded.Devices,
@@ -139,14 +139,20 @@ fun HomeScreen(
                             tint = if (hasPeer) palette.accent else palette.textPrimary,
                         )
                     }
-                    IconButton(onClick = onOpenAccounts) {
+                    IconButton(
+                        onClick = onOpenAccounts,
+                        modifier = Modifier.size(40.dp),
+                    ) {
                         Icon(
                             imageVector = Icons.Rounded.AccountCircle,
                             contentDescription = "Accounts",
                             tint = if (anyConnected) palette.accent else palette.textPrimary,
                         )
                     }
-                    IconButton(onClick = onOpenSettings) {
+                    IconButton(
+                        onClick = onOpenSettings,
+                        modifier = Modifier.size(40.dp),
+                    ) {
                         Icon(
                             imageVector = Icons.Rounded.Settings,
                             contentDescription = "Settings",
@@ -206,11 +212,24 @@ fun HomeScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text(
-                    text = "Quick picks",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = palette.textPrimary,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Quick picks",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = palette.textPrimary,
+                    )
+                    IconButton(
+                        onClick = onRefresh,
+                        modifier = Modifier.size(34.dp),
+                    ) {
+                        Icon(
+                            Icons.Rounded.Refresh,
+                            contentDescription = "Refresh Home",
+                            tint = palette.textSecondary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
                 if (quickPicks.isNotEmpty()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = { onPlayQueue(quickPicks, 0, "Quick Picks") }) {
@@ -232,6 +251,7 @@ fun HomeScreen(
             TrackRow(
                 track = track,
                 isActive = state.currentTrack?.id == track.id,
+                isOfflineDownloaded = state.offlineTrackIds.contains(track.id),
                 onPlay = { onPlayQueue(quickPicks, idx, "Quick Picks") },
                 onToggleLike = { onToggleLike(track.id) },
                 onPlayNext = { onPlayNext(track) },

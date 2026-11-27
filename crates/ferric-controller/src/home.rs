@@ -111,7 +111,13 @@ impl FerricController {
             if force_refresh {
                 st.station_rotation_epoch = st.station_rotation_epoch.wrapping_add(1);
             }
-            let lib = st.db.list_tracks("").unwrap_or_default();
+            let lib: Vec<Track> = st
+                .db
+                .list_tracks("")
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| !t.id.starts_with("demo:"))
+                .collect();
 
             let mut top_tracks: Vec<(u32, Track)> = Vec::new();
             let recent_set: HashSet<&str> = st

@@ -290,7 +290,7 @@ fun MiniPlayerBar(
     val displaySubtitle = when {
         activeRemotePeer != null -> "Playing on ${activeRemotePeer.deviceName} · ${activeRemotePeer.nowPlayingArtist}"
         cur != null -> "${cur.artist} · ${state.activeOutputRoute}"
-        else -> "Swipe up for Player · left/right to skip"
+        else -> "Swipe up for Player · tap a track"
     }
     val displayThumb = activeRemotePeer?.nowPlayingThumbnailUrl ?: cur?.thumbnailUrl
     val displayPlaying = activeRemotePeer?.isPlaying ?: state.isPlaying

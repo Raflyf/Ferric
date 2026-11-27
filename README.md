@@ -34,7 +34,7 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
   <img src="assets/screenshots/ferric-home-v0.1.0.png" width="1200" alt="Ferric v0.1.0 desktop workspace showing Library sidebar, Quick Picks, Recommended Stations, Queue panel, and bottom player bar with playback speed control">
 </p>
 
-*Captured from Ferric `v0.1.0` (`1600x975`, Native Acrylic flattened over `#0B0C11`). Album artwork and track titles belong to their respective owners and are not bundled with the application.*
+*Captured from Ferric `v0.1.0` (`1600x975`, matching `v0.1.1` UI layout, Native Acrylic flattened over `#0B0C11`). Album artwork and track titles belong to their respective owners and are not bundled with the application.*
 
 ## Features
 
@@ -68,7 +68,7 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 
 **Requirements:** Windows 10 or Windows 11 on a 64-bit (`x86_64`) PC. No administrator rights are required. Native Windows Acrylic backdrop works best on Windows 11.
 
-Browse [all releases](<https://github.com/Raflyf/Ferric/releases>) &middot; [LivelyDesk showcase](<https://livelydesk.vercel.app/ferric>) &middot; [Report an issue](<https://github.com/Raflyf/Ferric/issues>)
+Browse [all releases](<https://github.com/Raflyf/Ferric/releases>) &middot; [LivelyDesk showcase](<https://livelydesk.vercel.app/ferric>) &middot; [LivelyDesk User Guide](<https://livelydesk.vercel.app/doc#ferric-install>) &middot; [Report an issue](<https://github.com/Raflyf/Ferric/issues>)
 
 ## Getting started
 

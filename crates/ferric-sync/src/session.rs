@@ -1,14 +1,15 @@
-//! Authenticated, ChaCha20-Poly1305 AEAD encrypted Zero-Pairing Ferric Connect LAN runtime
-//! shared identically by Ferric Android (`ferric-controller`) and Ferric Windows Desktop.
+//! Authenticated, ChaCha20-Poly1305 AEAD encrypted Zero-Pairing Ferric Connect LAN + Cloud
+//! Relay runtime shared identically by Ferric Android (`ferric-controller`) and Ferric Desktop.
 
 use crate::crypto::{
     AeadChannel, AeadReceiver, AeadSender, LocalRoomKeys, MatchedRoomSlot, compute_handshake_mac,
-    ct_eq, decode_room_tags_hex, derive_qr_room, encode_room_tags_hex,
+    ct_eq, decode_room_tags_hex, derive_qr_room, derive_relay_topic, encode_room_tags_hex,
 };
 use crate::lan::{
     DiscoveredPeer, LanDiscoveryBeacon, detect_local_lan_ip, is_lan_or_loopback,
     sanitize_device_name,
 };
+use crate::relay::{RelayClient, RelayEnvelope, RelayEvent, RelayRoomSpec};
 use crate::{
     DeviceKind, MAX_FRAME_BYTES, PairingPayload, QueueEntry, RemoteAction, SessionState,
     SpeakerAuthority, SyncError, SyncFrame, SyncResult, decode_frame_payload, encode_frame_payload,
@@ -16,7 +17,7 @@ use crate::{
 };
 use ferric_core::models::RepeatMode;
 use ferric_core::secrets::{csprng_fill, csprng_hex};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +28,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HANDSHAKE_MAGIC: &[u8; 4] = b"FCH1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const BEACON_INTERVAL: Duration = Duration::from_secs(3);
+const RELAY_HELLO_INTERVAL: Duration = Duration::from_secs(9);
+const RELAY_PEER_TTL: Duration = Duration::from_secs(26);
+const RELAY_STATE_HEARTBEAT: Duration = Duration::from_millis(3_500);
+const MAX_RELAY_QUEUE_BYTES: usize = 44 * 1024;
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(4);
 const MAX_CONNECTED_PEERS: usize = 8;
 const MAX_HANDSHAKE_ID_LEN: usize = 64;
@@ -76,14 +81,37 @@ pub struct ConnectPeerInfo {
     pub device_kind: DeviceKind,
     pub addr: String,
     pub connected: bool,
+    pub via_relay: bool,
     pub is_active_speaker: bool,
     pub is_playing: bool,
     pub volume_norm: f32,
+    pub active_track_id: Option<String>,
     pub now_playing_title: String,
     pub now_playing_artist: String,
     pub now_playing_thumbnail_url: Option<String>,
     pub position_ms: u64,
     pub duration_ms: u64,
+    pub anchor_utc_ms: i64,
+    pub repeat_mode: RepeatMode,
+    pub shuffle_enabled: bool,
+}
+
+impl ConnectPeerInfo {
+    /// Compute smoothed current playback position using wall-clock drift since `anchor_utc_ms`.
+    #[must_use]
+    pub fn interpolated_position_ms(&self) -> u64 {
+        if !self.is_playing || self.anchor_utc_ms <= 0 {
+            return self.position_ms;
+        }
+        let elapsed =
+            u64::try_from((unix_now_utc_ms() - self.anchor_utc_ms).clamp(0, 120_000)).unwrap_or(0);
+        let advanced = self.position_ms.saturating_add(elapsed);
+        if self.duration_ms > 0 {
+            advanced.min(self.duration_ms)
+        } else {
+            advanced
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,7 +125,10 @@ pub struct ConnectSnapshot {
     pub active_speaker_id: String,
     pub is_local_active_speaker: bool,
     pub is_account_ready: bool,
+    pub relay_connected: bool,
     pub peers: Vec<ConnectPeerInfo>,
+    pub active_queue: Vec<QueueEntry>,
+    pub active_queue_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +190,7 @@ enum InternalMsg {
     PeerClosed {
         device_id: String,
     },
+    Relay(RelayEvent),
 }
 
 struct PeerWriter {
@@ -182,11 +214,28 @@ struct ConnectedPeer {
     device_id: String,
     device_name: String,
     device_kind: DeviceKind,
-    addr: SocketAddr,
-    writer: Arc<Mutex<PeerWriter>>,
+    lan_addr: Option<SocketAddr>,
+    lan_writer: Option<Arc<Mutex<PeerWriter>>>,
+    relay_slot: Option<MatchedRoomSlot>,
+    relay_last_seen: Option<Instant>,
     last_state: Option<SessionState>,
     last_queue: Vec<QueueEntry>,
     last_queue_index: usize,
+}
+
+impl ConnectedPeer {
+    fn has_lan(&self) -> bool {
+        self.lan_writer.is_some()
+    }
+
+    fn has_live_relay(&self) -> bool {
+        self.relay_last_seen
+            .is_some_and(|t| t.elapsed() < RELAY_PEER_TTL)
+    }
+
+    fn is_connected(&self) -> bool {
+        self.has_lan() || self.has_live_relay()
+    }
 }
 
 /// Shared Zero-Pairing Ferric Connect background engine.
@@ -223,11 +272,22 @@ impl ConnectEngine {
         cfg: ConnectConfig,
         on_event: Arc<dyn Fn(ConnectEvent) + Send + Sync>,
     ) -> SyncResult<Self> {
+        Self::start_with_options(cfg, on_event, true, None)
+    }
+
+    /// Start the background Connect engine with explicit LAN discovery toggle and optional
+    /// Cloud Relay broker URL overrides (used for isolated cross-network testing).
+    pub fn start_with_options(
+        cfg: ConnectConfig,
+        on_event: Arc<dyn Fn(ConnectEvent) + Send + Sync>,
+        enable_lan: bool,
+        relay_urls_override: Option<Vec<String>>,
+    ) -> SyncResult<Self> {
         let listener = TcpListener::bind(("0.0.0.0", 0))?;
         listener.set_nonblocking(true)?;
         let local_tcp_port = listener.local_addr()?.port();
 
-        let beacon = if cfg.bind_ephemeral_udp {
+        let beacon = if cfg.bind_ephemeral_udp || !enable_lan {
             LanDiscoveryBeacon::bind_nonblocking(&cfg.device_id, 0)?
         } else {
             LanDiscoveryBeacon::bind_default(&cfg.device_id)?
@@ -254,7 +314,10 @@ impl ConnectEngine {
             active_speaker_id: cfg.device_id.clone(),
             is_local_active_speaker: true,
             is_account_ready: false,
+            relay_connected: false,
             peers: Vec::new(),
+            active_queue: Vec::new(),
+            active_queue_index: 0,
         };
 
         let latest_snapshot = Arc::new(Mutex::new(initial_snapshot));
@@ -263,27 +326,40 @@ impl ConnectEngine {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (int_tx, int_rx) = mpsc::channel();
 
-        let accept_tx = int_tx.clone();
-        let accept_shutdown = Arc::clone(&shutdown_flag);
-        let _ = thread::Builder::new()
-            .name("ferric-conn-acc".to_string())
-            .spawn(move || {
-                while !accept_shutdown.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((stream, addr)) => {
-                            if is_lan_or_loopback(addr.ip()) {
-                                let _ = accept_tx.send(InternalMsg::IncomingTcp(stream, addr));
+        if enable_lan {
+            let accept_tx = int_tx.clone();
+            let accept_shutdown = Arc::clone(&shutdown_flag);
+            let _ = thread::Builder::new()
+                .name("ferric-conn-acc".to_string())
+                .spawn(move || {
+                    while !accept_shutdown.load(Ordering::Relaxed) {
+                        match listener.accept() {
+                            Ok((stream, addr)) => {
+                                if is_lan_or_loopback(addr.ip()) {
+                                    let _ = accept_tx.send(InternalMsg::IncomingTcp(stream, addr));
+                                }
+                            }
+                            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(60));
+                            }
+                            Err(_) => {
+                                thread::sleep(Duration::from_millis(120));
                             }
                         }
-                        Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(60));
-                        }
-                        Err(_) => {
-                            thread::sleep(Duration::from_millis(120));
-                        }
                     }
-                }
-            });
+                });
+        } else {
+            drop(listener);
+        }
+
+        let relay_tx = int_tx.clone();
+        let relay_client = RelayClient::start(
+            cfg.device_id.clone(),
+            relay_urls_override,
+            Arc::new(move |ev| {
+                let _ = relay_tx.send(InternalMsg::Relay(ev));
+            }),
+        );
 
         let state_snap_arc = Arc::clone(&latest_snapshot);
         let qr_uri_arc = Arc::clone(&qr_uri);
@@ -301,6 +377,7 @@ impl ConnectEngine {
                     local_device_kind: dev_kind,
                     local_ip,
                     local_tcp_port,
+                    enable_lan,
                     keys: LocalRoomKeys {
                         spotify: None,
                         ytm: None,
@@ -308,6 +385,13 @@ impl ConnectEngine {
                     },
                     qr_token_hex: initial_token,
                     beacon,
+                    relay_client,
+                    relay_connected: false,
+                    last_relay_hello_at: None,
+                    last_relay_state_at: None,
+                    last_relay_state_sig: None,
+                    last_relay_pos_ms: 0,
+                    last_relay_sweep_at: Instant::now(),
                     local_playback: LocalPlaybackSnapshot::default(),
                     active_speaker_id: dev_id,
                     revision: 1,
@@ -359,10 +443,17 @@ impl ConnectEngine {
 
     #[must_use]
     pub fn snapshot(&self) -> ConnectSnapshot {
-        self.latest_snapshot
+        let mut snap = self
+            .latest_snapshot
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .clone()
+            .clone();
+        for peer in &mut snap.peers {
+            if peer.connected {
+                peer.position_ms = peer.interpolated_position_ms();
+            }
+        }
+        snap
     }
 
     #[must_use]
@@ -455,15 +546,33 @@ impl Drop for ConnectEngine {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct RelayStateSig {
+    active_speaker_id: String,
+    is_playing: bool,
+    track_id: Option<String>,
+    vol_bucket: i32,
+    repeat: RepeatMode,
+    shuffle: bool,
+}
+
 struct EngineRunner {
     local_device_id: String,
     local_device_name: String,
     local_device_kind: DeviceKind,
     local_ip: String,
     local_tcp_port: u16,
+    enable_lan: bool,
     keys: LocalRoomKeys,
     qr_token_hex: String,
     beacon: LanDiscoveryBeacon,
+    relay_client: RelayClient,
+    relay_connected: bool,
+    last_relay_hello_at: Option<Instant>,
+    last_relay_state_at: Option<Instant>,
+    last_relay_state_sig: Option<RelayStateSig>,
+    last_relay_pos_ms: u64,
+    last_relay_sweep_at: Instant,
     local_playback: LocalPlaybackSnapshot,
     active_speaker_id: String,
     revision: u64,
@@ -479,6 +588,60 @@ struct EngineRunner {
 }
 
 impl EngineRunner {
+    fn sync_relay_rooms(&self, include_guest: bool) {
+        let mut specs = Vec::with_capacity(3);
+        if let Some(sp) = &self.keys.spotify {
+            specs.push(RelayRoomSpec::from_key(
+                MatchedRoomSlot::Spotify,
+                sp.room_key(),
+            ));
+        }
+        if let Some(yt) = &self.keys.ytm {
+            specs.push(RelayRoomSpec::from_key(
+                MatchedRoomSlot::YouTubeMusic,
+                yt.room_key(),
+            ));
+        }
+        if include_guest && let Some(g) = &self.keys.guest {
+            specs.push(RelayRoomSpec::from_key(
+                MatchedRoomSlot::GuestQr,
+                g.room_key(),
+            ));
+        }
+        self.relay_client.update_rooms(specs);
+    }
+
+    fn send_relay_hello(&self) {
+        if !self.relay_connected {
+            return;
+        }
+        let hello = SyncFrame::Hello {
+            device_id: self.local_device_id.clone(),
+            device_name: self.local_device_name.clone(),
+            device_kind: self.local_device_kind,
+        };
+        for slot in [
+            MatchedRoomSlot::Spotify,
+            MatchedRoomSlot::YouTubeMusic,
+            MatchedRoomSlot::GuestQr,
+        ] {
+            if let Some((key, _)) = self.keys.key_and_tag_for_slot(slot) {
+                let topic = derive_relay_topic(key.as_bytes());
+                self.relay_client.publish_envelope(
+                    &topic,
+                    key,
+                    RelayEnvelope {
+                        sender_id: self.local_device_id.clone(),
+                        sender_name: self.local_device_name.clone(),
+                        sender_kind: self.local_device_kind,
+                        target_id: None,
+                        frame: hello.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     fn run(
         &mut self,
         cmd_rx: mpsc::Receiver<EngineCommand>,
@@ -486,13 +649,17 @@ impl EngineRunner {
         shutdown: Arc<AtomicBool>,
     ) {
         self.publish_snapshot();
+        let mut guest_relay_armed = false;
 
         while !shutdown.load(Ordering::Relaxed) {
             let mut dirty = false;
 
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
-                    EngineCommand::Shutdown => return,
+                    EngineCommand::Shutdown => {
+                        self.relay_client.shutdown();
+                        return;
+                    }
                     EngineCommand::UpdateAccounts {
                         spotify_user_id,
                         youtube_account_id,
@@ -504,10 +671,13 @@ impl EngineRunner {
                         };
                         let changed = new_keys.advertised_tags() != self.keys.advertised_tags();
                         self.keys = new_keys;
+                        self.sync_relay_rooms(guest_relay_armed);
                         if changed {
-                            // Revoke existing sessions whose room keys no longer match the updated account state.
+                            // Revoke existing LAN sessions whose room keys no longer match.
                             for peer in self.connected.values() {
-                                if let Ok(w) = peer.writer.lock() {
+                                if let Some(writer) = &peer.lan_writer
+                                    && let Ok(w) = writer.lock()
+                                {
                                     let _ = w.stream.shutdown(std::net::Shutdown::Both);
                                 }
                             }
@@ -516,6 +686,8 @@ impl EngineRunner {
                                 self.active_speaker_id = self.local_device_id.clone();
                             }
                             self.last_beacon_at = None;
+                            self.last_relay_hello_at = None;
+                            self.last_relay_state_sig = None;
                             dirty = true;
                         }
                     }
@@ -546,7 +718,7 @@ impl EngineRunner {
                                 self.revision += 1;
                                 self.broadcast_local_queue();
                             }
-                            self.broadcast_local_state();
+                            self.broadcast_local_state(queue_changed);
                         }
                     }
                     EngineCommand::IngestMdnsPeer {
@@ -557,18 +729,20 @@ impl EngineRunner {
                         tcp_port,
                         room_tags,
                     } => {
-                        let now_ms = unix_now_ms();
-                        if self.beacon.ingest_mdns_peer(
-                            &device_id,
-                            &device_name,
-                            device_kind,
-                            ip,
-                            tcp_port,
-                            room_tags,
-                            now_ms,
-                        ) {
-                            self.poll_and_connect(now_ms);
-                            dirty = true;
+                        if self.enable_lan {
+                            let now_ms = unix_now_ms();
+                            if self.beacon.ingest_mdns_peer(
+                                &device_id,
+                                &device_name,
+                                device_kind,
+                                ip,
+                                tcp_port,
+                                room_tags,
+                                now_ms,
+                            ) {
+                                self.poll_and_connect(now_ms);
+                                dirty = true;
+                            }
                         }
                     }
                     EngineCommand::TransferActiveSpeaker { target_device_id } => {
@@ -579,13 +753,18 @@ impl EngineRunner {
                         self.handle_local_remote_action(action);
                     }
                     EngineCommand::PairWithQrUri { uri } => {
+                        guest_relay_armed = true;
                         self.handle_pair_qr_uri(&uri);
+                        self.sync_relay_rooms(true);
+                        self.last_relay_hello_at = None;
                         dirty = true;
                     }
                     EngineCommand::RegenerateQrToken { reply } => {
+                        guest_relay_armed = true;
                         let tok = csprng_hex(16);
                         self.qr_token_hex = tok.clone();
                         self.keys.guest = derive_qr_room(&tok);
+                        self.sync_relay_rooms(true);
                         self.local_ip = detect_local_lan_ip();
                         let payload = PairingPayload {
                             endpoint_id: self.local_device_id.clone(),
@@ -601,6 +780,7 @@ impl EngineRunner {
                             *slot = uri.clone();
                         }
                         self.last_beacon_at = None;
+                        self.last_relay_hello_at = None;
                         let _ = reply.send(uri);
                         dirty = true;
                     }
@@ -610,7 +790,9 @@ impl EngineRunner {
             while let Ok(msg) = int_rx.try_recv() {
                 match msg {
                     InternalMsg::IncomingTcp(stream, addr) => {
-                        self.spawn_inbound_handshake(stream, addr);
+                        if self.enable_lan {
+                            self.spawn_inbound_handshake(stream, addr);
+                        }
                     }
                     InternalMsg::PeerEstablished {
                         device_id,
@@ -628,10 +810,25 @@ impl EngineRunner {
                         }
                     }
                     InternalMsg::PeerClosed { device_id } => {
-                        if self.connected.remove(&device_id).is_some() {
+                        let mut remove_peer = false;
+                        if let Some(peer) = self.connected.get_mut(&device_id) {
+                            peer.lan_writer = None;
+                            peer.lan_addr = None;
+                            if !peer.is_connected() {
+                                remove_peer = true;
+                            } else {
+                                dirty = true;
+                            }
+                        }
+                        if remove_peer && self.connected.remove(&device_id).is_some() {
                             if self.active_speaker_id == device_id {
                                 self.active_speaker_id = self.local_device_id.clone();
                             }
+                            dirty = true;
+                        }
+                    }
+                    InternalMsg::Relay(ev) => {
+                        if self.on_relay_event(ev) {
                             dirty = true;
                         }
                     }
@@ -639,37 +836,66 @@ impl EngineRunner {
             }
 
             let now_ms = unix_now_ms();
-            let should_beacon = self
-                .last_beacon_at
-                .is_none_or(|t| t.elapsed() >= BEACON_INTERVAL);
-            if should_beacon {
-                self.last_beacon_at = Some(Instant::now());
-                let detected_ip = detect_local_lan_ip();
-                if detected_ip != "127.0.0.1" && detected_ip != self.local_ip {
-                    self.local_ip = detected_ip;
-                    dirty = true;
+            if self.enable_lan {
+                let should_beacon = self
+                    .last_beacon_at
+                    .is_none_or(|t| t.elapsed() >= BEACON_INTERVAL);
+                if should_beacon {
+                    self.last_beacon_at = Some(Instant::now());
+                    let detected_ip = detect_local_lan_ip();
+                    if detected_ip != "127.0.0.1" && detected_ip != self.local_ip {
+                        self.local_ip = detected_ip;
+                        dirty = true;
+                    }
+                    if self.keys.has_any_room() {
+                        let (title, artist) = self
+                            .local_playback
+                            .current_track
+                            .as_ref()
+                            .map(|t| (t.title.as_str(), t.artist.as_str()))
+                            .unwrap_or(("", ""));
+                        let _ = self.beacon.broadcast_announce_v2(
+                            &self.local_device_name,
+                            self.local_device_kind,
+                            self.keys.advertised_tags(),
+                            self.local_tcp_port,
+                            self.active_speaker_id == self.local_device_id,
+                            title,
+                            artist,
+                        );
+                    }
                 }
-                if self.keys.has_any_room() {
-                    let (title, artist) = self
-                        .local_playback
-                        .current_track
-                        .as_ref()
-                        .map(|t| (t.title.as_str(), t.artist.as_str()))
-                        .unwrap_or(("", ""));
-                    let _ = self.beacon.broadcast_announce_v2(
-                        &self.local_device_name,
-                        self.local_device_kind,
-                        self.keys.advertised_tags(),
-                        self.local_tcp_port,
-                        self.active_speaker_id == self.local_device_id,
-                        title,
-                        artist,
-                    );
+
+                if self.poll_and_connect(now_ms) {
+                    dirty = true;
                 }
             }
 
-            if self.poll_and_connect(now_ms) {
-                dirty = true;
+            if self.relay_connected
+                && self.keys.has_any_room()
+                && self
+                    .last_relay_hello_at
+                    .is_none_or(|t| t.elapsed() >= RELAY_HELLO_INTERVAL)
+            {
+                self.last_relay_hello_at = Some(Instant::now());
+                self.send_relay_hello();
+            }
+
+            if self.last_relay_sweep_at.elapsed() >= Duration::from_secs(2) {
+                self.last_relay_sweep_at = Instant::now();
+                let expired: Vec<String> = self
+                    .connected
+                    .iter()
+                    .filter(|(_, p)| !p.is_connected())
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in expired {
+                    self.connected.remove(&id);
+                    if self.active_speaker_id == id {
+                        self.active_speaker_id = self.local_device_id.clone();
+                    }
+                    dirty = true;
+                }
             }
 
             if dirty {
@@ -683,6 +909,8 @@ impl EngineRunner {
             };
             thread::sleep(sleep_dur);
         }
+
+        self.relay_client.shutdown();
     }
 
     fn poll_and_connect(&mut self, now_ms: u64) -> bool {
@@ -692,9 +920,11 @@ impl EngineRunner {
 
         for p in peers {
             if let Some((slot, key)) = self.keys.match_remote_tags(&p.room_tags) {
-                if !self.connected.contains_key(&p.device_id)
-                    && self.connected.len() < MAX_CONNECTED_PEERS
-                {
+                let needs_lan = match self.connected.get(&p.device_id) {
+                    None => true,
+                    Some(existing) => !existing.has_lan(),
+                };
+                if needs_lan && self.connected.len() < MAX_CONNECTED_PEERS {
                     let should_dial = self.local_device_id < p.device_id
                         || self
                             .last_dial_attempt
@@ -812,19 +1042,31 @@ impl EngineRunner {
             return;
         }
         let clean_name = sanitize_device_name(&device_name);
-        let peer = ConnectedPeer {
-            device_id: device_id.clone(),
-            device_name: clean_name.clone(),
-            device_kind,
-            addr,
-            writer: Arc::clone(&writer),
-            last_state: None,
-            last_queue: Vec::new(),
-            last_queue_index: 0,
-        };
-        self.connected.insert(device_id, peer);
+        let was_known = self.connected.contains_key(&device_id);
+        if let Some(existing) = self.connected.get_mut(&device_id) {
+            existing.device_name = clean_name.clone();
+            existing.device_kind = device_kind;
+            existing.lan_addr = Some(addr);
+            existing.lan_writer = Some(Arc::clone(&writer));
+        } else {
+            self.connected.insert(
+                device_id.clone(),
+                ConnectedPeer {
+                    device_id: device_id.clone(),
+                    device_name: clean_name.clone(),
+                    device_kind,
+                    lan_addr: Some(addr),
+                    lan_writer: Some(Arc::clone(&writer)),
+                    relay_slot: None,
+                    relay_last_seen: None,
+                    last_state: None,
+                    last_queue: Vec::new(),
+                    last_queue_index: 0,
+                },
+            );
+        }
 
-        // Immediately sync our current playback snapshot & queue over the authenticated channel.
+        // Immediately sync our current playback snapshot & queue over the authenticated LAN channel.
         let state_frame = SyncFrame::StateSnapshot(Box::new(self.build_local_session_state()));
         let queue_frame = SyncFrame::QueueFull {
             revision: self.revision,
@@ -835,7 +1077,82 @@ impl EngineRunner {
             let _ = w.send_frame(&state_frame);
             let _ = w.send_frame(&queue_frame);
         }
-        (self.on_event)(ConnectEvent::Toast(format!("Connected to {clean_name}")));
+        if !was_known {
+            (self.on_event)(ConnectEvent::Toast(format!("Connected to {clean_name}")));
+        }
+    }
+
+    fn on_relay_event(&mut self, ev: RelayEvent) -> bool {
+        match ev {
+            RelayEvent::StatusChanged { connected, .. } => {
+                let changed = self.relay_connected != connected;
+                self.relay_connected = connected;
+                if connected {
+                    self.last_relay_hello_at = None;
+                    self.last_relay_state_sig = None;
+                }
+                changed
+            }
+            RelayEvent::Inbound { slot, envelope } => {
+                let envelope = *envelope;
+                let peer_id = envelope.sender_id.clone();
+                if peer_id == self.local_device_id || peer_id.is_empty() {
+                    return false;
+                }
+                let clean_name = sanitize_device_name(&envelope.sender_name);
+                let is_new_peer = !self.connected.contains_key(&peer_id);
+                let mut had_lan = false;
+
+                if let Some(peer) = self.connected.get_mut(&peer_id) {
+                    peer.device_name = clean_name.clone();
+                    peer.device_kind = envelope.sender_kind;
+                    peer.relay_last_seen = Some(Instant::now());
+                    had_lan = peer.has_lan();
+                    let should_replace_slot = match peer.relay_slot {
+                        None => true,
+                        Some(cur) => (slot as u8) < (cur as u8),
+                    };
+                    if should_replace_slot && self.keys.key_and_tag_for_slot(slot).is_some() {
+                        peer.relay_slot = Some(slot);
+                    }
+                } else {
+                    self.connected.insert(
+                        peer_id.clone(),
+                        ConnectedPeer {
+                            device_id: peer_id.clone(),
+                            device_name: clean_name.clone(),
+                            device_kind: envelope.sender_kind,
+                            lan_addr: None,
+                            lan_writer: None,
+                            relay_slot: Some(slot),
+                            relay_last_seen: Some(Instant::now()),
+                            last_state: None,
+                            last_queue: Vec::new(),
+                            last_queue_index: 0,
+                        },
+                    );
+                }
+
+                if is_new_peer {
+                    // Send initial StateSnapshot + QueueFull back so newly joined relay peer syncs at once.
+                    let state_frame =
+                        SyncFrame::StateSnapshot(Box::new(self.build_local_session_state()));
+                    let queue_frame = SyncFrame::QueueFull {
+                        revision: self.revision,
+                        tracks: self.local_playback.queue.clone(),
+                        current_index: self.local_playback.current_index,
+                    };
+                    self.send_to_peer_targeted(&peer_id, &state_frame);
+                    self.send_to_peer_targeted(&peer_id, &queue_frame);
+                    (self.on_event)(ConnectEvent::Toast(format!("Connected to {clean_name}")));
+                }
+
+                if had_lan && matches!(envelope.frame, SyncFrame::Hello { .. }) {
+                    return is_new_peer;
+                }
+                self.on_peer_frame(&peer_id, envelope.frame) || is_new_peer
+            }
+        }
     }
 
     fn on_peer_frame(&mut self, peer_id: &str, frame: SyncFrame) -> bool {
@@ -859,6 +1176,11 @@ impl EngineRunner {
                     st.active_speaker.as_deref() == Some(self.local_device_id.as_str());
 
                 if let Some(peer) = self.connected.get_mut(peer_id) {
+                    if let Some(prev) = &peer.last_state
+                        && st.revision < prev.revision
+                    {
+                        return false;
+                    }
                     if !st.device_name.trim().is_empty() {
                         peer.device_name = sanitize_device_name(&st.device_name);
                     }
@@ -887,12 +1209,14 @@ impl EngineRunner {
                     let local_auth = SpeakerAuthority {
                         device_id: self.local_device_id.clone(),
                         is_playing: self.local_playback.is_playing,
+                        has_track: self.local_playback.current_track.is_some(),
                         revision: self.revision,
                         anchor_utc_ms: self.local_playback.anchor_utc_ms,
                     };
                     let remote_auth = SpeakerAuthority {
                         device_id: peer_id.to_string(),
                         is_playing: st.is_playing,
+                        has_track: st.track_id.is_some(),
                         revision: st.revision,
                         anchor_utc_ms: st.anchor_utc_ms,
                     };
@@ -954,15 +1278,14 @@ impl EngineRunner {
                 ..
             } => {
                 let now = unix_now_utc_ms();
-                if let Some(peer) = self.connected.get(peer_id)
-                    && let Ok(mut w) = peer.writer.lock()
-                {
-                    let _ = w.send_frame(&SyncFrame::Pong {
+                self.send_to_peer_targeted(
+                    peer_id,
+                    &SyncFrame::Pong {
                         client_send_mono_ms,
                         server_recv_utc_ms: now,
                         server_send_utc_ms: now,
-                    });
-                }
+                    },
+                );
                 false
             }
             _ => false,
@@ -998,7 +1321,7 @@ impl EngineRunner {
                     current_index,
                 });
             }
-            self.broadcast_local_state();
+            self.broadcast_local_state(true);
         } else if self.active_speaker_id == self.local_device_id {
             // Yield active speaker cleanly: ship latest queue + exact position snapshot first.
             let mut handoff_state = self.build_local_session_state();
@@ -1021,8 +1344,8 @@ impl EngineRunner {
                 current_index: self.local_playback.current_index,
             };
             let state_frame = SyncFrame::StateSnapshot(Box::new(handoff_state));
-            self.broadcast_frame(&queue_frame);
-            self.broadcast_frame(&state_frame);
+            self.broadcast_frame(&queue_frame, true);
+            self.broadcast_frame(&state_frame, true);
 
             (self.on_event)(ConnectEvent::YieldedActiveSpeaker {
                 new_speaker_id: new_speaker,
@@ -1054,8 +1377,8 @@ impl EngineRunner {
                     current_index: self.local_playback.current_index,
                 };
                 let state_frame = SyncFrame::StateSnapshot(Box::new(handoff_state));
-                self.broadcast_frame(&queue_frame);
-                self.broadcast_frame(&state_frame);
+                self.broadcast_frame(&queue_frame, true);
+                self.broadcast_frame(&state_frame, true);
 
                 (self.on_event)(ConnectEvent::YieldedActiveSpeaker {
                     new_speaker_id: target_device_id,
@@ -1073,10 +1396,8 @@ impl EngineRunner {
                     start_playing: true,
                 },
             };
-            if let Some(peer) = self.connected.get(&active_id) {
-                if let Ok(mut w) = peer.writer.lock() {
-                    let _ = w.send_frame(&cmd);
-                }
+            if self.connected.contains_key(&active_id) {
+                self.send_to_peer_targeted(&active_id, &cmd);
             } else if target_device_id == self.local_device_id {
                 self.active_speaker_id = self.local_device_id.clone();
             }
@@ -1096,15 +1417,13 @@ impl EngineRunner {
             return;
         }
 
-        if let Some(peer) = self.connected.get(&target_id) {
+        if self.connected.contains_key(&target_id) {
             self.cmd_seq += 1;
             let frame = SyncFrame::Command {
                 cmd_id: self.cmd_seq,
                 action,
             };
-            if let Ok(mut w) = peer.writer.lock() {
-                let _ = w.send_frame(&frame);
-            }
+            self.send_to_peer_targeted(&target_id, &frame);
         }
     }
 
@@ -1165,15 +1484,45 @@ impl EngineRunner {
         }
     }
 
-    fn broadcast_local_state(&self) {
+    fn broadcast_local_state(&mut self, force_relay: bool) {
         if self.connected.is_empty() {
             return;
         }
-        let frame = SyncFrame::StateSnapshot(Box::new(self.build_local_session_state()));
-        self.broadcast_frame(&frame);
+        let state = self.build_local_session_state();
+        let sig = RelayStateSig {
+            active_speaker_id: self.active_speaker_id.clone(),
+            is_playing: state.is_playing,
+            track_id: state.track_id.clone(),
+            vol_bucket: (state.volume_norm * 50.0).round() as i32,
+            repeat: state.repeat_mode,
+            shuffle: state.shuffle_enabled,
+        };
+        let elapsed_ms = self.last_relay_state_at.map_or(u64::MAX, |t| {
+            u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
+        let expected_pos = if state.is_playing && elapsed_ms < u64::MAX {
+            self.last_relay_pos_ms.saturating_add(elapsed_ms)
+        } else {
+            self.last_relay_pos_ms
+        };
+        let seek_jumped = state.base_position_ms.abs_diff(expected_pos) > 1_500;
+        let discrete_changed = self.last_relay_state_sig.as_ref() != Some(&sig);
+        let heartbeat_due = self
+            .last_relay_state_at
+            .is_none_or(|t| t.elapsed() >= RELAY_STATE_HEARTBEAT);
+        let send_relay = force_relay || discrete_changed || seek_jumped || heartbeat_due;
+
+        if send_relay {
+            self.last_relay_state_sig = Some(sig);
+            self.last_relay_pos_ms = state.base_position_ms;
+            self.last_relay_state_at = Some(Instant::now());
+        }
+
+        let frame = SyncFrame::StateSnapshot(Box::new(state));
+        self.broadcast_frame(&frame, send_relay);
     }
 
-    fn broadcast_local_queue(&self) {
+    fn broadcast_local_queue(&mut self) {
         if self.connected.is_empty() {
             return;
         }
@@ -1182,35 +1531,210 @@ impl EngineRunner {
             tracks: self.local_playback.queue.clone(),
             current_index: self.local_playback.current_index,
         };
-        self.broadcast_frame(&frame);
+        self.broadcast_frame(&frame, true);
     }
 
-    fn broadcast_frame(&self, frame: &SyncFrame) {
-        for peer in self.connected.values() {
-            if let Ok(mut w) = peer.writer.lock() {
-                let _ = w.send_frame(frame);
+    fn slice_tracks_for_relay(
+        tracks: &[QueueEntry],
+        current_index: usize,
+        limit_items: usize,
+    ) -> (Vec<QueueEntry>, usize) {
+        if tracks.is_empty() {
+            return (Vec::new(), 0);
+        }
+        let idx = current_index.min(tracks.len() - 1);
+        let start = idx.saturating_sub(8);
+        let end = (start + limit_items).min(tracks.len());
+        let sliced = tracks[start..end].to_vec();
+        let adj_idx = idx
+            .saturating_sub(start)
+            .min(sliced.len().saturating_sub(1));
+        (sliced, adj_idx)
+    }
+
+    fn cap_frame_for_relay(frame: &SyncFrame) -> SyncFrame {
+        let ok_len = |f: &SyncFrame| -> bool {
+            encode_frame_payload(f).is_ok_and(|p| p.len() <= MAX_RELAY_QUEUE_BYTES)
+        };
+        if ok_len(frame) {
+            return frame.clone();
+        }
+        match frame {
+            SyncFrame::QueueFull {
+                revision,
+                tracks,
+                current_index,
+            } => {
+                for cap in [90usize, 50, 25, 10, 3, 1] {
+                    let (sliced, idx) = Self::slice_tracks_for_relay(tracks, *current_index, cap);
+                    let cand = SyncFrame::QueueFull {
+                        revision: *revision,
+                        tracks: sliced,
+                        current_index: idx,
+                    };
+                    if ok_len(&cand) {
+                        return cand;
+                    }
+                }
+                SyncFrame::QueueFull {
+                    revision: *revision,
+                    tracks: Vec::new(),
+                    current_index: 0,
+                }
+            }
+            SyncFrame::Command {
+                cmd_id,
+                action:
+                    RemoteAction::PlayQueue {
+                        tracks,
+                        start_index,
+                        context,
+                    },
+            } => {
+                for cap in [90usize, 50, 25, 10, 3, 1] {
+                    let (sliced, idx) = Self::slice_tracks_for_relay(tracks, *start_index, cap);
+                    let cand = SyncFrame::Command {
+                        cmd_id: *cmd_id,
+                        action: RemoteAction::PlayQueue {
+                            tracks: sliced,
+                            start_index: idx,
+                            context: context.clone(),
+                        },
+                    };
+                    if ok_len(&cand) {
+                        return cand;
+                    }
+                }
+                frame.clone()
+            }
+            other => other.clone(),
+        }
+    }
+
+    fn send_to_peer_targeted(&mut self, peer_id: &str, frame: &SyncFrame) {
+        let mut drop_lan = false;
+        let mut fallback_slot: Option<MatchedRoomSlot> = None;
+
+        if let Some(peer) = self.connected.get(peer_id) {
+            if let Some(writer) = &peer.lan_writer {
+                let sent = writer.lock().is_ok_and(|mut w| w.send_frame(frame).is_ok());
+                if sent {
+                    return;
+                }
+                drop_lan = true;
+            }
+            if peer.has_live_relay() || drop_lan {
+                fallback_slot = peer.relay_slot;
+            }
+        }
+        if drop_lan && let Some(peer) = self.connected.get_mut(peer_id) {
+            peer.lan_writer = None;
+            peer.lan_addr = None;
+        }
+        if self.relay_connected
+            && let Some(slot) = fallback_slot
+            && let Some((key, _)) = self.keys.key_and_tag_for_slot(slot)
+        {
+            let topic = derive_relay_topic(key.as_bytes());
+            let capped = Self::cap_frame_for_relay(frame);
+            self.relay_client.publish_envelope(
+                &topic,
+                key,
+                RelayEnvelope {
+                    sender_id: self.local_device_id.clone(),
+                    sender_name: self.local_device_name.clone(),
+                    sender_kind: self.local_device_kind,
+                    target_id: Some(peer_id.to_string()),
+                    frame: capped,
+                },
+            );
+        }
+    }
+
+    fn broadcast_frame(&mut self, frame: &SyncFrame, send_relay: bool) {
+        let mut broken_lan_ids = Vec::new();
+        let mut relay_slots_needed: HashSet<MatchedRoomSlot> = HashSet::new();
+
+        for (id, peer) in &self.connected {
+            let mut sent_over_lan = false;
+            if let Some(writer) = &peer.lan_writer {
+                if writer.lock().is_ok_and(|mut w| w.send_frame(frame).is_ok()) {
+                    sent_over_lan = true;
+                } else {
+                    broken_lan_ids.push(id.clone());
+                }
+            }
+            if !sent_over_lan
+                && send_relay
+                && let Some(slot) = peer.relay_slot
+                && peer.has_live_relay()
+            {
+                relay_slots_needed.insert(slot);
+            }
+        }
+        for id in broken_lan_ids {
+            if let Some(peer) = self.connected.get_mut(&id) {
+                peer.lan_writer = None;
+                peer.lan_addr = None;
+            }
+        }
+
+        if send_relay && self.relay_connected && !relay_slots_needed.is_empty() {
+            let capped = Self::cap_frame_for_relay(frame);
+            for slot in relay_slots_needed {
+                if let Some((key, _)) = self.keys.key_and_tag_for_slot(slot) {
+                    let topic = derive_relay_topic(key.as_bytes());
+                    self.relay_client.publish_envelope(
+                        &topic,
+                        key,
+                        RelayEnvelope {
+                            sender_id: self.local_device_id.clone(),
+                            sender_name: self.local_device_name.clone(),
+                            sender_kind: self.local_device_kind,
+                            target_id: None,
+                            frame: capped.clone(),
+                        },
+                    );
+                }
             }
         }
     }
 
     fn publish_snapshot(&self) {
         let mut peers = Vec::new();
+        let mut active_queue = Vec::new();
+        let mut active_queue_index = 0usize;
+
         for cp in self.connected.values() {
             let st = cp.last_state.as_ref();
+            let is_active = self.active_speaker_id == cp.device_id;
+            if is_active {
+                active_queue = cp.last_queue.clone();
+                active_queue_index = cp.last_queue_index;
+            }
+            let via_relay = !cp.has_lan();
+            let addr = cp
+                .lan_addr
+                .map_or_else(|| "Cloud E2EE".to_string(), |a| a.to_string());
             peers.push(ConnectPeerInfo {
                 device_id: cp.device_id.clone(),
                 device_name: cp.device_name.clone(),
                 device_kind: cp.device_kind,
-                addr: cp.addr.to_string(),
+                addr,
                 connected: true,
-                is_active_speaker: self.active_speaker_id == cp.device_id,
+                via_relay,
+                is_active_speaker: is_active,
                 is_playing: st.is_some_and(|s| s.is_playing),
                 volume_norm: st.map_or(1.0, |s| s.volume_norm),
+                active_track_id: st.and_then(|s| s.track_id.clone()),
                 now_playing_title: st.map(|s| s.track_title.clone()).unwrap_or_default(),
                 now_playing_artist: st.map(|s| s.track_artist.clone()).unwrap_or_default(),
                 now_playing_thumbnail_url: st.and_then(|s| s.track_thumbnail_url.clone()),
                 position_ms: st.map_or(0, |s| s.base_position_ms),
                 duration_ms: st.map_or(0, |s| s.duration_ms),
+                anchor_utc_ms: st.map_or(0, |s| s.anchor_utc_ms),
+                repeat_mode: st.map_or(RepeatMode::Off, |s| s.repeat_mode),
+                shuffle_enabled: st.is_some_and(|s| s.shuffle_enabled),
             });
         }
         for dp in self.discovered.values() {
@@ -1223,14 +1747,19 @@ impl EngineRunner {
                 device_kind: dp.device_kind,
                 addr: dp.addr.clone(),
                 connected: false,
+                via_relay: false,
                 is_active_speaker: dp.is_active_speaker,
                 is_playing: false,
                 volume_norm: 1.0,
+                active_track_id: None,
                 now_playing_title: dp.now_playing_title.clone(),
                 now_playing_artist: dp.now_playing_artist.clone(),
                 now_playing_thumbnail_url: None,
                 position_ms: 0,
                 duration_ms: 0,
+                anchor_utc_ms: 0,
+                repeat_mode: RepeatMode::Off,
+                shuffle_enabled: false,
             });
         }
         peers.sort_by(|a, b| {
@@ -1251,7 +1780,10 @@ impl EngineRunner {
             active_speaker_id: self.active_speaker_id.clone(),
             is_local_active_speaker: self.active_speaker_id == self.local_device_id,
             is_account_ready: self.keys.spotify.is_some() || self.keys.ytm.is_some(),
+            relay_connected: self.relay_connected,
             peers,
+            active_queue,
+            active_queue_index,
         };
         {
             let mut slot = self
@@ -1687,5 +2219,225 @@ mod tests {
 
         desktop.shutdown();
         stranger.shutdown();
+    }
+
+    #[test]
+    fn cloud_relay_connects_controls_and_hands_off_with_lan_disabled() {
+        let (broker_url, stop, broker_handle) = crate::relay::tests::spawn_mock_mqtt_ws_broker();
+        let desktop_events: Arc<Mutex<Vec<ConnectEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let phone_events: Arc<Mutex<Vec<ConnectEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let d_ev = Arc::clone(&desktop_events);
+        let desktop = ConnectEngine::start_with_options(
+            ConnectConfig {
+                device_id: "pc_cross_01".to_string(),
+                device_name: "Home Workstation".to_string(),
+                device_kind: DeviceKind::Desktop,
+                bind_ephemeral_udp: true,
+            },
+            Arc::new(move |ev| d_ev.lock().expect("lock").push(ev)),
+            false,
+            Some(vec![broker_url.clone()]),
+        )
+        .expect("start desktop");
+
+        let p_ev = Arc::clone(&phone_events);
+        let phone = ConnectEngine::start_with_options(
+            ConnectConfig {
+                device_id: "phone_cross_02".to_string(),
+                device_name: "Pixel 5G".to_string(),
+                device_kind: DeviceKind::Phone,
+                bind_ephemeral_udp: true,
+            },
+            Arc::new(move |ev| p_ev.lock().expect("lock").push(ev)),
+            false,
+            Some(vec![broker_url]),
+        )
+        .expect("start phone");
+
+        desktop.update_accounts("rafly_sp".to_string(), "rafly@gmail.com".to_string());
+        phone.update_accounts(String::new(), "RAFLY@GMAIL.COM".to_string());
+
+        let tracks = vec![
+            QueueEntry {
+                track_id: "yt:video:abc111".to_string(),
+                title: "Starboy".to_string(),
+                artist: "The Weeknd".to_string(),
+                album: "Starboy".to_string(),
+                duration_ms: 230_000,
+                spotify_id: None,
+                youtube_video_id: Some("abc111".to_string()),
+                thumbnail_url: Some("https://img.example/1.jpg".to_string()),
+            },
+            QueueEntry {
+                track_id: "yt:video:def222".to_string(),
+                title: "Blinding Lights".to_string(),
+                artist: "The Weeknd".to_string(),
+                album: "After Hours".to_string(),
+                duration_ms: 200_000,
+                spotify_id: None,
+                youtube_video_id: Some("def222".to_string()),
+                thumbnail_url: Some("https://img.example/2.jpg".to_string()),
+            },
+        ];
+
+        desktop.update_local_playback(LocalPlaybackSnapshot {
+            is_playing: true,
+            current_track: Some(tracks[0].clone()),
+            queue: tracks.clone(),
+            current_index: 0,
+            position_ms: 48_000,
+            volume_norm: 0.85,
+            repeat_mode: RepeatMode::All,
+            shuffle_enabled: true,
+            anchor_utc_ms: unix_now_utc_ms(),
+        });
+
+        assert!(
+            wait_until(6_000, || {
+                let d = desktop.snapshot();
+                let p = phone.snapshot();
+                d.relay_connected
+                    && p.relay_connected
+                    && d.peers.iter().any(|x| x.connected && x.via_relay)
+                    && p.peers.iter().any(|x| x.connected && x.via_relay)
+            }),
+            "desktop and phone must discover & connect across relay with LAN disabled"
+        );
+
+        assert!(wait_until(4_000, || {
+            let p = phone.snapshot();
+            !p.is_local_active_speaker
+                && p.active_speaker_id == "pc_cross_01"
+                && p.active_queue.len() == 2
+                && p.peers.iter().any(|x| {
+                    x.now_playing_title == "Starboy"
+                        && x.shuffle_enabled
+                        && x.repeat_mode == RepeatMode::All
+                })
+        }));
+
+        phone.send_remote_action(RemoteAction::SeekTo {
+            position_ms: 95_000,
+        });
+        assert!(wait_until(3_000, || {
+            desktop_events.lock().expect("lock").iter().any(|ev| {
+                matches!(
+                    ev,
+                    ConnectEvent::ExecuteRemoteAction(RemoteAction::SeekTo {
+                        position_ms: 95_000
+                    })
+                )
+            })
+        }));
+
+        phone.transfer_active_speaker("phone_cross_02".to_string());
+        assert!(wait_until(4_000, || {
+            phone_events.lock().expect("lock").iter().any(|ev| {
+                matches!(
+                    ev,
+                    ConnectEvent::BecameActiveSpeaker { state, queue, .. }
+                        if state.track_title == "Starboy"
+                            && queue.len() == 2
+                            && state.repeat_mode == RepeatMode::All
+                            && state.shuffle_enabled
+                )
+            })
+        }));
+
+        desktop.shutdown();
+        phone.shutdown();
+        stop.store(true, Ordering::Release);
+        let _ = broker_handle.join();
+    }
+
+    #[test]
+    fn cloud_relay_isolates_mismatched_accounts() {
+        let (broker_url, stop, broker_handle) = crate::relay::tests::spawn_mock_mqtt_ws_broker();
+        let dev_a = ConnectEngine::start_with_options(
+            ConnectConfig {
+                device_id: "pc_alice".to_string(),
+                device_name: "Alice PC".to_string(),
+                device_kind: DeviceKind::Desktop,
+                bind_ephemeral_udp: true,
+            },
+            Arc::new(|_| {}),
+            false,
+            Some(vec![broker_url.clone()]),
+        )
+        .expect("start a");
+
+        let dev_b = ConnectEngine::start_with_options(
+            ConnectConfig {
+                device_id: "phone_bob".to_string(),
+                device_name: "Bob Phone".to_string(),
+                device_kind: DeviceKind::Phone,
+                bind_ephemeral_udp: true,
+            },
+            Arc::new(|_| {}),
+            false,
+            Some(vec![broker_url]),
+        )
+        .expect("start b");
+
+        dev_a.update_accounts("alice".to_string(), String::new());
+        dev_b.update_accounts("bob".to_string(), String::new());
+        assert!(wait_until(4_000, || {
+            dev_a.snapshot().relay_connected && dev_b.snapshot().relay_connected
+        }));
+        thread::sleep(Duration::from_millis(350));
+        assert!(dev_a.snapshot().peers.is_empty());
+        assert!(dev_b.snapshot().peers.is_empty());
+
+        dev_a.shutdown();
+        dev_b.shutdown();
+        stop.store(true, Ordering::Release);
+        let _ = broker_handle.join();
+    }
+
+    #[test]
+    #[ignore = "requires live internet access to public WSS MQTT brokers"]
+    fn live_public_wss_broker_connects_and_syncs() {
+        let dev_a = ConnectEngine::start_with_options(
+            ConnectConfig {
+                device_id: format!("pc_live_{}", csprng_hex(4)),
+                device_name: "Live Test PC".to_string(),
+                device_kind: DeviceKind::Desktop,
+                bind_ephemeral_udp: true,
+            },
+            Arc::new(|_| {}),
+            false,
+            None,
+        )
+        .expect("start live a");
+        let dev_b = ConnectEngine::start_with_options(
+            ConnectConfig {
+                device_id: format!("ph_live_{}", csprng_hex(4)),
+                device_name: "Live Test Phone".to_string(),
+                device_kind: DeviceKind::Phone,
+                bind_ephemeral_udp: true,
+            },
+            Arc::new(|_| {}),
+            false,
+            None,
+        )
+        .expect("start live b");
+
+        let shared_secret_id = format!("ferric_live_smoke_{}", csprng_hex(8));
+        dev_a.update_accounts(shared_secret_id.clone(), String::new());
+        dev_b.update_accounts(shared_secret_id, String::new());
+
+        let linked = wait_until(12_000, || {
+            let a = dev_a.snapshot();
+            let b = dev_b.snapshot();
+            a.relay_connected
+                && b.relay_connected
+                && a.peers.iter().any(|p| p.connected && p.via_relay)
+                && b.peers.iter().any(|p| p.connected && p.via_relay)
+        });
+        assert!(linked, "two live engines must link across public WSS relay");
+
+        dev_a.shutdown();
+        dev_b.shutdown();
     }
 }

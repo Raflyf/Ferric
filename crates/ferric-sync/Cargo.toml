@@ -13,4 +13,8 @@ serde.workspace = true
 postcard.workspace = true
 sha2.workspace = true
 chacha20poly1305.workspace = true
+tungstenite.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+fastrand.workspace = true
 ferric-core = { path = "../ferric-core" }

@@ -52,6 +52,8 @@ walkdir = "2.5"
 aho-corasick = "1.1.5"
 ureq = { version = "3.5", features = ["json"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0"
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
 postcard = { version = "1.2", features = ["use-std"] }

@@ -1059,6 +1059,17 @@ impl FerricController {
     }
 
     pub fn jump_to_upcoming(self: &Arc<Self>, offset: usize) -> ControllerResult<()> {
+        if self.is_controlling_remote() {
+            let snap = self.get_connect_state();
+            let target_idx = snap
+                .active_queue_index
+                .saturating_add(1)
+                .saturating_add(offset);
+            self.forward_remote_action(ferric_sync::RemoteAction::JumpToQueueIndex {
+                index: target_idx,
+            });
+            return Ok(());
+        }
         self.ensure_audio_started()?;
         let (target, up_next, gen_id) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -1072,6 +1083,7 @@ impl FerricController {
         if let Some(t) = target {
             self.dispatch_track_playback(&t, gen_id)?;
         }
+        self.push_connect_playback_snapshot();
         self.wake_monitor();
         Ok(())
     }

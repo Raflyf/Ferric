@@ -163,7 +163,10 @@ impl FerricController {
                 active_speaker_id: self.cfg.device_id.clone(),
                 is_local_active_speaker: true,
                 is_account_ready: false,
+                relay_connected: false,
                 peers: Vec::new(),
+                active_queue: Vec::new(),
+                active_queue_index: 0,
             }
         }
     }
@@ -324,13 +327,13 @@ impl FerricController {
                 let _ = self.prev_local_only();
             }
             RemoteAction::JumpToQueueIndex { index } => {
-                let tracks = {
+                let (tracks, ctx) = {
                     let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                    st.queue.tracks().to_vec()
+                    (st.queue.tracks().to_vec(), st.queue_context.clone())
                 };
                 if !tracks.is_empty() {
                     let clamped = index.min(tracks.len() - 1);
-                    let _ = self.play_queue_local_only(tracks, clamped, "Connect".to_string());
+                    let _ = self.play_queue_local_only(tracks, clamped, ctx);
                 }
             }
             RemoteAction::PlayQueue {
@@ -348,21 +351,25 @@ impl FerricController {
                 self.set_volume(volume_norm);
             }
             RemoteAction::SetRepeat(mode) => {
-                {
+                let up_next = {
                     let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
                     st.queue.repeat = mode;
                     st.session.repeat = mode;
-                }
+                    st.queue.peek_upcoming(250).into_iter().cloned().collect()
+                };
                 self.queue_upcoming_deck_b();
+                self.sink.on_queue_changed(up_next);
                 self.push_connect_playback_snapshot();
             }
             RemoteAction::SetShuffle(enabled) => {
-                {
+                let up_next = {
                     let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
                     st.queue.set_shuffle(enabled);
                     st.session.shuffle = enabled;
-                }
+                    st.queue.peek_upcoming(250).into_iter().cloned().collect()
+                };
                 self.queue_upcoming_deck_b();
+                self.sink.on_queue_changed(up_next);
                 self.push_connect_playback_snapshot();
             }
             RemoteAction::TransferActiveSpeaker { .. } | RemoteAction::SetSimulcastMode { .. } => {}
@@ -432,7 +439,12 @@ impl FerricController {
         }
 
         if self
-            .play_queue_local_only(tracks, idx, "Ferric Connect".to_string())
+            .play_queue_local_with_mode(
+                tracks,
+                idx,
+                "Ferric Connect".to_string(),
+                !state.is_playing,
+            )
             .is_ok()
         {
             if seek_target_ms > 1_000 {

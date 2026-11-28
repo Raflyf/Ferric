@@ -245,6 +245,36 @@ impl FerricController {
 
         ctrl.start_connect_engine();
 
+        // Auto-populate canonical account IDs on startup for older sessions saved before IDs
+        // were persisted, so Cross-Network Ferric Connect links without manual re-sync.
+        {
+            let weak_heal = Arc::downgrade(&ctrl);
+            let _ = thread::Builder::new()
+                .name("ferric-acct-heal".to_string())
+                .spawn(move || {
+                    thread::sleep(Duration::from_millis(900));
+                    let Some(c) = weak_heal.upgrade() else {
+                        return;
+                    };
+                    let (need_yt, need_sp) = {
+                        let st = c.state.lock().unwrap_or_else(|p| p.into_inner());
+                        let yt = st.accounts.youtube_connected
+                            && !st.accounts.youtube_sapisid.trim().is_empty()
+                            && st.accounts.youtube_account_id.trim().is_empty();
+                        let sp = (st.accounts.spotify_web_connected
+                            || st.accounts.spotify_connected)
+                            && st.accounts.spotify_user_id.trim().is_empty();
+                        (yt, sp)
+                    };
+                    if need_yt {
+                        c.sync_ytm_account();
+                    }
+                    if need_sp {
+                        c.sync_spotify_account();
+                    }
+                });
+        }
+
         let weak = Arc::downgrade(&ctrl);
         let mon_sync = Arc::clone(&ctrl.monitor_sync);
         if let Ok(handle) = thread::Builder::new()
@@ -380,6 +410,16 @@ impl FerricController {
         start_index: usize,
         context: String,
     ) -> ControllerResult<()> {
+        self.play_queue_local_with_mode(tracks, start_index, context, false)
+    }
+
+    pub(crate) fn play_queue_local_with_mode(
+        self: &Arc<Self>,
+        tracks: Vec<Track>,
+        start_index: usize,
+        context: String,
+        start_paused: bool,
+    ) -> ControllerResult<()> {
         if tracks.is_empty() {
             return Err(ControllerError::State(
                 "cannot play empty queue".to_string(),
@@ -393,7 +433,7 @@ impl FerricController {
             st.queue.set_tracks(tracks, Some(clamped_idx));
             st.queue_context = context;
             st.last_finished_seq = current_seq;
-            st.paused_while_resolving = false;
+            st.paused_while_resolving = start_paused;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
             st.extend_queue_gen = st.extend_queue_gen.wrapping_add(1);
             st.is_extending_queue = false;

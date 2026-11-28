@@ -94,8 +94,10 @@ fun ConnectSheet(
     } else {
         if (activePeer.nowPlayingTitle.isNotBlank()) {
             "${activePeer.nowPlayingTitle} - ${activePeer.nowPlayingArtist}"
+        } else if (activePeer.viaRelay) {
+            "Linked over Cloud E2EE · Anywhere"
         } else {
-            "Connected over encrypted LAN"
+            "Connected over encrypted Wi-Fi LAN"
         }
     }
     val activeTargetId = if (connect.isLocalActiveSpeaker || activePeer == null) {
@@ -149,9 +151,13 @@ fun ConnectSheet(
                     )
                     Text(
                         text = if (connect.isAccountReady) {
-                            "Auto-Connect active on Wi-Fi (same Spotify / YouTube Music account)"
+                            if (connect.relayConnected) {
+                                "Cloud E2EE + Wi-Fi Connect active (works across any network)"
+                            } else {
+                                "Auto-Connect active (same Spotify / YouTube Music account)"
+                            }
                         } else {
-                            "Sign in to Spotify or YouTube Music on PC & phone to link automatically"
+                            "Sign in to Spotify or YouTube Music on PC & phone to link automatically anywhere"
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = palette.textSecondary,
@@ -283,7 +289,11 @@ fun ConnectSheet(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
-                        text = "Searching local Wi-Fi (${connect.localIp}:${connect.localTcpPort}) for Ferric Desktop or other devices signed into the same account...",
+                        text = if (connect.relayConnected) {
+                            "Cloud E2EE online · Open Ferric Desktop signed into the same Spotify or YouTube Music account on any Wi-Fi or cellular network."
+                        } else {
+                            "Searching Wi-Fi (${connect.localIp}:${connect.localTcpPort}) and Cloud Relay for Ferric Desktop or other devices on the same account..."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = palette.textSecondary,
                         modifier = Modifier.padding(12.dp),
@@ -291,13 +301,14 @@ fun ConnectSheet(
                 }
             } else {
                 connect.peers.forEach { peer ->
+                    val modeTag = if (peer.viaRelay) "Cloud E2EE" else "Wi-Fi Direct"
                     DeviceTargetRow(
                         title = peer.deviceName,
                         subtitle = if (peer.connected) {
                             if (peer.nowPlayingTitle.isNotBlank()) {
-                                "${peer.nowPlayingTitle} - ${peer.nowPlayingArtist}"
+                                "$modeTag · ${peer.nowPlayingTitle} - ${peer.nowPlayingArtist}"
                             } else {
-                                "Connected · ${peer.addr}"
+                                "Connected · $modeTag"
                             }
                         } else {
                             "Connecting · ${peer.addr}"

@@ -3164,9 +3164,9 @@ live_design! {
                                             connect_qr_view = <FerricQrView> { width: 136, height: 136 }
                                             <View> {
                                                 width: Fill, height: Fit, flow: Down, spacing: 6,
-                                                lbl_t_conn_title = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Ferric Connect (Local LAN Pairing)" }
-                                                connect_lan_ip_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "LAN: Ready" }
-                                                connect_peers_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Listening for Ferric devices on local Wi-Fi..." }
+                                                lbl_t_conn_title = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_BOLD> { font_size: 10.8 } }, text: "Ferric Connect (Cloud E2EE & Wi-Fi)" }
+                                                connect_lan_ip_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_MEDIUM> { font_size: 8.8 } }, text: "Connect: Ready" }
+                                                connect_peers_lbl = <Label> { width: Fill, draw_text: { color: #9A9CA8, text_style: <THEME_FONT_REGULAR> { font_size: 8.6 } }, text: "Searching Cloud E2EE Relay and local Wi-Fi for your Ferric devices..." }
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, spacing: 6,
                                                     connect_gen_pair_btn = <FerricBtn> { text: "Regenerate QR" }
@@ -3422,7 +3422,7 @@ live_design! {
                                         rs_conn_now_lbl = <Label> {
                                             width: Fill,
                                             draw_text: { color: #C2C5D2, text_style: <THEME_FONT_REGULAR> { font_size: 8.4 } }
-                                            text: "Ready to connect on local Wi-Fi"
+                                            text: "Ready to connect across Cloud or Wi-Fi"
                                         }
                                         <View> {
                                             width: Fill, height: 20, flow: Right, align: { y: 0.5 }, spacing: 6,
@@ -3456,10 +3456,10 @@ live_design! {
                                         width: Fill,
                                         margin: { left: 4, top: 4 }
                                         draw_text: { color: #8A8EA2, text_style: <THEME_FONT_REGULAR> { font_size: 8.0 } }
-                                        text: "Sign in to Spotify or YouTube Music on Desktop & Android for automatic LAN link."
+                                        text: "Sign in to Spotify or YouTube Music on Desktop & Android to auto-link across any network."
                                     }
 
-                                    rs_conn_qr_btn = <FerricBtn> { width: Fill, height: 28, text: "QR Pairing & LAN Info" }
+                                    rs_conn_qr_btn = <FerricBtn> { width: Fill, height: 28, text: "QR Pairing & Network Info" }
                                 }
                             }
                         }
@@ -4437,7 +4437,15 @@ pub struct App {
     #[rust]
     connect_sync_ticks: u8,
     #[rust]
+    last_connect_pushed_playing: Option<bool>,
+    #[rust]
     pending_handoff_seek_ms: Option<u64>,
+    #[rust]
+    pending_handoff_paused: bool,
+    #[rust]
+    last_remote_mirror_key: String,
+    #[rust]
+    was_controlling_remote: bool,
     #[rust]
     pairing_uri: String,
     #[rust]
@@ -5814,7 +5822,7 @@ impl App {
         self.bg_tx = Some(tx.clone());
         self.bg_rx = Some(rx);
 
-        let dev_id = format!("ferric-pc-{}", csprng_hex(6));
+        let dev_id = persistent_connect_device_id();
         let pc_name = std::env::var("COMPUTERNAME")
             .ok()
             .map(|s| s.trim().to_string())
@@ -5884,6 +5892,9 @@ impl App {
                     format!("Signed in as {name} · {yt_pl_n} synced playlists.")
                 },
             );
+            if self.accounts.youtube_account_id.trim().is_empty() {
+                self.sync_ytm_signed_in_library(cx);
+            }
         }
         if self.is_spotify_web_session_active() {
             let web_pl_n = self
@@ -5900,6 +5911,13 @@ impl App {
                     format!("Spotify: {name} · {web_pl_n} playlists synced.")
                 },
             );
+            if self.accounts.spotify_user_id.trim().is_empty() {
+                self.sync_spotify_library_for(cx, true, 400);
+            }
+        } else if self.is_spotify_oauth_session_active()
+            && self.accounts.spotify_user_id.trim().is_empty()
+        {
+            self.sync_spotify_library_for(cx, false, 400);
         }
         if !self.all_tracks.is_empty() {
             self.queue.set_tracks(self.all_tracks.clone(), None);
@@ -6908,7 +6926,8 @@ impl App {
     }
 
     fn sync_fullscreen_backdrop_artwork(&self, cx: &mut Cx) {
-        let zones = self.queue.current().and_then(|cur| {
+        let cur_track = self.effective_display_track();
+        let zones = cur_track.as_ref().and_then(|cur| {
             self.artwork
                 .as_ref()
                 .and_then(|c| c.get_for_track(cur))
@@ -6936,10 +6955,13 @@ impl App {
         let fs_muted = vec4(1.0, 1.0, 1.0, 0.72);
         let fs_hover = vec4(1.0, 1.0, 1.0, 1.0);
 
-        let is_muted = self.session_state.volume < 0.01;
+        let eff_vol = self.effective_volume();
+        let (eff_shuffle, eff_repeat) = self.effective_shuffle_repeat();
+
+        let is_muted = eff_vol < 0.01;
         let vol_level_mode = if is_muted {
             0.0_f32
-        } else if self.session_state.volume < 0.50 {
+        } else if eff_vol < 0.50 {
             1.0_f32
         } else {
             2.0_f32
@@ -6966,23 +6988,11 @@ impl App {
             1.0,
         );
 
-        let shuf_act = if self.queue.shuffle { 1.0_f32 } else { 0.0_f32 };
-        let shuf_col = if self.queue.shuffle { accent } else { muted };
-        let shuf_hov = if self.queue.shuffle {
-            accent
-        } else {
-            icon_hover
-        };
-        let fs_shuf_col = if self.queue.shuffle {
-            raw_accent
-        } else {
-            fs_muted
-        };
-        let fs_shuf_hov = if self.queue.shuffle {
-            raw_accent
-        } else {
-            fs_hover
-        };
+        let shuf_act = if eff_shuffle { 1.0_f32 } else { 0.0_f32 };
+        let shuf_col = if eff_shuffle { accent } else { muted };
+        let shuf_hov = if eff_shuffle { accent } else { icon_hover };
+        let fs_shuf_col = if eff_shuffle { raw_accent } else { fs_muted };
+        let fs_shuf_hov = if eff_shuffle { raw_accent } else { fs_hover };
         self.ui.button(id!(shuffle_btn)).apply_over(
             cx,
             live! {
@@ -6998,18 +7008,18 @@ impl App {
             },
         );
 
-        let rep_active = self.queue.repeat != RepeatMode::Off;
-        let rep_mode = match self.queue.repeat {
+        let rep_active = eff_repeat != RepeatMode::Off;
+        let rep_mode = match eff_repeat {
             RepeatMode::Off => 0.0_f32,
             RepeatMode::All => 1.0_f32,
             RepeatMode::One => 2.0_f32,
         };
-        let rep_col = match self.queue.repeat {
+        let rep_col = match eff_repeat {
             RepeatMode::Off => muted,
             RepeatMode::All | RepeatMode::One => accent,
         };
         let rep_hov = if rep_active { rep_col } else { icon_hover };
-        let fs_rep_col = match self.queue.repeat {
+        let fs_rep_col = match eff_repeat {
             RepeatMode::Off => fs_muted,
             RepeatMode::All | RepeatMode::One => raw_accent,
         };
@@ -7078,7 +7088,7 @@ impl App {
                     acrylic_opacity: (op),
                     acrylic_tint: (acrylic_tint),
                     light_mode: (lm),
-                    glow_amt: (if self.queue.current().is_some() { 0.36 } else { 0.14 })
+                    glow_amt: (if self.effective_display_track().is_some() { 0.36 } else { 0.14 })
                 }
             },
         );
@@ -7261,7 +7271,7 @@ impl App {
                     acrylic_opacity: (op),
                     acrylic_tint: (acrylic_tint),
                     light_mode: (lm),
-                    glow_amt: (if self.queue.current().is_some() { 0.36 } else { 0.14 })
+                    glow_amt: (if self.effective_display_track().is_some() { 0.36 } else { 0.14 })
                 }
             },
         );
@@ -8609,10 +8619,15 @@ impl App {
     }
 
     fn refresh_right_sidebar(&mut self, cx: &mut Cx) {
-        let is_playing = self
-            .audio
-            .as_ref()
-            .is_some_and(|a| a.telemetry().is_playing);
+        let is_remote = self.is_controlling_remote();
+        let remote_peer = self.active_remote_peer().cloned();
+        let is_playing = if let Some(ref peer) = remote_peer {
+            peer.is_playing
+        } else {
+            self.audio
+                .as_ref()
+                .is_some_and(|a| a.telemetry().is_playing)
+        };
         let accent = rgba_to_vec4(self.adaptive_palette().accent);
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
@@ -8620,17 +8635,53 @@ impl App {
             0.0_f32
         };
 
-        // History (last 3 played tracks excluding current)
-        let cur_id = self.queue.current().map(|t| t.id.clone());
-        let hist: Vec<Track> = self
-            .session_state
-            .recent_track_ids
-            .iter()
-            .filter(|id| cur_id.as_deref() != Some(id.as_str()))
-            .filter_map(|id| self.all_tracks.iter().find(|t| &t.id == id).cloned())
-            .take(3)
-            .collect();
-        let upcoming: Vec<Track> = self.queue.peek_upcoming(10).into_iter().cloned().collect();
+        let remote_queue: Vec<Track> = if is_remote {
+            self.connect_snap
+                .as_ref()
+                .map(|s| {
+                    s.active_queue
+                        .iter()
+                        .cloned()
+                        .map(QueueEntry::into_track)
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let remote_idx = self
+            .connect_snap
+            .as_ref()
+            .map_or(0, |s| s.active_queue_index)
+            .min(remote_queue.len().saturating_sub(1));
+
+        // History (last 3 played tracks excluding current; hidden when viewing remote speaker queue)
+        let cur_track = self.effective_display_track();
+        let cur_id = cur_track.as_ref().map(|t| t.id.clone());
+        let hist: Vec<Track> = if is_remote {
+            Vec::new()
+        } else {
+            self.session_state
+                .recent_track_ids
+                .iter()
+                .filter(|id| cur_id.as_deref() != Some(id.as_str()))
+                .filter_map(|id| self.all_tracks.iter().find(|t| &t.id == id).cloned())
+                .take(3)
+                .collect()
+        };
+        let upcoming: Vec<Track> = if is_remote {
+            if remote_idx + 1 < remote_queue.len() {
+                remote_queue[remote_idx + 1..]
+                    .iter()
+                    .take(10)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            self.queue.peek_upcoming(10).into_iter().cloned().collect()
+        };
         if !self.window_hidden_or_minimized
             && let Some(cache) = &mut self.artwork
         {
@@ -8687,10 +8738,12 @@ impl App {
         }
 
         // Now playing
-        self.ui.label(id!(q_now_header)).set_text(
-            cx,
-            &format!("Now playing · {}", clip_text(&self.queue_context, 18)),
-        );
+        let now_ctx = if let Some(ref peer) = remote_peer {
+            format!("Playing on {}", clip_text(&peer.device_name, 18))
+        } else {
+            format!("Now playing · {}", clip_text(&self.queue_context, 18))
+        };
+        self.ui.label(id!(q_now_header)).set_text(cx, &now_ctx);
         let now_v = self.ui.view(id!(q_now_row));
         now_v.apply_over(
             cx,
@@ -8702,7 +8755,7 @@ impl App {
                 }
             },
         );
-        if let Some(cur) = self.queue.current().cloned() {
+        if let Some(cur) = cur_track {
             now_v.set_visible(cx, true);
             now_v
                 .label(id!(title))
@@ -8744,8 +8797,10 @@ impl App {
         }
 
         // Up next (10 rows)
-        let upnext_txt = if upcoming.is_empty() && self.radio_loading {
+        let upnext_txt = if !is_remote && upcoming.is_empty() && self.radio_loading {
             "Up next (loading...)".to_string()
+        } else if is_remote {
+            format!("Up next ({}) · Remote", upcoming.len())
         } else {
             format!("Up next ({})", upcoming.len())
         };
@@ -8808,8 +8863,8 @@ impl App {
                         String::new()
                     },
                 );
-                rv.button(id!(up_btn)).set_visible(cx, i > 0);
-                rv.button(id!(rm_btn)).set_visible(cx, true);
+                rv.button(id!(up_btn)).set_visible(cx, !is_remote && i > 0);
+                rv.button(id!(rm_btn)).set_visible(cx, !is_remote);
                 self.bind_cover_art_url(
                     cx,
                     rv.ferric_cover_art(id!(art)),
@@ -9834,12 +9889,13 @@ impl App {
             .set_text(cx, &self.discord_settings.client_id);
         self.refresh_discord_preview(cx);
 
+        let eff_vol = self.effective_volume();
         self.ui
             .ferric_bar_slider(id!(vol_slider))
-            .set_value(cx, f64::from(self.session_state.volume));
+            .set_value(cx, f64::from(eff_vol));
         self.ui
             .ferric_bar_slider(id!(fs_vol_slider))
-            .set_value(cx, f64::from(self.session_state.volume));
+            .set_value(cx, f64::from(eff_vol));
         self.sync_transport_mode_icons(cx);
 
         self.ui
@@ -12472,7 +12528,7 @@ impl App {
             engine.send_remote_action(RemoteAction::PlayQueue {
                 tracks: tracks_to_send,
                 start_index: idx,
-                context: "Desktop".to_string(),
+                context: self.queue_context.clone(),
             });
             return;
         }
@@ -13796,7 +13852,10 @@ impl App {
             .map_or("Desktop-PC", |s| s.local_device_name.as_str());
         self.ui.label(id!(connect_lan_ip_lbl)).set_text(
             cx,
-            &format!("LAN: {}:{port} · {pc_name} Ready", self.lan_ip),
+            &format!(
+                "Cloud E2EE + Wi-Fi ({}:{port}) · {pc_name} Ready",
+                self.lan_ip
+            ),
         );
     }
 
@@ -13821,6 +13880,274 @@ impl App {
         self.connect_snap
             .as_ref()
             .is_some_and(|s| !s.is_local_active_speaker && s.peers.iter().any(|p| p.connected))
+    }
+
+    fn active_remote_peer(&self) -> Option<&ferric_sync::ConnectPeerInfo> {
+        let snap = self.connect_snap.as_ref()?;
+        if snap.is_local_active_speaker {
+            return None;
+        }
+        snap.peers
+            .iter()
+            .find(|p| p.connected && p.device_id == snap.active_speaker_id)
+    }
+
+    fn active_remote_track(&self) -> Option<Track> {
+        let snap = self.connect_snap.as_ref()?;
+        let peer = self.active_remote_peer()?;
+        if let Some(q_entry) = snap.active_queue.get(snap.active_queue_index)
+            && (peer.active_track_id.is_none()
+                || peer.active_track_id.as_deref() == Some(q_entry.track_id.as_str()))
+        {
+            return Some(q_entry.clone().into_track());
+        }
+        if peer.now_playing_title.is_empty() && peer.active_track_id.is_none() {
+            return None;
+        }
+        let tid = peer
+            .active_track_id
+            .clone()
+            .unwrap_or_else(|| format!("remote:{}", peer.device_id));
+        let yt_vid = tid.strip_prefix("yt:video:").map(ToOwned::to_owned);
+        Some(Track {
+            id: tid,
+            title: peer.now_playing_title.clone(),
+            artist: peer.now_playing_artist.clone(),
+            album: String::new(),
+            duration_ms: peer.duration_ms,
+            path: None,
+            source: if yt_vid.is_some() {
+                TrackSource::YouTubeMusic
+            } else {
+                TrackSource::Spotify
+            },
+            codec: if peer.via_relay {
+                "CLOUD".to_string()
+            } else {
+                "WIFI".to_string()
+            },
+            sample_rate: 48_000,
+            bit_depth: 16,
+            bitrate_kbps: 128,
+            isrc: None,
+            spotify_id: None,
+            youtube_video_id: yt_vid,
+            thumbnail_url: peer.now_playing_thumbnail_url.clone(),
+            replay_gain_db: 0,
+            liked: false,
+        })
+    }
+
+    fn effective_display_track(&self) -> Option<Track> {
+        if self.is_controlling_remote() {
+            self.active_remote_track()
+        } else {
+            self.queue.current().cloned()
+        }
+    }
+
+    fn effective_volume(&self) -> f32 {
+        self.active_remote_peer()
+            .map_or(self.session_state.volume, |p| p.volume_norm)
+            .clamp(0.0, 1.0)
+    }
+
+    fn effective_shuffle_repeat(&self) -> (bool, RepeatMode) {
+        if let Some(peer) = self.active_remote_peer() {
+            (peer.shuffle_enabled, peer.repeat_mode)
+        } else {
+            (self.queue.shuffle, self.queue.repeat)
+        }
+    }
+
+    fn sync_remote_mirror_ui(&mut self, cx: &mut Cx) {
+        let Some(peer) = self.active_remote_peer().cloned() else {
+            return;
+        };
+        let remote_track = self.active_remote_track();
+        let track_id = remote_track
+            .as_ref()
+            .map(|t| t.id.as_str())
+            .unwrap_or_default();
+        let (q_len, q_idx, q_next) = self
+            .connect_snap
+            .as_ref()
+            .map(|s| {
+                let next_id = s
+                    .active_queue
+                    .get(s.active_queue_index.saturating_add(1))
+                    .map(|e| e.track_id.as_str())
+                    .unwrap_or_default();
+                (s.active_queue.len(), s.active_queue_index, next_id)
+            })
+            .unwrap_or((0, 0, ""));
+        let mirror_key = format!(
+            "{}|{}|{}|{}|{}|{:?}|{}|{:.2}|{}|{}|{}|{}",
+            peer.device_id,
+            track_id,
+            peer.now_playing_title,
+            peer.now_playing_artist,
+            peer.is_playing,
+            peer.repeat_mode,
+            peer.shuffle_enabled,
+            peer.volume_norm,
+            peer.duration_ms,
+            q_len,
+            q_idx,
+            q_next,
+        );
+        let meta_changed = self.last_remote_mirror_key != mirror_key;
+        self.last_remote_mirror_key = mirror_key;
+        self.was_controlling_remote = true;
+
+        self.ui
+            .ferric_play_btn(id!(play_pause_btn))
+            .set_playing(cx, peer.is_playing);
+        if self.fullscreen_open {
+            self.ui
+                .ferric_play_btn(id!(fs_play_pause_btn))
+                .set_playing(cx, peer.is_playing);
+        }
+        self.sync_controls_from_state(cx);
+
+        if meta_changed {
+            self.last_pos_txt.clear();
+            self.last_dur_txt.clear();
+            self.last_codec_txt.clear();
+
+            let title = if peer.now_playing_title.is_empty() {
+                "Connected Device".to_string()
+            } else {
+                peer.now_playing_title.clone()
+            };
+            let artist_sub = if peer.now_playing_artist.is_empty() {
+                format!("Playing on {}", peer.device_name)
+            } else {
+                format!(
+                    "{} · Playing on {}",
+                    peer.now_playing_artist, peer.device_name
+                )
+            };
+            let mode_badge = if peer.via_relay {
+                format!("CLOUD · {}", clip_text(&peer.device_name, 14))
+            } else {
+                format!("WIFI · {}", clip_text(&peer.device_name, 14))
+            };
+
+            self.ui
+                .label(id!(np_title_lbl))
+                .set_text(cx, &clip_text(&clean_display_text(&title), 20));
+            self.ui
+                .label(id!(np_artist_lbl))
+                .set_text(cx, &clip_text(&clean_display_text(&artist_sub), 26));
+            self.ui
+                .label(id!(fs_title_lbl))
+                .set_text(cx, &clip_text(&clean_display_text(&title), 36));
+            self.ui
+                .label(id!(fs_artist_lbl))
+                .set_text(cx, &clip_text(&clean_display_text(&artist_sub), 44));
+            self.ui
+                .button(id!(codec_pill_btn))
+                .set_text(cx, &mode_badge);
+            self.ui.label(id!(signal_path_lbl)).set_text(
+                cx,
+                &format!(
+                    "Ferric Connect ({}) -> {} (E2EE ChaCha20-Poly1305)",
+                    if peer.via_relay { "Cloud" } else { "Wi-Fi" },
+                    peer.device_name
+                ),
+            );
+            win32_update_tray_tooltip(&format!("Ferric · On {} - {title}", peer.device_name));
+            win32_update_taskbar_playback(&title, &peer.now_playing_artist, peer.is_playing);
+
+            if let Some(ref tr) = remote_track {
+                if let Some(cache) = &mut self.artwork {
+                    cache.pin_active_track(Some(tr));
+                }
+                self.bind_hero_cover_art_url(
+                    cx,
+                    self.ui.ferric_cover_art(id!(np_art)),
+                    tr.thumbnail_url.as_deref(),
+                    Some(tr),
+                    peer.is_playing,
+                    0.55,
+                    false,
+                );
+                self.bind_hero_cover_art_url(
+                    cx,
+                    self.ui.ferric_cover_art(id!(fs_art)),
+                    tr.thumbnail_url.as_deref(),
+                    Some(tr),
+                    false,
+                    0.55,
+                    false,
+                );
+                self.sync_fullscreen_backdrop_artwork(cx);
+                self.apply_adaptive_accent_live(cx);
+                self.load_lyrics_for_track(cx, tr);
+            }
+            self.refresh_right_sidebar(cx);
+        }
+    }
+
+    fn update_remote_timeline_tick(&mut self, cx: &mut Cx, window_hidden: bool) -> bool {
+        let Some(peer) = self.active_remote_peer().cloned() else {
+            return false;
+        };
+        let dur_ms = peer.duration_ms;
+        let pos_ms = peer.interpolated_position_ms();
+
+        self.ui
+            .ferric_play_btn(id!(play_pause_btn))
+            .set_playing(cx, peer.is_playing);
+        if self.fullscreen_open {
+            self.ui
+                .ferric_play_btn(id!(fs_play_pause_btn))
+                .set_playing(cx, peer.is_playing);
+        }
+
+        if !window_hidden && dur_ms > 0 {
+            let ratio = (pos_ms as f64 / dur_ms as f64).clamp(0.0, 1.0);
+            let pos_txt = format_compact_time_ms(pos_ms);
+            let dur_txt = if self.show_remaining_time {
+                format!("-{}", format_compact_time_ms(dur_ms.saturating_sub(pos_ms)))
+            } else {
+                format_compact_time_ms(dur_ms)
+            };
+            self.ui
+                .ferric_bar_slider(id!(seek_slider))
+                .set_value(cx, ratio);
+            if pos_txt != self.last_pos_txt {
+                self.last_pos_txt = pos_txt.clone();
+                self.ui.label(id!(pos_lbl)).set_text(cx, &pos_txt);
+                if self.fullscreen_open {
+                    self.ui.label(id!(fs_pos_lbl)).set_text(cx, &pos_txt);
+                }
+            }
+            if dur_txt != self.last_dur_txt {
+                self.last_dur_txt = dur_txt.clone();
+                self.ui.button(id!(dur_btn)).set_text(cx, &dur_txt);
+                if self.fullscreen_open {
+                    self.ui.label(id!(fs_dur_lbl)).set_text(cx, &dur_txt);
+                }
+            }
+            if self.fullscreen_open {
+                self.ui
+                    .ferric_bar_slider(id!(fs_seek_slider))
+                    .set_value(cx, ratio);
+            }
+            self.update_lyrics_display(cx, pos_ms);
+        }
+
+        let desired = if window_hidden {
+            if peer.is_playing { 500 } else { 1000 }
+        } else if peer.is_playing {
+            250
+        } else {
+            350
+        };
+        self.sync_tick_timer_rate(cx, desired);
+        true
     }
 
     fn push_connect_playback_snapshot(&self) {
@@ -13885,8 +14212,10 @@ impl App {
             } else if let Some(peer) = active_peer {
                 let now = if !peer.now_playing_title.is_empty() {
                     format!("{} - {}", peer.now_playing_title, peer.now_playing_artist)
+                } else if peer.via_relay {
+                    "Linked via Cloud E2EE · Anywhere".to_string()
                 } else {
-                    "Connected over encrypted LAN".to_string()
+                    "Connected over encrypted Wi-Fi".to_string()
                 };
                 (
                     format!("{} (Playing)", peer.device_name),
@@ -13947,18 +14276,31 @@ impl App {
 
         let status = if snap.is_account_ready {
             if snap.peers.is_empty() {
-                format!(
-                    "Auto-Connect active ({}:{}) · Waiting for Ferric Android on same Wi-Fi...",
-                    snap.local_ip, snap.local_tcp_port
-                )
+                if snap.relay_connected {
+                    "Cloud E2EE online · Open Ferric Android on the same account (any Wi-Fi/cellular)..."
+                        .to_string()
+                } else {
+                    format!(
+                        "Connecting Cloud E2EE & Wi-Fi ({}:{}) · Waiting for Ferric Android...",
+                        snap.local_ip, snap.local_tcp_port
+                    )
+                }
             } else {
+                let any_relay = snap.peers.iter().any(|p| p.connected && p.via_relay);
+                let any_lan = snap.peers.iter().any(|p| p.connected && !p.via_relay);
+                let transport_lbl = match (any_lan, any_relay) {
+                    (true, true) => "Cloud E2EE & Wi-Fi Direct",
+                    (true, false) => "Encrypted Wi-Fi Direct",
+                    (false, true) => "Encrypted Cloud Relay (Anywhere)",
+                    (false, false) => "Auto-Connect",
+                };
                 format!(
-                    "Auto-Connect linked ({} device(s)) · Encrypted ChaCha20 LAN",
+                    "Auto-Connect linked ({} device(s)) · {transport_lbl}",
                     snap.peers.len()
                 )
             }
         } else {
-            "Sign in to Spotify or YouTube Music on Desktop & Android for zero-pairing Connect."
+            "Sign in to Spotify or YouTube Music on Desktop & Android for zero-pairing Connect anywhere."
                 .to_string()
         };
         self.ui.label(id!(rs_conn_status_lbl)).set_text(cx, &status);
@@ -13994,6 +14336,50 @@ impl App {
             ConnectEvent::StateUpdated(snap) => {
                 self.connect_snap = Some(snap);
                 self.refresh_connect_panel(cx);
+                if self.is_controlling_remote() {
+                    self.sync_remote_mirror_ui(cx);
+                } else if self.was_controlling_remote {
+                    self.was_controlling_remote = false;
+                    self.last_remote_mirror_key.clear();
+                    self.last_pos_txt.clear();
+                    self.last_dur_txt.clear();
+                    self.last_codec_txt.clear();
+                    if let Some(cur) = self.queue.current().cloned() {
+                        let is_playing = self
+                            .audio
+                            .as_ref()
+                            .is_some_and(|a| a.telemetry().is_playing);
+                        self.sync_now_playing_ui_widgets(cx, &cur, is_playing);
+                    } else {
+                        self.ui
+                            .label(id!(np_title_lbl))
+                            .set_text(cx, "Nothing playing");
+                        self.ui
+                            .label(id!(np_artist_lbl))
+                            .set_text(cx, "Pick any song to start");
+                        self.ui
+                            .label(id!(fs_title_lbl))
+                            .set_text(cx, "Nothing playing");
+                        self.ui
+                            .label(id!(fs_artist_lbl))
+                            .set_text(cx, "Pick any song to start");
+                        self.ui.button(id!(codec_pill_btn)).set_text(cx, "READY");
+                        self.ui
+                            .ferric_play_btn(id!(play_pause_btn))
+                            .set_playing(cx, false);
+                        self.ui
+                            .ferric_play_btn(id!(fs_play_pause_btn))
+                            .set_playing(cx, false);
+                        self.ui
+                            .ferric_cover_art(id!(np_art))
+                            .set_texture(cx, None, 1.0);
+                        self.ui
+                            .ferric_cover_art(id!(fs_art))
+                            .set_texture(cx, None, 1.0);
+                    }
+                    self.sync_controls_from_state(cx);
+                    self.refresh_right_sidebar(cx);
+                }
                 self.ui.redraw(cx);
             }
             ConnectEvent::ExecuteRemoteAction(action) => {
@@ -14004,6 +14390,8 @@ impl App {
                 queue,
                 current_index,
             } => {
+                self.was_controlling_remote = false;
+                self.last_remote_mirror_key.clear();
                 let mut tracks = self.hydrate_connect_tracks(queue);
                 if tracks.is_empty()
                     && let Some(tid) = state.track_id.clone()
@@ -14027,6 +14415,8 @@ impl App {
                     let chosen = tracks[idx].clone();
                     self.queue.repeat = state.repeat_mode;
                     self.queue.set_shuffle(state.shuffle_enabled);
+                    self.session_state.repeat = state.repeat_mode;
+                    self.session_state.shuffle = state.shuffle_enabled;
                     self.queue.set_tracks(tracks, Some(idx));
                     let now_utc = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -14039,6 +14429,7 @@ impl App {
                     };
                     let seek_ms = state.base_position_ms.saturating_add(drift);
                     self.pending_handoff_seek_ms = Some(seek_ms);
+                    self.pending_handoff_paused = !state.is_playing;
                     self.play_track_inner(cx, chosen, true);
                     if seek_ms > 1_000
                         && let Some(audio) = &self.audio
@@ -14050,9 +14441,12 @@ impl App {
                     {
                         audio.send(EngineCommand::Pause);
                     }
+                    self.sync_controls_from_state(cx);
+                    self.refresh_right_sidebar(cx);
                     self.show_toast(cx, "Switched playback to Desktop PC");
                 }
                 self.refresh_connect_panel(cx);
+                self.push_connect_playback_snapshot();
             }
             ConnectEvent::YieldedActiveSpeaker {
                 new_speaker_name, ..
@@ -14062,6 +14456,7 @@ impl App {
                 }
                 self.show_toast(cx, &format!("Playing on {new_speaker_name}"));
                 self.refresh_connect_panel(cx);
+                self.sync_remote_mirror_ui(cx);
             }
             ConnectEvent::Toast(msg) => {
                 self.show_toast(cx, &msg);
@@ -14137,12 +14532,14 @@ impl App {
                 self.session_state.repeat = mode;
                 self.sync_next_deck_to_engine();
                 self.sync_controls_from_state(cx);
+                self.refresh_right_sidebar(cx);
             }
             RemoteAction::SetShuffle(enabled) => {
                 self.queue.set_shuffle(enabled);
                 self.session_state.shuffle = enabled;
                 self.sync_next_deck_to_engine();
                 self.sync_controls_from_state(cx);
+                self.refresh_right_sidebar(cx);
             }
             RemoteAction::TransferActiveSpeaker { .. } | RemoteAction::SetSimulcastMode { .. } => {}
         }
@@ -15383,10 +15780,19 @@ impl App {
                         {
                             audio.send(EngineCommand::SeekMs(seek_ms));
                         }
+                        let start_paused = self.pending_handoff_paused;
+                        self.pending_handoff_paused = false;
+                        if start_paused && let Some(audio) = &self.audio {
+                            audio.send(EngineCommand::Pause);
+                        }
                         self.sync_next_deck_to_engine();
                         self.prefetch_next_online_track();
                         if let Some(tr) = resolved_track {
-                            self.update_now_playing_metadata(cx, &tr);
+                            if start_paused {
+                                self.sync_now_playing_ui_widgets(cx, &tr, false);
+                            } else {
+                                self.update_now_playing_metadata(cx, &tr);
+                            }
                         }
                         self.push_connect_playback_snapshot();
                     } else {
@@ -15587,29 +15993,44 @@ impl App {
             .map(|s| s.poll_commands())
             .unwrap_or_default();
         for cmd in smtc_cmds {
+            let remote_engine = if self.is_controlling_remote() {
+                self.connect_engine.as_ref()
+            } else {
+                None
+            };
             match cmd {
                 SmtcCommand::Play => {
-                    if let Some(a) = &self.audio {
+                    if let Some(engine) = remote_engine {
+                        engine.send_remote_action(RemoteAction::Play);
+                    } else if let Some(a) = &self.audio {
                         a.send(EngineCommand::Play);
                     }
                 }
                 SmtcCommand::Pause => {
-                    if let Some(a) = &self.audio {
+                    if let Some(engine) = remote_engine {
+                        engine.send_remote_action(RemoteAction::Pause);
+                    } else if let Some(a) = &self.audio {
                         a.send(EngineCommand::Pause);
                     }
                 }
                 SmtcCommand::Toggle => {
-                    if let Some(a) = &self.audio {
+                    if let Some(engine) = remote_engine {
+                        engine.send_remote_action(RemoteAction::TogglePlayPause);
+                    } else if let Some(a) = &self.audio {
                         a.send(EngineCommand::TogglePlayPause);
                     }
                 }
                 SmtcCommand::Next => {
-                    if let Some(next) = self.queue.next_track_manual().cloned() {
+                    if let Some(engine) = remote_engine {
+                        engine.send_remote_action(RemoteAction::SkipNext);
+                    } else if let Some(next) = self.queue.next_track_manual().cloned() {
                         self.play_track(cx, next);
                     }
                 }
                 SmtcCommand::Previous => {
-                    if let Some(prev) = self.queue.prev_track().cloned() {
+                    if let Some(engine) = remote_engine {
+                        engine.send_remote_action(RemoteAction::SkipPrev);
+                    } else if let Some(prev) = self.queue.prev_track().cloned() {
                         self.play_track(cx, prev);
                     }
                 }
@@ -15665,12 +16086,15 @@ impl App {
             }
         }
 
-        // 4. Periodic Ferric Connect playback state sync (~1 Hz while playing)
-        if let Some(audio) = &self.audio
-            && audio.telemetry().is_playing
+        // 4. Periodic Ferric Connect playback state sync (~1 Hz while playing + immediate on state flip)
+        if !self.is_controlling_remote()
+            && let Some(audio) = &self.audio
         {
+            let playing_now = audio.telemetry().is_playing;
+            let state_flipped = self.last_connect_pushed_playing != Some(playing_now);
             self.connect_sync_ticks = self.connect_sync_ticks.wrapping_add(1);
-            if self.connect_sync_ticks.is_multiple_of(10) {
+            if state_flipped || (playing_now && self.connect_sync_ticks.is_multiple_of(10)) {
+                self.last_connect_pushed_playing = Some(playing_now);
                 self.push_connect_playback_snapshot();
             }
         }
@@ -15685,6 +16109,11 @@ impl App {
             self.ui
                 .ferric_win_btn(id!(win_max_btn))
                 .set_maximized(cx, win32_is_active_window_maximized());
+        }
+
+        // When another Ferric device is active speaker, mirror its timeline smoothly at 250ms and skip local seekbar overwrite.
+        if self.update_remote_timeline_tick(cx, window_hidden) {
+            return;
         }
 
         // 6. Audio Telemetry, Device Hot-Swap Recovery, Zero-Gap Crossfade Auto-Transition, Prefetch, Video Sync & Spectrum
@@ -17073,7 +17502,42 @@ impl App {
             match action.as_widget_action().cast() {
                 TrackListAction::PlayIndex(idx) => {
                     if let Some(clicked) = active_list.get(idx).cloned() {
-                        if self.active_page == MainPage::Search
+                        if self.is_controlling_remote()
+                            && let Some(engine) = &self.connect_engine
+                        {
+                            let ctx = if self.active_page == MainPage::Search
+                                && clicked.youtube_video_id.is_some()
+                                && self.session_state.autoplay_radio
+                            {
+                                format!("{} radio", clicked.title)
+                            } else {
+                                match self.active_page {
+                                    MainPage::Search => "Search".to_string(),
+                                    MainPage::Recents => "Recents".to_string(),
+                                    MainPage::Detail => self.detail_state.title.clone(),
+                                    _ => "Library".to_string(),
+                                }
+                            };
+                            let (tracks_to_send, send_idx) = if self.active_page == MainPage::Search
+                                && clicked.youtube_video_id.is_some()
+                                && self.session_state.autoplay_radio
+                            {
+                                (vec![QueueEntry::from_track(&clicked)], 0)
+                            } else {
+                                let entries: Vec<QueueEntry> = active_list
+                                    .iter()
+                                    .take(200)
+                                    .map(QueueEntry::from_track)
+                                    .collect();
+                                let clamped = idx.min(entries.len().saturating_sub(1));
+                                (entries, clamped)
+                            };
+                            engine.send_remote_action(RemoteAction::PlayQueue {
+                                tracks: tracks_to_send,
+                                start_index: send_idx,
+                                context: ctx,
+                            });
+                        } else if self.active_page == MainPage::Search
                             && clicked.youtube_video_id.is_some()
                             && self.session_state.autoplay_radio
                         {
@@ -17360,16 +17824,20 @@ impl App {
         {
             let rv = self.ui.view(rid);
             if rv.button(id!(up_btn)).clicked(actions) {
-                if self.queue.move_upcoming_up(i) {
+                if !self.is_controlling_remote() && self.queue.move_upcoming_up(i) {
                     self.sync_next_deck_to_engine();
                     self.refresh_right_sidebar(cx);
+                    self.push_connect_playback_snapshot();
                 }
                 continue;
             }
             if rv.button(id!(rm_btn)).clicked(actions) {
-                if let Some(removed) = self.queue.remove_upcoming(i) {
+                if !self.is_controlling_remote()
+                    && let Some(removed) = self.queue.remove_upcoming(i)
+                {
                     self.sync_next_deck_to_engine();
                     self.refresh_right_sidebar(cx);
+                    self.push_connect_playback_snapshot();
                     self.show_toast(
                         cx,
                         &format!("Removed '{}' from queue", clip_text(&removed.title, 22)),
@@ -17377,10 +17845,20 @@ impl App {
                 }
                 continue;
             }
-            if (rv.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&rv, actions))
-                && let Some(target) = self.queue.jump_to_upcoming(i).cloned()
-            {
-                self.play_track(cx, target);
+            if rv.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&rv, actions) {
+                if self.is_controlling_remote() {
+                    if let Some(snap) = &self.connect_snap
+                        && let Some(engine) = &self.connect_engine
+                    {
+                        let target_idx =
+                            snap.active_queue_index.saturating_add(1).saturating_add(i);
+                        engine.send_remote_action(RemoteAction::JumpToQueueIndex {
+                            index: target_idx,
+                        });
+                    }
+                } else if let Some(target) = self.queue.jump_to_upcoming(i).cloned() {
+                    self.play_track(cx, target);
+                }
             }
         }
 
@@ -17489,15 +17967,25 @@ impl App {
         if self.ui.button(id!(shuffle_btn)).clicked(actions)
             || self.ui.button(id!(fs_shuffle_btn)).clicked(actions)
         {
-            let next_shuf = !self.queue.shuffle;
-            self.queue.set_shuffle(next_shuf);
-            self.session_state.shuffle = next_shuf;
-            self.mark_session_dirty();
-            self.sync_next_deck_to_engine();
-            self.sync_controls_from_state(cx);
-            self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
-            self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
-            self.refresh_right_sidebar(cx);
+            if self.is_controlling_remote()
+                && let Some(peer) = self.active_remote_peer().cloned()
+                && let Some(engine) = &self.connect_engine
+            {
+                engine.send_remote_action(RemoteAction::SetShuffle(!peer.shuffle_enabled));
+                self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
+                self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
+            } else {
+                let next_shuf = !self.queue.shuffle;
+                self.queue.set_shuffle(next_shuf);
+                self.session_state.shuffle = next_shuf;
+                self.mark_session_dirty();
+                self.sync_next_deck_to_engine();
+                self.sync_controls_from_state(cx);
+                self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
+                self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
+                self.refresh_right_sidebar(cx);
+                self.push_connect_playback_snapshot();
+            }
         }
         if self.ui.ferric_repeat_btn(id!(repeat_btn)).clicked(actions)
             || self
@@ -17505,24 +17993,45 @@ impl App {
                 .ferric_repeat_btn(id!(fs_repeat_btn))
                 .clicked(actions)
         {
-            self.queue.repeat = self.queue.repeat.next();
-            self.session_state.repeat = self.queue.repeat;
-            self.mark_session_dirty();
-            self.sync_next_deck_to_engine();
-            self.sync_controls_from_state(cx);
-            self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
-            self.ui
-                .ferric_repeat_btn(id!(fs_repeat_btn))
-                .trigger_anim(cx);
-            self.show_toast(
-                cx,
-                match self.queue.repeat {
-                    RepeatMode::Off => "Repeat Off",
-                    RepeatMode::All => "Repeat All",
-                    RepeatMode::One => "Repeat One",
-                },
-            );
-            self.ui.redraw(cx);
+            if self.is_controlling_remote()
+                && let Some(peer) = self.active_remote_peer().cloned()
+                && let Some(engine) = &self.connect_engine
+            {
+                let next_rep = peer.repeat_mode.next();
+                engine.send_remote_action(RemoteAction::SetRepeat(next_rep));
+                self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
+                self.ui
+                    .ferric_repeat_btn(id!(fs_repeat_btn))
+                    .trigger_anim(cx);
+                self.show_toast(
+                    cx,
+                    match next_rep {
+                        RepeatMode::Off => "Repeat Off",
+                        RepeatMode::All => "Repeat All",
+                        RepeatMode::One => "Repeat One",
+                    },
+                );
+            } else {
+                self.queue.repeat = self.queue.repeat.next();
+                self.session_state.repeat = self.queue.repeat;
+                self.mark_session_dirty();
+                self.sync_next_deck_to_engine();
+                self.sync_controls_from_state(cx);
+                self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
+                self.ui
+                    .ferric_repeat_btn(id!(fs_repeat_btn))
+                    .trigger_anim(cx);
+                self.push_connect_playback_snapshot();
+                self.show_toast(
+                    cx,
+                    match self.queue.repeat {
+                        RepeatMode::Off => "Repeat Off",
+                        RepeatMode::All => "Repeat All",
+                        RepeatMode::One => "Repeat One",
+                    },
+                );
+                self.ui.redraw(cx);
+            }
         }
         if self.ui.button(id!(dur_btn)).clicked(actions) {
             self.show_remaining_time = !self.show_remaining_time;
@@ -17553,18 +18062,30 @@ impl App {
                     .ferric_bar_slider(id!(fs_seek_slider))
                     .released(actions)
             })
-            && let Some(audio) = &self.audio
         {
-            let snap = audio.telemetry();
-            let dur = snap.duration_ms;
-            if dur > 0 {
-                let target_ms = (pos_ratio * dur as f64) as u64;
-                audio.send(EngineCommand::SeekMs(target_ms));
-                if self.video_open
-                    && let Some(vp) = &self.video_player
-                    && vp.is_open()
-                {
-                    vp.sync_playback(target_ms as f64 / 1000.0, snap.is_playing);
+            if self.is_controlling_remote()
+                && let Some(peer) = self.active_remote_peer().cloned()
+                && let Some(engine) = &self.connect_engine
+            {
+                if peer.duration_ms > 0 {
+                    let target_ms = (pos_ratio * peer.duration_ms as f64) as u64;
+                    engine.send_remote_action(RemoteAction::SeekTo {
+                        position_ms: target_ms,
+                    });
+                }
+            } else if let Some(audio) = &self.audio {
+                let snap = audio.telemetry();
+                let dur = snap.duration_ms;
+                if dur > 0 {
+                    let target_ms = (pos_ratio * dur as f64) as u64;
+                    audio.send(EngineCommand::SeekMs(target_ms));
+                    self.push_connect_playback_snapshot();
+                    if self.video_open
+                        && let Some(vp) = &self.video_player
+                        && vp.is_open()
+                    {
+                        vp.sync_playback(target_ms as f64 / 1000.0, snap.is_playing);
+                    }
                 }
             }
         }
@@ -17578,23 +18099,32 @@ impl App {
                     .changed(actions)
             })
         {
-            let was_muted = self.session_state.volume < 0.01;
-            self.session_state.volume = vol as f32;
-            let now_muted = self.session_state.volume < 0.01;
-            if self.session_state.volume > 0.02 {
-                self.pre_mute_volume = self.session_state.volume;
-            }
-            if let Some(audio) = &self.audio {
-                audio.send(EngineCommand::SetVolume(vol as f32));
-            }
-            self.sync_controls_from_state(cx);
-            if was_muted != now_muted {
+            if self.is_controlling_remote() {
                 self.ui
-                    .ferric_volume_btn(id!(vol_mute_btn))
-                    .trigger_anim(cx);
+                    .ferric_bar_slider(id!(vol_slider))
+                    .set_value(cx, vol);
                 self.ui
-                    .ferric_volume_btn(id!(fs_vol_mute_btn))
-                    .trigger_anim(cx);
+                    .ferric_bar_slider(id!(fs_vol_slider))
+                    .set_value(cx, vol);
+            } else {
+                let was_muted = self.session_state.volume < 0.01;
+                self.session_state.volume = vol as f32;
+                let now_muted = self.session_state.volume < 0.01;
+                if self.session_state.volume > 0.02 {
+                    self.pre_mute_volume = self.session_state.volume;
+                }
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::SetVolume(vol as f32));
+                }
+                self.sync_controls_from_state(cx);
+                if was_muted != now_muted {
+                    self.ui
+                        .ferric_volume_btn(id!(vol_mute_btn))
+                        .trigger_anim(cx);
+                    self.ui
+                        .ferric_volume_btn(id!(fs_vol_mute_btn))
+                        .trigger_anim(cx);
+                }
             }
         }
         if let Some(vol) = self
@@ -17607,14 +18137,25 @@ impl App {
                     .released(actions)
             })
         {
-            self.session_state.volume = vol as f32;
-            if self.session_state.volume > 0.02 {
-                self.pre_mute_volume = self.session_state.volume;
+            if self.is_controlling_remote()
+                && let Some(peer) = self.active_remote_peer().cloned()
+                && let Some(engine) = &self.connect_engine
+            {
+                engine.send_remote_action(RemoteAction::SetVolume {
+                    target_device: peer.device_id,
+                    volume_norm: (vol as f32).clamp(0.0, 1.0),
+                });
+            } else {
+                self.session_state.volume = vol as f32;
+                if self.session_state.volume > 0.02 {
+                    self.pre_mute_volume = self.session_state.volume;
+                }
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::SetVolume(vol as f32));
+                }
+                self.mark_session_dirty();
+                self.push_connect_playback_snapshot();
             }
-            if let Some(audio) = &self.audio {
-                audio.send(EngineCommand::SetVolume(vol as f32));
-            }
-            self.mark_session_dirty();
         }
         if self
             .ui
@@ -17625,24 +18166,46 @@ impl App {
                 .ferric_volume_btn(id!(fs_vol_mute_btn))
                 .clicked(actions)
         {
-            if self.session_state.volume > 0.01 {
-                self.pre_mute_volume = self.session_state.volume;
-                self.session_state.volume = 0.0;
+            if self.is_controlling_remote()
+                && let Some(peer) = self.active_remote_peer().cloned()
+                && let Some(engine) = &self.connect_engine
+            {
+                let next_v = if peer.volume_norm > 0.01 {
+                    0.0_f32
+                } else {
+                    0.85_f32
+                };
+                engine.send_remote_action(RemoteAction::SetVolume {
+                    target_device: peer.device_id,
+                    volume_norm: next_v,
+                });
+                self.ui
+                    .ferric_volume_btn(id!(vol_mute_btn))
+                    .trigger_anim(cx);
+                self.ui
+                    .ferric_volume_btn(id!(fs_vol_mute_btn))
+                    .trigger_anim(cx);
             } else {
-                self.session_state.volume = self.pre_mute_volume.max(0.5);
+                if self.session_state.volume > 0.01 {
+                    self.pre_mute_volume = self.session_state.volume;
+                    self.session_state.volume = 0.0;
+                } else {
+                    self.session_state.volume = self.pre_mute_volume.max(0.5);
+                }
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::SetVolume(self.session_state.volume));
+                }
+                self.mark_session_dirty();
+                self.push_connect_playback_snapshot();
+                self.sync_controls_from_state(cx);
+                self.ui
+                    .ferric_volume_btn(id!(vol_mute_btn))
+                    .trigger_anim(cx);
+                self.ui
+                    .ferric_volume_btn(id!(fs_vol_mute_btn))
+                    .trigger_anim(cx);
+                self.ui.redraw(cx);
             }
-            if let Some(audio) = &self.audio {
-                audio.send(EngineCommand::SetVolume(self.session_state.volume));
-            }
-            self.mark_session_dirty();
-            self.sync_controls_from_state(cx);
-            self.ui
-                .ferric_volume_btn(id!(vol_mute_btn))
-                .trigger_anim(cx);
-            self.ui
-                .ferric_volume_btn(id!(fs_vol_mute_btn))
-                .trigger_anim(cx);
-            self.ui.redraw(cx);
         }
 
         // Lyrics & Video Clip actions (Right Sidebar + Integrated Fullscreen Lyrics/Video Stage)
@@ -17655,16 +18218,25 @@ impl App {
                     .ferric_lyrics_view(id!(fs_lyrics_scroll))
                     .seek_ms(actions)
             })
-            && let Some(audio) = &self.audio
         {
-            let playing = audio.telemetry().is_playing;
-            audio.send(EngineCommand::SeekMs(seek_ms));
-            self.update_lyrics_display(cx, seek_ms);
-            if self.video_open
-                && let Some(vp) = &self.video_player
-                && vp.is_open()
+            if self.is_controlling_remote()
+                && let Some(engine) = &self.connect_engine
             {
-                vp.sync_playback(seek_ms as f64 / 1000.0, playing);
+                engine.send_remote_action(RemoteAction::SeekTo {
+                    position_ms: seek_ms,
+                });
+                self.update_lyrics_display(cx, seek_ms);
+            } else if let Some(audio) = &self.audio {
+                let playing = audio.telemetry().is_playing;
+                audio.send(EngineCommand::SeekMs(seek_ms));
+                self.push_connect_playback_snapshot();
+                self.update_lyrics_display(cx, seek_ms);
+                if self.video_open
+                    && let Some(vp) = &self.video_player
+                    && vp.is_open()
+                {
+                    vp.sync_playback(seek_ms as f64 / 1000.0, playing);
+                }
             }
         }
         if self.ui.button(id!(rs_lyr_minus)).clicked(actions)
@@ -19686,6 +20258,26 @@ fn eq_band_ids() -> [(&'static [LiveId], &'static [LiveId]); 10] {
 fn rgba_vec4(hex: &str) -> Vec4 {
     let [r, g, b, a] = hex_to_rgba_f32(hex, 1.0);
     vec4(r, g, b, a)
+}
+
+fn persistent_connect_device_id() -> String {
+    let dir = app_data_dir();
+    let id_path = dir.join("connect_device_id.txt");
+    if let Ok(raw) = std::fs::read_to_string(&id_path) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty()
+            && trimmed.len() <= 64
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return trimmed.to_string();
+        }
+    }
+    let generated = format!("ferric-pc-{}", csprng_hex(6));
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&id_path, &generated);
+    generated
 }
 
 fn rgba_to_vec4(c: [f32; 4]) -> Vec4 {

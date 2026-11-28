@@ -131,9 +131,11 @@ fun SettingsSheet(
                 val peerCount = state.connectState.peers.count { it.connected }
                 SettingsRowCard(
                     icon = Icons.Rounded.Devices,
-                    title = "Ferric Connect (Zero-Pairing LAN)",
+                    title = "Ferric Connect (Cloud & Wi-Fi)",
                     subtitle = if (peerCount > 0) {
-                        "$peerCount device(s) connected over encrypted ChaCha20 LAN"
+                        "$peerCount device(s) connected via E2EE Connect"
+                    } else if (state.connectState.relayConnected) {
+                        "Cloud E2EE online · Works across any Wi-Fi or 4G/5G network"
                     } else {
                         "Auto-Connect via Spotify/YTM account · ${state.connectState.localIp}"
                     },

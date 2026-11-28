@@ -11,6 +11,10 @@ const ACCOUNT_ROOM_SALT: &[u8] = b"Ferric.Connect.AccountRoom.v1";
 const QR_ROOM_SALT: &[u8] = b"Ferric.Connect.QrRoom.v1";
 const SESSION_KEY_INFO: &[u8] = b"session-key";
 const ROOM_TAG_LABEL: &[u8] = b"ferric-room-tag-v1";
+const RELAY_TOPIC_LABEL: &[u8] = b"ferric-relay-topic-v1";
+const RELAY_MSG_INFO: &[u8] = b"ferric-relay-msg-v1";
+const RELAY_FRAME_MAGIC: &[u8; 4] = b"FCR1";
+const RELAY_HEADER_LEN: usize = 4 + 16 + 8;
 const HANDSHAKE_DOMAIN: &[u8] = b"ferric-connect-hs-v1";
 const DIR_INIT_TO_RESP: u8 = 0x01;
 const DIR_RESP_TO_INIT: u8 = 0x02;
@@ -210,7 +214,7 @@ pub struct LocalRoomKeys {
 }
 
 /// Selector indicating which room key matched during LAN discovery / handshake.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MatchedRoomSlot {
     Spotify = 0,
@@ -622,6 +626,102 @@ impl AeadChannel {
     }
 }
 
+/// Derive an unlinkable opaque MQTT topic name (`ferric/v1/<32 hex chars>`) from a 32-byte room key.
+/// Brokers only ever observe this HMAC digest, never account emails, IDs, or handles.
+#[must_use]
+pub fn derive_relay_topic(room_key: &[u8; 32]) -> String {
+    let mac = hmac_sha256(room_key, RELAY_TOPIC_LABEL);
+    format!("ferric/v1/{}", hex_encode(&mac[..16]))
+}
+
+/// Seal a relay plaintext payload under `room_key` using a per-boot `epoch_salt` and monotonic
+/// `seq >= 1` (`[FCR1][epoch_salt:16][seq:u64 LE][ChaCha20-Poly1305 ct+tag]`).
+pub fn seal_relay_packet(
+    room_key: &[u8; 32],
+    epoch_salt: &[u8; 16],
+    seq: u64,
+    plaintext: &[u8],
+) -> SyncResult<Vec<u8>> {
+    if seq == 0 {
+        return Err(SyncError::Crypto("relay seq must be non-zero"));
+    }
+    if plaintext.len() > MAX_FRAME_BYTES {
+        return Err(SyncError::FrameTooLarge(plaintext.len()));
+    }
+    let mut msg_key = hkdf_sha256_32(room_key, epoch_salt, RELAY_MSG_INFO);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&msg_key));
+    zeroize_bytes(&mut msg_key);
+
+    let mut header = [0u8; RELAY_HEADER_LEN];
+    header[..4].copy_from_slice(RELAY_FRAME_MAGIC);
+    header[4..20].copy_from_slice(epoch_salt);
+    header[20..28].copy_from_slice(&seq.to_le_bytes());
+
+    let mut nonce = [0u8; 12];
+    nonce[0] = 0x09;
+    nonce[4..12].copy_from_slice(&seq.to_le_bytes());
+
+    let ct = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &header,
+            },
+        )
+        .map_err(|_| SyncError::Crypto("relay seal failed"))?;
+
+    let mut out = Vec::with_capacity(RELAY_HEADER_LEN + ct.len());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Decrypt and authenticate a sealed relay packet, returning `(epoch_salt, seq, plaintext)`.
+pub fn open_relay_packet(
+    room_key: &[u8; 32],
+    packet: &[u8],
+) -> SyncResult<([u8; 16], u64, Vec<u8>)> {
+    if packet.len() < RELAY_HEADER_LEN + POLY1305_TAG_LEN {
+        return Err(SyncError::TruncatedFrame);
+    }
+    if packet.len() > RELAY_HEADER_LEN + MAX_FRAME_BYTES + POLY1305_TAG_LEN {
+        return Err(SyncError::FrameTooLarge(packet.len()));
+    }
+    if &packet[..4] != RELAY_FRAME_MAGIC {
+        return Err(SyncError::AuthFailed);
+    }
+    let mut epoch_salt = [0u8; 16];
+    epoch_salt.copy_from_slice(&packet[4..20]);
+    let seq = u64::from_le_bytes([
+        packet[20], packet[21], packet[22], packet[23], packet[24], packet[25], packet[26],
+        packet[27],
+    ]);
+    if seq == 0 {
+        return Err(SyncError::AuthFailed);
+    }
+
+    let mut msg_key = hkdf_sha256_32(room_key, &epoch_salt, RELAY_MSG_INFO);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&msg_key));
+    zeroize_bytes(&mut msg_key);
+
+    let mut nonce = [0u8; 12];
+    nonce[0] = 0x09;
+    nonce[4..12].copy_from_slice(&seq.to_le_bytes());
+
+    let pt = cipher
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &packet[RELAY_HEADER_LEN..],
+                aad: &packet[..RELAY_HEADER_LEN],
+            },
+        )
+        .map_err(|_| SyncError::AuthFailed)?;
+
+    Ok((epoch_salt, seq, pt))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,5 +820,31 @@ mod tests {
         let mut attacker = AeadChannel::from_handshake(&wrong_room.key, &n_init, &n_resp, true);
         let bad_ct = attacker.seal(b"hijack").expect("seal");
         assert!(resp.open(&bad_ct).is_err());
+    }
+
+    #[test]
+    fn relay_topic_is_opaque_and_packet_aead_rejects_wrong_key_or_tamper() {
+        let room_a = derive_spotify_room("RaflyUser").expect("room a");
+        let room_b = derive_spotify_room("raflyuser").expect("room b");
+        let other = derive_spotify_room("someone_else").expect("other");
+
+        let topic_a = derive_relay_topic(&room_a.key);
+        let topic_b = derive_relay_topic(&room_b.key);
+        assert_eq!(topic_a, topic_b);
+        assert!(topic_a.starts_with("ferric/v1/"));
+        assert!(!topic_a.to_ascii_lowercase().contains("rafly"));
+        assert_ne!(topic_a, derive_relay_topic(&other.key));
+
+        let salt = [0x42u8; 16];
+        let sealed = seal_relay_packet(&room_a.key, &salt, 1, b"hello relay").expect("seal");
+        let (dec_salt, dec_seq, pt) = open_relay_packet(&room_b.key, &sealed).expect("open");
+        assert_eq!(dec_salt, salt);
+        assert_eq!(dec_seq, 1);
+        assert_eq!(pt, b"hello relay");
+
+        let mut tampered = sealed.clone();
+        tampered[12] ^= 0x01;
+        assert!(open_relay_packet(&room_b.key, &tampered).is_err());
+        assert!(open_relay_packet(&other.key, &sealed).is_err());
     }
 }

@@ -978,7 +978,7 @@ private fun FloatingMiniPlayerPill(
             }
             MiniProgressBar(
                 progressFlow = progressFlow,
-                remotePositionMs = activeRemotePeer?.positionMs?.toLong(),
+                remotePositionMs = null,
                 remoteDurationMs = activeRemotePeer?.durationMs?.toLong(),
                 accent = palette.accent,
                 trackColor = palette.textSecondary.copy(alpha = 0.16f),

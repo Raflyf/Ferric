@@ -628,17 +628,25 @@ fun FullPlayerScreen(
 
                     // Jitter-free isolated Seekbar + Elapsed / Codec / Remaining row
                     PlayerSeekSection(
-                        trackId = track?.id,
+                        trackId = activeRemote?.activeTrackId ?: track?.id,
                         progressFlow = progressFlow,
-                        remotePositionMs = activeRemote?.positionMs?.toLong(),
+                        remotePositionMs = null,
                         remoteDurationMs = activeRemote?.durationMs?.toLong(),
                         fallbackDurationMs = track?.durationMs?.toLong()?.coerceAtLeast(0L) ?: 0L,
-                        codecLabel = buildString {
-                            val c = track?.codec.orEmpty()
-                            if (c.isNotBlank()) append(c)
-                            if (state.outputRate > 0) {
-                                if (isNotEmpty()) append(" · ")
-                                append(String.format(Locale.US, "%.1f kHz", state.outputRate / 1000.0))
+                        codecLabel = if (activeRemote != null) {
+                            if (activeRemote.viaRelay) {
+                                "CLOUD · ${activeRemote.deviceName}"
+                            } else {
+                                "WIFI · ${activeRemote.deviceName}"
+                            }
+                        } else {
+                            buildString {
+                                val c = track?.codec.orEmpty()
+                                if (c.isNotBlank()) append(c)
+                                if (state.outputRate > 0) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append(String.format(Locale.US, "%.1f kHz", state.outputRate / 1000.0))
+                                }
                             }
                         },
                         accent = palette.accent,
@@ -646,6 +654,9 @@ fun FullPlayerScreen(
                         onCanvasSecondary = onCanvasSecondary,
                         onSeek = onSeek,
                     )
+
+                    val effectiveShuffle = activeRemote?.shuffleEnabled ?: state.shuffle
+                    val effectiveRepeat = activeRemote?.repeatMode ?: state.repeatMode
 
                     // Transport Controls
                     Row(
@@ -657,7 +668,7 @@ fun FullPlayerScreen(
                             Icon(
                                 imageVector = Icons.Rounded.Shuffle,
                                 contentDescription = "Shuffle",
-                                tint = if (state.shuffle) palette.accent else onCanvasSecondary,
+                                tint = if (effectiveShuffle) palette.accent else onCanvasSecondary,
                                 modifier = Modifier.size(23.dp),
                             )
                         }
@@ -693,13 +704,13 @@ fun FullPlayerScreen(
                         }
                         IconButton(onClick = onCycleRepeat) {
                             Icon(
-                                imageVector = if (state.repeatMode == FfiRepeatMode.ONE) {
+                                imageVector = if (effectiveRepeat == FfiRepeatMode.ONE) {
                                     Icons.Rounded.RepeatOne
                                 } else {
                                     Icons.Rounded.Repeat
                                 },
                                 contentDescription = "Repeat",
-                                tint = if (state.repeatMode != FfiRepeatMode.OFF) palette.accent else onCanvasSecondary,
+                                tint = if (effectiveRepeat != FfiRepeatMode.OFF) palette.accent else onCanvasSecondary,
                                 modifier = Modifier.size(23.dp),
                             )
                         }

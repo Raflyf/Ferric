@@ -1,18 +1,20 @@
 pub mod crypto;
 pub mod lan;
 pub mod qr;
+pub mod relay;
 pub mod session;
 
 pub use crypto::{
     AeadChannel, AeadReceiver, AeadSender, LocalRoomKeys, MatchedRoomSlot, RoomIdentity, RoomKey,
-    decode_room_tags_hex, derive_qr_room, derive_spotify_room, derive_ytm_room,
-    encode_room_tags_hex,
+    decode_room_tags_hex, derive_qr_room, derive_relay_topic, derive_spotify_room, derive_ytm_room,
+    encode_room_tags_hex, open_relay_packet, seal_relay_packet,
 };
 pub use lan::{
     DiscoveredPeer, FERRIC_LAN_UDP_PORT, LanDiscoveryBeacon, detect_local_lan_ip,
     is_lan_or_loopback, sanitize_device_name,
 };
 pub use qr::QrMatrix;
+pub use relay::{DEFAULT_RELAY_BROKERS, RelayClient, RelayEnvelope, RelayEvent, RelayRoomSpec};
 pub use session::{
     ConnectConfig, ConnectEngine, ConnectEvent, ConnectPeerInfo, ConnectSnapshot,
     LocalPlaybackSnapshot,
@@ -260,16 +262,17 @@ pub enum SyncFrame {
 pub struct SpeakerAuthority {
     pub device_id: DeviceId,
     pub is_playing: bool,
+    pub has_track: bool,
     pub revision: u64,
     pub anchor_utc_ms: i64,
 }
 
 /// Resolve active speaker authority deterministically when two devices connect:
-/// `actively playing > highest revision > newest anchor_utc_ms > lexicographically smaller device_id`.
+/// `actively playing > has loaded track > highest revision > newest anchor_utc_ms > lexicographically smaller device_id`.
 #[must_use]
 pub fn resolve_active_speaker_tie_break(a: &SpeakerAuthority, b: &SpeakerAuthority) -> DeviceId {
-    let rank_a = (a.is_playing, a.revision, a.anchor_utc_ms);
-    let rank_b = (b.is_playing, b.revision, b.anchor_utc_ms);
+    let rank_a = (a.is_playing, a.has_track, a.revision, a.anchor_utc_ms);
+    let rank_b = (b.is_playing, b.has_track, b.revision, b.anchor_utc_ms);
     match rank_a.cmp(&rank_b) {
         std::cmp::Ordering::Greater => a.device_id.clone(),
         std::cmp::Ordering::Less => b.device_id.clone(),
@@ -582,12 +585,14 @@ mod tests {
         let a = SpeakerAuthority {
             device_id: "phone-b".to_string(),
             is_playing: true,
+            has_track: true,
             revision: 1,
             anchor_utc_ms: 100,
         };
         let b = SpeakerAuthority {
             device_id: "desktop-a".to_string(),
             is_playing: false,
+            has_track: true,
             revision: 99,
             anchor_utc_ms: 999,
         };
@@ -596,15 +601,33 @@ mod tests {
         let c = SpeakerAuthority {
             device_id: "phone-b".to_string(),
             is_playing: false,
+            has_track: true,
             revision: 5,
             anchor_utc_ms: 500,
         };
         let d = SpeakerAuthority {
             device_id: "desktop-a".to_string(),
             is_playing: false,
+            has_track: true,
             revision: 5,
             anchor_utc_ms: 500,
         };
         assert_eq!(resolve_active_speaker_tie_break(&c, &d), "desktop-a");
+
+        let loaded = SpeakerAuthority {
+            device_id: "z-phone".to_string(),
+            is_playing: false,
+            has_track: true,
+            revision: 1,
+            anchor_utc_ms: 100,
+        };
+        let empty = SpeakerAuthority {
+            device_id: "a-desktop".to_string(),
+            is_playing: false,
+            has_track: false,
+            revision: 9,
+            anchor_utc_ms: 999,
+        };
+        assert_eq!(resolve_active_speaker_tie_break(&loaded, &empty), "z-phone");
     }
 }

@@ -145,9 +145,13 @@ fun YouScreen(
                     subtitle = if (connectedPeers.isNotEmpty()) {
                         "Connected to ${connectedPeers.joinToString { it.deviceName }}"
                     } else if (state.connectState.isAccountReady) {
-                        "Auto-Connect ready on Wi-Fi"
+                        if (state.connectState.relayConnected) {
+                            "Cloud E2EE & Wi-Fi Connect active"
+                        } else {
+                            "Auto-Connect ready across networks"
+                        }
                     } else {
-                        "Link Desktop & phone over Wi-Fi"
+                        "Link Desktop & phone across any network"
                     },
                     badgeText = if (connectedPeers.isNotEmpty()) "${connectedPeers.size} LIVE" else null,
                     badgeColor = Color(0xFF22C55E),

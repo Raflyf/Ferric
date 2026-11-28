@@ -165,7 +165,10 @@ data class PlaybackUiState(
         activeSpeakerId = "",
         isLocalActiveSpeaker = true,
         isAccountReady = false,
+        relayConnected = false,
         peers = emptyList(),
+        activeRemoteQueue = emptyList(),
+        activeRemoteQueueIndex = 0u,
     ),
     val connectQrCode: FfiQrCode? = null,
     val statusMessage: String? = null,
@@ -251,6 +254,7 @@ class CoreStateStore(private val appContext: Context) {
     private var onlineSearchJob: Job? = null
     private var autoEqSearchJob: Job? = null
     private var sleepTimerPollJob: Job? = null
+    private var remoteProgressJob: Job? = null
 
     private val _uiState = MutableStateFlow(
         PlaybackUiState(
@@ -395,7 +399,23 @@ class CoreStateStore(private val appContext: Context) {
         }
 
         override fun onConnectStateChanged(state: FfiConnectState) {
-            _uiState.update { it.copy(connectState = state) }
+            _uiState.update { prev ->
+                val activeRemote = if (!state.isLocalActiveSpeaker) {
+                    state.peers.firstOrNull { it.connected && it.deviceId == state.activeSpeakerId }
+                } else {
+                    null
+                }
+                if (activeRemote != null && activeRemote.nowPlayingTitle.isNotBlank()) {
+                    extractCoverShadeAsync(activeRemote.nowPlayingThumbnailUrl)
+                    prev.copy(
+                        connectState = state,
+                        miniPlayerDismissed = false,
+                    )
+                } else {
+                    prev.copy(connectState = state)
+                }
+            }
+            updateRemoteProgressTicker(state)
             if (state.localTcpPort.toInt() >= 1024) {
                 nsdHelper.syncRegistration(
                     deviceId = state.localDeviceId,
@@ -704,6 +724,50 @@ class CoreStateStore(private val appContext: Context) {
                 val rem = runCatching { core?.getSleepTimerRemainingSecs()?.toLong() ?: 0L }.getOrDefault(0L)
                 _uiState.update { it.copy(sleepTimerRemainingSecs = rem) }
                 if (rem <= 0L) break
+            }
+        }
+    }
+
+    private fun updateRemoteProgressTicker(connectState: FfiConnectState) {
+        remoteProgressJob?.cancel()
+        remoteProgressJob = null
+        if (connectState.isLocalActiveSpeaker) return
+        val peer = connectState.peers.firstOrNull {
+            it.connected && it.deviceId == connectState.activeSpeakerId
+        } ?: return
+
+        val durMs = peer.durationMs.toLong().coerceAtLeast(0L)
+        val anchorWall = peer.anchorUtcMs
+        val driftAtReceive = if (peer.isPlaying && anchorWall > 0L) {
+            (System.currentTimeMillis() - anchorWall).coerceIn(0L, 120_000L)
+        } else {
+            0L
+        }
+        val basePos = (peer.positionMs.toLong() + driftAtReceive).let { raw ->
+            if (durMs > 0L) raw.coerceIn(0L, durMs) else raw.coerceAtLeast(0L)
+        }
+        _playbackProgress.update { prev ->
+            prev.copy(positionMs = basePos, durationMs = durMs)
+        }
+        if (!peer.isPlaying) return
+
+        val startMonoMs = android.os.SystemClock.elapsedRealtime()
+        remoteProgressJob = scope.launch {
+            while (true) {
+                delay(500L)
+                val latest = _uiState.value.connectState
+                if (latest.isLocalActiveSpeaker) break
+                val livePeer = latest.peers.firstOrNull {
+                    it.connected && it.deviceId == latest.activeSpeakerId
+                } ?: break
+                if (!livePeer.isPlaying) break
+                val elapsed = (android.os.SystemClock.elapsedRealtime() - startMonoMs).coerceAtLeast(0L)
+                val nextPos = (basePos + elapsed).let { p ->
+                    if (durMs > 0L) p.coerceIn(0L, durMs) else p
+                }
+                _playbackProgress.update { prev ->
+                    prev.copy(positionMs = nextPos, durationMs = durMs)
+                }
             }
         }
     }

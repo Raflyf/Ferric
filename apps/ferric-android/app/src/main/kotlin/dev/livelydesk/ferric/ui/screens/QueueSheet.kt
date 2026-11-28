@@ -66,7 +66,10 @@ import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
 import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import java.util.Locale
 import kotlinx.coroutines.flow.StateFlow
+import uniffi.ferric_mobile_ffi.FfiConnectPeer
 import uniffi.ferric_mobile_ffi.FfiRepeatMode
+import uniffi.ferric_mobile_ffi.FfiTrack
+import uniffi.ferric_mobile_ffi.FfiTrackSource
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,6 +94,51 @@ fun QueueSheet(
     var saveName by remember { mutableStateOf("Queue Mix") }
     val listState = rememberLazyListState()
 
+    val activeRemote: FfiConnectPeer? = if (!state.connectState.isLocalActiveSpeaker) {
+        state.connectState.peers.firstOrNull {
+            it.connected && it.deviceId == state.connectState.activeSpeakerId
+        }
+    } else {
+        null
+    }
+    val isRemote = activeRemote != null
+    val remoteQueue = state.connectState.activeRemoteQueue
+    val remoteIdx = state.connectState.activeRemoteQueueIndex.toInt()
+        .coerceIn(0, (remoteQueue.size - 1).coerceAtLeast(0))
+
+    val displayCurrent: FfiTrack? = if (isRemote) {
+        remoteQueue.getOrNull(remoteIdx) ?: activeRemote.nowPlayingTitle.takeIf { it.isNotBlank() }?.let { t ->
+            FfiTrack(
+                id = activeRemote.activeTrackId ?: "remote:${activeRemote.deviceId}",
+                title = t,
+                artist = activeRemote.nowPlayingArtist,
+                album = "",
+                durationMs = activeRemote.durationMs,
+                path = null,
+                source = FfiTrackSource.YOU_TUBE_MUSIC,
+                codec = "",
+                sampleRate = 48000u,
+                bitDepth = 16u,
+                bitrateKbps = 128u,
+                spotifyId = null,
+                youtubeVideoId = null,
+                thumbnailUrl = activeRemote.nowPlayingThumbnailUrl,
+                replayGainDb = 0,
+                liked = false,
+            )
+        }
+    } else {
+        state.currentTrack
+    }
+    val displayUpNext: List<FfiTrack> = if (isRemote) {
+        if (remoteIdx + 1 < remoteQueue.size) remoteQueue.drop(remoteIdx + 1) else emptyList()
+    } else {
+        state.upNext
+    }
+    val displayPlaying = activeRemote?.isPlaying ?: state.isPlaying
+    val displayShuffle = activeRemote?.shuffleEnabled ?: state.shuffle
+    val displayRepeat = activeRemote?.repeatMode ?: state.repeatMode
+
     val nearEnd by remember {
         derivedStateOf {
             val layout = listState.layoutInfo
@@ -98,20 +146,20 @@ fun QueueSheet(
             layout.totalItemsCount > 0 && lastVisible >= (layout.totalItemsCount - 6)
         }
     }
-    LaunchedEffect(nearEnd, state.upNext.size, state.isExtendingQueue) {
-        if (nearEnd && !state.isExtendingQueue && state.currentTrack != null) {
+    LaunchedEffect(nearEnd, displayUpNext.size, state.isExtendingQueue, isRemote) {
+        if (!isRemote && nearEnd && !state.isExtendingQueue && displayCurrent != null) {
             onLoadMoreQueue()
         }
     }
 
-    val totalSongs = (if (state.currentTrack != null) 1 else 0) + state.upNext.size
-    val totalMs = (state.currentTrack?.durationMs?.toLong() ?: 0L) +
-        state.upNext.sumOf { it.durationMs.toLong() }
+    val totalSongs = (if (displayCurrent != null) 1 else 0) + displayUpNext.size
+    val totalMs = (displayCurrent?.durationMs?.toLong() ?: 0L) +
+        displayUpNext.sumOf { it.durationMs.toLong() }
 
     // Stable occurrence-counted keys so moving rows does not break item identity.
-    val queueKeys = remember(state.upNext) {
-        val counts = HashMap<String, Int>(state.upNext.size)
-        state.upNext.map { t ->
+    val queueKeys = remember(displayUpNext) {
+        val counts = HashMap<String, Int>(displayUpNext.size)
+        displayUpNext.map { t ->
             val occ = (counts[t.id] ?: 0) + 1
             counts[t.id] = occ
             "${t.id}#$occ"
@@ -137,7 +185,7 @@ fun QueueSheet(
             ) {
                 Column {
                     Text(
-                        text = "Queue",
+                        text = if (isRemote) "Queue · ${activeRemote.deviceName}" else "Queue",
                         style = MaterialTheme.typography.headlineSmall,
                         color = palette.textPrimary,
                     )
@@ -152,24 +200,24 @@ fun QueueSheet(
                         Icon(
                             imageVector = Icons.Rounded.Shuffle,
                             contentDescription = "Shuffle",
-                            tint = if (state.shuffle) palette.accent else palette.textSecondary,
+                            tint = if (displayShuffle) palette.accent else palette.textSecondary,
                         )
                     }
                     IconButton(onClick = onCycleRepeat) {
                         Icon(
-                            imageVector = if (state.repeatMode == FfiRepeatMode.ONE) {
+                            imageVector = if (displayRepeat == FfiRepeatMode.ONE) {
                                 Icons.Rounded.RepeatOne
                             } else {
                                 Icons.Rounded.Repeat
                             },
                             contentDescription = "Repeat",
-                            tint = if (state.repeatMode != FfiRepeatMode.OFF) palette.accent else palette.textSecondary,
+                            tint = if (displayRepeat != FfiRepeatMode.OFF) palette.accent else palette.textSecondary,
                         )
                     }
                 }
             }
 
-            state.currentTrack?.let { cur ->
+            displayCurrent?.let { cur ->
                 androidx.compose.foundation.layout.Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -186,7 +234,7 @@ fun QueueSheet(
                                 url = cur.thumbnailUrl,
                                 size = 48.dp,
                                 cornerRadius = 10.dp,
-                                isActive = state.isPlaying,
+                                isActive = displayPlaying,
                             )
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
@@ -221,40 +269,44 @@ fun QueueSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Up Next (${state.upNext.size})",
+                    text = "Up Next (${displayUpNext.size})",
                     style = MaterialTheme.typography.titleMedium,
                     color = palette.textPrimary,
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { showSaveDialog = true }) {
-                        Icon(Icons.Rounded.Save, contentDescription = null, tint = palette.accent, modifier = Modifier.size(17.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Save", color = palette.accent)
-                    }
-                    TextButton(onClick = onCopyQueue) {
-                        Icon(Icons.Rounded.ContentCopy, contentDescription = null, tint = palette.textSecondary, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Copy", color = palette.textSecondary)
-                    }
-                    if (state.upNext.isNotEmpty()) {
-                        IconButton(onClick = onClearUpNext) {
-                            Icon(Icons.Rounded.DeleteSweep, contentDescription = "Clear Up Next", tint = palette.textSecondary)
+                if (!isRemote) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { showSaveDialog = true }) {
+                            Icon(Icons.Rounded.Save, contentDescription = null, tint = palette.accent, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Save", color = palette.accent)
+                        }
+                        TextButton(onClick = onCopyQueue) {
+                            Icon(Icons.Rounded.ContentCopy, contentDescription = null, tint = palette.textSecondary, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Copy", color = palette.textSecondary)
+                        }
+                        if (displayUpNext.isNotEmpty()) {
+                            IconButton(onClick = onClearUpNext) {
+                                Icon(Icons.Rounded.DeleteSweep, contentDescription = "Clear Up Next", tint = palette.textSecondary)
+                            }
                         }
                     }
                 }
             }
 
-            if (state.upNext.isEmpty()) {
+            if (displayUpNext.isEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = if (state.isExtendingQueue) {
+                        text = if (!isRemote && state.isExtendingQueue) {
                             "Loading personalized Up Next tracks..."
+                        } else if (isRemote) {
+                            "Up Next queue from ${activeRemote.deviceName} is empty."
                         } else {
                             "Queue is empty. Add tracks or load more recommendations."
                         },
                         color = palette.textSecondary,
                     )
-                    if (state.currentTrack != null && !state.isExtendingQueue) {
+                    if (!isRemote && displayCurrent != null && !state.isExtendingQueue) {
                         TextButton(onClick = onLoadMoreQueue) {
                             Text("Load Up Next Radio", color = palette.accent)
                         }
@@ -267,7 +319,7 @@ fun QueueSheet(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier.heightIn(max = 460.dp),
                 ) {
-                    itemsIndexed(state.upNext, key = { idx, _ -> queueKeys[idx] }) { idx, track ->
+                    itemsIndexed(displayUpNext, key = { idx, _ -> queueKeys[idx] }) { idx, track ->
                         val rowRadius = (palette.cornerRadiusDp.value * 0.6f).coerceIn(4f, 14f).dp
                         Row(
                             modifier = Modifier
@@ -313,45 +365,48 @@ fun QueueSheet(
                                     modifier = Modifier.padding(horizontal = 4.dp),
                                 )
                             }
-                            IconButton(
-                                onClick = { onMoveUp(idx) },
-                                enabled = idx > 0,
-                                modifier = Modifier.size(30.dp),
-                            ) {
-                                Icon(
-                                    Icons.Rounded.ArrowUpward,
-                                    contentDescription = "Move up",
-                                    tint = if (idx > 0) palette.textPrimary else palette.border,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                            IconButton(
-                                onClick = { onMoveDown(idx) },
-                                enabled = idx < state.upNext.lastIndex,
-                                modifier = Modifier.size(30.dp),
-                            ) {
-                                Icon(
-                                    Icons.Rounded.ArrowDownward,
-                                    contentDescription = "Move down",
-                                    tint = if (idx < state.upNext.lastIndex) palette.textPrimary else palette.border,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                            IconButton(
-                                onClick = { onRemove(idx) },
-                                modifier = Modifier.size(30.dp),
-                            ) {
-                                Icon(
-                                    Icons.Rounded.Close,
-                                    contentDescription = "Remove from queue",
-                                    tint = palette.textSecondary,
-                                    modifier = Modifier.size(16.dp),
-                                )
+                            if (!isRemote) {
+                                IconButton(
+                                    onClick = { onMoveUp(idx) },
+                                    enabled = idx > 0,
+                                    modifier = Modifier.size(30.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.ArrowUpward,
+                                        contentDescription = "Move up",
+                                        tint = if (idx > 0) palette.textPrimary else palette.border,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onMoveDown(idx) },
+                                    enabled = idx < displayUpNext.lastIndex,
+                                    modifier = Modifier.size(30.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.ArrowDownward,
+                                        contentDescription = "Move down",
+                                        tint = if (idx < displayUpNext.lastIndex) palette.textPrimary else palette.border,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onRemove(idx) },
+                                    modifier = Modifier.size(30.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Close,
+                                        contentDescription = "Remove from queue",
+                                        tint = palette.textSecondary,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
                             }
                         }
                     }
 
-                    item(key = "queue_infinite_footer") {
+                    if (!isRemote) {
+                        item(key = "queue_infinite_footer") {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -381,6 +436,7 @@ fun QueueSheet(
                                 }
                             }
                         }
+                    }
                     }
                 }
             }

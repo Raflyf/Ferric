@@ -47,10 +47,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -65,6 +67,7 @@ import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
 import dev.livelydesk.ferric.ui.theme.FerricEaseOut
 import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
+import dev.livelydesk.ferric.ui.theme.FerricVisualPalette
 import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalBackdropState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
@@ -129,8 +132,24 @@ fun ShareCardSheet(
 
     val selectedLines = selectedIndices.sorted().mapNotNull { allLines.getOrNull(it) }
     val cardBackdrop = rememberFerricBackdropState()
-    val outerCorner = (palette.cornerRadiusDp.value * 0.9f).coerceIn(10f, 24f).dp
-    val cardCorner = (palette.cornerRadiusDp.value * 0.85f).coerceIn(10f, 22f).dp
+    val outerCorner = (palette.cornerRadiusDp.value * 0.9f).coerceIn(12f, 24f).dp
+    val cardCorner = if (style == ShareCardStyle.LIQUID_GLASS) {
+        24.dp
+    } else {
+        (palette.cornerRadiusDp.value * 0.85f).coerceIn(10f, 22f).dp
+    }
+    val liquidPreviewPalette = remember(state.coverShade, palette.fontFamilyName, palette.editorialMode) {
+        FerricVisualPalette(
+            isLight = false,
+            isLiquidGlass = true,
+            glassOpacity = 0.66f,
+            glassTint = state.coverShade.glassTint,
+            accent = state.coverShade.accent,
+            cornerRadiusDp = 24.dp,
+            editorialMode = palette.editorialMode,
+            fontFamilyName = palette.fontFamilyName,
+        )
+    }
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     FerricModalBottomSheet(
@@ -232,9 +251,7 @@ fun ShareCardSheet(
                                         model = bgReq,
                                         contentDescription = null,
                                         contentScale = ContentScale.Crop,
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .blur(6.dp),
+                                        modifier = Modifier.fillMaxSize(),
                                     )
                                 } else {
                                     Box(
@@ -257,9 +274,9 @@ fun ShareCardSheet(
                                         .background(
                                             Brush.verticalGradient(
                                                 colors = listOf(
-                                                    Color.Black.copy(alpha = 0.16f),
-                                                    Color.Black.copy(alpha = 0.06f),
-                                                    Color.Black.copy(alpha = 0.30f),
+                                                    Color.Black.copy(alpha = 0.12f),
+                                                    Color.Black.copy(alpha = 0.04f),
+                                                    Color.Black.copy(alpha = 0.28f),
                                                 ),
                                             ),
                                         ),
@@ -268,20 +285,30 @@ fun ShareCardSheet(
                         }
                     }
 
-                    // Preview Layer 2: Floating Lyric Card (true AGSL Liquid Glass when selected)
-                    CompositionLocalProvider(LocalBackdropState provides cardBackdrop) {
+                    // Preview Layer 2: Floating Lyric Card (matches Home Pill crystal optics 1:1)
+                    CompositionLocalProvider(
+                        LocalBackdropState provides cardBackdrop,
+                        LocalFerricPalette provides (if (style == ShareCardStyle.LIQUID_GLASS) liquidPreviewPalette else palette),
+                    ) {
                         val cardModifier = when (style) {
                             ShareCardStyle.LIQUID_GLASS -> Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp, vertical = 14.dp)
+                                .shadow(
+                                    elevation = 14.dp,
+                                    shape = RoundedCornerShape(cardCorner),
+                                    ambientColor = Color.Black.copy(alpha = 0.42f),
+                                    spotColor = Color.Black.copy(alpha = 0.52f),
+                                )
                                 .ferricLiquidGlass(
                                     cornerRadius = cardCorner,
-                                    blurRadius = 11.dp,
-                                    refractionHeight = 16.dp,
-                                    refractionAmount = 18.dp,
-                                    chromaticDispersion = 0.88f,
-                                    anchorAlphaOverride = 0.16f,
+                                    blurRadius = 10.dp,
+                                    refractionHeight = 20.dp,
+                                    refractionAmount = 22.dp,
+                                    chromaticDispersion = 0.92f,
+                                    anchorAlphaOverride = 0.24f,
                                     alwaysGlass = true,
+                                    tier = GlassTier.HERO_LENS,
                                 )
                             ShareCardStyle.AMOLED -> Modifier
                                 .fillMaxWidth()
@@ -297,6 +324,16 @@ fun ShareCardSheet(
                                 .border(1.dp, Color.White.copy(alpha = 0.26f), RoundedCornerShape(cardCorner))
                         }
 
+                        val glassTextShadow = if (style == ShareCardStyle.LIQUID_GLASS) {
+                            Shadow(
+                                color = Color.Black.copy(alpha = 0.52f),
+                                offset = Offset(0f, 1.5f),
+                                blurRadius = 4.5f,
+                            )
+                        } else {
+                            null
+                        }
+
                         Box(modifier = cardModifier) {
                             Column(
                                 modifier = Modifier.padding(13.dp),
@@ -308,7 +345,7 @@ fun ShareCardSheet(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             text = track.title,
-                                            style = MaterialTheme.typography.titleSmall,
+                                            style = MaterialTheme.typography.titleSmall.copy(shadow = glassTextShadow),
                                             fontWeight = FontWeight.Bold,
                                             color = Color.White,
                                             maxLines = 1,
@@ -316,7 +353,7 @@ fun ShareCardSheet(
                                         )
                                         Text(
                                             text = track.artist,
-                                            style = MaterialTheme.typography.labelSmall,
+                                            style = MaterialTheme.typography.labelSmall.copy(shadow = glassTextShadow),
                                             color = Color(0xFFDCE1EC),
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -328,7 +365,7 @@ fun ShareCardSheet(
                                     previewLines.forEach { line ->
                                         Text(
                                             text = line,
-                                            style = MaterialTheme.typography.titleMedium,
+                                            style = MaterialTheme.typography.titleMedium.copy(shadow = glassTextShadow),
                                             fontSize = if (aspect == ShareCardAspect.STORY_9_16) 11.5.sp else 11.sp,
                                             lineHeight = 14.5.sp,
                                             fontWeight = FontWeight.Bold,
@@ -340,27 +377,19 @@ fun ShareCardSheet(
                                 }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    horizontalArrangement = Arrangement.End,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
                                         text = "FERRIC",
-                                        style = MaterialTheme.typography.labelSmall,
+                                        style = MaterialTheme.typography.labelSmall.copy(shadow = glassTextShadow),
                                         letterSpacing = 2.sp,
                                         color = if (style == ShareCardStyle.LIQUID_GLASS) {
-                                            Color.White.copy(alpha = 0.90f)
+                                            Color.White.copy(alpha = 0.88f)
                                         } else {
                                             state.coverShade.accent
                                         },
                                     )
-                                    if (style == ShareCardStyle.LIQUID_GLASS) {
-                                        Text(
-                                            text = "LIQUID GLASS",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontSize = 9.sp,
-                                            color = Color.White.copy(alpha = 0.65f),
-                                        )
-                                    }
                                 }
                             }
                         }

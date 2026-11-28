@@ -5,10 +5,14 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -33,6 +37,12 @@ import dev.livelydesk.ferric.R
 import dev.livelydesk.ferric.ui.theme.CoverShadeColors
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import uniffi.ferric_mobile_ffi.FfiTrack
@@ -202,19 +212,239 @@ object ShareCardRenderer {
         }.getOrNull()
     }
 
-    private fun softBlurBitmap(src: Bitmap, downscaleFactor: Int = 10): Bitmap {
+    private fun buildVibratedGaussianCrop(src: Bitmap, radius: Int = 6): Bitmap {
         val w = src.width.coerceAtLeast(1)
         val h = src.height.coerceAtLeast(1)
-        val smallW = (w / downscaleFactor).coerceAtLeast(8)
-        val smallH = (h / downscaleFactor).coerceAtLeast(8)
-        val tiny = Bitmap.createScaledBitmap(src, smallW, smallH, true)
-        val midW = (w / 3).coerceAtLeast(smallW)
-        val midH = (h / 3).coerceAtLeast(smallH)
-        val mid = Bitmap.createScaledBitmap(tiny, midW, midH, true)
-        if (tiny !== src) tiny.recycle()
-        val smooth = Bitmap.createScaledBitmap(mid, w, h, true)
-        if (mid !== src) mid.recycle()
+        val bw = (w * 0.25f).roundToInt().coerceAtLeast(12)
+        val bh = (h * 0.25f).roundToInt().coerceAtLeast(12)
+
+        val small = createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+        val smallCanvas = Canvas(small)
+        val satMatrix = ColorMatrix().apply { setSaturation(1.55f) }
+        val satPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            colorFilter = ColorMatrixColorFilter(satMatrix)
+        }
+        smallCanvas.drawBitmap(src, null, RectF(0f, 0f, bw.toFloat(), bh.toFloat()), satPaint)
+
+        val count = bw * bh
+        val pxA = IntArray(count)
+        val pxB = IntArray(count)
+        small.getPixels(pxA, 0, bw, 0, 0, bw, bh)
+
+        // Separable 2-pass Gaussian kernel matching Ferric's 0.25x GPU blur pass
+        val sigma = max(1.0f, radius * 0.55f)
+        val weights = FloatArray(radius * 2 + 1)
+        var wSum = 0f
+        for (i in -radius..radius) {
+            val wgt = kotlin.math.exp(-(i * i) / (2f * sigma * sigma))
+            weights[i + radius] = wgt
+            wSum += wgt
+        }
+        for (i in weights.indices) weights[i] /= wSum
+
+        for (y in 0 until bh) {
+            val rowOff = y * bw
+            for (x in 0 until bw) {
+                var r = 0f
+                var g = 0f
+                var b = 0f
+                for (k in -radius..radius) {
+                    val sx = (x + k).coerceIn(0, bw - 1)
+                    val c = pxA[rowOff + sx]
+                    val wt = weights[k + radius]
+                    r += ((c ushr 16) and 0xFF) * wt
+                    g += ((c ushr 8) and 0xFF) * wt
+                    b += (c and 0xFF) * wt
+                }
+                pxB[rowOff + x] = (0xFF shl 24) or
+                    (r.roundToInt().coerceIn(0, 255) shl 16) or
+                    (g.roundToInt().coerceIn(0, 255) shl 8) or
+                    b.roundToInt().coerceIn(0, 255)
+            }
+        }
+        for (y in 0 until bh) {
+            val rowOff = y * bw
+            for (x in 0 until bw) {
+                var r = 0f
+                var g = 0f
+                var b = 0f
+                for (k in -radius..radius) {
+                    val sy = (y + k).coerceIn(0, bh - 1)
+                    val c = pxB[sy * bw + x]
+                    val wt = weights[k + radius]
+                    r += ((c ushr 16) and 0xFF) * wt
+                    g += ((c ushr 8) and 0xFF) * wt
+                    b += (c and 0xFF) * wt
+                }
+                pxA[rowOff + x] = (0xFF shl 24) or
+                    (r.roundToInt().coerceIn(0, 255) shl 16) or
+                    (g.roundToInt().coerceIn(0, 255) shl 8) or
+                    b.roundToInt().coerceIn(0, 255)
+            }
+        }
+        small.setPixels(pxA, 0, bw, 0, 0, bw, bh)
+        val smooth = Bitmap.createScaledBitmap(small, w, h, true)
+        if (smooth !== small) small.recycle()
         return smooth
+    }
+
+    private fun buildLiquidGlassCardBitmap(
+        backdropBmp: Bitmap,
+        cardRect: RectF,
+        cornerRadius: Float,
+        glassTintArgb: Int,
+    ): Bitmap {
+        val margin = 72
+        val cropL = (cardRect.left - margin).roundToInt().coerceIn(0, backdropBmp.width - 2)
+        val cropT = (cardRect.top - margin).roundToInt().coerceIn(0, backdropBmp.height - 2)
+        val cropR = (cardRect.right + margin).roundToInt().coerceIn(cropL + 2, backdropBmp.width)
+        val cropB = (cardRect.bottom + margin).roundToInt().coerceIn(cropT + 2, backdropBmp.height)
+        val srcW = (cropR - cropL).coerceAtLeast(2)
+        val srcH = (cropB - cropT).coerceAtLeast(2)
+
+        val rawCrop = Bitmap.createBitmap(backdropBmp, cropL, cropT, srcW, srcH)
+        val blurredCrop = buildVibratedGaussianCrop(rawCrop, radius = 6)
+        rawCrop.recycle()
+
+        val cardW = cardRect.width().roundToInt().coerceAtLeast(4)
+        val cardH = cardRect.height().roundToInt().coerceAtLeast(4)
+        val offX = cardRect.left - cropL
+        val offY = cardRect.top - cropT
+
+        val srcPixels = IntArray(srcW * srcH)
+        blurredCrop.getPixels(srcPixels, 0, srcW, 0, 0, srcW, srcH)
+        blurredCrop.recycle()
+
+        val outPixels = IntArray(cardW * cardH)
+        val halfW = cardW * 0.5f
+        val halfH = cardH * 0.5f
+        val minHalf = min(halfW, halfH)
+        val r = min(cornerRadius, minHalf)
+        val innerBoxW = (halfW - r).coerceAtLeast(0f)
+        val innerBoxH = (halfH - r).coerceAtLeast(0f)
+        val gradR = min(r * 1.45f, minHalf)
+        val gradBoxW = (halfW - gradR).coerceAtLeast(0f)
+        val gradBoxH = (halfH - gradR).coerceAtLeast(0f)
+        val refractionHeight = 58f.coerceIn(8f, minHalf)
+        val refractionAmount = 64f
+        val dispersion = 0.92f
+        val invArea = 1f / max(halfW * halfH, 1f)
+        val maxSrcX = srcW - 1
+        val maxSrcY = srcH - 1
+
+        // Smoked crystal tint + meniscus wash matching Home Pill (FerricLiquidGlass.kt)
+        val anchorA = 0.24f
+        val anchorR = (0.04f + (Color.red(glassTintArgb) / 255f) * 0.10f) * 255f
+        val anchorG = (0.06f + (Color.green(glassTintArgb) / 255f) * 0.10f) * 255f
+        val anchorB = (0.10f + (Color.blue(glassTintArgb) / 255f) * 0.10f) * 255f
+        val frostA = 0.04f
+
+        for (py in 0 until cardH) {
+            val cy = py - halfH
+            val syDirect = (py + offY).roundToInt().coerceIn(0, maxSrcY)
+            val tY = py.toFloat() / cardH.toFloat()
+            val sheenA = when {
+                tY < 0.38f -> 0.20f * (1f - tY / 0.38f)
+                tY > 0.75f -> 0.08f * ((tY - 0.75f) / 0.25f)
+                else -> 0f
+            }
+            val rowOut = py * cardW
+
+            for (px in 0 until cardW) {
+                val cx = px - halfW
+                val ax = abs(cx)
+                val ay = abs(cy)
+                val qx = ax - innerBoxW
+                val qy = ay - innerBoxH
+                val sd = if (qx > 0f || qy > 0f) {
+                    hypot(max(qx, 0f), max(qy, 0f)) - r
+                } else {
+                    max(qx, qy) - r
+                }
+
+                var red: Float
+                var green: Float
+                var blue: Float
+
+                if (-sd >= refractionHeight) {
+                    val sx = (px + offX).roundToInt().coerceIn(0, maxSrcX)
+                    val c = srcPixels[syDirect * srcW + sx]
+                    red = ((c ushr 16) and 0xFF).toFloat()
+                    green = ((c ushr 8) and 0xFF).toFloat()
+                    blue = (c and 0xFF).toFloat()
+                } else {
+                    val depth = (1f - (-min(sd, 0f) / refractionHeight)).coerceIn(0f, 1f)
+                    val clampedD = min(depth, 0.9999f)
+                    val disp = (1f - sqrt(1f - clampedD * clampedD)) * refractionAmount
+
+                    val gqx = ax - gradBoxW
+                    val gqy = ay - gradBoxH
+                    var gbx: Float
+                    var gby: Float
+                    if (gqx >= 0f || gqy >= 0f) {
+                        val mx = max(gqx, 0f) + 1e-5f
+                        val my = max(gqy, 0f) + 1e-5f
+                        val gl = hypot(mx, my)
+                        gbx = (if (cx >= 0f) 1f else -1f) * (mx / gl)
+                        gby = (if (cy >= 0f) 1f else -1f) * (my / gl)
+                    } else {
+                        val stepG = if (gqy <= gqx) 1f else 0f
+                        gbx = (if (cx >= 0f) 1f else -1f) * stepG
+                        gby = (if (cy >= 0f) 1f else -1f) * (1f - stepG)
+                    }
+
+                    val clen = hypot(cx, cy).coerceAtLeast(1e-4f)
+                    val combX = gbx + (cx / clen) * 0.55f
+                    val combY = gby + (cy / clen) * 0.55f
+                    val normL = hypot(combX, combY).coerceAtLeast(1e-4f)
+                    val gx = combX / normL
+                    val gy = combY / normL
+
+                    val refX = (px + offX + disp * gx).roundToInt().coerceIn(0, maxSrcX)
+                    val refY = (py + offY + disp * gy).roundToInt().coerceIn(0, maxSrcY)
+                    val greenSample = srcPixels[refY * srcW + refX]
+
+                    val cornerDispersion = dispersion * ((cx * cy) * invArea)
+                    val chX = gx * (disp * cornerDispersion)
+                    val chY = gy * (disp * cornerDispersion)
+                    val rX = (px + offX + disp * gx + chX).roundToInt().coerceIn(0, maxSrcX)
+                    val rY = (py + offY + disp * gy + chY).roundToInt().coerceIn(0, maxSrcY)
+                    val bX = (px + offX + disp * gx - chX).roundToInt().coerceIn(0, maxSrcX)
+                    val bY = (py + offY + disp * gy - chY).roundToInt().coerceIn(0, maxSrcY)
+
+                    val redSample = srcPixels[rY * srcW + rX]
+                    val blueSample = srcPixels[bY * srcW + bX]
+
+                    red = ((redSample ushr 16) and 0xFF).toFloat()
+                    green = ((greenSample ushr 8) and 0xFF).toFloat()
+                    blue = (blueSample and 0xFF).toFloat()
+                }
+
+                // Clear dark crystal smoke
+                red = red * (1f - anchorA) + anchorR * anchorA
+                green = green * (1f - anchorA) + anchorG * anchorA
+                blue = blue * (1f - anchorA) + anchorB * anchorA
+
+                // Subtle white optical frost veil (#F6F9FF)
+                red = red * (1f - frostA) + 246f * frostA
+                green = green * (1f - frostA) + 249f * frostA
+                blue = blue * (1f - frostA) + 255f * frostA
+
+                // Top meniscus highlight sheen
+                if (sheenA > 0f) {
+                    red += (255f - red) * sheenA
+                    green += (255f - green) * sheenA
+                    blue += (255f - blue) * sheenA
+                }
+
+                val ri = red.roundToInt().coerceIn(0, 255)
+                val gi = green.roundToInt().coerceIn(0, 255)
+                val bi = blue.roundToInt().coerceIn(0, 255)
+                outPixels[rowOut + px] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+            }
+        }
+
+        return Bitmap.createBitmap(outPixels, cardW, cardH, Bitmap.Config.ARGB_8888)
     }
 
     private fun drawCard(
@@ -233,8 +463,6 @@ object ShareCardRenderer {
         val orb2 = shade.orb2.toArgb()
         val accent = shade.accent.toArgb()
 
-        // Render full canvas backdrop onto an offscreen bitmap when using LIQUID_GLASS so we can
-        // refract & frost the true blurred pixels directly inside the glass card.
         val backdropBmp = if (style == ShareCardStyle.LIQUID_GLASS) {
             createBitmap(w, h, Bitmap.Config.ARGB_8888)
         } else {
@@ -248,19 +476,39 @@ object ShareCardRenderer {
             }
             ShareCardStyle.LIQUID_GLASS -> {
                 if (artBitmap != null) {
-                    val scaleW = maxOf(w.toFloat() / artBitmap.width.coerceAtLeast(1), h.toFloat() / artBitmap.height.coerceAtLeast(1))
+                    // Crisp native cover art behind the glass card so convex-lens edge refraction
+                    // bends vivid artwork contours around the glass bezel just like the Home Pill.
+                    val scaleW = maxOf(
+                        w.toFloat() / artBitmap.width.coerceAtLeast(1),
+                        h.toFloat() / artBitmap.height.coerceAtLeast(1),
+                    )
                     val drawW = artBitmap.width * scaleW
                     val drawH = artBitmap.height * scaleW
                     val left = (w - drawW) * 0.5f
                     val top = (h - drawH) * 0.5f
-                    val softCover = softBlurBitmap(
-                        Bitmap.createScaledBitmap(artBitmap, 320, 320, true),
-                        downscaleFactor = 2,
+                    bgCanvas.drawBitmap(
+                        artBitmap,
+                        null,
+                        RectF(left, top, left + drawW, top + drawH),
+                        Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
                     )
-                    bgCanvas.drawBitmap(softCover, null, RectF(left, top, left + drawW, top + drawH), Paint(Paint.FILTER_BITMAP_FLAG))
-                    softCover.recycle()
                 } else {
-                    bgCanvas.drawColor(Color.rgb(12, 14, 22))
+                    bgCanvas.drawColor(Color.rgb(10, 13, 22))
+                    val radPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        shader = RadialGradient(
+                            w * 0.45f,
+                            h * 0.35f,
+                            maxOf(w, h) * 0.72f,
+                            intArrayOf(
+                                Color.argb(185, Color.red(accent), Color.green(accent), Color.blue(accent)),
+                                Color.argb(215, Color.red(orb1), Color.green(orb1), Color.blue(orb1)),
+                                Color.rgb(10, 13, 22),
+                            ),
+                            floatArrayOf(0f, 0.52f, 1f),
+                            Shader.TileMode.CLAMP,
+                        )
+                    }
+                    bgCanvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), radPaint)
                 }
                 bgPaint.shader = LinearGradient(
                     0f,
@@ -268,9 +516,9 @@ object ShareCardRenderer {
                     0f,
                     h.toFloat(),
                     intArrayOf(
-                        Color.argb(42, 0, 0, 0),
-                        Color.argb(18, 0, 0, 0),
-                        Color.argb(82, 0, 0, 0),
+                        Color.argb(30, 0, 0, 0),
+                        Color.argb(10, 0, 0, 0),
+                        Color.argb(72, 0, 0, 0),
                     ),
                     floatArrayOf(0f, 0.45f, 1f),
                     Shader.TileMode.CLAMP,
@@ -305,15 +553,18 @@ object ShareCardRenderer {
         val textStartX = innerX + artSize + 30f
         val headerW = (cardRight - 56f - textStartX).toInt().coerceAtLeast(160)
 
+        val isLiquid = style == ShareCardStyle.LIQUID_GLASS
         val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             textSize = 40f
             this.typeface = typeface
+            if (isLiquid) setShadowLayer(6f, 0f, 2f, Color.argb(130, 0, 0, 0))
         }
         val artistPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(215, 224, 229, 240)
+            color = Color.argb(220, 224, 229, 240)
             textSize = 30f
             this.typeface = Typeface.create(typeface, Typeface.NORMAL)
+            if (isLiquid) setShadowLayer(5f, 0f, 1.5f, Color.argb(120, 0, 0, 0))
         }
         val titleLayout = StaticLayout.Builder.obtain(track.title, 0, track.title.length, titlePaint, headerW)
             .setMaxLines(2)
@@ -333,6 +584,7 @@ object ShareCardRenderer {
             color = Color.WHITE
             textSize = if (isStory) 48f else 40f
             this.typeface = typeface
+            if (isLiquid) setShadowLayer(7f, 0f, 2.5f, Color.argb(138, 0, 0, 0))
         }
         val lyricsLayout = StaticLayout.Builder.obtain(bodyText, 0, bodyText.length, lyricsPaint, innerW)
             .setAlignment(Layout.Alignment.ALIGN_NORMAL)
@@ -347,74 +599,64 @@ object ShareCardRenderer {
         val cardTop = (h - cardH) * 0.5f
         val cardBottom = cardTop + cardH
         val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
-        val corner = 48f
+        val corner = if (isLiquid) 72f else 48f
 
         val cardPath = android.graphics.Path().apply {
             addRoundRect(cardRect, corner, corner, android.graphics.Path.Direction.CW)
         }
 
-        if (backdropBmp != null && style == ShareCardStyle.LIQUID_GLASS) {
-            // Crop & heavily frost the exact area beneath the card for true optical Liquid Glass
-            val cropL = cardRect.left.toInt().coerceIn(0, w - 2)
-            val cropT = cardRect.top.toInt().coerceIn(0, h - 2)
-            val cropW = (cardRect.width().toInt()).coerceIn(2, w - cropL)
-            val cropH = (cardRect.height().toInt()).coerceIn(2, h - cropT)
-            val slice = Bitmap.createBitmap(backdropBmp, cropL, cropT, cropW, cropH)
-            val frosted = softBlurBitmap(slice, downscaleFactor = 12)
-            slice.recycle()
+        if (isLiquid) {
+            val shadowRect = RectF(cardRect).apply { offset(0f, 14f) }
+            val dropShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(115, 0, 0, 0)
+                maskFilter = BlurMaskFilter(36f, BlurMaskFilter.Blur.NORMAL)
+            }
+            canvas.drawRoundRect(shadowRect, corner, corner, dropShadowPaint)
+        }
 
+        if (backdropBmp != null && isLiquid) {
+            val glassCardBmp = buildLiquidGlassCardBitmap(
+                backdropBmp = backdropBmp,
+                cardRect = cardRect,
+                cornerRadius = corner,
+                glassTintArgb = shade.glassTint.toArgb(),
+            )
+            backdropBmp.recycle()
             canvas.withSave {
                 clipPath(cardPath)
-                drawBitmap(frosted, null, cardRect, Paint(Paint.FILTER_BITMAP_FLAG))
-                // Translucent optical tint + top inner meniscus highlight sheen
-                drawRect(cardRect, Paint().apply { color = Color.argb(66, 20, 26, 44) })
-                val sheenPaint = Paint().apply {
-                    shader = LinearGradient(
-                        cardRect.left,
-                        cardRect.top,
-                        cardRect.left,
-                        cardRect.bottom,
-                        intArrayOf(
-                            Color.argb(72, 255, 255, 255),
-                            Color.argb(0, 255, 255, 255),
-                            Color.argb(46, 0, 0, 0),
-                        ),
-                        floatArrayOf(0f, 0.35f, 1f),
-                        Shader.TileMode.CLAMP,
-                    )
-                }
-                drawRect(cardRect, sheenPaint)
+                drawBitmap(glassCardBmp, null, cardRect, Paint(Paint.FILTER_BITMAP_FLAG))
             }
-            frosted.recycle()
-            backdropBmp.recycle()
+            glassCardBmp.recycle()
         } else {
             backdropBmp?.recycle()
             val cardFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = when (style) {
                     ShareCardStyle.AMOLED -> Color.argb(255, 13, 13, 17)
-                    ShareCardStyle.LIQUID_GLASS -> Color.argb(170, 20, 24, 38)
+                    ShareCardStyle.LIQUID_GLASS -> Color.argb(185, 18, 22, 34)
                     ShareCardStyle.ADAPTIVE_GRADIENT -> Color.argb(122, 8, 9, 14)
                 }
             }
             canvas.drawRoundRect(cardRect, corner, corner, cardFill)
         }
 
-        // Directional top-left chrome specular rim border (matches Live Preview AGSL rim)
+        // Home-Pill directional white top-left catchlight + cool silver bounce rim border
         val cardBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             this.style = Paint.Style.STROKE
-            strokeWidth = if (style == ShareCardStyle.LIQUID_GLASS) 3.5f else 2.5f
-            if (style == ShareCardStyle.LIQUID_GLASS) {
+            strokeWidth = if (isLiquid) 3.6f else 2.5f
+            if (isLiquid) {
                 shader = LinearGradient(
                     cardRect.left,
                     cardRect.top,
                     cardRect.right,
                     cardRect.bottom,
                     intArrayOf(
-                        Color.argb(200, 255, 255, 255),
-                        Color.argb(56, 255, 255, 255),
-                        Color.argb(125, Color.red(accent), Color.green(accent), Color.blue(accent)),
+                        Color.argb(212, 255, 255, 255),
+                        Color.argb(74, 255, 255, 255),
+                        Color.argb(38, 255, 255, 255),
+                        Color.argb(68, 235, 242, 255),
+                        Color.argb(122, 235, 242, 255),
                     ),
-                    floatArrayOf(0f, 0.50f, 1f),
+                    floatArrayOf(0f, 0.25f, 0.52f, 0.78f, 1f),
                     Shader.TileMode.CLAMP,
                 )
             } else {
@@ -451,25 +693,17 @@ object ShareCardRenderer {
         }
 
         val brandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (style == ShareCardStyle.LIQUID_GLASS) {
-                Color.argb(232, 255, 255, 255)
+            color = if (isLiquid) {
+                Color.argb(228, 255, 255, 255)
             } else {
                 accent
             }
             textSize = 27f
             letterSpacing = 0.18f
+            textAlign = Paint.Align.RIGHT
             this.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            if (isLiquid) setShadowLayer(4f, 0f, 1.5f, Color.argb(120, 0, 0, 0))
         }
-        canvas.drawText("FERRIC", innerX, cardRect.bottom - 44f, brandPaint)
-        if (style == ShareCardStyle.LIQUID_GLASS) {
-            val tagPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(175, 255, 255, 255)
-                textSize = 21f
-                letterSpacing = 0.08f
-                textAlign = Paint.Align.RIGHT
-                this.typeface = Typeface.create(typeface, Typeface.NORMAL)
-            }
-            canvas.drawText("LIQUID GLASS", cardRight - 56f, cardRect.bottom - 44f, tagPaint)
-        }
+        canvas.drawText("FERRIC", cardRight - 56f, cardRect.bottom - 44f, brandPaint)
     }
 }

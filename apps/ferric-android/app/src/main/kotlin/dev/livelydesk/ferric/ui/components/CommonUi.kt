@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -52,6 +53,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarData
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -67,6 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -1093,4 +1096,101 @@ fun AddToPlaylistDialog(
             }
         },
     )
+}
+
+/**
+ * Theme-synced floating notification pill replacing default opaque Material3 Snackbar cards.
+ * Uses optical AGSL Liquid Glass when Liquid Glass mode is active, and matches solid/AMOLED/Warm
+ * Cream surfaces, corner radius, font family, and dynamic accent across every theme.
+ */
+@Composable
+fun FerricSnackbar(
+    snackbarData: SnackbarData,
+    modifier: Modifier = Modifier,
+) {
+    val palette = LocalFerricPalette.current
+    val snackCorner = if (palette.isLiquidGlass) {
+        24.dp
+    } else {
+        (palette.cornerRadiusDp.value * 1.15f).coerceIn(12f, 24f).dp
+    }
+    val shape = RoundedCornerShape(snackCorner)
+    val glassTextShadow = if (palette.isLiquidGlass && !palette.isLight) {
+        Shadow(color = Color.Black.copy(alpha = 0.55f), offset = Offset(0f, 1f), blurRadius = 4f)
+    } else {
+        null
+    }
+    val containerMod = modifier
+        .widthIn(min = 160.dp, max = 420.dp)
+        .shadow(
+            elevation = if (palette.isLiquidGlass) 12.dp else 8.dp,
+            shape = shape,
+            ambientColor = Color.Black.copy(alpha = 0.36f),
+            spotColor = Color.Black.copy(alpha = 0.44f),
+        )
+        .let { base ->
+            if (palette.isLiquidGlass) {
+                base.ferricLiquidGlass(
+                    cornerRadius = snackCorner,
+                    blurRadius = 9.dp,
+                    refractionHeight = 16.dp,
+                    refractionAmount = 18.dp,
+                    chromaticDispersion = 0.88f,
+                    alwaysGlass = true,
+                    tier = GlassTier.HERO_LENS,
+                    anchorAlphaOverride = if (palette.isLight) 0f else 0.24f,
+                )
+            } else {
+                base
+                    .clip(shape)
+                    .background(palette.elevated)
+                    .border(
+                        width = 1.dp,
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(
+                                palette.accent.copy(alpha = if (palette.isLight) 0.42f else 0.50f),
+                                palette.border,
+                                palette.border,
+                            ),
+                        ),
+                        shape = shape,
+                    )
+            }
+        }
+        .clickable { snackbarData.dismiss() }
+
+    Box(modifier = containerMod) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(palette.accent),
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = snackbarData.visuals.message,
+                style = MaterialTheme.typography.bodyMedium.copy(shadow = glassTextShadow),
+                fontWeight = FontWeight.Medium,
+                color = if (palette.isLiquidGlass && !palette.isLight) Color.White else palette.textPrimary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            val actionLabel = snackbarData.visuals.actionLabel
+            if (!actionLabel.isNullOrBlank()) {
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = actionLabel,
+                    style = MaterialTheme.typography.labelLarge.copy(shadow = glassTextShadow),
+                    fontWeight = FontWeight.Bold,
+                    color = palette.accent,
+                    modifier = Modifier.clickable { snackbarData.performAction() },
+                )
+            }
+        }
+    }
 }

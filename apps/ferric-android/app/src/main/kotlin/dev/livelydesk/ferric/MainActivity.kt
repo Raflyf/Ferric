@@ -74,6 +74,7 @@ import dev.livelydesk.ferric.playback.OutputRouteHelper
 import dev.livelydesk.ferric.ui.components.AddToPlaylistDialog
 import dev.livelydesk.ferric.ui.components.AuroraBackdrop
 import dev.livelydesk.ferric.ui.components.FerricLaunchSplash
+import dev.livelydesk.ferric.ui.components.FerricSnackbar
 import dev.livelydesk.ferric.ui.components.FerricTab
 import dev.livelydesk.ferric.ui.components.FloatingLiquidGlassDock
 import dev.livelydesk.ferric.ui.screens.AccountsSheet
@@ -776,14 +777,34 @@ private fun FerricMainShell(
             sheetBackdrop = sheetBackdrop,
         )
 
-        // Layer 5: Top-most SnackbarHost so toasts remain visible above sheets & FullPlayer
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = if (showFullPlayer || hasActiveSheets) 16.dp else 148.dp, start = 16.dp, end = 16.dp),
-        )
+        // Layer 5: Top-most theme-synced floating toast pill above dock, sheets & FullPlayer
+        val hasActiveTrackForDock = !state.miniPlayerDismissed && (
+            state.currentTrack != null ||
+                (!state.connectState.isLocalActiveSpeaker && state.connectState.peers.any { it.connected })
+            )
+        val snackBottomPad = when {
+            showFullPlayer || hasActiveSheets -> 24.dp
+            dockCollapsed && hasActiveTrackForDock -> 84.dp
+            dockCollapsed -> 82.dp
+            hasActiveTrackForDock -> 158.dp
+            else -> 88.dp
+        }
+        val snackBackdrop = when {
+            hasActiveSheets && sheetBackdrop.hasRecorded -> sheetBackdrop
+            !showFullPlayer && backdropState.hasRecorded -> backdropState
+            else -> null
+        }
+        CompositionLocalProvider(LocalBackdropState provides snackBackdrop) {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = snackBottomPad, start = 16.dp, end = 16.dp),
+            ) { data ->
+                FerricSnackbar(snackbarData = data)
+            }
+        }
 
         // Layer 6: Cold-start Auralys-style animated Ferric Type-I cassette splash intro
         if (showLaunchSplash) {

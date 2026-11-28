@@ -4,23 +4,32 @@ All notable changes to Ferric are documented in this file.
 
 ---
 
-## Desktop v0.1.3 & Android v0.1.0 (Initial Android Release) (2026-11-28)
+## v0.1.3 (2026-11-28)
 
 ### Added
 
-- **Overhanging Optical Convex Magnifier Pill & Reconfigurable Glass Widgets (Android v0.1.0):** Upgraded the bottom navigation pill with an optical 3D convex magnifying lens featuring rim chromatic dispersion while holding and sliding across tabs. Added `FerricWidgetConfigActivity` (`android:configure`, reconfigurable) supporting `Glass` (blurred album cover with lens refraction), `Clear glass` (wallpaper-tinted smoked translucent panel with crystal rim), `Dark`, `Light`, `Cover colour`, dynamic "From the cover" accent extraction (supporting chromatic and monochrome covers), refined non-boxy Ferric cassette fallback emblem, persistent last-played track display after stop/close, symmetrical centered transport controls with a spacious right-aligned Like button, and an amber ember streak badge pill.
-- **Standalone About Sheet & Streamlined `You` Hub (Android):** Separated `About` from `Settings` into a dedicated Liquid Glass sheet with live GitHub release checks, `Raflyf/Ferric` repository & `livelydesk.vercel.app/ferric` links, changelog/issue shortcuts, and creator support CTAs (`Buy me a coffee`, `Saweria`); reordered and streamlined the `You` hub with a quick stats pill.
-- **Synchronized Connect Queue, Like & Handoff Continuity (Desktop & Android):** Mirrored like state, `Play Next`, `Add to Queue`, queue item removal, and `Clear Up Next` actions bidirectionally over Ferric Connect, preserved live playback position across rapid speaker handoffs, and added version 1..=10 multi-group Reed-Solomon QR pairing support.
+- **Synchronized Connect Queue, Like & Handoff Continuity (Desktop & Android):** Mirrored like state, `Play Next`, `Add to Queue`, queue item removal, shuffled queue windows, and `Clear Up Next` actions bidirectionally over Ferric Connect, preserved live playback position and paused state across rapid speaker handoffs without audio bleed, and added version 1..=10 multi-group Reed-Solomon QR pairing support.
 
 ### Fixed
 
-- **Android Foreground Service, Rich Media Notification & Shutdown ANR:** Eliminated `Context.startForegroundService() did not then call Service.startForeground()` ANRs via one-time foreground promotion preserving Media3 `MediaStyle` artwork and transport controls across track/play updates, aligned notification channel/ID with `DefaultMediaNotificationProvider`, moved `CoreStateStore.shutdown()` execution off the Main Thread, and paused background Connect/aurora timers when backgrounded.
-- **Full-Screen Player Popup Blur & Lyrics/Video Sync:** Shared `fullPlayerBackdrop` capture on demand for `FerricSnackbar` and overlay sheets over `FullPlayerScreen` (zero idle FBO cost), fixed local tracks skipping automatic lyrics/video lookup (`onNowPlayingChanged`), persisted per-track `lyrics_offset_ms` across sessions, tightened official music video duration matching (`<= 10 s` drift guard), and snapped ExoPlayer seeks immediately on seek-nonce changes.
-- **Ferric Connect Failover & Desktop UI Sync:** Drained queued `SyncFrame::Goodbye` frames on relay shutdown, tightened Connect heartbeat/peer TTL and force-failover timers so exiting Desktop/Android switches cleanly back to the live speaker without hanging, synced Desktop cards/buttons (`FerricCard`, `FerricBtn`, `FerricChipBtn`) to active Solid/Acrylic/Adaptive theme tokens, fixed bottom-bar Copy Link clipping, and placed the `Ferric` brand label cleanly at bottom-right on quote cards.
+- **Ferric Connect Failover, Shuffle Parity & Desktop UI Sync:** Drained queued `SyncFrame::Goodbye` frames on relay shutdown, aligned `RELAY_PEER_TTL` (`35s`) above background heartbeat (`15s`), fixed remote shuffle/repeat mutations and unshuffled `JumpToQueueIndex` regressions, preserved paused-seek Connect snapshots, synced Desktop cards/buttons (`FerricCard`, `FerricBtn`, `FerricChipBtn`) to active Solid/Acrylic/Adaptive theme tokens, and fixed bottom-bar Copy Link clipping.
 
 ### Security & Hardening
 
-- Stripped verbose/debug `android.util.Log` calls in release ProGuard rules, restricted release `network_security_config.xml` strictly to system certificate authorities (keeping user CAs debug-only), enforced CI release keystore verification, scrubbed `AccountSettings`/`SubsonicCredentials` secrets on drop, and eliminated stale audio/cloud/log artifacts.
+- Scrubbed `AccountSettings`/`SubsonicCredentials` secrets on drop, enforced PE hardening flags and stripped host path references in release binaries, and separated Android APK update discovery (`android-v*` / `.apk` assets) from Desktop installers.
+
+---
+
+## Android v0.1.0 (Initial Android Release) (2026-11-28)
+
+### Added
+
+- **Overhanging Optical Convex Magnifier Pill & Reconfigurable Glass Widgets:** Added an optical 3D convex magnifying lens bottom navigation pill with rim chromatic dispersion, plus `FerricWidgetConfigActivity` (`android:configure`, reconfigurable) supporting `Glass`, `Clear glass`, `Dark`, `Light`, `Cover colour`, dynamic "From the cover" accent extraction across chromatic and monochrome artwork, refined cassette fallback cover rendering, persistent last-played track display after stop or app close, symmetrical centered transport controls with a spacious right-aligned Like toggle, and an amber dual-tone flame streak badge pill.
+- **Standalone About Sheet & Streamlined `You` Hub:** Separated `About` from `Settings` into a dedicated Liquid Glass sheet with Android-scoped GitHub release checks, `Raflyf/Ferric` & `livelydesk.vercel.app/ferric` links, changelog/issue shortcuts, and creator support links, plus a compact `You` hub.
+
+### Fixed & Hardening
+
+- **Rich `MediaStyle` Notification, Service Lifecycle & Player Polish:** Bound `MediaSession` directly in `FerricPlaybackService`, eliminated `ForegroundServiceDidNotStartInTimeException` races and bare non-MediaStyle overwrites, added shared `fullPlayerBackdrop` capture, fixed Warm Cream Light contrast and `ShareCardSheet` storage permissions on Android 9, stripped debug/verbose logging in R8 release builds, and enforced release keystore checks in CI.
 
 ---
 

@@ -33,8 +33,6 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Speaker
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -42,8 +40,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -78,7 +74,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.livelydesk.ferric.ui.components.EqCurveMath
+import dev.livelydesk.ferric.ui.theme.FerricChoicePill
 import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
+import dev.livelydesk.ferric.ui.theme.FerricSlimSlider
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import java.util.Locale
@@ -292,16 +290,10 @@ fun EqualizerSheet(
                             ) {
                                 items(eqPresets, key = { it }) { preset ->
                                     val selected = activeEq.presetName.equals(preset, ignoreCase = true)
-                                    FilterChip(
+                                    FerricChoicePill(
+                                        label = preset,
                                         selected = selected,
                                         onClick = { onApplyPreset(preset) },
-                                        label = { Text(preset) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = palette.accent,
-                                            selectedLabelColor = Color.Black,
-                                            containerColor = palette.elevated,
-                                            labelColor = palette.textPrimary,
-                                        ),
                                     )
                                 }
                             }
@@ -407,7 +399,7 @@ fun EqualizerSheet(
                                         color = palette.accent,
                                     )
                                 }
-                                Slider(
+                                FerricSlimSlider(
                                     value = activeEq.preampDb.coerceIn(-12f, 12f),
                                     onValueChange = { v ->
                                         draftEq = activeEq.copy(preampDb = v, presetName = "Custom")
@@ -416,11 +408,6 @@ fun EqualizerSheet(
                                         draftEq?.let(onUpdateEq)
                                     },
                                     valueRange = -12f..12f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = palette.accent,
-                                        activeTrackColor = palette.accent,
-                                        inactiveTrackColor = palette.border,
-                                    ),
                                 )
                             }
                         }
@@ -530,7 +517,7 @@ fun EqualizerSheet(
                                     Text("Velvet Auto Crossfade", style = MaterialTheme.typography.titleSmall, color = palette.textPrimary)
                                     Text("${draftCrossfadeSec.roundToInt()} s", color = palette.accent, style = MaterialTheme.typography.labelSmall)
                                 }
-                                Slider(
+                                FerricSlimSlider(
                                     value = draftCrossfadeSec,
                                     onValueChange = { sec -> draftCrossfadeSec = sec },
                                     onValueChangeFinished = {
@@ -538,11 +525,6 @@ fun EqualizerSheet(
                                     },
                                     valueRange = 0f..12f,
                                     steps = 11,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = palette.accent,
-                                        activeTrackColor = palette.accent,
-                                        inactiveTrackColor = palette.border,
-                                    ),
                                 )
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     val curves = listOf(
@@ -551,16 +533,10 @@ fun EqualizerSheet(
                                         FfiFadeCurve.EQUAL_POWER to "Equal-Power",
                                     )
                                     items(curves, key = { it.first.name }) { (curve, label) ->
-                                        FilterChip(
+                                        FerricChoicePill(
+                                            label = label,
                                             selected = dspSettings.fadeCurve == curve,
                                             onClick = { onUpdateDsp(dspSettings.copy(fadeCurve = curve)) },
-                                            label = { Text(label) },
-                                            colors = FilterChipDefaults.filterChipColors(
-                                                selectedContainerColor = palette.accent,
-                                                selectedLabelColor = Color.Black,
-                                                containerColor = palette.surface,
-                                                labelColor = palette.textPrimary,
-                                            ),
                                         )
                                     }
                                 }
@@ -596,16 +572,10 @@ fun EqualizerSheet(
                                 Text("Playback Speed", color = palette.textPrimary, style = MaterialTheme.typography.titleSmall)
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     items(listOf(0.75f, 1.0f, 1.15f, 1.25f, 1.5f), key = { it }) { spd ->
-                                        FilterChip(
+                                        FerricChoicePill(
+                                            label = "${spd}x",
                                             selected = kotlin.math.abs(dspSettings.playbackSpeed - spd) < 0.03f,
                                             onClick = { onUpdateDsp(dspSettings.copy(playbackSpeed = spd)) },
-                                            label = { Text("${spd}x") },
-                                            colors = FilterChipDefaults.filterChipColors(
-                                                selectedContainerColor = palette.accent,
-                                                selectedLabelColor = Color.Black,
-                                                containerColor = palette.surface,
-                                                labelColor = palette.textPrimary,
-                                            ),
                                         )
                                     }
                                 }
@@ -618,16 +588,10 @@ fun EqualizerSheet(
                                         FfiAudioQuality.BEST to "Best",
                                     )
                                     items(qualities, key = { it.first.name }) { (q, lbl) ->
-                                        FilterChip(
+                                        FerricChoicePill(
+                                            label = lbl,
                                             selected = dspSettings.audioQuality == q,
                                             onClick = { onUpdateDsp(dspSettings.copy(audioQuality = q)) },
-                                            label = { Text(lbl) },
-                                            colors = FilterChipDefaults.filterChipColors(
-                                                selectedContainerColor = palette.accent,
-                                                selectedLabelColor = Color.Black,
-                                                containerColor = palette.surface,
-                                                labelColor = palette.textPrimary,
-                                            ),
                                         )
                                     }
                                 }

@@ -190,7 +190,7 @@ fun SearchScreen(
                         .ferricGlassSurface(
                             palette = palette,
                             cornerRadius = 999.dp,
-                            tier = GlassTier.HERO_LENS,
+                            tier = GlassTier.FROSTED_PANEL,
                             fallbackColor = searchPillBg,
                         ),
                 ) {

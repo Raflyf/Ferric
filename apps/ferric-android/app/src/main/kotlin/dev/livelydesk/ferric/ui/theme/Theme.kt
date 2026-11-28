@@ -154,19 +154,28 @@ fun buildVisualPalette(
     val isLiquidGlass = theme.backgroundMode == FfiBackgroundMode.NATIVE_ACRYLIC || theme.acrylicEnabled
     val canvas = parseHexColor(theme.canvasHex, if (isLight) Color(0xFFF3EEE3) else AmoledBlack)
     val baseSurface = parseHexColor(theme.surfaceHex, if (isLight) Color(0xFFEAE3D4) else ObsidianSurface)
-    val surface = if (isLiquidGlass && !isLight) Color(0x9E1E2434) else baseSurface
+    val surface = if (isLiquidGlass && !isLight) Color(0x52121622) else baseSurface
     val elevated = when {
         isLight -> Color(0xFFE0D7C5)
-        isLiquidGlass -> Color(0xB8283044)
+        isLiquidGlass -> Color(0x70181E2C)
         else -> ObsidianElevated
     }
     val border = if (isLiquidGlass && !isLight) {
-        Color.White.copy(alpha = 0.24f)
+        Color.White.copy(alpha = 0.22f)
     } else {
         parseHexColor(theme.borderHex, if (isLight) Color(0xFFD5CCB9) else HairlineBorder)
     }
-    val textPrimary = parseHexColor(theme.textPrimaryHex, if (isLight) Color(0xFF111111) else TextPrimary)
-    val textSecondary = parseHexColor(theme.textSecondaryHex, if (isLight) Color(0xFF524B42) else TextSecondary)
+    val textPrimary = if (isLiquidGlass && !isLight) {
+        Color(0xFFFFFFFF)
+    } else {
+        parseHexColor(theme.textPrimaryHex, if (isLight) Color(0xFF111111) else TextPrimary)
+    }
+    val rawSecondary = parseHexColor(theme.textSecondaryHex, if (isLight) Color(0xFF524B42) else TextSecondary)
+    val textSecondary = if (isLiquidGlass && !isLight && rawSecondary.luminance() < 0.50f) {
+        Color(0xFFC8D2E3)
+    } else {
+        rawSecondary
+    }
     val baseAccent = parseHexColor(theme.accentHex, FerricOrange)
     val chosenAccent = if (theme.adaptiveAlbumArt && !isLight) coverShade.accent else baseAccent
     val safeAccent = ensureWcagAccent(chosenAccent, elevated, isLight)
@@ -309,7 +318,7 @@ fun buildFerricTypography(fontName: String, editorialMode: Boolean): Typography 
 }
 
 fun ferricDialogContainerColor(palette: FerricVisualPalette): Color =
-    if (palette.isLiquidGlass && !palette.isLight) Color(0xD91B2230) else palette.elevated
+    if (palette.isLiquidGlass && !palette.isLight) Color(0xE0131824) else palette.elevated
 
 /**
  * Applies Liquid Glass optical blur + luminous frosted finish when Liquid Glass mode is active,

@@ -36,8 +36,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,6 +60,7 @@ import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.formatDurationMs
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
+import dev.livelydesk.ferric.ui.theme.FerricSlimSlider
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
 import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
@@ -195,7 +194,7 @@ fun QueueSheet(
                                     text = cur.title,
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = palette.accent,
+                                    color = palette.textPrimary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -433,7 +432,7 @@ private fun QueueNowPlayingSlider(
     var draftPos by remember { mutableFloatStateOf(progress.positionMs.toFloat()) }
     val shownPos = if (isDragging) draftPos else progress.positionMs.toFloat()
 
-    Slider(
+    FerricSlimSlider(
         value = shownPos.coerceIn(0f, maxDur),
         onValueChange = {
             isDragging = true
@@ -445,11 +444,6 @@ private fun QueueNowPlayingSlider(
             onSeek(target)
         },
         valueRange = 0f..maxDur,
-        colors = SliderDefaults.colors(
-            thumbColor = palette.accent,
-            activeTrackColor = palette.accent,
-            inactiveTrackColor = palette.border,
-        ),
     )
     Row(
         modifier = Modifier.fillMaxWidth(),

@@ -6,30 +6,43 @@ import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
+import android.os.SystemClock
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -44,6 +57,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
@@ -52,9 +66,13 @@ import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
@@ -89,7 +107,7 @@ class FerricBackdropState(
     val graphicsLayer: GraphicsLayer,
     val blurredLayer: GraphicsLayer,
 ) {
-    val blurScale: Float = 0.28f
+    val blurScale: Float = 0.20f
     var rootOffset: Offset = Offset.Zero
     var hasRecorded: Boolean = false
     var isRecordingSource: Boolean = false
@@ -99,6 +117,7 @@ class FerricBackdropState(
     var blurredSize: IntSize = IntSize.Zero
     private var lastBlurPx: Float = -1f
     private var lastIsLight: Boolean = false
+    private var lastBlurMs: Long = 0L
     private var sharedBlurEffect: androidx.compose.ui.graphics.RenderEffect? = null
 
     fun ensureBlurred(
@@ -115,19 +134,20 @@ class FerricBackdropState(
         ) {
             return false
         }
-        val scaledBlur = (blurPx * blurScale).coerceIn(2f, 22f)
-        val bw = (contentSize.width * blurScale).roundToInt().coerceAtLeast(1)
-        val bh = (contentSize.height * blurScale).roundToInt().coerceAtLeast(1)
+        val scaledBlur = (blurPx * blurScale).coerceIn(2f, 20f)
+        val bw = kotlin.math.ceil(contentSize.width * blurScale.toDouble()).toInt().coerceAtLeast(1)
+        val bh = kotlin.math.ceil(contentSize.height * blurScale.toDouble()).toInt().coerceAtLeast(1)
         val targetSize = IntSize(bw, bh)
-        if (!hasBlurred ||
-            blurDirty ||
+        val configChanged = !hasBlurred ||
             blurredSize != targetSize ||
             sharedBlurEffect == null ||
-            abs(lastBlurPx - scaledBlur) > 0.4f ||
+            abs(lastBlurPx - scaledBlur) > 0.5f ||
             lastIsLight != isLight
-        ) {
+        val nowMs = SystemClock.uptimeMillis()
+        if (configChanged || (blurDirty && nowMs - lastBlurMs >= 24L)) {
             lastBlurPx = scaledBlur
             lastIsLight = isLight
+            lastBlurMs = nowMs
             blurredSize = targetSize
             val fx = buildDecoupledBlurEffect(scaledBlur, isLight)
             sharedBlurEffect = fx
@@ -168,15 +188,20 @@ fun Modifier.ferricBackdropSource(
         }
         .drawWithContent {
             if (enabled && size.width >= 1f && size.height >= 1f) {
+                val exactSize = IntSize(
+                    size.width.roundToInt().coerceAtLeast(1),
+                    size.height.roundToInt().coerceAtLeast(1),
+                )
                 backdrop.isRecordingSource = true
                 try {
-                    backdrop.graphicsLayer.record {
+                    backdrop.graphicsLayer.record(
+                        density = this@drawWithContent,
+                        layoutDirection = layoutDirection,
+                        size = exactSize,
+                    ) {
                         this@drawWithContent.drawContent()
                     }
-                    backdrop.contentSize = IntSize(
-                        size.width.roundToInt().coerceAtLeast(1),
-                        size.height.roundToInt().coerceAtLeast(1),
-                    )
+                    backdrop.contentSize = exactSize
                     backdrop.hasRecorded = true
                     backdrop.blurDirty = true
                 } finally {
@@ -305,13 +330,13 @@ private class GlassCache {
 
 @RequiresApi(Build.VERSION_CODES.S)
 private fun buildVibrancyEffect(isLight: Boolean): RenderEffect {
-    val sat = if (isLight) 1.24f else 1.32f
+    val sat = if (isLight) 1.22f else 1.28f
     val matrix = ColorMatrix().apply {
         setSaturation(sat)
     }
-    // Lift blurred dark regions into a soft luminous pearlescent glow while keeping white typography crisp.
-    val gain = if (isLight) 1.05f else 1.20f
-    val bias = if (isLight) 8f else 22f
+    // Keep blacks deep and colors crystal-clear with zero milky white haze.
+    val gain = if (isLight) 1.02f else 1.04f
+    val bias = if (isLight) 2f else 0f
     val lift = ColorMatrix(
         floatArrayOf(
             gain, 0f, 0f, 0f, bias,
@@ -422,46 +447,44 @@ fun Modifier.ferricLiquidGlass(
     val shape = RoundedCornerShape(cornerRadius)
     val opacityNorm = palette.glassOpacity.coerceIn(0.15f, 0.95f)
 
-    // Balanced pearlescent white frosted wash over a subtle dark contrast anchor so pills & cards
-    // look bright, milky silvery-glass while underlying art gleams through and white text stays crisp.
+    // Clear smoked crystal optics matching Auralys: underlying colors shine cleanly through with
+    // zero chalky white milk wash while white typography & icons stay razor-sharp.
     val anchorAlpha = if (palette.isLight) {
         0f
+    } else if (isHero) {
+        (0.10f + opacityNorm * 0.16f).coerceIn(0.12f, 0.28f)
     } else {
-        val base = 0.12f + opacityNorm * 0.15f
-        if (isHero) (base * 0.85f).coerceIn(0.06f, 0.22f) else base.coerceIn(0.10f, 0.28f)
+        (0.18f + opacityNorm * 0.22f).coerceIn(0.20f, 0.42f)
     }
     val anchorColor = Color(
-        red = 0.08f + palette.glassTint.red * 0.14f,
-        green = 0.10f + palette.glassTint.green * 0.14f,
-        blue = 0.15f + palette.glassTint.blue * 0.14f,
+        red = 0.04f + palette.glassTint.red * 0.10f,
+        green = 0.06f + palette.glassTint.green * 0.10f,
+        blue = 0.10f + palette.glassTint.blue * 0.10f,
         alpha = anchorAlpha,
     )
 
     val whiteFrostAlpha = if (palette.isLight) {
-        (tintAlpha ?: (0.58f + opacityNorm * 0.30f)).coerceIn(0.32f, 0.88f)
+        (tintAlpha ?: (0.58f + opacityNorm * 0.28f)).coerceIn(0.32f, 0.86f)
     } else {
-        val base = 0.13f + opacityNorm * 0.21f
-        val heroAdj = if (isHero) (base + 0.03f) else base
-        (tintAlpha?.let { (it * 0.55f).coerceIn(0.08f, 0.36f) } ?: heroAdj).coerceIn(0.10f, 0.36f)
+        val base = if (isHero) 0.015f + opacityNorm * 0.030f else 0.025f + opacityNorm * 0.040f
+        (tintAlpha?.let { (it * 0.18f).coerceIn(0.01f, 0.10f) } ?: base).coerceIn(0.01f, 0.09f)
     }
     val whiteFrostColor = Color(0xFFF6F9FF).copy(alpha = whiteFrostAlpha)
 
-    val sheenBrush = remember(palette.isLight, accentGlow) {
+    val sheenBrush = remember(palette.isLight, isHero, accentGlow) {
         if (accentGlow != Color.Unspecified) {
             Brush.verticalGradient(
-                colors = listOf(
-                    Color.White.copy(alpha = 0.26f),
-                    accentGlow.copy(alpha = 0.14f),
-                    Color.White.copy(alpha = 0.14f),
-                ),
+                0.0f to Color.White.copy(alpha = if (isHero) 0.22f else 0.16f),
+                0.35f to accentGlow.copy(alpha = 0.08f),
+                0.70f to Color.Transparent,
+                1.0f to Color.White.copy(alpha = 0.06f),
             )
         } else {
             Brush.verticalGradient(
-                colors = listOf(
-                    Color.White.copy(alpha = if (palette.isLight) 0.42f else 0.28f),
-                    Color.White.copy(alpha = if (palette.isLight) 0.12f else 0.04f),
-                    Color.White.copy(alpha = if (palette.isLight) 0.20f else 0.14f),
-                ),
+                0.0f to Color.White.copy(alpha = if (palette.isLight) 0.40f else if (isHero) 0.20f else 0.15f),
+                0.38f to Color.Transparent,
+                0.75f to Color.Transparent,
+                1.0f to Color.White.copy(alpha = if (palette.isLight) 0.18f else if (isHero) 0.08f else 0.05f),
             )
         }
     }
@@ -475,9 +498,9 @@ fun Modifier.ferricLiquidGlass(
                 )
             } else {
                 listOf(
-                    Color.White.copy(alpha = 0.64f),
-                    Color.White.copy(alpha = 0.18f),
-                    (if (accentGlow != Color.Unspecified) accentGlow else Color.White).copy(alpha = 0.34f),
+                    Color.White.copy(alpha = 0.68f),
+                    Color.White.copy(alpha = 0.16f),
+                    (if (accentGlow != Color.Unspecified) accentGlow else Color.White).copy(alpha = 0.36f),
                 )
             },
         )
@@ -496,8 +519,8 @@ fun Modifier.ferricLiquidGlass(
             }
             val intSize = IntSize(w.roundToInt().coerceAtLeast(1), h.roundToInt().coerceAtLeast(1))
             val radiusPx = min(cornerRadius.toPx(), min(w, h) * 0.5f)
-            val opacityBlurScale = (0.45f + opacityNorm * 0.95f)
-            val blurPx = (blurRadius.toPx() * opacityBlurScale).coerceIn(4f, 44f)
+            val opacityBlurScale = (0.45f + opacityNorm * 0.85f)
+            val blurPx = (blurRadius.toPx() * opacityBlurScale).coerceIn(4f, 40f)
             val refHeightPx = refractionHeight.toPx()
             val refAmountPx = refractionAmount.toPx()
 
@@ -513,17 +536,18 @@ fun Modifier.ferricLiquidGlass(
                 cache.cachedPathRadius = radiusPx
             }
 
-            val hasSharedBlur = backdrop?.ensureBlurred(
+            val activeBackdrop = backdrop
+            val hasSharedBlur = activeBackdrop?.ensureBlurred(
                 blurPx = blurPx,
                 isLight = palette.isLight,
                 density = this@drawWithContent,
                 layoutDirection = layoutDirection,
             ) == true
 
-            if (hasSharedBlur && backdrop != null) {
-                val dx = cache.elementOffset.x - backdrop.rootOffset.x
-                val dy = cache.elementOffset.y - backdrop.rootOffset.y
-                val invScale = 1f / backdrop.blurScale
+            if (hasSharedBlur) {
+                val dx = cache.elementOffset.x - activeBackdrop!!.rootOffset.x
+                val dy = cache.elementOffset.y - activeBackdrop.rootOffset.y
+                val invScale = 1f / activeBackdrop.blurScale
 
                 if (isHero && glassLayer != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     val needsRebuild = cache.cachedRefractEffect == null ||
@@ -570,7 +594,7 @@ fun Modifier.ferricLiquidGlass(
                             glassLayer.record(size = intSize) {
                                 translate(left = -dx, top = -dy) {
                                     scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
-                                        drawLayer(backdrop.blurredLayer)
+                                        drawLayer(activeBackdrop.blurredLayer)
                                     }
                                 }
                             }
@@ -578,7 +602,7 @@ fun Modifier.ferricLiquidGlass(
                         } else {
                             translate(left = -dx, top = -dy) {
                                 scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
-                                    drawLayer(backdrop.blurredLayer)
+                                    drawLayer(activeBackdrop.blurredLayer)
                                 }
                             }
                         }
@@ -591,7 +615,7 @@ fun Modifier.ferricLiquidGlass(
                     clipPath(cache.cachedPath) {
                         translate(left = -dx, top = -dy) {
                             scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
-                                drawLayer(backdrop.blurredLayer)
+                                drawLayer(activeBackdrop.blurredLayer)
                             }
                         }
                         if (anchorAlpha > 0.005f) drawRect(color = anchorColor)
@@ -600,13 +624,17 @@ fun Modifier.ferricLiquidGlass(
                     }
                 }
             } else {
-                // Fallback translucent frosted glass (widgets / unrecorded surfaces / API 28-30).
+                // Zero-FBO translucent smoked crystal directly over live Aurora or sheet glow.
                 clipPath(cache.cachedPath) {
                     if (palette.isLight) {
                         drawRect(color = Color.White.copy(alpha = 0.84f))
                     } else {
-                        drawRect(color = Color(0xFF1F2534).copy(alpha = 0.66f))
-                        drawRect(color = Color.White.copy(alpha = 0.16f))
+                        val crystalAlpha = (0.28f + opacityNorm * 0.28f).coerceIn(0.24f, 0.58f)
+                        drawRect(color = Color(0xFF0B0F19).copy(alpha = crystalAlpha))
+                        drawRect(color = palette.glassTint.copy(alpha = 0.14f))
+                        if (accentGlow != Color.Unspecified) {
+                            drawRect(color = accentGlow.copy(alpha = 0.10f))
+                        }
                         drawRect(brush = sheenBrush)
                     }
                 }
@@ -664,9 +692,8 @@ fun FerricModalBottomSheet(
         return
     }
 
-    val sheetBackdrop = rememberFerricBackdropState()
     val opacityNorm = palette.glassOpacity.coerceIn(0.15f, 0.95f)
-    val sheetBgAlpha = (0.38f + opacityNorm * 0.24f).coerceIn(0.34f, 0.66f)
+    val sheetBgAlpha = (0.56f + opacityNorm * 0.22f).coerceIn(0.50f, 0.78f)
     val sheetShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
 
     ModalBottomSheet(
@@ -674,7 +701,7 @@ fun FerricModalBottomSheet(
         modifier = modifier,
         sheetState = sheetState,
         containerColor = Color.Transparent,
-        scrimColor = Color.Black.copy(alpha = 0.24f),
+        scrimColor = Color.Black.copy(alpha = 0.28f),
         dragHandle = null,
     ) {
         val view = LocalView.current
@@ -685,9 +712,9 @@ fun FerricModalBottomSheet(
                     runCatching {
                         window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
                         window.attributes = window.attributes.apply {
-                            blurBehindRadius = 48
+                            blurBehindRadius = 42
                         }
-                        window.setBackgroundBlurRadius(92)
+                        window.setBackgroundBlurRadius(84)
                     }
                 }
             }
@@ -700,7 +727,7 @@ fun FerricModalBottomSheet(
                 width = 1.dp,
                 brush = Brush.verticalGradient(
                     listOf(
-                        Color.White.copy(alpha = 0.56f),
+                        Color.White.copy(alpha = 0.50f),
                         Color.White.copy(alpha = 0.14f),
                         Color.Transparent,
                     ),
@@ -711,50 +738,41 @@ fun FerricModalBottomSheet(
                 .clip(sheetShape),
         ) {
             Box(modifier = Modifier.fillMaxWidth()) {
-                // Sheet ambient frosted backdrop captured into sheetBackdrop for child glass cards/pills.
                 Box(
                     modifier = Modifier
                         .matchParentSize()
-                        .ferricBackdropSource(sheetBackdrop),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .background(
-                                Color(0xFF141824).copy(alpha = sheetBgAlpha),
+                        .background(Color(0xFF0C101B).copy(alpha = sheetBgAlpha)),
+                )
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    coverShade.accent.copy(alpha = 0.16f),
+                                    coverShade.orb1.copy(alpha = 0.16f),
+                                    Color.Transparent,
+                                ),
+                                center = Offset(220f, 140f),
+                                radius = 900f,
                             ),
-                    )
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .background(
-                                Brush.radialGradient(
-                                    colors = listOf(
-                                        coverShade.accent.copy(alpha = 0.22f),
-                                        coverShade.orb1.copy(alpha = 0.20f),
-                                        Color.Transparent,
-                                    ),
-                                    center = Offset(220f, 140f),
-                                    radius = 900f,
+                        ),
+                )
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    Color.White.copy(alpha = 0.12f),
+                                    Color.Transparent,
+                                    Color.White.copy(alpha = 0.04f),
                                 ),
                             ),
-                    )
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(
-                                        Color.White.copy(alpha = 0.14f),
-                                        Color.White.copy(alpha = 0.05f),
-                                        Color.White.copy(alpha = 0.09f),
-                                    ),
-                                ),
-                            ),
-                    )
-                }
+                        ),
+                )
 
-                CompositionLocalProvider(LocalBackdropState provides sheetBackdrop) {
+                CompositionLocalProvider(LocalBackdropState provides null) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Box(
                             modifier = Modifier
@@ -767,7 +785,7 @@ fun FerricModalBottomSheet(
                                     .width(40.dp)
                                     .height(4.dp)
                                     .clip(RoundedCornerShape(999.dp))
-                                    .background(Color.White.copy(alpha = 0.52f)),
+                                    .background(Color.White.copy(alpha = 0.56f)),
                             )
                         }
                         content()
@@ -775,5 +793,157 @@ fun FerricModalBottomSheet(
                 }
             }
         }
+    }
+}
+
+/**
+ * Translucent crystal Liquid Glass selection pill replacing solid opaque Material FilterChips
+ * across Equalizer, DSP, and Theme Studio controls.
+ */
+@Composable
+fun FerricChoicePill(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val palette = LocalFerricPalette.current
+    if (selected) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = palette.accent,
+            border = BorderStroke(1.dp, palette.accent),
+            modifier = modifier
+                .height(34.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .clickable(onClick = onClick),
+        ) {
+            Box(
+                modifier = Modifier.padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (palette.isLight) Color.White else Color.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    } else {
+        Box(
+            modifier = modifier
+                .height(34.dp)
+                .ferricGlassSurface(
+                    palette = palette,
+                    cornerRadius = 999.dp,
+                    tier = GlassTier.FROSTED_PANEL,
+                    fallbackColor = palette.elevated,
+                )
+                .clickable(onClick = onClick)
+                .padding(horizontal = 14.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                color = palette.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/**
+ * Slim precision slider (4 dp capsule track + 14 dp thumb) avoiding bulky Material3 Expressive bars.
+ */
+@Composable
+fun FerricSlimSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float> = 0f..1f,
+    steps: Int = 0,
+    onValueChangeFinished: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val palette = LocalFerricPalette.current
+    val currentOnChange by rememberUpdatedState(onValueChange)
+    val currentOnFinished by rememberUpdatedState(onValueChangeFinished)
+    val span = (valueRange.endInclusive - valueRange.start).coerceAtLeast(1e-5f)
+    val frac = ((value - valueRange.start) / span).coerceIn(0f, 1f)
+    var trackWidthPx by remember { mutableIntStateOf(1) }
+
+    fun emitForX(x: Float) {
+        var f = (x / trackWidthPx.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+        if (steps > 0) {
+            val segments = steps + 1
+            f = kotlin.math.round(f * segments) / segments
+        }
+        currentOnChange(valueRange.start + f * span)
+    }
+
+    val inactiveTrack = if (palette.isLiquidGlass && !palette.isLight) {
+        Color.White.copy(alpha = 0.22f)
+    } else {
+        palette.border
+    }
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(28.dp)
+            .onSizeChanged { trackWidthPx = it.width.coerceAtLeast(1) }
+            .pointerInput(valueRange, steps) {
+                detectTapGestures { offset ->
+                    emitForX(offset.x)
+                    currentOnFinished?.invoke()
+                }
+            }
+            .pointerInput(valueRange, steps) {
+                detectHorizontalDragGestures(
+                    onDragStart = { offset -> emitForX(offset.x) },
+                    onHorizontalDrag = { change, _ ->
+                        change.consume()
+                        emitForX(change.position.x)
+                    },
+                    onDragEnd = { currentOnFinished?.invoke() },
+                    onDragCancel = { currentOnFinished?.invoke() },
+                )
+            },
+    ) {
+        val midY = size.height * 0.5f
+        val thumbR = 7.dp.toPx()
+        val usableW = (size.width - thumbR * 2f).coerceAtLeast(1f)
+        val thumbX = thumbR + frac * usableW
+        val strokePx = 4.dp.toPx()
+
+        drawLine(
+            color = inactiveTrack,
+            start = Offset(thumbR, midY),
+            end = Offset(size.width - thumbR, midY),
+            strokeWidth = strokePx,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = palette.accent,
+            start = Offset(thumbR, midY),
+            end = Offset(thumbX, midY),
+            strokeWidth = strokePx,
+            cap = StrokeCap.Round,
+        )
+        drawCircle(
+            color = Color.Black.copy(alpha = 0.28f),
+            radius = thumbR + 1.5f,
+            center = Offset(thumbX, midY + 1f),
+        )
+        drawCircle(
+            color = palette.accent,
+            radius = thumbR,
+            center = Offset(thumbX, midY),
+        )
     }
 }

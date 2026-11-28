@@ -397,37 +397,29 @@ private fun FerricMainShell(
         }
     }
 
-    val auroraBackdrop = rememberFerricBackdropState()
-
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.canvas),
     ) {
-        // Layer 1: Full-screen scrollable canvas captured into GPU backdropState so floating
-        // Liquid Glass dock/mini-player opt-refract scrolling cards, while scrolling cards sample
-        // sibling auroraBackdrop (strictly acyclic DAG: auroraBackdrop -> tabs -> backdropState -> dock).
+        // Layer 1: Full-screen scrollable canvas captured into ONE shared backdropState so the
+        // floating Liquid Glass dock & mini-player opt-refract scrolling cards. Inner page cards draw
+        // directly over live AuroraBackdrop as zero-FBO translucent crystal glass.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .ferricBackdropSource(backdropState, enabled = !showFullPlayer),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .ferricBackdropSource(auroraBackdrop, enabled = !showFullPlayer && palette.isLiquidGlass),
-            ) {
-                if (palette.isLiquidGlass) {
-                    AuroraBackdrop(
-                        colors = state.coverShade,
-                        baseCanvas = palette.canvas,
-                        isPlaying = state.isPlaying && !showFullPlayer,
-                        intensity = 0.64f,
-                    )
-                }
+            if (palette.isLiquidGlass) {
+                AuroraBackdrop(
+                    colors = state.coverShade,
+                    baseCanvas = palette.canvas,
+                    isPlaying = state.isPlaying && !showFullPlayer,
+                    intensity = 0.68f,
+                )
             }
 
-            androidx.compose.runtime.CompositionLocalProvider(LocalBackdropState provides auroraBackdrop) {
+            androidx.compose.runtime.CompositionLocalProvider(LocalBackdropState provides null) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -692,30 +684,36 @@ private fun FerricMainShell(
             }
         }
 
-        // Layer 2: Floating Optical Liquid Glass Dock + Mini-Player Pill (sibling over backdrop!)
-        FloatingLiquidGlassDock(
-            state = state,
-            progressFlow = store.playbackProgress,
-            activeTab = activeTab,
-            isDetailOpen = state.activeDetail != null,
-            isCollapsed = dockCollapsed,
-            onSelectTab = { tab ->
-                store.closeDetail()
-                activeTab = tab
-                dockCollapsed = false
-            },
-            onExpandDock = { dockCollapsed = false },
-            onTogglePlayPause = { store.togglePlayPause() },
-            onNext = { store.next() },
-            onPrev = { store.prev() },
-            onDismissStop = { store.stopAndDismissMiniPlayer() },
-            onToggleLike = { id -> store.toggleLike(id) },
-            onOpenFullPlayer = { showFullPlayer = true },
-            onOpenConnect = { showConnectSheet = true },
+        // Layer 2: Floating Optical Liquid Glass Dock + Mini-Player Pill (unmounted while FullPlayer covers)
+        AnimatedVisibility(
+            visible = !showFullPlayer,
+            enter = fadeIn(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)),
+            exit = fadeOut(tween(durationMillis = 140)),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding(),
-        )
+        ) {
+            FloatingLiquidGlassDock(
+                state = state,
+                progressFlow = store.playbackProgress,
+                activeTab = activeTab,
+                isDetailOpen = state.activeDetail != null,
+                isCollapsed = dockCollapsed,
+                onSelectTab = { tab ->
+                    store.closeDetail()
+                    activeTab = tab
+                    dockCollapsed = false
+                },
+                onExpandDock = { dockCollapsed = false },
+                onTogglePlayPause = { store.togglePlayPause() },
+                onNext = { store.next() },
+                onPrev = { store.prev() },
+                onDismissStop = { store.stopAndDismissMiniPlayer() },
+                onToggleLike = { id -> store.toggleLike(id) },
+                onOpenFullPlayer = { showFullPlayer = true },
+                onOpenConnect = { showConnectSheet = true },
+            )
+        }
 
         // Layer 3: Full Player rendered as sibling overlay (preserves all tab scroll positions!)
         AnimatedVisibility(

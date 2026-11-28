@@ -69,8 +69,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -660,7 +662,7 @@ private fun FloatingNavPill(
                     .fillMaxSize()
                     .graphicsLayer { alpha = expandedAlpha },
             ) {
-                // Smooth convex lens pill sits beneath icons so glyphs stay razor-sharp.
+                // Clear crystal specular lens bubble behind active tab, matching Auralys optics.
                 if (slotWidthPx > 0f && (!isDetailOpen || isDragging)) {
                     val bubbleW = with(density) { (slotWidthPx * 0.92f).toDp() }
                     val bubbleOffsetX = (animatedCenterPx - (slotWidthPx * 0.46f)).roundToInt()
@@ -677,22 +679,25 @@ private fun FloatingNavPill(
                             .clip(RoundedCornerShape(27.dp))
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(
-                                        Color.White.copy(alpha = if (palette.isLight) 0.16f else 0.26f + 0.14f * dragFocus),
-                                        restPillBg.copy(alpha = (restPillBg.alpha + 0.12f * dragFocus).coerceAtMost(0.42f)),
-                                        palette.accent.copy(alpha = 0.24f * dragFocus),
-                                    ),
+                                    0.0f to Color.White.copy(alpha = if (palette.isLight) 0.24f else 0.20f + 0.14f * dragFocus),
+                                    0.45f to restPillBg.copy(alpha = (0.06f + 0.12f * dragFocus).coerceAtMost(0.24f)),
+                                    1.0f to palette.accent.copy(alpha = 0.10f + 0.16f * dragFocus),
                                 ),
                             )
                             .border(
                                 width = 1.dp,
-                                color = Color.White.copy(alpha = (0.28f + 0.44f * dragFocus).coerceAtMost(0.75f)),
+                                color = Color.White.copy(alpha = (0.42f + 0.36f * dragFocus).coerceAtMost(0.80f)),
                                 shape = RoundedCornerShape(27.dp),
                             ),
                     )
                 }
 
-                // Tab labels & icons drawn razor-sharp above the optical lens bubble.
+                // Tab labels & icons drawn razor-sharp above the crystal lens bubble.
+                val glassTextShadow = if (palette.isLiquidGlass && !palette.isLight) {
+                    Shadow(color = Color.Black.copy(alpha = 0.55f), offset = Offset(0f, 1f), blurRadius = 4f)
+                } else {
+                    null
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
@@ -708,10 +713,11 @@ private fun FloatingNavPill(
                             label = "nav_tab_scale",
                         )
                         val contentColor by animateColorAsState(
-                            targetValue = if (selected) {
-                                if (palette.isLiquidGlass) palette.textPrimary else palette.accent
-                            } else {
-                                palette.textSecondary
+                            targetValue = when {
+                                selected && palette.isLiquidGlass -> Color.White
+                                selected -> palette.accent
+                                palette.isLiquidGlass && !palette.isLight -> Color(0xFFD6DFEE)
+                                else -> palette.textSecondary
                             },
                             animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
                             label = "nav_tab_color",
@@ -736,7 +742,7 @@ private fun FloatingNavPill(
                             Spacer(Modifier.height(2.dp))
                             Text(
                                 text = tab.label,
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelSmall.copy(shadow = glassTextShadow),
                                 fontSize = 11.sp,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                                 color = contentColor,
@@ -893,19 +899,28 @@ private fun FloatingMiniPlayerPill(
                     isActive = displayPlaying,
                 )
                 Spacer(Modifier.width(10.dp))
+                val miniShadow = if (palette.isLiquidGlass && !palette.isLight) {
+                    Shadow(color = Color.Black.copy(alpha = 0.55f), offset = Offset(0f, 1f), blurRadius = 4f)
+                } else {
+                    null
+                }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = displayTitle,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.titleMedium.copy(shadow = miniShadow),
                         fontWeight = FontWeight.SemiBold,
-                        color = palette.textPrimary,
+                        color = if (palette.isLiquidGlass && !palette.isLight) Color.White else palette.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
                         text = displaySubtitle,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (activeRemotePeer != null) palette.accent else palette.textSecondary,
+                        style = MaterialTheme.typography.bodyMedium.copy(shadow = miniShadow),
+                        color = when {
+                            activeRemotePeer != null -> palette.accent
+                            palette.isLiquidGlass && !palette.isLight -> Color(0xFFDCE4F2)
+                            else -> palette.textSecondary
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )

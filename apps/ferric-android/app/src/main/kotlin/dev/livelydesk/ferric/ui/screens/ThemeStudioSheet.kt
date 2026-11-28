@@ -23,14 +23,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -47,7 +43,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import dev.livelydesk.ferric.ui.theme.FerricChoicePill
 import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
+import dev.livelydesk.ferric.ui.theme.FerricSlimSlider
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import uniffi.ferric_mobile_ffi.FfiThemeConfig
@@ -166,16 +164,10 @@ fun ThemeStudioSheet(
                 Text("Full Player Layout", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(PLAYER_LAYOUTS, key = { it.first }) { (key, label) ->
-                        FilterChip(
+                        FerricChoicePill(
+                            label = label,
                             selected = themeConfig.playerLayout == key,
                             onClick = { onUpdateTheme(themeConfig.copy(playerLayout = key)) },
-                            label = { Text(label) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = palette.accent,
-                                selectedLabelColor = if (palette.isLight) Color.White else Color.Black,
-                                containerColor = palette.elevated,
-                                labelColor = palette.textPrimary,
-                            ),
                         )
                     }
                 }
@@ -186,16 +178,10 @@ fun ThemeStudioSheet(
                         val isSelected = themeConfig.fontFamily.equals(font, ignoreCase = true) ||
                             (font == "DM Sans" && themeConfig.fontFamily.equals("Inter", ignoreCase = true)) ||
                             (font == "Figtree" && themeConfig.fontFamily.equals("Plus Jakarta Sans", ignoreCase = true))
-                        FilterChip(
+                        FerricChoicePill(
+                            label = font,
                             selected = isSelected,
                             onClick = { onUpdateTheme(themeConfig.copy(fontFamily = font)) },
-                            label = { Text(font) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = palette.accent,
-                                selectedLabelColor = if (palette.isLight) Color.White else Color.Black,
-                                containerColor = palette.elevated,
-                                labelColor = palette.textPrimary,
-                            ),
                         )
                     }
                 }
@@ -217,7 +203,7 @@ fun ThemeStudioSheet(
                     Text("Glass Frost Opacity", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                     Text("${(draftOpacity * 100).toInt()}%", color = palette.accent, style = MaterialTheme.typography.labelSmall)
                 }
-                Slider(
+                FerricSlimSlider(
                     value = draftOpacity,
                     onValueChange = { next ->
                         draftOpacity = next
@@ -227,11 +213,6 @@ fun ThemeStudioSheet(
                         onUpdateTheme(themeConfig.copy(acrylicOpacity = draftOpacity))
                     },
                     valueRange = 0.15f..0.95f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = palette.accent,
-                        activeTrackColor = palette.accent,
-                        inactiveTrackColor = palette.border,
-                    ),
                 )
 
                 Row(
@@ -241,7 +222,7 @@ fun ThemeStudioSheet(
                     Text("Card Corner Radius", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
                     Text("${draftRadius.toInt()} dp", color = palette.accent, style = MaterialTheme.typography.labelSmall)
                 }
-                Slider(
+                FerricSlimSlider(
                     value = draftRadius,
                     onValueChange = { next ->
                         draftRadius = next
@@ -251,11 +232,6 @@ fun ThemeStudioSheet(
                         onUpdateTheme(themeConfig.copy(cornerRadiusPx = draftRadius))
                     },
                     valueRange = 0f..28f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = palette.accent,
-                        activeTrackColor = palette.accent,
-                        inactiveTrackColor = palette.border,
-                    ),
                 )
 
                 // Live tactile preview reflecting active Font, Corner Radius, Accent, and Frost Opacity

@@ -1,21 +1,16 @@
 package dev.livelydesk.ferric.ui.components
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.State
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -56,19 +51,13 @@ fun AuroraBackdrop(
     }
 
     val animate = isPlaying && isResumed
-    val phaseState: State<Float> = if (animate) {
-        val transition = rememberInfiniteTransition(label = "aurora")
-        transition.animateFloat(
-            initialValue = 0f,
-            targetValue = (2.0 * PI).toFloat(),
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 18_000, easing = LinearEasing),
-                repeatMode = RepeatMode.Restart,
-            ),
-            label = "aurora_phase",
-        )
-    } else {
-        remember { mutableFloatStateOf(0.6f) }
+    val phaseState = remember { mutableFloatStateOf(0.6f) }
+    androidx.compose.runtime.LaunchedEffect(animate) {
+        if (!animate) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(64L)
+            phaseState.floatValue = ((phaseState.floatValue + 0.022f) % (2.0 * PI)).toFloat()
+        }
     }
 
     var canvasRadius by remember { mutableFloatStateOf(720f) }

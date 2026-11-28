@@ -262,11 +262,11 @@ fun ShareCardSheet(
                                 .padding(horizontal = 12.dp, vertical = 14.dp)
                                 .ferricLiquidGlass(
                                     cornerRadius = cardCorner,
-                                    blurRadius = 15.dp,
+                                    blurRadius = 14.dp,
                                     refractionHeight = 16.dp,
                                     refractionAmount = 14.dp,
                                     chromaticDispersion = 0.65f,
-                                    tintAlpha = 0.22f,
+                                    tintAlpha = 0.06f,
                                     alwaysGlass = true,
                                 )
                             ShareCardStyle.AMOLED -> Modifier

@@ -584,7 +584,7 @@ impl Default for UpdateSettings {
 }
 
 fn default_volume() -> f32 {
-    0.85
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -614,7 +614,7 @@ impl Default for SessionResumeState {
     fn default() -> Self {
         Self {
             last_track_id: None,
-            volume: 0.85,
+            volume: 1.0,
             shuffle: false,
             repeat: RepeatMode::Off,
             total_tracks_played: 0,

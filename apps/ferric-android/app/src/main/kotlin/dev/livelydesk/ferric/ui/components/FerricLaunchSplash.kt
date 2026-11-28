@@ -1,12 +1,14 @@
 package dev.livelydesk.ferric.ui.components
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -39,19 +41,24 @@ import kotlin.math.sin
 
 /**
  * Sleek Auralys-inspired cold launch reveal animation built with authentic Ferric Type-I Cassette
- * copper geometry. Runs briefly (~600ms) while state hydrates, then fades/scales cleanly into Home
- * before detaching completely from Composition (zero post-launch GPU/RAM cost).
+ * copper geometry. Combines staggered icon motion + fade-in with sequential character reveal
+ * (~1.4s hold + smooth 380ms dissolve) before detaching completely from Composition.
  */
 @Composable
 fun FerricLaunchSplash(
     onFinished: () -> Unit,
 ) {
-    val enterScale = remember { Animatable(0.84f) }
+    val enterScale = remember { Animatable(0.72f) }
     val enterAlpha = remember { Animatable(0f) }
+    val iconRotation = remember { Animatable(-20f) }
+    val iconOffsetY = remember { Animatable(32f) }
     val reelSpin = remember { Animatable(0f) }
-    val wordAlpha = remember { Animatable(0f) }
+    val wordReveal = remember { Animatable(0f) }
+    val taglineAlpha = remember { Animatable(0f) }
     val exitAlpha = remember { Animatable(1f) }
     val exitScale = remember { Animatable(1f) }
+
+    val brandLetters = remember { listOf("F", "e", "r", "r", "i", "c") }
 
     val ambientBrush = remember {
         Brush.radialGradient(
@@ -65,23 +72,33 @@ fun FerricLaunchSplash(
 
     LaunchedEffect(Unit) {
         launch {
-            enterScale.animateTo(1f, tween(durationMillis = 420, easing = FerricEaseOut))
+            enterScale.animateTo(1f, tween(durationMillis = 780, easing = FerricEaseOut))
         }
         launch {
-            enterAlpha.animateTo(1f, tween(durationMillis = 300, easing = FerricEaseOut))
+            enterAlpha.animateTo(1f, tween(durationMillis = 560, easing = FerricEaseOut))
         }
         launch {
-            reelSpin.animateTo(110f, tween(durationMillis = 720, easing = FerricEaseOut))
+            iconRotation.animateTo(-7f, tween(durationMillis = 920, easing = FerricEaseOut))
         }
         launch {
-            delay(130L)
-            wordAlpha.animateTo(1f, tween(durationMillis = 280, easing = FerricEaseOut))
+            iconOffsetY.animateTo(0f, tween(durationMillis = 700, easing = FerricEaseOut))
         }
-        delay(560L)
         launch {
-            exitScale.animateTo(1.06f, tween(durationMillis = 280, easing = FerricEaseOut))
+            reelSpin.animateTo(300f, tween(durationMillis = 1520, easing = FerricEaseOut))
         }
-        exitAlpha.animateTo(0f, tween(durationMillis = 280, easing = FerricEaseOut))
+        launch {
+            delay(280L)
+            wordReveal.animateTo(1f, tween(durationMillis = 640, easing = LinearEasing))
+        }
+        launch {
+            delay(760L)
+            taglineAlpha.animateTo(1f, tween(durationMillis = 420, easing = FerricEaseOut))
+        }
+        delay(1420L)
+        launch {
+            exitScale.animateTo(1.06f, tween(durationMillis = 360, easing = FerricEaseOut))
+        }
+        exitAlpha.animateTo(0f, tween(durationMillis = 360, easing = FerricEaseOut))
         onFinished()
     }
 
@@ -98,8 +115,8 @@ fun FerricLaunchSplash(
     ) {
         Box(
             modifier = Modifier
-                .size(220.dp)
-                .graphicsLayer { alpha = enterAlpha.value * 0.85f }
+                .size(240.dp)
+                .graphicsLayer { alpha = enterAlpha.value * 0.90f }
                 .background(ambientBrush),
         )
 
@@ -114,7 +131,8 @@ fun FerricLaunchSplash(
                         alpha = enterAlpha.value
                         scaleX = enterScale.value
                         scaleY = enterScale.value
-                        rotationZ = -10f
+                        rotationZ = iconRotation.value
+                        translationY = iconOffsetY.value
                     },
             ) {
                 val u = size.minDimension / 100f
@@ -273,18 +291,44 @@ fun FerricLaunchSplash(
                 )
             }
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(14.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                brandLetters.forEachIndexed { idx, ch ->
+                    val charProgress = ((wordReveal.value * 7.2f) - idx).coerceIn(0f, 1f)
+                    Text(
+                        text = ch,
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 1.6.sp,
+                        ),
+                        color = Color(0xFFF3EEE3).copy(alpha = 0.92f),
+                        modifier = Modifier.graphicsLayer {
+                            alpha = charProgress
+                            translationY = (1f - charProgress) * 16f
+                            val s = 0.88f + 0.12f * charProgress
+                            scaleX = s
+                            scaleY = s
+                        },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(4.dp))
 
             Text(
-                text = "Ferric",
-                style = MaterialTheme.typography.titleLarge.copy(
-                    letterSpacing = 1.2.sp,
+                text = "PURE AUDIO",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    letterSpacing = 2.8.sp,
                     fontWeight = FontWeight.Medium,
                 ),
-                color = Color(0xFFF3EEE3).copy(alpha = 0.72f),
+                color = Color(0xFFDCC0A1).copy(alpha = 0.56f),
                 modifier = Modifier.graphicsLayer {
-                    alpha = wordAlpha.value
-                    translationY = (1f - wordAlpha.value) * 14f
+                    alpha = taglineAlpha.value
+                    translationY = (1f - taglineAlpha.value) * 8f
                 },
             )
         }

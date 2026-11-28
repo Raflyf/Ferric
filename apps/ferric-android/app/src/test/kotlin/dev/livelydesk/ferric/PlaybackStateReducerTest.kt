@@ -44,6 +44,15 @@ class PlaybackStateReducerTest {
             telemetry.copy(positionMs = 43_000uL),
         )
         assertSame(lowFreq1, lowFreq2)
+
+        // When container duration is briefly 0 while streaming/playing, positionMs must keep
+        // advancing so the clock and live synced lyrics do not freeze at 0:00.
+        val unknownDur = PlaybackStateReducer.applyProgress(
+            PlaybackProgress(),
+            telemetry.copy(durationMs = 0uL, positionMs = 28_400uL),
+        )
+        assertEquals(28_400L, unknownDur.positionMs)
+        assertEquals(0L, unknownDur.durationMs)
     }
 
     @Test

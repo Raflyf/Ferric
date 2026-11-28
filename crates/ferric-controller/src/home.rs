@@ -19,12 +19,92 @@ use ferric_providers::spotify_web::{
 use ferric_providers::ytmusic::{
     RecommendedStation, YtmHomeTasteProfile, build_algorithmic_recommended_stations_rotated,
     expand_recommended_station_tracks, fetch_browse_detail, fetch_home_continuation,
-    fetch_rich_home, fetch_rich_search, is_low_quality_radio_candidate, primary_artist_key,
-    search_music,
+    fetch_rich_genre_browse, fetch_rich_home, fetch_rich_search, is_low_quality_radio_candidate,
+    primary_artist_key, search_music,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::thread;
+
+fn push_bounded_exclusion(
+    set: &mut HashSet<String>,
+    fifo: &mut VecDeque<String>,
+    key: String,
+    cap: usize,
+) {
+    if key.is_empty() {
+        return;
+    }
+    if set.insert(key.clone()) {
+        fifo.push_back(key);
+        while fifo.len() > cap {
+            if let Some(old) = fifo.pop_front() {
+                set.remove(&old);
+            }
+        }
+    }
+}
+
+fn merge_stations_rotated(
+    sp_cards: &[ferric_providers::spotify_web::SpotifyStationCard],
+    algo_stations: Vec<RecommendedStation>,
+    excluded_artists: &HashSet<String>,
+    rotation_epoch: usize,
+    force_refresh: bool,
+) -> Vec<RecommendedStation> {
+    if sp_cards.is_empty() {
+        return algo_stations.into_iter().take(10).collect();
+    }
+    let mut sp_converted: Vec<RecommendedStation> = sp_cards
+        .iter()
+        .enumerate()
+        .map(|(idx, card)| RecommendedStation::from_spotify_card(card, (idx % 6) as u8))
+        .collect();
+    if rotation_epoch > 0 && sp_converted.len() > 1 {
+        let shift = rotation_epoch % sp_converted.len();
+        sp_converted.rotate_left(shift);
+        // Partition unseen Spotify station artists ahead of recently shown ones on Refresh
+        sp_converted
+            .sort_by_key(|s| excluded_artists.contains(&s.seed_artist.trim().to_ascii_lowercase()));
+    }
+    let sp_cap = if force_refresh { 4 } else { 5 };
+    let mut sp_iter = sp_converted.into_iter().take(sp_cap);
+    let mut algo_iter = algo_stations.into_iter();
+    let mut out = Vec::with_capacity(10);
+    let mut seen_artists: HashSet<String> = HashSet::with_capacity(12);
+
+    while out.len() < 10 {
+        let pick_algo_first = force_refresh;
+        let first = if pick_algo_first {
+            algo_iter.next().or_else(|| sp_iter.next())
+        } else {
+            sp_iter.next().or_else(|| algo_iter.next())
+        };
+        if let Some(s) = first {
+            let norm = s.seed_artist.trim().to_ascii_lowercase();
+            if norm.is_empty() || seen_artists.insert(norm) {
+                out.push(s);
+            }
+        } else {
+            break;
+        }
+        if out.len() >= 10 {
+            break;
+        }
+        let second = if pick_algo_first {
+            sp_iter.next().or_else(|| algo_iter.next())
+        } else {
+            algo_iter.next().or_else(|| sp_iter.next())
+        };
+        if let Some(s) = second {
+            let norm = s.seed_artist.trim().to_ascii_lowercase();
+            if norm.is_empty() || seen_artists.insert(norm) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
 
 fn clean_home_tracks(tracks: Vec<Track>) -> Vec<Track> {
     tracks
@@ -88,18 +168,23 @@ fn build_home_taste_profile(
         lib_artist_freq
             .entry(norm)
             .and_modify(|e| {
-                e.1 += if t.liked { 5 } else { 2 };
+                e.1 += if t.liked { 4 } else { 1 };
                 if lib[e.2].youtube_video_id.is_none() && t.youtube_video_id.is_some() {
                     e.2 = idx;
                 }
             })
-            .or_insert_with(|| (key, if t.liked { 10 } else { 5 }, idx));
+            .or_insert_with(|| (key, if t.liked { 8 } else { 2 }, idx));
     }
     let mut lib_artists_sorted: Vec<(String, i32, usize)> = lib_artist_freq.into_values().collect();
     lib_artists_sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
-    for (_, freq_score, rep_idx) in lib_artists_sorted.iter().take(64) {
+    for (_, freq_score, rep_idx) in lib_artists_sorted.iter().take(48) {
         if seen_ids.insert(lib[*rep_idx].id.as_str()) {
-            scored_tracks.push(((*freq_score).min(20), *rep_idx));
+            let capped = if lib[*rep_idx].liked {
+                (*freq_score).min(18)
+            } else {
+                (*freq_score).min(10)
+            };
+            scored_tracks.push((capped, *rep_idx));
         }
     }
 
@@ -164,13 +249,6 @@ fn build_home_taste_profile(
     artist_list.sort_by_key(|a| std::cmp::Reverse(a.1));
     let top_artists: Vec<String> = artist_list.into_iter().take(48).map(|(a, _)| a).collect();
 
-    let refresh_mood_params = if !st.home_cache.chips.is_empty() {
-        let idx = st.home_more_cycle % st.home_cache.chips.len();
-        Some(st.home_cache.chips[idx].params.clone())
-    } else {
-        None
-    };
-
     YtmHomeTasteProfile {
         top_tracks,
         library_tracks,
@@ -192,7 +270,7 @@ fn build_home_taste_profile(
             HashSet::new()
         },
         continuation_token: st.home_continuation.clone(),
-        refresh_mood_params,
+        refresh_mood_params: None,
     }
 }
 
@@ -332,37 +410,35 @@ impl FerricController {
                 let ytm_res =
                     fetch_rich_home(&session, mood_params.as_deref(), force_refresh, &taste);
 
-                let mut stations: Vec<RecommendedStation> = Vec::with_capacity(12);
-                if let Some(tok) = spotify_token.as_deref() {
+                let sp_cards = if let Some(tok) = spotify_token.as_deref() {
                     match fetch_spotify_recommended_stations(tok) {
-                        Ok(sp_cards) => {
-                            for (idx, card) in sp_cards.iter().take(8).enumerate() {
-                                stations.push(RecommendedStation::from_spotify_card(
-                                    card,
-                                    (idx % 6) as u8,
-                                ));
-                            }
-                        }
+                        Ok(cards) => cards,
                         Err(SpotifyWebSyncError::AuthExpired) => {
                             this.sink.on_spotify_auth_expired();
+                            Vec::new()
                         }
-                        Err(_) => {}
+                        Err(_) => Vec::new(),
                     }
-                }
+                } else {
+                    Vec::new()
+                };
 
                 match ytm_res {
                     Ok(rich) => {
-                        let algo_needed = 10usize.saturating_sub(stations.len());
-                        if algo_needed > 0 {
-                            let algo = build_algorithmic_recommended_stations_rotated(
-                                &taste,
-                                &library_tracks,
-                                &rich.all_tracks,
-                                algo_needed,
-                                rotation_epoch,
-                            );
-                            stations.extend(algo);
-                        }
+                        let algo = build_algorithmic_recommended_stations_rotated(
+                            &taste,
+                            &library_tracks,
+                            &rich.all_tracks,
+                            8,
+                            rotation_epoch,
+                        );
+                        let stations = merge_stations_rotated(
+                            &sp_cards,
+                            algo,
+                            &taste.excluded_artists,
+                            rotation_epoch,
+                            force_refresh,
+                        );
 
                         let chips: Vec<MoodChipSnapshot> = if rich.chips.is_empty() {
                             existing_chips
@@ -396,24 +472,51 @@ impl FerricController {
                             }
                             st.home_continuation = rich.continuation_token;
 
-                            st.home_excluded_tracks.clear();
-                            for t in &quick_picks {
-                                st.home_excluded_tracks.insert(t.id.clone());
+                            // Maintain rolling FIFO windows instead of clearing every load so
+                            // consecutive Refreshes avoid oscillating back into an A -> B -> A loop.
+                            let crate::ControllerState {
+                                home_excluded_tracks,
+                                home_excluded_track_fifo,
+                                home_excluded_cards,
+                                home_excluded_card_fifo,
+                                home_excluded_artists,
+                                home_excluded_artist_fifo,
+                                ..
+                            } = &mut *st;
+                            for t in quick_picks.iter().take(24) {
+                                push_bounded_exclusion(
+                                    home_excluded_tracks,
+                                    home_excluded_track_fifo,
+                                    t.id.clone(),
+                                    96,
+                                );
                                 if let Some(vid) = &t.youtube_video_id {
-                                    st.home_excluded_tracks.insert(vid.clone());
+                                    push_bounded_exclusion(
+                                        home_excluded_tracks,
+                                        home_excluded_track_fifo,
+                                        vid.clone(),
+                                        96,
+                                    );
                                 }
                             }
-                            st.home_excluded_cards.clear();
                             for sh in &shelves {
-                                for c in &sh.cards {
-                                    st.home_excluded_cards.insert(c.id.clone());
+                                for c in sh.cards.iter().take(12) {
+                                    push_bounded_exclusion(
+                                        home_excluded_cards,
+                                        home_excluded_card_fifo,
+                                        c.id.clone(),
+                                        64,
+                                    );
                                 }
                             }
-                            st.home_excluded_artists.clear();
                             for s in &stations {
                                 if !s.seed_artist.is_empty() {
-                                    st.home_excluded_artists
-                                        .insert(s.seed_artist.trim().to_ascii_lowercase());
+                                    push_bounded_exclusion(
+                                        home_excluded_artists,
+                                        home_excluded_artist_fifo,
+                                        s.seed_artist.trim().to_ascii_lowercase(),
+                                        12,
+                                    );
                                 }
                             }
 
@@ -436,12 +539,16 @@ impl FerricController {
                             &taste,
                             &library_tracks,
                             &[],
-                            6,
+                            8,
                             rotation_epoch,
                         );
-                        if stations.is_empty() {
-                            stations = algo;
-                        }
+                        let stations = merge_stations_rotated(
+                            &sp_cards,
+                            algo,
+                            &taste.excluded_artists,
+                            rotation_epoch,
+                            force_refresh,
+                        );
                         let station_snaps: Vec<StationCardSnapshot> =
                             stations.iter().map(Into::into).collect();
                         let fallback_snap = {
@@ -864,6 +971,110 @@ impl FerricController {
         Ok(())
     }
 
+    /// Browse a curated genre mix ("Pop", "Indie", "Rock", etc.) with epoch-based rotation,
+    /// parallel multi-query + radio expansion (~32-44 songs + cards), and per-genre rolling exclusions.
+    pub fn browse_genre(self: &Arc<Self>, genre: String) -> ControllerResult<()> {
+        let g = genre.trim().to_string();
+        if g.is_empty() {
+            return self.search_online(String::new());
+        }
+        let local_tracks = self.instant_search_local(&g)?;
+        let g_key = g.to_ascii_lowercase();
+
+        let (session, gen_id, epoch, taste, excluded_ids) = {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.search_gen = st.search_gen.wrapping_add(1);
+            let gen_id = st.search_gen;
+            let epoch_entry = st.genre_browse_epochs.entry(g_key.clone()).or_insert(0);
+            let epoch = *epoch_entry;
+            *epoch_entry = epoch_entry.wrapping_add(1);
+            let excluded_ids: HashSet<String> = st
+                .genre_excluded_tracks
+                .get(&g_key)
+                .map(|dq| dq.iter().cloned().collect())
+                .unwrap_or_default();
+            let lib: Vec<Track> = st
+                .db
+                .list_tracks("")
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| {
+                    !t.id.starts_with("demo:") && !contains_ascii_icase(&t.album, "watching")
+                })
+                .collect();
+            let taste = build_home_taste_profile(&st, &lib, false);
+            (
+                active_ytm_session(&st.accounts),
+                gen_id,
+                epoch,
+                taste,
+                excluded_ids,
+            )
+        };
+
+        self.sink.on_search_results(SearchSnapshot {
+            query: g.clone(),
+            local_tracks: local_tracks.clone(),
+            online_tracks: Vec::new(),
+            online_cards: Vec::new(),
+            is_loading: true,
+        });
+
+        let this = Arc::clone(self);
+        let _ = thread::Builder::new()
+            .name("ferric-genre-browse".to_string())
+            .spawn(move || {
+                let (online_tracks, online_cards) =
+                    match fetch_rich_genre_browse(&session, &g, epoch, &taste, &excluded_ids) {
+                        Ok(rich) => (
+                            rich.tracks,
+                            rich.cards
+                                .into_iter()
+                                .map(ShelfCardSnapshot::from)
+                                .collect(),
+                        ),
+                        Err(_) => match fetch_rich_search(&session, &g, 28) {
+                            Ok(rich) => (
+                                rich.tracks,
+                                rich.cards
+                                    .into_iter()
+                                    .map(ShelfCardSnapshot::from)
+                                    .collect(),
+                            ),
+                            Err(err) => {
+                                this.sink.on_toast(format!("Genre browse failed: {err}"));
+                                (Vec::new(), Vec::new())
+                            }
+                        },
+                    };
+
+                let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
+                if st.search_gen != gen_id {
+                    return;
+                }
+                let dq = st.genre_excluded_tracks.entry(g_key).or_default();
+                for t in online_tracks.iter().take(24) {
+                    let k = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+                    if !dq.contains(&k) {
+                        dq.push_back(k);
+                        while dq.len() > 72 {
+                            dq.pop_front();
+                        }
+                    }
+                }
+                drop(st);
+
+                this.sink.on_search_results(SearchSnapshot {
+                    query: g,
+                    local_tracks,
+                    online_tracks,
+                    online_cards,
+                    is_loading: false,
+                });
+            });
+        Ok(())
+    }
+
     /// Import any public Spotify or YouTube / YouTube Music playlist, album, or track URL directly.
     pub fn import_public_url(self: &Arc<Self>, raw_url: String) -> ControllerResult<()> {
         let trimmed = raw_url.trim().to_string();
@@ -925,5 +1136,82 @@ impl FerricController {
                 }
             });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_stations_rotated, push_bounded_exclusion};
+    use ferric_providers::spotify_web::SpotifyStationCard;
+    use ferric_providers::ytmusic::RecommendedStation;
+    use std::collections::{HashSet, VecDeque};
+
+    fn fake_algo(artist: &str) -> RecommendedStation {
+        RecommendedStation {
+            id: format!("algo:{artist}"),
+            title: format!("{artist} Radio"),
+            display_name: artist.to_string(),
+            subtitle: format!("Inspired by {artist}"),
+            palette_idx: 0,
+            is_spotify_prebuilt_art: false,
+            center_art_url: None,
+            left_art_url: None,
+            right_art_url: None,
+            spotify_playlist_id: None,
+            seed_video_id: Some("dQw4w9WgXcQ".to_string()),
+            seed_artist: artist.to_string(),
+            seed_title: "Song".to_string(),
+            is_spotify_origin: false,
+            cached_tracks: Vec::new(),
+        }
+    }
+
+    fn fake_sp(id: &str, artist: &str) -> SpotifyStationCard {
+        SpotifyStationCard {
+            playlist_id: id.to_string(),
+            title: format!("{artist} Radio"),
+            display_name: artist.to_string(),
+            subtitle: String::new(),
+            thumbnail_url: None,
+        }
+    }
+
+    #[test]
+    fn rolling_fifo_exclusions_evict_oldest_without_full_clear() {
+        let mut set = HashSet::new();
+        let mut fifo = VecDeque::new();
+        for i in 0..5 {
+            push_bounded_exclusion(&mut set, &mut fifo, format!("id_{i}"), 3);
+        }
+        assert_eq!(fifo.len(), 3);
+        assert!(!set.contains("id_0"));
+        assert!(!set.contains("id_1"));
+        assert!(set.contains("id_2"));
+        assert!(set.contains("id_3"));
+        assert!(set.contains("id_4"));
+    }
+
+    #[test]
+    fn merge_stations_rotated_changes_order_and_respects_excluded_artists() {
+        let sp = vec![
+            fake_sp("sp1", "Artist A"),
+            fake_sp("sp2", "Artist B"),
+            fake_sp("sp3", "Artist C"),
+            fake_sp("sp4", "Artist D"),
+        ];
+        let algo = vec![
+            fake_algo("Algo 1"),
+            fake_algo("Algo 2"),
+            fake_algo("Algo 3"),
+            fake_algo("Algo 4"),
+        ];
+        let init = merge_stations_rotated(&sp, algo.clone(), &HashSet::new(), 0, false);
+        let excluded: HashSet<String> = ["artist a", "artist b"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let refreshed = merge_stations_rotated(&sp, algo, &excluded, 1, true);
+        assert_ne!(init[0].seed_artist, refreshed[0].seed_artist);
+        assert_eq!(refreshed[0].seed_artist, "Algo 1");
     }
 }

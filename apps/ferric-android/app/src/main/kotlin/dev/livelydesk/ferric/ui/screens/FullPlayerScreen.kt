@@ -1,7 +1,7 @@
 package dev.livelydesk.ferric.ui.screens
 
 import android.os.SystemClock
-import android.view.ViewGroup
+import android.view.LayoutInflater
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
@@ -122,11 +122,11 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.size.Precision
+import dev.livelydesk.ferric.R
 import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.formatDurationMs
@@ -216,7 +216,7 @@ fun FullPlayerScreen(
 
     LaunchedEffect(showLyrics, mediaMode, track?.id) {
         if (track == null) return@LaunchedEffect
-        if (showLyrics && state.lyricsState.trackId != track.id && !state.lyricsState.isLoading) {
+        if ((showLyrics || mediaMode == MediaMode.VIDEO) && state.lyricsState.trackId != track.id && !state.lyricsState.isLoading) {
             onLoadLyrics()
         }
         if (mediaMode == MediaMode.VIDEO && (state.videoStreams.trackId != track.id || state.videoStreams.options.isEmpty())) {
@@ -510,7 +510,9 @@ fun FullPlayerScreen(
                                     state = state,
                                     progressFlow = progressFlow,
                                     playbackSpeed = speed,
-                                    onRetry = onResolveVideo,
+                                    onSeek = onSeek,
+                                    onRetryVideo = onResolveVideo,
+                                    onRetryLyrics = onLoadLyrics,
                                 )
                             }
                             PlayerCenterStage.ARTWORK_CARD -> {
@@ -626,9 +628,11 @@ fun FullPlayerScreen(
 
                     // Jitter-free isolated Seekbar + Elapsed / Codec / Remaining row
                     PlayerSeekSection(
+                        trackId = track?.id,
                         progressFlow = progressFlow,
                         remotePositionMs = activeRemote?.positionMs?.toLong(),
                         remoteDurationMs = activeRemote?.durationMs?.toLong(),
+                        fallbackDurationMs = track?.durationMs?.toLong()?.coerceAtLeast(0L) ?: 0L,
                         codecLabel = buildString {
                             val c = track?.codec.orEmpty()
                             if (c.isNotBlank()) append(c)
@@ -917,9 +921,11 @@ fun FullPlayerScreen(
 
 @Composable
 private fun PlayerSeekSection(
+    trackId: String?,
     progressFlow: StateFlow<PlaybackProgress>,
     remotePositionMs: Long?,
     remoteDurationMs: Long?,
+    fallbackDurationMs: Long,
     codecLabel: String,
     accent: Color,
     onCanvasPrimary: Color,
@@ -927,15 +933,28 @@ private fun PlayerSeekSection(
     onSeek: (Long) -> Unit,
 ) {
     val progress by progressFlow.collectAsStateWithLifecycle()
-    val effectiveDur = (remoteDurationMs ?: progress.durationMs).coerceAtLeast(1L)
-    val effectivePos = (remotePositionMs ?: progress.positionMs).coerceIn(0L, effectiveDur)
+    val rawDur = (remoteDurationMs?.takeIf { it > 0L }
+        ?: progress.durationMs.takeIf { it > 0L }
+        ?: fallbackDurationMs).coerceAtLeast(0L)
+    val hasKnownDuration = rawDur > 0L
+    val effectiveDur = rawDur.coerceAtLeast(1L)
+    val rawPos = (remotePositionMs ?: progress.positionMs).coerceAtLeast(0L)
+    val effectivePos = if (hasKnownDuration) {
+        rawPos.coerceIn(0L, effectiveDur)
+    } else {
+        rawPos
+    }
 
-    var isDragging by remember { mutableStateOf(false) }
-    var dragPosMs by remember { mutableFloatStateOf(effectivePos.toFloat()) }
+    var isDragging by remember(trackId) { mutableStateOf(false) }
+    var dragPosMs by remember(trackId) { mutableFloatStateOf(effectivePos.toFloat()) }
 
-    val sliderValue = if (isDragging) dragPosMs else effectivePos.toFloat()
-    val shownPosMs = sliderValue.toLong().coerceIn(0L, effectiveDur)
-    val remainingMs = (effectiveDur - shownPosMs).coerceAtLeast(0L)
+    val sliderValue = when {
+        !hasKnownDuration -> 0f
+        isDragging -> dragPosMs.coerceIn(0f, effectiveDur.toFloat())
+        else -> effectivePos.toFloat()
+    }
+    val shownPosMs = if (hasKnownDuration) sliderValue.toLong().coerceIn(0L, effectiveDur) else rawPos
+    val remainingMs = if (hasKnownDuration) (effectiveDur - shownPosMs).coerceAtLeast(0L) else 0L
 
     Column(modifier = Modifier.fillMaxWidth()) {
         SleekScrubSlider(
@@ -946,13 +965,19 @@ private fun PlayerSeekSection(
             thumbSize = 13.dp,
             trackHeight = 4.dp,
             onValueChange = { v ->
-                isDragging = true
-                dragPosMs = v
+                if (hasKnownDuration) {
+                    isDragging = true
+                    dragPosMs = v
+                }
             },
             onValueChangeFinished = {
-                val target = dragPosMs.toLong().coerceAtLeast(0L)
-                isDragging = false
-                onSeek(target)
+                if (hasKnownDuration) {
+                    val target = dragPosMs.toLong().coerceIn(0L, effectiveDur)
+                    isDragging = false
+                    onSeek(target)
+                } else {
+                    isDragging = false
+                }
             },
             modifier = Modifier.fillMaxWidth(),
         )
@@ -1147,104 +1172,167 @@ private fun SyncedLyricsStage(
             }
         }
 
-        when {
-            lyrics.isLoading -> {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = palette.accent)
-                }
+        SyncedLyricsViewport(
+            state = state,
+            progressFlow = progressFlow,
+            compact = false,
+            lyricsTextColor = lyricsTextColor,
+            onSeek = onSeek,
+            onRetry = onRetry,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun SyncedLyricsViewport(
+    state: PlaybackUiState,
+    progressFlow: StateFlow<PlaybackProgress>,
+    compact: Boolean,
+    lyricsTextColor: Color,
+    onSeek: (Long) -> Unit,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val palette = LocalFerricPalette.current
+    val progress by progressFlow.collectAsStateWithLifecycle()
+    val lyrics = state.lyricsState
+    val listState = rememberLazyListState()
+
+    val effectivePosMs = (progress.positionMs + lyrics.offsetMs).coerceAtLeast(0L)
+    val activeIdx = remember(lyrics.lines, lyrics.isSynced, effectivePosMs) {
+        if (!lyrics.isSynced) return@remember -1
+        var found = -1
+        for (i in lyrics.lines.indices) {
+            if (lyrics.lines[i].timestampMs.toLong() <= effectivePosMs) {
+                found = i
+            } else {
+                break
             }
-            lyrics.lines.isEmpty() -> {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Text("No lyrics found for this track.", style = MaterialTheme.typography.bodyLarge, color = lyricsTextColor.copy(alpha = 0.72f))
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = onRetry) { Text("Retry Lyrics", color = palette.accent) }
-                }
+        }
+        found
+    }
+
+    when {
+        lyrics.isLoading -> {
+            Box(modifier = modifier, contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    color = palette.accent,
+                    modifier = Modifier.size(if (compact) 24.dp else 36.dp),
+                )
             }
-            else -> {
-                BoxWithConstraints(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
-                        .drawWithContent {
-                            drawContent()
-                            drawRect(
-                                brush = Brush.verticalGradient(
-                                    0.0f to Color.Transparent,
-                                    0.14f to Color.Black,
-                                    0.84f to Color.Black,
-                                    1.0f to Color.Transparent,
-                                ),
-                                blendMode = BlendMode.DstIn,
-                            )
-                        },
-                ) {
-                    val density = LocalDensity.current
-                    val halfViewport = (maxHeight * 0.50f).coerceAtLeast(120.dp)
-                    LaunchedEffect(activeIdx, lyrics.isSynced, lyrics.lines.size, state.currentTrack?.id) {
-                        if (lyrics.isSynced && activeIdx >= 0 && !listState.isScrollInProgress) {
-                            val activeItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == activeIdx }
-                            val fallbackItemH = with(density) { 42.dp.roundToPx() }
-                            val itemHalfH = (activeItem?.size ?: fallbackItemH) / 2
-                            listState.animateScrollToItem(index = activeIdx, scrollOffset = itemHalfH)
-                        }
+        }
+        lyrics.lines.isEmpty() -> {
+            Column(
+                modifier = modifier,
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    text = "No lyrics found for this track.",
+                    style = if (compact) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodyLarge,
+                    color = lyricsTextColor.copy(alpha = 0.72f),
+                )
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = onRetry) { Text("Retry Lyrics", color = palette.accent) }
+            }
+        }
+        else -> {
+            BoxWithConstraints(
+                modifier = modifier
+                    .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                0.0f to Color.Transparent,
+                                0.14f to Color.Black,
+                                0.84f to Color.Black,
+                                1.0f to Color.Transparent,
+                            ),
+                            blendMode = BlendMode.DstIn,
+                        )
+                    },
+            ) {
+                val density = LocalDensity.current
+                val halfViewport = if (compact) {
+                    (maxHeight * 0.40f).coerceAtLeast(48.dp)
+                } else {
+                    (maxHeight * 0.50f).coerceAtLeast(120.dp)
+                }
+                LaunchedEffect(activeIdx, lyrics.isSynced, lyrics.lines.size, state.currentTrack?.id) {
+                    if (lyrics.isSynced && activeIdx >= 0 && !listState.isScrollInProgress) {
+                        val activeItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == activeIdx }
+                        val fallbackItemH = with(density) { (if (compact) 28.dp else 42.dp).roundToPx() }
+                        val itemHalfH = (activeItem?.size ?: fallbackItemH) / 2
+                        listState.animateScrollToItem(index = activeIdx, scrollOffset = itemHalfH)
                     }
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = halfViewport, bottom = halfViewport),
-                        verticalArrangement = Arrangement.spacedBy(22.dp),
-                    ) {
-                        itemsIndexed(lyrics.lines, key = { idx, line -> "${idx}_${line.timestampMs}" }) { idx, line ->
-                            val isActive = lyrics.isSynced && idx == activeIdx
-                            val dist = if (activeIdx >= 0 && lyrics.isSynced) abs(idx - activeIdx) else 1
-                            val targetAlpha = when {
-                                !lyrics.isSynced -> 0.90f
-                                isActive -> 1.0f
-                                dist == 1 -> 0.56f
-                                dist == 2 -> 0.34f
-                                else -> 0.20f
-                            }
-                            val animColor by animateColorAsState(
-                                targetValue = lyricsTextColor.copy(alpha = targetAlpha),
-                                animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
-                                label = "lyric_color",
+                }
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(top = halfViewport, bottom = halfViewport),
+                    verticalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 22.dp),
+                ) {
+                    itemsIndexed(lyrics.lines, key = { idx, line -> "${idx}_${line.timestampMs}" }) { idx, line ->
+                        val isActive = lyrics.isSynced && idx == activeIdx
+                        val dist = if (activeIdx >= 0 && lyrics.isSynced) abs(idx - activeIdx) else 1
+                        val targetAlpha = when {
+                            !lyrics.isSynced -> 0.88f
+                            isActive -> 1.0f
+                            dist == 1 -> if (compact) 0.52f else 0.56f
+                            dist == 2 -> 0.32f
+                            else -> 0.18f
+                        }
+                        val animColor by animateColorAsState(
+                            targetValue = lyricsTextColor.copy(alpha = targetAlpha),
+                            animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                            label = "lyric_color",
+                        )
+                        val animScale by animateFloatAsState(
+                            targetValue = when {
+                                isActive || !lyrics.isSynced -> 1.0f
+                                compact -> 0.94f
+                                else -> 0.90f
+                            },
+                            animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                            label = "lyric_scale",
+                        )
+                        val lyricStyle = if (compact) {
+                            MaterialTheme.typography.titleMedium.copy(
+                                fontSize = if (palette.editorialMode) 18.sp else 17.sp,
+                                lineHeight = 23.sp,
+                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
                             )
-                            val animScale by animateFloatAsState(
-                                targetValue = if (isActive || !lyrics.isSynced) 1.0f else 0.90f,
-                                animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
-                                label = "lyric_scale",
-                            )
-                            val lyricStyle = MaterialTheme.typography.headlineMedium.copy(
+                        } else {
+                            MaterialTheme.typography.headlineMedium.copy(
                                 fontSize = if (palette.editorialMode) 27.sp else 25.sp,
                                 lineHeight = 33.sp,
                                 fontWeight = if (isActive) FontWeight.Bold else FontWeight.SemiBold,
                             )
-
-                            Text(
-                                text = line.text,
-                                style = lyricStyle,
-                                color = animColor,
-                                textAlign = TextAlign.Start,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .graphicsLayer {
-                                        scaleX = animScale
-                                        scaleY = animScale
-                                        transformOrigin = TransformOrigin(0f, 0.5f)
-                                    }
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable(enabled = lyrics.isSynced) {
-                                        val targetMs = (line.timestampMs.toLong() - lyrics.offsetMs).coerceAtLeast(0L)
-                                        onSeek(targetMs)
-                                    }
-                                    .padding(horizontal = 4.dp, vertical = 2.dp),
-                            )
                         }
+
+                        Text(
+                            text = line.text,
+                            style = lyricStyle,
+                            color = animColor,
+                            textAlign = if (compact) TextAlign.Center else TextAlign.Start,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .graphicsLayer {
+                                    scaleX = animScale
+                                    scaleY = animScale
+                                    transformOrigin = TransformOrigin(if (compact) 0.5f else 0f, 0.5f)
+                                }
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable(enabled = lyrics.isSynced) {
+                                    val targetMs = (line.timestampMs.toLong() - lyrics.offsetMs).coerceAtLeast(0L)
+                                    onSeek(targetMs)
+                                }
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                        )
                     }
                 }
             }
@@ -1258,7 +1346,9 @@ private fun DockedVideoStage(
     state: PlaybackUiState,
     progressFlow: StateFlow<PlaybackProgress>,
     playbackSpeed: Float,
-    onRetry: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onRetryVideo: () -> Unit,
+    onRetryLyrics: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -1334,18 +1424,40 @@ private fun DockedVideoStage(
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         when {
             video.isLoading -> {
-                CircularProgressIndicator(color = palette.accent)
-                Spacer(Modifier.height(10.dp))
-                Text("Resolving official music video...", color = Color.White.copy(alpha = 0.72f))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.Black.copy(alpha = 0.35f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = palette.accent)
+                        Spacer(Modifier.height(10.dp))
+                        Text("Resolving official music video...", color = Color.White.copy(alpha = 0.72f))
+                    }
+                }
             }
             selectedOption == null -> {
-                Text("No music video stream available.", color = Color.White.copy(alpha = 0.72f))
-                Spacer(Modifier.height(8.dp))
-                TextButton(onClick = onRetry) { Text("Retry Video", color = palette.accent) }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.Black.copy(alpha = 0.35f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("No music video stream available.", color = Color.White.copy(alpha = 0.72f))
+                        Spacer(Modifier.height(6.dp))
+                        TextButton(onClick = onRetryVideo) { Text("Retry Video", color = palette.accent) }
+                    }
+                }
             }
             else -> {
                 Box(
@@ -1358,47 +1470,65 @@ private fun DockedVideoStage(
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
                         factory = { ctx ->
-                            PlayerView(ctx).apply {
-                                layoutParams = ViewGroup.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                )
-                                useController = false
-                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                            (LayoutInflater.from(ctx).inflate(
+                                R.layout.ferric_texture_player_view,
+                                null,
+                                false,
+                            ) as PlayerView).apply {
                                 player = exoPlayer
                             }
                         },
                         update = { it.player = exoPlayer },
                     )
                 }
-                Spacer(Modifier.height(10.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(video.options.indices.toList()) { idx ->
-                        val opt = video.options[idx]
-                        FilterChip(
-                            selected = idx == selectedOptIdx,
-                            onClick = { selectedOptIdx = idx },
-                            label = { Text(opt.label) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = palette.accent,
-                                selectedLabelColor = Color.Black,
-                                containerColor = Color.White.copy(alpha = 0.14f),
-                                labelColor = Color.White,
-                            ),
-                        )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        items(video.options.indices.toList()) { idx ->
+                            val opt = video.options[idx]
+                            val sel = idx == selectedOptIdx
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(if (sel) palette.accent else Color.White.copy(alpha = 0.14f))
+                                    .clickable { selectedOptIdx = idx }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                            ) {
+                                Text(
+                                    text = opt.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (sel) Color.Black else Color.White,
+                                )
+                            }
+                        }
                     }
+                    Text(
+                        text = if (video.isOfficialMv) "MV · Synced" else "Synced",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.64f),
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
                 }
-                Text(
-                    text = if (video.isOfficialMv) {
-                        "Official MV · Synced to Rust DSP Audio"
-                    } else {
-                        "Video · Synced to Rust Audio"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White.copy(alpha = 0.68f),
-                )
             }
         }
+
+        SyncedLyricsViewport(
+            state = state,
+            progressFlow = progressFlow,
+            compact = true,
+            lyricsTextColor = Color.White,
+            onSeek = onSeek,
+            onRetry = onRetryLyrics,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+        )
     }
 }
 

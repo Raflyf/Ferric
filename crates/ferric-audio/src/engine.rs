@@ -947,6 +947,116 @@ fn safe_speed(speed: f32) -> f32 {
     }
 }
 
+fn read_ebml_vint(buf: &[u8], pos: usize, keep_marker: bool) -> Option<(u64, usize)> {
+    let first = *buf.get(pos)?;
+    if first == 0 {
+        return None;
+    }
+    let lz = first.leading_zeros() as usize;
+    let len = lz + 1;
+    if len > 8 || pos + len > buf.len() {
+        return None;
+    }
+    let mut val = if keep_marker {
+        u64::from(first)
+    } else {
+        u64::from(first & (0x7f_u8 >> lz))
+    };
+    for &b in &buf[pos + 1..pos + len] {
+        val = (val << 8) | u64::from(b);
+    }
+    Some((val, len))
+}
+
+fn parse_ebml_info_duration_ms(buf: &[u8]) -> Option<u64> {
+    // Locate Matroska Segment/Info element (ID 0x1549A966) and read TimecodeScale + Duration.
+    const INFO_ID: [u8; 4] = [0x15, 0x49, 0xA9, 0x66];
+    let mut offset = 0usize;
+    while let Some(rel) = buf[offset..].windows(4).position(|w| w == INFO_ID) {
+        let start = offset + rel;
+        if let Some((info_size, size_len)) = read_ebml_vint(buf, start + 4, false)
+            && (4..=4096).contains(&info_size)
+        {
+            let body_start = start + 4 + size_len;
+            let body_end = body_start.saturating_add(info_size as usize).min(buf.len());
+            let mut cur = body_start;
+            let mut timecode_scale_ns: u64 = 1_000_000;
+            let mut duration_units: Option<f64> = None;
+
+            while cur < body_end {
+                let Some((id, id_len)) = read_ebml_vint(buf, cur, true) else {
+                    break;
+                };
+                cur += id_len;
+                let Some((sz, sz_len)) = read_ebml_vint(buf, cur, false) else {
+                    break;
+                };
+                cur += sz_len;
+                let end = cur.saturating_add(sz as usize);
+                if end > body_end {
+                    break;
+                }
+                let payload = &buf[cur..end];
+                match id {
+                    0x2AD7B1 if !payload.is_empty() && payload.len() <= 8 => {
+                        let mut v = 0u64;
+                        for &b in payload {
+                            v = (v << 8) | u64::from(b);
+                        }
+                        if v > 0 {
+                            timecode_scale_ns = v;
+                        }
+                    }
+                    0x4489 if payload.len() == 4 => {
+                        let d = f64::from(f32::from_be_bytes([
+                            payload[0], payload[1], payload[2], payload[3],
+                        ]));
+                        if d.is_finite() && d > 0.0 {
+                            duration_units = Some(d);
+                        }
+                    }
+                    0x4489 if payload.len() == 8 => {
+                        let d = f64::from_be_bytes([
+                            payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
+                            payload[6], payload[7],
+                        ]);
+                        if d.is_finite() && d > 0.0 {
+                            duration_units = Some(d);
+                        }
+                    }
+                    _ => {}
+                }
+                cur = end;
+            }
+            if let Some(d) = duration_units {
+                let ms = (d * (timecode_scale_ns as f64) / 1_000_000.0).round();
+                if ms.is_finite() && ms > 0.0 {
+                    return Some(ms as u64);
+                }
+            }
+        }
+        offset = start + 1;
+    }
+    None
+}
+
+fn probe_webm_duration_ms(path: &Path) -> Option<u64> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if ext != "webm" && ext != "mkv" {
+        return None;
+    }
+    use std::io::Read;
+    let mut f = crate::content::open_audio_file(path).ok()?;
+    let mut buf = vec![0u8; 8192];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
+    parse_ebml_info_duration_ms(&buf)
+}
+
 impl ActiveDeck {
     fn open(
         path: &Path,
@@ -1001,6 +1111,8 @@ impl ActiveDeck {
         };
         let duration_ms = if probed_duration_ms > 0 {
             probed_duration_ms
+        } else if let Some(wd) = probe_webm_duration_ms(path).filter(|&d| d > 0) {
+            wd
         } else {
             fallback_duration_ms
         };
@@ -1784,8 +1896,8 @@ fn decode_loop(
     headless: bool,
 ) {
     let mut rt = DecodeRuntime::new(out_rate, &eq_config);
-    let mut target_volume = 0.85_f32;
-    let mut smoothed_volume = 0.85_f32;
+    let mut target_volume = 1.0_f32;
+    let mut smoothed_volume = 1.0_f32;
     let mut ducking = DuckingState::default();
     let mut dsp_scratch = Vec::with_capacity(2048);
 
@@ -2551,5 +2663,18 @@ mod tests {
         engine.send(EngineCommand::SetDucking(false));
         engine.send(EngineCommand::Shutdown);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duration_parsers_decode_webm_ebml_and_duration_tags() {
+        // Synthetic Matroska Segment/Info containing TimecodeScale (1_000_000 ns) + float64 Duration (184_500.0 ms)
+        let mut info_body = Vec::new();
+        info_body.extend_from_slice(&[0x2A, 0xD7, 0xB1, 0x83, 0x0F, 0x42, 0x40]);
+        info_body.extend_from_slice(&[0x44, 0x89, 0x88]);
+        info_body.extend_from_slice(&184_500.0_f64.to_be_bytes());
+        let mut ebml = vec![0x1A, 0x45, 0xDF, 0xA3, 0x15, 0x49, 0xA9, 0x66];
+        ebml.push(0x80 | (info_body.len() as u8));
+        ebml.extend_from_slice(&info_body);
+        assert_eq!(parse_ebml_info_duration_ms(&ebml), Some(184_500));
     }
 }

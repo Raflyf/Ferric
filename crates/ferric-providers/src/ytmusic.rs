@@ -665,7 +665,7 @@ fn post_ytm_json_fast(endpoint: &str, body: &Value, session: &YtmSession) -> Pro
     post_ytm_json_with_opts(endpoint, body, session, 2, 14)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MusicLocale {
     GlobalEn,
     Indonesian,
@@ -962,8 +962,33 @@ fn is_track_excluded(track: &Track, excluded: &HashSet<String>) -> bool {
     false
 }
 
+fn strip_bidi_controls(raw: &str) -> String {
+    raw.chars()
+        .filter(|&c| !matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{feff}'))
+        .collect()
+}
+
+fn is_noisy_track_artist(artist: &str) -> bool {
+    let trimmed = artist.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("untitled")
+        || trimmed.eq_ignore_ascii_case("various artists")
+        || trimmed.eq_ignore_ascii_case("youtube music")
+        || trimmed.eq_ignore_ascii_case("unknown artist")
+    {
+        return true;
+    }
+    if trimmed.contains("うた担") || trimmed.contains("CV:") || trimmed.contains("cv.") {
+        return true;
+    }
+    trimmed.chars().count() > 24
+        && (trimmed.contains('(') || trimmed.contains('（'))
+        && trimmed.contains('&')
+}
+
 fn primary_artist_norm(raw: &str) -> String {
-    raw.split(['&', ',', '•', '·'])
+    strip_bidi_controls(raw)
+        .split(['&', ',', '•', '·'])
         .next()
         .unwrap_or(raw)
         .split(" feat.")
@@ -1049,6 +1074,32 @@ fn rank_personalized_home_candidates_ex(
         .take(12)
         .map(|t| t.id.as_str())
         .collect();
+    let core_artist_ranks: HashMap<String, usize> = taste
+        .top_artists
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            let norm = primary_artist_norm(a);
+            (!norm.is_empty()).then_some((norm, i))
+        })
+        .collect();
+    let library_artist_norms: HashSet<String> = taste
+        .library_tracks
+        .iter()
+        .map(|t| primary_artist_norm(&t.artist))
+        .filter(|a| !a.is_empty())
+        .collect();
+    // Tracks/artists actually present in top_tracks or liked library entries define the user's
+    // active language/locale mix so completely unplayed foreign outliers don't hijack Refresh.
+    let mut active_locales: HashSet<MusicLocale> = taste
+        .top_tracks
+        .iter()
+        .map(|t| detect_track_locale(&t.title, &t.artist, &t.album))
+        .collect();
+    for t in taste.library_tracks.iter().filter(|t| t.liked) {
+        active_locales.insert(detect_track_locale(&t.title, &t.artist, &t.album));
+    }
+    active_locales.insert(taste_locale);
 
     struct ScoredTrack {
         track: Track,
@@ -1061,12 +1112,15 @@ fn rank_personalized_home_candidates_ex(
     for pool in radio_pools {
         let mut seen_in_pool = HashSet::new();
         for (rank, t) in pool.iter().enumerate() {
-            if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms) {
+            if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                || is_noisy_track_artist(&t.artist)
+            {
                 continue;
             }
+            let cand_locale = detect_track_locale(&t.title, &t.artist, &t.album);
             if !allow_indonesian
                 && taste_locale == MusicLocale::GlobalEn
-                && detect_track_locale(&t.title, &t.artist, &t.album) == MusicLocale::Indonesian
+                && cand_locale == MusicLocale::Indonesian
             {
                 continue;
             }
@@ -1076,17 +1130,25 @@ fn rank_personalized_home_candidates_ex(
             }
             let pos_score = 32_i32.saturating_sub((rank as i32) * 2).max(4);
             let artist_n = primary_artist_norm(&t.artist);
-            let affinity_bonus = if top_artist_norms.contains(&artist_n) {
-                12
-            } else {
+            let affinity_bonus = match core_artist_ranks.get(&artist_n) {
+                Some(&r) if r < 8 => 24,
+                Some(&r) if r < 20 => 18,
+                Some(_) => 13,
+                None if top_artist_norms.contains(&artist_n) => 12,
+                None if library_artist_norms.contains(&artist_n) => 8,
+                None => 0,
+            };
+            let locale_penalty = if active_locales.contains(&cand_locale) {
                 0
+            } else {
+                -22
             };
             let freshness_bonus = if heavy_top_ids.contains(t.id.as_str()) {
-                if fresh_seed { -24 } else { 0 }
+                if fresh_seed { -28 } else { 0 }
             } else if recent_ids.contains(t.id.as_str()) {
-                if fresh_seed { -8 } else { 4 }
+                if fresh_seed { -10 } else { 4 }
             } else if fresh_seed {
-                22
+                18
             } else {
                 12
             };
@@ -1094,7 +1156,7 @@ fn rank_personalized_home_candidates_ex(
             let entry = by_key.entry(key).or_insert_with(|| ScoredTrack {
                 track: t.clone(),
                 score: if fresh_seed {
-                    fastrand::i32(-18..=22)
+                    fastrand::i32(-10..=12)
                 } else {
                     0
                 },
@@ -1102,41 +1164,58 @@ fn rank_personalized_home_candidates_ex(
                 excluded,
             });
             entry.pool_hits += 1;
-            // On initial load reward consensus strongly; on manual Refresh cap consensus so viral hub
-            // tracks don't drown out newly explored corners of the user's library.
+            // On initial load reward consensus strongly; on manual Refresh still favor cross-seed
+            // taste consensus (2+ aligned radio pools) while leaving room for fresh deep cuts.
             let consensus_bonus = if entry.pool_hits >= 2 {
-                if fresh_seed { 14 } else { 44 }
+                if fresh_seed { 22 } else { 44 }
             } else {
                 0
             };
-            entry.score += pos_score + affinity_bonus + freshness_bonus + consensus_bonus;
+            entry.score +=
+                pos_score + affinity_bonus + locale_penalty + freshness_bonus + consensus_bonus;
         }
     }
 
     for (rank, t) in artist_popular.iter().enumerate() {
-        if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms) {
+        if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+            || is_noisy_track_artist(&t.artist)
+        {
             continue;
         }
+        let cand_locale = detect_track_locale(&t.title, &t.artist, &t.album);
         if !allow_indonesian
             && taste_locale == MusicLocale::GlobalEn
-            && detect_track_locale(&t.title, &t.artist, &t.album) == MusicLocale::Indonesian
+            && cand_locale == MusicLocale::Indonesian
         {
             continue;
         }
         let key = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
         let pos_score = 22_i32.saturating_sub((rank as i32) * 2).max(4);
+        let artist_n = primary_artist_norm(&t.artist);
+        let affinity_bonus = if core_artist_ranks.contains_key(&artist_n) {
+            14
+        } else if library_artist_norms.contains(&artist_n) {
+            8
+        } else {
+            0
+        };
+        let locale_penalty = if active_locales.contains(&cand_locale) {
+            0
+        } else {
+            -18
+        };
         let excluded = is_track_excluded(t, &taste.excluded_track_ids);
         let entry = by_key.entry(key).or_insert_with(|| ScoredTrack {
             track: t.clone(),
             score: if fresh_seed {
-                fastrand::i32(-14..=18)
+                fastrand::i32(-8..=10)
             } else {
                 0
             },
             pool_hits: 0,
             excluded,
         });
-        entry.score += pos_score;
+        entry.score += pos_score + affinity_bonus + locale_penalty;
     }
 
     let mut ranked: Vec<ScoredTrack> = by_key.into_values().collect();
@@ -1228,24 +1307,11 @@ pub fn fetch_rich_home(
         HOME_REFRESH_EPOCH.load(Ordering::Relaxed)
     };
 
-    // On manual Refresh of default Home, alternate between walking the previous `FEmusic_home`
-    // continuation token and sampling a rotating Mood Chip so YTM returns genuinely new shelves!
+    // On manual Refresh of default Home, stay anchored on the personalized Home graph (walking
+    // `FEmusic_home` continuation tokens instead of injecting random off-genre Mood Chips).
     let mut home_used_continuation_or_mood = false;
     let body = if is_default_home && fresh_seed {
-        if refresh_epoch.is_multiple_of(2)
-            && let Some(mp) = taste
-                .refresh_mood_params
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        {
-            home_used_continuation_or_mood = true;
-            json!({
-                "browseId": "FEmusic_home",
-                "params": mp,
-                "context": web_remix_context_for_locale(&effective_session, taste_locale),
-            })
-        } else if let Some(tok) = taste
+        if let Some(tok) = taste
             .continuation_token
             .as_deref()
             .map(str::trim)
@@ -1273,7 +1339,8 @@ pub fn fetch_rich_home(
         b
     };
 
-    // Build a deep, deduplicated artist list spanning top_artists, library_tracks, and recent_searches.
+    // Build a coherent artist list anchored in `top_artists` + `top_tracks` + liked songs,
+    // only backfilling unplayed playlist tracks when the core taste graph is still small.
     let mut all_taste_artists: Vec<(String, f64)> = Vec::new();
     let mut seen_artist_norms: HashSet<String> = HashSet::new();
     for (idx, a) in taste.top_artists.iter().enumerate() {
@@ -1284,11 +1351,11 @@ pub fn fetch_rich_home(
             && !norm.is_empty()
             && seen_artist_norms.insert(norm)
         {
-            let w = (42.0 - (idx as f64) * 0.7).max(8.0);
+            let w = (48.0 - (idx as f64) * 0.9).max(12.0);
             all_taste_artists.push((trimmed.to_string(), w));
         }
     }
-    for t in taste.top_tracks.iter().chain(taste.library_tracks.iter()) {
+    for t in taste.top_tracks.iter() {
         let a = primary_artist_display(&t.artist);
         let norm = primary_artist_norm(&a);
         if !a.is_empty()
@@ -1296,8 +1363,35 @@ pub fn fetch_rich_home(
             && !norm.is_empty()
             && seen_artist_norms.insert(norm)
         {
-            let w = if t.liked { 18.0 } else { 9.0 };
+            let w = if t.liked { 22.0 } else { 14.0 };
             all_taste_artists.push((a, w));
+        }
+    }
+    for t in taste.library_tracks.iter().filter(|t| t.liked) {
+        let a = primary_artist_display(&t.artist);
+        let norm = primary_artist_norm(&a);
+        if !a.is_empty()
+            && !a.eq_ignore_ascii_case("unknown artist")
+            && !norm.is_empty()
+            && seen_artist_norms.insert(norm)
+        {
+            all_taste_artists.push((a, 16.0));
+        }
+    }
+    if all_taste_artists.len() < 12 {
+        for t in taste.library_tracks.iter() {
+            let a = primary_artist_display(&t.artist);
+            let norm = primary_artist_norm(&a);
+            if !a.is_empty()
+                && !a.eq_ignore_ascii_case("unknown artist")
+                && !norm.is_empty()
+                && seen_artist_norms.insert(norm)
+            {
+                all_taste_artists.push((a, 6.0));
+                if all_taste_artists.len() >= 18 {
+                    break;
+                }
+            }
         }
     }
 
@@ -1326,8 +1420,8 @@ pub fn fetch_rich_home(
             .collect()
     };
 
-    // Stratified seed selection (3 genuinely distant seed tracks across Recent, Deep Library, and
-    // Secondary Locale) so RDAMVM radios return ~60–75 fresh, non-echo-chamber tracks every Refresh!
+    // Stratified seed selection (3 distinct artists anchored in active listening + liked tracks)
+    // so RDAMVM radios return fresh tracks every Refresh without jumping to 1-off playlist outliers.
     let mut seed_tracks: Vec<Track> = Vec::new();
     if is_default_home && has_taste {
         let mut used_artists: HashSet<String> = HashSet::new();
@@ -1336,11 +1430,24 @@ pub fn fetch_rich_home(
             .iter()
             .filter(|t| t.youtube_video_id.as_deref().is_some_and(is_valid_video_id))
             .collect();
+        let liked_lib_yt: Vec<&Track> = taste
+            .library_tracks
+            .iter()
+            .filter(|t| t.liked && t.youtube_video_id.as_deref().is_some_and(is_valid_video_id))
+            .collect();
         let lib_yt: Vec<&Track> = taste
             .library_tracks
             .iter()
             .filter(|t| t.youtube_video_id.as_deref().is_some_and(is_valid_video_id))
             .collect();
+
+        // Count how often each non-primary locale appears in top_tracks so we only allocate a
+        // secondary-locale seed if the user consistently plays songs in that language (>= 3 tracks).
+        let mut locale_counts: HashMap<MusicLocale, usize> = HashMap::new();
+        for t in &taste.top_tracks {
+            let loc = detect_track_locale(&t.title, &t.artist, &t.album);
+            *locale_counts.entry(loc).or_insert(0) += 1;
+        }
 
         let pick_weighted_seed = |pool: &[&Track],
                                   used: &mut HashSet<String>,
@@ -1353,14 +1460,17 @@ pub fn fetch_rich_home(
                     continue;
                 }
                 let loc = detect_track_locale(&t.title, &t.artist, &t.album);
-                if prefer_secondary_locale && loc == taste_locale {
-                    continue;
+                if prefer_secondary_locale {
+                    let loc_n = locale_counts.get(&loc).copied().unwrap_or(0);
+                    if loc == taste_locale || loc_n < 3 {
+                        continue;
+                    }
                 }
                 let artist_excl = fresh_seed && taste.excluded_artists.contains(&an);
                 let track_excl = fresh_seed && is_track_excluded(t, &taste.excluded_track_ids);
                 let base_w = if fresh_seed {
                     let decay = (28.0 - (i as f64) * 0.35).max(6.0);
-                    if t.liked { decay + 10.0 } else { decay }
+                    if t.liked { decay + 12.0 } else { decay }
                 } else {
                     (100.0 - (i as f64) * 2.0).max(5.0)
                 };
@@ -1388,20 +1498,31 @@ pub fn fetch_rich_home(
         if let Some(s0) = pick_weighted_seed(&top_yt, &mut used_artists, false) {
             seed_tracks.push(s0);
         }
-        // Seed 1: deeper library track (falls back to top_yt if library_tracks has no YT IDs)
-        let deep_pool = if !lib_yt.is_empty() { &lib_yt } else { &top_yt };
-        if let Some(s1) = pick_weighted_seed(deep_pool, &mut used_artists, false)
+        // Seed 1: deeper liked/core track (falling back to top_yt before raw unplayed library)
+        let mid_pool = if !liked_lib_yt.is_empty() {
+            &liked_lib_yt
+        } else if !top_yt.is_empty() {
+            &top_yt
+        } else {
+            &lib_yt
+        };
+        if let Some(s1) = pick_weighted_seed(mid_pool, &mut used_artists, false)
             .or_else(|| pick_weighted_seed(&top_yt, &mut used_artists, false))
         {
             seed_tracks.push(s1);
         }
-        // Seed 2: secondary active locale (e.g. Indonesian / Japanese) for true multi-locale variety,
-        // falling back to another distant library/top artist
-        let mut combined_yt: Vec<&Track> = Vec::with_capacity(lib_yt.len() + top_yt.len());
-        combined_yt.extend_from_slice(&lib_yt);
-        combined_yt.extend_from_slice(&top_yt);
-        if let Some(s2) = pick_weighted_seed(&combined_yt, &mut used_artists, true)
-            .or_else(|| pick_weighted_seed(&combined_yt, &mut used_artists, false))
+        // Seed 2: genuine active secondary-locale track (>= 3 plays in top_tracks) OR another
+        // distinct core artist from top_yt / liked_lib_yt (never 1-off random library outliers)
+        let mut core_yt: Vec<&Track> = Vec::with_capacity(top_yt.len() + liked_lib_yt.len());
+        core_yt.extend_from_slice(&top_yt);
+        core_yt.extend_from_slice(&liked_lib_yt);
+        let fallback_yt = if !core_yt.is_empty() {
+            &core_yt
+        } else {
+            &lib_yt
+        };
+        if let Some(s2) = pick_weighted_seed(fallback_yt, &mut used_artists, true)
+            .or_else(|| pick_weighted_seed(fallback_yt, &mut used_artists, false))
         {
             seed_tracks.push(s2);
         }
@@ -1431,21 +1552,15 @@ pub fn fetch_rich_home(
     };
     let need_explore_fetch = is_default_home && cached_explore.is_none();
 
-    // Lean parallel fan-out (5–6 HTTP POSTs instead of 11):
-    // 1x Home/Continuation/Mood + optional cached Explore + 3x diverse RDAMVM radios + 2x fast searches
+    // Lean parallel fan-out (5-6 HTTP POSTs instead of 11):
+    // 1x Home/Continuation + optional cached Explore + 3x diverse RDAMVM radios + 2x artist searches
     let (home_res, explore_res, charts_res, radio_pools, artist_search_1, artist_search_2) =
         if is_default_home && has_taste {
             let s0 = seed_tracks.first().cloned();
             let s1 = seed_tracks.get(1).cloned();
             let s2 = seed_tracks.get(2).cloned();
             let a1_q = artist_1.as_ref().map(|a| format!("{a} {album_suf}"));
-            let a2_q = if fresh_seed && !taste.recent_searches.is_empty() && refresh_epoch % 3 == 2
-            {
-                let q = &taste.recent_searches[refresh_epoch % taste.recent_searches.len()];
-                Some(q.clone())
-            } else {
-                artist_2.as_ref().map(|a| format!("{a} {mix_suf}"))
-            };
+            let a2_q = artist_2.as_ref().map(|a| format!("{a} {mix_suf}"));
             std::thread::scope(|s| {
                 let h_home = s.spawn(|| post_ytm_json_fast("browse", &body, &effective_session));
                 let h_explore = s.spawn(|| {
@@ -1789,14 +1904,42 @@ pub fn fetch_rich_home(
             fresh_seed,
         );
 
-        // Clean & shuffle signed-in YTM Home / continuation / mood picks so they actually enter Quick Picks!
+        // Only include Indonesian Geo-IP trending items from `raw_home_picks` if user has
+        // actually played Indonesian tracks recently (`top_tracks`), so one library playlist does
+        // not import Geo-IP viral dangdut/koplo tracks into Quick Picks.
+        let played_indonesian = taste
+            .top_tracks
+            .iter()
+            .filter(|t| {
+                detect_track_locale(&t.title, &t.artist, &t.album) == MusicLocale::Indonesian
+            })
+            .count()
+            >= 2;
+        let top_track_locales: HashSet<MusicLocale> = taste
+            .top_tracks
+            .iter()
+            .map(|t| detect_track_locale(&t.title, &t.artist, &t.album))
+            .collect();
         let mut ytm_home_pool: Vec<Track> = raw_home_picks
             .iter()
-            .filter(|t| !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms))
             .filter(|t| {
+                !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                    && !is_noisy_track_artist(&t.artist)
+            })
+            .filter(|t| {
+                let loc = detect_track_locale(&t.title, &t.artist, &t.album);
+                if loc == MusicLocale::Indonesian && !played_indonesian {
+                    return false;
+                }
+                if !top_track_locales.is_empty()
+                    && loc != taste_locale
+                    && !top_track_locales.contains(&loc)
+                {
+                    return false;
+                }
                 allow_indonesian
                     || taste_locale != MusicLocale::GlobalEn
-                    || detect_track_locale(&t.title, &t.artist, &t.album) != MusicLocale::Indonesian
+                    || loc != MusicLocale::Indonesian
             })
             .cloned()
             .collect();
@@ -1808,9 +1951,10 @@ pub fn fetch_rich_home(
         // Familiar / library rediscovery pool drawn from BOTH top_tracks and deeper library_tracks
         let mut fav_pool: Vec<Track> = Vec::new();
         let mut fav_seen: HashSet<String> = HashSet::new();
-        for t in taste.library_tracks.iter().chain(taste.top_tracks.iter()) {
+        for t in taste.top_tracks.iter().chain(taste.library_tracks.iter()) {
             if t.youtube_video_id.is_some()
                 && !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+                && !is_noisy_track_artist(&t.artist)
                 && fav_seen.insert(t.id.clone())
             {
                 fav_pool.push(t.clone());
@@ -1822,12 +1966,11 @@ pub fn fetch_rich_home(
         fav_pool.sort_by_key(|t| is_track_excluded(t, &taste.excluded_track_ids));
 
         // Quick Picks (32 songs = 4 pages):
-        // Page 1 (first 8 slots) enforces:
-        //   - 0 overlap with `excluded_track_ids` (unless pool exhausted)
-        //   - max 1 track per primary artist across all 8 visible tiles
-        //   - 6 fresh discovery tracks (interleaving diverse RDAMVM radios + YTM Home) + 2 library rediscovery
+        // Enforces zero duplicate song titles/signatures, max 1 track per artist on Page 1,
+        // and max 2 tracks per artist across Pages 2..4.
         let mut qp_seen: HashSet<String> = HashSet::new();
-        let mut page1_artists: HashSet<String> = HashSet::new();
+        let mut seen_core_titles: HashSet<String> = HashSet::new();
+        let mut page1_artists: HashMap<String, usize> = HashMap::new();
         let mut disc_fresh: std::collections::VecDeque<Track> = ranked_discovery
             .iter()
             .filter(|t| !is_track_excluded(t, &taste.excluded_track_ids))
@@ -1846,8 +1989,9 @@ pub fn fetch_rich_home(
 
         let pop_diverse = |q: &mut std::collections::VecDeque<Track>,
                            seen_keys: &mut HashSet<String>,
-                           seen_art: &mut HashSet<String>,
-                           enforce_unique_artist: bool|
+                           seen_titles: &mut HashSet<String>,
+                           artist_counts: &mut HashMap<String, usize>,
+                           max_per_artist: usize|
          -> Option<Track> {
             let mut deferred = Vec::new();
             let mut picked = None;
@@ -1856,14 +2000,26 @@ pub fn fetch_rich_home(
                 if seen_keys.contains(&k) {
                     continue;
                 }
+                let core = normalize_core_title(&t.title);
+                if !core.is_empty() && seen_titles.contains(&core) {
+                    continue;
+                }
                 let an = primary_artist_norm(&t.artist);
-                if enforce_unique_artist && !an.is_empty() && seen_art.contains(&an) {
+                let cur_cnt = if an.is_empty() {
+                    0
+                } else {
+                    artist_counts.get(&an).copied().unwrap_or(0)
+                };
+                if cur_cnt >= max_per_artist {
                     deferred.push(t);
                     continue;
                 }
                 seen_keys.insert(k);
+                if !core.is_empty() {
+                    seen_titles.insert(core);
+                }
                 if !an.is_empty() {
-                    seen_art.insert(an);
+                    *artist_counts.entry(an).or_insert(0) += 1;
                 }
                 picked = Some(t);
                 break;
@@ -1874,40 +2030,118 @@ pub fn fetch_rich_home(
             picked
         };
 
-        // Fill Page 1 (8 tiles): slots 0, 4 = familiar/rediscovery; slots 2, 6 = YTM Home picks; rest = radio discovery
+        // Fill Page 1 (8 tiles): slots 0, 4 = familiar/rediscovery; slot 6 = clean YTM Home pick; rest = taste-aligned radio discovery
         for slot in 0..8 {
             let chosen = match slot {
-                0 | 4 => pop_diverse(&mut fav_fresh, &mut qp_seen, &mut page1_artists, true)
-                    .or_else(|| {
-                        pop_diverse(&mut disc_fresh, &mut qp_seen, &mut page1_artists, true)
-                    })
-                    .or_else(|| {
-                        pop_diverse(&mut ytm_fresh, &mut qp_seen, &mut page1_artists, true)
-                    }),
-                2 | 6 => pop_diverse(&mut ytm_fresh, &mut qp_seen, &mut page1_artists, true)
-                    .or_else(|| {
-                        pop_diverse(&mut disc_fresh, &mut qp_seen, &mut page1_artists, true)
-                    })
-                    .or_else(|| {
-                        pop_diverse(&mut fav_fresh, &mut qp_seen, &mut page1_artists, true)
-                    }),
-                _ => pop_diverse(&mut disc_fresh, &mut qp_seen, &mut page1_artists, true)
-                    .or_else(|| pop_diverse(&mut ytm_fresh, &mut qp_seen, &mut page1_artists, true))
-                    .or_else(|| {
-                        pop_diverse(&mut fav_fresh, &mut qp_seen, &mut page1_artists, true)
-                    }),
+                0 | 4 => pop_diverse(
+                    &mut fav_fresh,
+                    &mut qp_seen,
+                    &mut seen_core_titles,
+                    &mut page1_artists,
+                    1,
+                )
+                .or_else(|| {
+                    pop_diverse(
+                        &mut disc_fresh,
+                        &mut qp_seen,
+                        &mut seen_core_titles,
+                        &mut page1_artists,
+                        1,
+                    )
+                })
+                .or_else(|| {
+                    pop_diverse(
+                        &mut ytm_fresh,
+                        &mut qp_seen,
+                        &mut seen_core_titles,
+                        &mut page1_artists,
+                        1,
+                    )
+                }),
+                6 => pop_diverse(
+                    &mut ytm_fresh,
+                    &mut qp_seen,
+                    &mut seen_core_titles,
+                    &mut page1_artists,
+                    1,
+                )
+                .or_else(|| {
+                    pop_diverse(
+                        &mut disc_fresh,
+                        &mut qp_seen,
+                        &mut seen_core_titles,
+                        &mut page1_artists,
+                        1,
+                    )
+                })
+                .or_else(|| {
+                    pop_diverse(
+                        &mut fav_fresh,
+                        &mut qp_seen,
+                        &mut seen_core_titles,
+                        &mut page1_artists,
+                        1,
+                    )
+                }),
+                _ => pop_diverse(
+                    &mut disc_fresh,
+                    &mut qp_seen,
+                    &mut seen_core_titles,
+                    &mut page1_artists,
+                    1,
+                )
+                .or_else(|| {
+                    pop_diverse(
+                        &mut fav_fresh,
+                        &mut qp_seen,
+                        &mut seen_core_titles,
+                        &mut page1_artists,
+                        1,
+                    )
+                })
+                .or_else(|| {
+                    pop_diverse(
+                        &mut ytm_fresh,
+                        &mut qp_seen,
+                        &mut seen_core_titles,
+                        &mut page1_artists,
+                        1,
+                    )
+                }),
             };
             if let Some(t) = chosen {
                 quick_picks.push(t);
             }
         }
 
-        // Fill pages 2..4 (up to 32 tracks) with remaining fresh tracks first, then fallback pool
-        let mut fallback_art = HashSet::new();
+        // Fill pages 2..4 (up to 32 tracks) with remaining fresh tracks (max 2 per artist)
+        let mut total_artists = page1_artists;
         while quick_picks.len() < 32 {
-            let next = pop_diverse(&mut disc_fresh, &mut qp_seen, &mut fallback_art, false)
-                .or_else(|| pop_diverse(&mut ytm_fresh, &mut qp_seen, &mut fallback_art, false))
-                .or_else(|| pop_diverse(&mut fav_fresh, &mut qp_seen, &mut fallback_art, false));
+            let next = pop_diverse(
+                &mut disc_fresh,
+                &mut qp_seen,
+                &mut seen_core_titles,
+                &mut total_artists,
+                2,
+            )
+            .or_else(|| {
+                pop_diverse(
+                    &mut fav_fresh,
+                    &mut qp_seen,
+                    &mut seen_core_titles,
+                    &mut total_artists,
+                    2,
+                )
+            })
+            .or_else(|| {
+                pop_diverse(
+                    &mut ytm_fresh,
+                    &mut qp_seen,
+                    &mut seen_core_titles,
+                    &mut total_artists,
+                    2,
+                )
+            });
             match next {
                 Some(t) => quick_picks.push(t),
                 None => break,
@@ -2740,10 +2974,44 @@ pub fn is_low_quality_radio_candidate(
                 "hits 2024",
                 "hits 2025",
                 "hits 2026",
+                "unofficial",
+                "ai video",
+                "ai cover",
+                "duet virtual",
+                "secretly obsessed",
+                "hari jadi",
+                "musik viral",
+                "dracin",
+                "playfest",
+                "tokopedia",
+                "songs that'll",
+                "make you dance",
+                "playlist 202",
+                "full live",
+                "lp spree",
+                "live at ",
+                "live @",
+                "i cover ",
+                "tanpa iklan",
+                "lagu hits",
+                "lagu santai",
+                "lagu nostalgia",
+                "lagu indonesia",
+                "lagu galau",
+                "kumpulan lagu",
+                "lagu best ",
             ])
             .expect("static radio filter patterns must compile")
     });
-    if title.matches('|').count() >= 2 && contains_ascii_icase(title, b"songs") {
+    if title.contains("?!")
+        || (title.matches('|').count() >= 2 && contains_ascii_icase(title, b"songs"))
+        || (title.contains('|') && title.chars().count() >= 68)
+    {
+        return true;
+    }
+    if is_noisy_track_artist(artist) && !artist.eq_ignore_ascii_case("YouTube Music") {
+        // Keep exact "YouTube Music" distinction handled at display/home ranking layers while
+        // immediately filtering anime cast strings and "untitled"/"various artists" channels.
         return true;
     }
     matcher.is_match(title) || matcher.is_match(artist)
@@ -3819,6 +4087,282 @@ pub fn fetch_rich_search(
     Ok(YtmRichSearch { tracks, cards })
 }
 
+fn genre_browse_query_pool(genre: &str) -> &'static [&'static str] {
+    match genre.trim().to_ascii_lowercase().as_str() {
+        "pop" => &[
+            "pop hits playlist",
+            "top pop songs 2025",
+            "synth pop essentials",
+            "best upbeat pop songs",
+            "dream pop modern hits",
+        ],
+        "indie" => &[
+            "indie chill playlist",
+            "indie pop essentials",
+            "bedroom pop indie favorites",
+            "modern indie alternative mix",
+            "dreamy indie late night",
+        ],
+        "rock" => &[
+            "alternative rock hits",
+            "modern rock essentials",
+            "indie rock favorites playlist",
+            "classic rock anthems",
+            "post punk revival mix",
+        ],
+        "hip hop" => &[
+            "hip hop beats playlist",
+            "melodic rap hits",
+            "modern hip hop essentials",
+            "chill rap vibes",
+            "rap caviar essentials",
+        ],
+        "acoustic" => &[
+            "acoustic coffeehouse playlist",
+            "acoustic indie stripped",
+            "singer songwriter acoustic",
+            "warm acoustic guitar vocals",
+            "unplugged acoustic hits",
+        ],
+        "jazz" => &[
+            "late night jazz playlist",
+            "modern nu jazz essentials",
+            "tokyo jazz cafe",
+            "smooth chill jazz",
+            "acoustic jazz quartet",
+        ],
+        "k-pop" => &[
+            "k-pop hits playlist",
+            "k-pop essentials 2025",
+            "k-pop chill r&b",
+            "k-pop dance hits",
+            "korean indie & k-pop mix",
+        ],
+        "chill" => &[
+            "chill lofi beats",
+            "late night chill vibes",
+            "ambient chill electronic",
+            "downtempo chillout mix",
+            "sunset chill indie",
+        ],
+        "focus" => &[
+            "deep focus instrumental",
+            "ambient study music",
+            "piano focus flow",
+            "minimal electronic coding music",
+            "calm instrumental concentration",
+        ],
+        "workout" => &[
+            "workout energy hits",
+            "gym hype phonk electronic",
+            "running upbeat cardio mix",
+            "high energy pop rock workout",
+            "beast mode training playlist",
+        ],
+        "r&b" => &[
+            "r&b soul hits playlist",
+            "modern alternative r&b",
+            "late night r&b slow jams",
+            "neo soul essentials",
+            "smooth r&b vibes",
+        ],
+        "sleep" => &[
+            "ambient sleep soundscapes",
+            "peaceful piano sleep",
+            "soft atmospheric night music",
+            "deep rain ambient sleep",
+            "calm dreamscape instrumental",
+        ],
+        _ => &["top hits playlist", "essentials mix"],
+    }
+}
+
+/// Curated multi-source genre browser for Search "Browse all" tiles:
+/// fans out across rotating genre queries + 1 RDAMVM radio hop, filters compilations, softly
+/// boosts overlapping taste artists, and demotes previously shown tracks per genre so repeated
+/// taps deal 35-48 fresh songs and 16-24 clickable albums/playlists/artists.
+pub fn fetch_rich_genre_browse(
+    session: &YtmSession,
+    genre: &str,
+    epoch: usize,
+    taste: &YtmHomeTasteProfile,
+    excluded_track_ids: &HashSet<String>,
+) -> ProviderResult<YtmRichSearch> {
+    let trimmed = genre.trim();
+    if trimmed.is_empty() {
+        return Ok(YtmRichSearch::default());
+    }
+    let pool = genre_browse_query_pool(trimmed);
+    let q_primary = if pool.is_empty() {
+        trimmed.to_string()
+    } else {
+        pool[epoch % pool.len()].to_string()
+    };
+    let q_secondary = if pool.len() > 1 {
+        let mut s_idx = (epoch.saturating_mul(2) + 1) % pool.len();
+        if s_idx == epoch % pool.len() {
+            s_idx = (s_idx + 1) % pool.len();
+        }
+        pool[s_idx].to_string()
+    } else {
+        format!("{trimmed} essentials")
+    };
+
+    // Include a taste-bridge query on alternating epochs if user has top artists
+    let q_tertiary = taste
+        .top_artists
+        .get(epoch % taste.top_artists.len().max(1))
+        .map(|a| format!("{a} {trimmed}"));
+
+    let (primary_res, secondary_opt, tertiary_opt) = std::thread::scope(|s| {
+        let h_pri = s.spawn(|| fetch_rich_search(session, &q_primary, 28));
+        let h_sec = s.spawn(|| fetch_home_discovery_search(session, &q_secondary, 24));
+        let h_ter = s.spawn(|| {
+            q_tertiary
+                .as_deref()
+                .and_then(|q| fetch_home_discovery_search(session, q, 14))
+        });
+        (
+            h_pri.join().unwrap_or_else(|_| {
+                Err(ProviderError::Http(
+                    "YouTube Music genre primary worker panicked".to_string(),
+                ))
+            }),
+            h_sec.join().ok().flatten(),
+            h_ter.join().ok().flatten(),
+        )
+    });
+
+    let primary = primary_res?;
+
+    // Expand one unseen clean song from the genre batch into RDAMVM radio so tracklists are deep
+    let mut radio_candidates: Vec<&Track> = primary
+        .tracks
+        .iter()
+        .chain(secondary_opt.iter().flat_map(|s| s.tracks.iter()))
+        .filter(|t| {
+            t.youtube_video_id.as_deref().is_some_and(is_valid_video_id)
+                && !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
+        })
+        .collect();
+    radio_candidates.sort_by_key(|t| is_track_excluded(t, excluded_track_ids));
+
+    let radio_tracks = if !radio_candidates.is_empty() {
+        let seed_pool_len = radio_candidates.len().min(6);
+        let seed = radio_candidates[epoch % seed_pool_len];
+        seed.youtube_video_id
+            .as_deref()
+            .and_then(|vid| {
+                fetch_radio_up_next_inner(
+                    session,
+                    vid,
+                    &seed.title,
+                    &seed.artist,
+                    &seed.album,
+                    26,
+                    true,
+                    false,
+                )
+                .ok()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let top_artist_norms: HashSet<String> = taste
+        .top_artists
+        .iter()
+        .map(|a| primary_artist_norm(a))
+        .filter(|a| !a.is_empty())
+        .collect();
+
+    struct RankedGenreTrack {
+        track: Track,
+        score: i32,
+        excluded: bool,
+    }
+    let mut by_key: HashMap<String, RankedGenreTrack> = HashMap::with_capacity(64);
+    let mut ingest = |tracks: &[Track], source_bonus: i32| {
+        for (idx, t) in tracks.iter().enumerate() {
+            if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms) {
+                continue;
+            }
+            let key = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
+            let excluded = is_track_excluded(t, excluded_track_ids);
+            let artist_n = primary_artist_norm(&t.artist);
+            let taste_bonus = if top_artist_norms.contains(&artist_n) {
+                14
+            } else {
+                0
+            };
+            let pos = 28_i32.saturating_sub((idx as i32) * 2).max(2);
+            let item_score = pos + source_bonus + taste_bonus + fastrand::i32(-6..=8);
+            by_key
+                .entry(key)
+                .and_modify(|e| e.score += 10)
+                .or_insert_with(|| RankedGenreTrack {
+                    track: t.clone(),
+                    score: item_score,
+                    excluded,
+                });
+        }
+    };
+
+    ingest(&primary.tracks, 12);
+    if let Some(sec) = &secondary_opt {
+        ingest(&sec.tracks, 10);
+    }
+    ingest(&radio_tracks, 8);
+    if let Some(ter) = &tertiary_opt {
+        ingest(&ter.tracks, 6);
+    }
+
+    let mut ranked: Vec<RankedGenreTrack> = by_key.into_values().collect();
+    ranked.sort_by(|a, b| {
+        a.excluded
+            .cmp(&b.excluded)
+            .then_with(|| b.score.cmp(&a.score))
+    });
+
+    let mut tracks = Vec::with_capacity(44);
+    let mut artist_counts: HashMap<String, usize> = HashMap::new();
+    for item in ranked {
+        let an = primary_artist_norm(&item.track.artist);
+        let cnt = artist_counts.entry(an).or_insert(0);
+        if *cnt >= 2 {
+            continue;
+        }
+        *cnt += 1;
+        tracks.push(item.track);
+        if tracks.len() >= 44 {
+            break;
+        }
+    }
+
+    let mut cards: Vec<YtmShelfCard> = Vec::with_capacity(24);
+    let mut seen_cards: HashSet<String> = HashSet::new();
+    for c in secondary_opt
+        .iter()
+        .flat_map(|s| s.cards.iter())
+        .chain(primary.cards.iter())
+        .chain(tertiary_opt.iter().flat_map(|s| s.cards.iter()))
+    {
+        if seen_cards.insert(c.id.clone()) {
+            cards.push(c.clone());
+            if cards.len() >= 24 {
+                break;
+            }
+        }
+    }
+    if cards.len() > 2 && epoch > 0 {
+        let rot = epoch % cards.len();
+        cards.rotate_left(rot);
+    }
+
+    Ok(YtmRichSearch { tracks, cards })
+}
+
 /// Search the entire YouTube Music catalog in real time with ZERO API key and ZERO login.
 pub fn search_music(session: &YtmSession, query: &str, limit: usize) -> ProviderResult<Vec<Track>> {
     let q = query.trim();
@@ -4697,6 +5241,16 @@ fn select_audio_format_for_quality(
         .pointer("/streamingData/adaptiveFormats")
         .and_then(Value::as_array)?;
 
+    let video_details_dur_ms = root
+        .pointer("/videoDetails/lengthSeconds")
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| v.as_u64())
+        })
+        .map(|s| s.saturating_mul(1_000))
+        .unwrap_or(0);
+
     let mut best: Option<(u32, SelectedStreamFormat)> = None;
     for fmt in formats {
         let Some(url) = fmt.get("url").and_then(Value::as_str) else {
@@ -4721,7 +5275,8 @@ fn select_audio_format_for_quality(
             .get("approxDurationMs")
             .and_then(Value::as_str)
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+            .filter(|&d| d > 0)
+            .unwrap_or(video_details_dur_ms);
 
         let (ext, codec) = if mime.starts_with("audio/mp4") {
             ("m4a", "AAC")
@@ -5221,7 +5776,10 @@ fn parse_responsive_item(item: &Value, default_album: &str) -> Option<Track> {
         duration_ms = ms;
     }
 
-    let cleaned = clean_youtube_metadata(&raw_title, &artist);
+    let cleaned = clean_youtube_metadata(
+        &strip_bidi_controls(&raw_title),
+        &strip_bidi_controls(&artist),
+    );
     let thumbnail_url = extract_best_thumbnail(item, Some(vid));
     Some(Track {
         id: format!("yt:video:{vid}"),
@@ -5260,7 +5818,10 @@ fn parse_two_row_song(item: &Value, default_album: &str) -> Option<Track> {
         return None;
     }
     let (artist, album, duration_ms) = parse_ytm_subtitle(&subtitle, default_album);
-    let cleaned = clean_youtube_metadata(&raw_title, &artist);
+    let cleaned = clean_youtube_metadata(
+        &strip_bidi_controls(&raw_title),
+        &strip_bidi_controls(&artist),
+    );
     let thumbnail_url = extract_best_thumbnail(item, Some(vid));
     Some(Track {
         id: format!("yt:video:{vid}"),
@@ -5544,17 +6105,31 @@ fn collect_radio_panel_items(
                 && seen.insert(vid.to_string())
                 && let Some(raw_title) = extract_runs_text(panel.get("title"))
             {
-                let sub = extract_runs_text(panel.get("longBylineText"))
-                    .or_else(|| extract_runs_text(panel.get("shortBylineText")))
-                    .unwrap_or_default();
-                let (artist, album, mut dur_ms) = parse_ytm_subtitle(&sub, "YouTube Music Radio");
+                let long_sub = extract_runs_text(panel.get("longBylineText")).unwrap_or_default();
+                let short_sub = extract_runs_text(panel.get("shortBylineText")).unwrap_or_default();
+                let (mut artist, mut album, mut dur_ms) =
+                    parse_ytm_subtitle(&long_sub, "YouTube Music Radio");
+                if (artist == "YouTube Music" || artist.is_empty()) && !short_sub.is_empty() {
+                    let (sa, _, s_dur) = parse_ytm_subtitle(&short_sub, "YouTube Music Radio");
+                    if !sa.is_empty() && sa != "YouTube Music" {
+                        artist = sa;
+                    }
+                    if dur_ms == 0 {
+                        dur_ms = s_dur;
+                    }
+                    if album == "YouTube Music Radio" {
+                        album = "Single".to_string();
+                    }
+                }
                 if dur_ms == 0
                     && let Some(len_txt) = extract_runs_text(panel.get("lengthText"))
                     && let Some(ms) = parse_clock_ms(&len_txt)
                 {
                     dur_ms = ms;
                 }
-                let cleaned = clean_youtube_metadata(&raw_title, &artist);
+                let raw_clean = strip_bidi_controls(&raw_title);
+                let artist_clean = strip_bidi_controls(&artist);
+                let cleaned = clean_youtube_metadata(&raw_clean, &artist_clean);
                 let thumb = extract_best_thumbnail(panel, Some(vid));
                 out.push(Track {
                     id: format!("yt:video:{vid}"),
@@ -6675,5 +7250,22 @@ mod tests {
 
         let _ = fs::remove_file(&f2);
         let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn genre_browse_query_pool_covers_all_genres_with_rotation() {
+        let genres = [
+            "Pop", "Indie", "Rock", "Hip Hop", "Acoustic", "Jazz", "K-Pop", "Chill", "Focus",
+            "Workout", "R&B", "Sleep",
+        ];
+        for g in genres {
+            let pool = genre_browse_query_pool(g);
+            assert!(
+                pool.len() >= 5,
+                "Genre {g} must provide >= 5 distinct queries"
+            );
+            let unique: HashSet<&str> = pool.iter().copied().collect();
+            assert_eq!(unique.len(), pool.len(), "Genre {g} has duplicate queries");
+        }
     }
 }

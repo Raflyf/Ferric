@@ -110,6 +110,7 @@ fun SearchScreen(
     listState: LazyListState = rememberLazyListState(),
     onInstantLocalSearch: (String) -> Unit,
     onOnlineSearch: (String) -> Unit,
+    onBrowseGenre: (String) -> Unit,
     onClearRecentSearches: () -> Unit,
     onImportUrl: (String) -> Unit,
     onPlayQueue: (List<FfiTrack>, Int, String) -> Unit,
@@ -129,16 +130,25 @@ fun SearchScreen(
     var selectedCategory by rememberSaveable { mutableStateOf(SearchCategory.ALL) }
     var showUrlImport by rememberSaveable { mutableStateOf(false) }
     var urlInput by rememberSaveable { mutableStateOf("") }
+    var activeGenre by rememberSaveable { mutableStateOf<String?>(null) }
+    var suppressNextOnlineSearch by remember { mutableStateOf(false) }
 
     // Debounce live YouTube Music search while keeping local search instantaneous.
     LaunchedEffect(query, searchScope) {
         onInstantLocalSearch(query)
         val trimmed = query.trim()
+        if (suppressNextOnlineSearch) {
+            suppressNextOnlineSearch = false
+            return@LaunchedEffect
+        }
+        val alreadyShowingSameQuery = trimmed.equals(state.searchResults.query, ignoreCase = true) &&
+            (state.searchResults.onlineTracks.isNotEmpty() || state.searchResults.onlineCards.isNotEmpty())
         if (searchScope == SearchScope.ONLINE) {
-            if (trimmed.length >= 2) {
+            if (trimmed.length >= 2 && !(activeGenre == trimmed && alreadyShowingSameQuery)) {
                 delay(380L)
                 onOnlineSearch(trimmed)
             } else if (trimmed.isEmpty()) {
+                activeGenre = null
                 onOnlineSearch("")
             }
         }
@@ -222,7 +232,11 @@ fun SearchScreen(
                             }
                             BasicTextField(
                                 value = query,
-                                onValueChange = { query = it },
+                                onValueChange = {
+                                    activeGenre = null
+                                    suppressNextOnlineSearch = false
+                                    query = it
+                                },
                                 singleLine = true,
                                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = palette.textPrimary),
                                 cursorBrush = SolidColor(palette.accent),
@@ -231,6 +245,7 @@ fun SearchScreen(
                                     onSearch = {
                                         val trimmed = query.trim()
                                         if (trimmed.isNotEmpty() && searchScope == SearchScope.ONLINE) {
+                                            activeGenre = null
                                             onOnlineSearch(trimmed)
                                         }
                                     },
@@ -240,7 +255,11 @@ fun SearchScreen(
                         }
                         if (query.isNotEmpty()) {
                             IconButton(
-                                onClick = { query = "" },
+                                onClick = {
+                                    activeGenre = null
+                                    suppressNextOnlineSearch = false
+                                    query = ""
+                                },
                                 modifier = Modifier.size(38.dp),
                             ) {
                                 Icon(
@@ -381,10 +400,30 @@ fun SearchScreen(
             }
         }
 
-        // Category pills when searching Online
+        // Category pills when searching Online (+ genre Mix Refresh chip when browsing a genre)
         if (query.isNotBlank() && searchScope == SearchScope.ONLINE) {
             item(key = "category_chips") {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (activeGenre != null) {
+                        item(key = "genre_refresh_chip") {
+                            val gName = activeGenre.orEmpty()
+                            Box(
+                                modifier = Modifier
+                                    .ferricGlassSurface(palette, cornerRadius = 999.dp, fallbackColor = searchPillBg)
+                                    .clickable {
+                                        selectedCategory = SearchCategory.ALL
+                                        onBrowseGenre(gName)
+                                    },
+                            ) {
+                                Text(
+                                    text = "Refresh mix",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = palette.accent,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                )
+                            }
+                        }
+                    }
                     items(SearchCategory.entries, key = { it.name }) { cat ->
                         val selected = selectedCategory == cat
                         val chipModifier = if (selected) {
@@ -438,6 +477,8 @@ fun SearchScreen(
                                     modifier = Modifier
                                         .ferricGlassSurface(palette, cornerRadius = 999.dp, fallbackColor = searchPillBg)
                                         .clickable {
+                                            activeGenre = null
+                                            suppressNextOnlineSearch = false
                                             searchScope = SearchScope.ONLINE
                                             query = term
                                         },
@@ -500,7 +541,11 @@ fun SearchScreen(
                                 modifier = tileMod
                                     .clickable {
                                         searchScope = SearchScope.ONLINE
-                                        query = genre.query
+                                        selectedCategory = SearchCategory.ALL
+                                        activeGenre = genre.title
+                                        suppressNextOnlineSearch = true
+                                        query = genre.title
+                                        onBrowseGenre(genre.title)
                                     }
                                     .padding(14.dp),
                                 contentAlignment = Alignment.BottomStart,

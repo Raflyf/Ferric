@@ -248,28 +248,31 @@ object ShareCardRenderer {
             }
             ShareCardStyle.LIQUID_GLASS -> {
                 if (artBitmap != null) {
-                    val blurredBg = softBlurBitmap(
-                        Bitmap.createScaledBitmap(artBitmap, 160, 160, true),
-                        downscaleFactor = 6,
+                    val scaleW = maxOf(w.toFloat() / artBitmap.width.coerceAtLeast(1), h.toFloat() / artBitmap.height.coerceAtLeast(1))
+                    val drawW = artBitmap.width * scaleW
+                    val drawH = artBitmap.height * scaleW
+                    val left = (w - drawW) * 0.5f
+                    val top = (h - drawH) * 0.5f
+                    val softCover = softBlurBitmap(
+                        Bitmap.createScaledBitmap(artBitmap, 320, 320, true),
+                        downscaleFactor = 2,
                     )
-                    val side = maxOf(w, h).toFloat()
-                    val left = (w - side) * 0.5f
-                    val top = (h - side) * 0.5f
-                    bgCanvas.drawBitmap(blurredBg, null, RectF(left, top, left + side, top + side), Paint(Paint.FILTER_BITMAP_FLAG))
-                    blurredBg.recycle()
+                    bgCanvas.drawBitmap(softCover, null, RectF(left, top, left + drawW, top + drawH), Paint(Paint.FILTER_BITMAP_FLAG))
+                    softCover.recycle()
                 } else {
                     bgCanvas.drawColor(Color.rgb(12, 14, 22))
                 }
-                bgPaint.shader = android.graphics.RadialGradient(
-                    w * 0.25f,
-                    h * 0.22f,
-                    w * 0.95f,
+                bgPaint.shader = LinearGradient(
+                    0f,
+                    0f,
+                    0f,
+                    h.toFloat(),
                     intArrayOf(
-                        Color.argb(145, Color.red(accent), Color.green(accent), Color.blue(accent)),
-                        Color.argb(165, Color.red(orb1), Color.green(orb1), Color.blue(orb1)),
-                        Color.argb(210, Color.red(orb2), Color.green(orb2), Color.blue(orb2)),
+                        Color.argb(42, 0, 0, 0),
+                        Color.argb(18, 0, 0, 0),
+                        Color.argb(82, 0, 0, 0),
                     ),
-                    floatArrayOf(0f, 0.48f, 1f),
+                    floatArrayOf(0f, 0.45f, 1f),
                     Shader.TileMode.CLAMP,
                 )
                 bgCanvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bgPaint)

@@ -544,6 +544,7 @@ private fun FerricMainShell(
                                     listState = searchListState,
                                     onInstantLocalSearch = { q -> store.instantSearchLocal(q) },
                                     onOnlineSearch = { q -> store.searchOnline(q) },
+                                    onBrowseGenre = { genre -> store.browseGenre(genre) },
                                     onClearRecentSearches = { store.clearRecentSearches() },
                                     onImportUrl = { url -> store.importPublicUrl(url) },
                                     onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },

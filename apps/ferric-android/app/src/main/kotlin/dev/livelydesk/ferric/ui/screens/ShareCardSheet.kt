@@ -224,7 +224,7 @@ fun ShareCardSheet(
                                     val bgReq = remember(track.thumbnailUrl) {
                                         ImageRequest.Builder(context)
                                             .data(track.thumbnailUrl)
-                                            .size(360, 360)
+                                            .size(540, 540)
                                             .precision(Precision.INEXACT)
                                             .build()
                                     }
@@ -234,18 +234,32 @@ fun ShareCardSheet(
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .blur(26.dp),
+                                            .blur(6.dp),
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(
+                                                Brush.radialGradient(
+                                                    colors = listOf(
+                                                        state.coverShade.accent.copy(alpha = 0.65f),
+                                                        state.coverShade.orb1.copy(alpha = 0.80f),
+                                                        Color(0xFF0A0D16),
+                                                    ),
+                                                ),
+                                            ),
                                     )
                                 }
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .background(
-                                            Brush.radialGradient(
+                                            Brush.verticalGradient(
                                                 colors = listOf(
-                                                    state.coverShade.accent.copy(alpha = 0.55f),
-                                                    state.coverShade.orb1.copy(alpha = 0.72f),
-                                                    state.coverShade.orb2.copy(alpha = 0.85f),
+                                                    Color.Black.copy(alpha = 0.16f),
+                                                    Color.Black.copy(alpha = 0.06f),
+                                                    Color.Black.copy(alpha = 0.30f),
                                                 ),
                                             ),
                                         ),
@@ -262,11 +276,11 @@ fun ShareCardSheet(
                                 .padding(horizontal = 12.dp, vertical = 14.dp)
                                 .ferricLiquidGlass(
                                     cornerRadius = cardCorner,
-                                    blurRadius = 14.dp,
+                                    blurRadius = 11.dp,
                                     refractionHeight = 16.dp,
-                                    refractionAmount = 14.dp,
-                                    chromaticDispersion = 0.65f,
-                                    tintAlpha = 0.06f,
+                                    refractionAmount = 18.dp,
+                                    chromaticDispersion = 0.88f,
+                                    anchorAlphaOverride = 0.16f,
                                     alwaysGlass = true,
                                 )
                             ShareCardStyle.AMOLED -> Modifier

@@ -15,9 +15,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -85,7 +87,6 @@ import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
@@ -94,6 +95,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Velocity
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
@@ -775,7 +777,7 @@ private fun FerricSheetWindowItem(
     val config = LocalConfiguration.current
     val screenHeightPx = with(density) { config.screenHeightDp.dp.toPx() }.coerceAtLeast(1200f)
     val maxSheetHeight = (config.screenHeightDp * 0.88f).dp
-    val dismissThresholdPx = with(density) { 108.dp.toPx() }
+    val dismissThresholdPx = with(density) { 88.dp.toPx() }
 
     val offsetY = remember(entry) { Animatable(screenHeightPx * 0.55f) }
     val scrimAlpha = remember(entry) { Animatable(0f) }
@@ -805,14 +807,42 @@ private fun FerricSheetWindowItem(
         }
     }
 
+    val applyDragDelta: (Float) -> Float = remember(entry) {
+        { deltaY ->
+            if (isClosing) {
+                0f
+            } else {
+                val next = (offsetY.value + deltaY).coerceAtLeast(0f)
+                val consumed = next - offsetY.value
+                if (consumed != 0f) {
+                    scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        offsetY.snapTo(next)
+                    }
+                }
+                consumed
+            }
+        }
+    }
+
+    val releaseDrag: (Float) -> Unit = remember(entry) {
+        { velocityY ->
+            if (!isClosing && offsetY.value > 0f) {
+                if (offsetY.value > dismissThresholdPx || velocityY > 650f) {
+                    dismissAnimated()
+                } else {
+                    scope.launch {
+                        offsetY.animateTo(0f, tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut))
+                    }
+                }
+            }
+        }
+    }
+
     val nestedScrollConnection = remember(entry) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                 if (isClosing || available.y >= 0f || offsetY.value <= 0f) return Offset.Zero
-                val next = (offsetY.value + available.y).coerceAtLeast(0f)
-                val consumedY = next - offsetY.value
-                scope.launch { offsetY.snapTo(next) }
-                return Offset(0f, consumedY)
+                return Offset(0f, applyDragDelta(available.y))
             }
 
             override fun onPostScroll(
@@ -823,18 +853,12 @@ private fun FerricSheetWindowItem(
                 if (isClosing || source != NestedScrollSource.UserInput || available.y <= 0f) {
                     return Offset.Zero
                 }
-                val next = (offsetY.value + available.y).coerceAtLeast(0f)
-                scope.launch { offsetY.snapTo(next) }
-                return Offset(0f, available.y)
+                return Offset(0f, applyDragDelta(available.y))
             }
 
             override suspend fun onPreFling(available: Velocity): Velocity {
                 if (offsetY.value <= 0f) return Velocity.Zero
-                if (offsetY.value > dismissThresholdPx || available.y > 950f) {
-                    dismissAnimated()
-                } else {
-                    offsetY.animateTo(0f, tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut))
-                }
+                releaseDrag(available.y)
                 return available
             }
         }
@@ -884,6 +908,11 @@ private fun FerricSheetWindowItem(
                         translationY = offsetY.value.coerceAtLeast(0f)
                     }
                     .nestedScroll(nestedScrollConnection)
+                    .draggable(
+                        orientation = Orientation.Vertical,
+                        state = rememberDraggableState { dy -> applyDragDelta(dy) },
+                        onDragStopped = { velocityY -> releaseDrag(velocityY) },
+                    )
                     .blockUnderlyingTouches(),
             ) {
                 // Layer A: Decoupled Liquid Glass backdrop shell (never redraws when scrolling sheet lists)
@@ -930,32 +959,6 @@ private fun FerricSheetWindowItem(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .pointerInput(entry) {
-                                    detectVerticalDragGestures(
-                                        onDragEnd = {
-                                            if (offsetY.value > dismissThresholdPx) {
-                                                dismissAnimated()
-                                            } else if (!isClosing) {
-                                                scope.launch {
-                                                    offsetY.animateTo(0f, tween(FERRIC_MOTION_MS, easing = FerricEaseOut))
-                                                }
-                                            }
-                                        },
-                                        onDragCancel = {
-                                            if (!isClosing) {
-                                                scope.launch {
-                                                    offsetY.animateTo(0f, tween(FERRIC_MOTION_MS, easing = FerricEaseOut))
-                                                }
-                                            }
-                                        },
-                                        onVerticalDrag = { _, dy ->
-                                            if (!isClosing) {
-                                                val next = (offsetY.value + dy).coerceAtLeast(0f)
-                                                scope.launch { offsetY.snapTo(next) }
-                                            }
-                                        },
-                                    )
-                                }
                                 .padding(top = 12.dp, bottom = 6.dp),
                             contentAlignment = Alignment.Center,
                         ) {
@@ -973,7 +976,13 @@ private fun FerricSheetWindowItem(
                                     ),
                             )
                         }
-                        entry.content(this)
+                        Column(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .fillMaxWidth(),
+                        ) {
+                            entry.content(this)
+                        }
                         if (palette.isLiquidGlass) {
                             Spacer(Modifier.height(10.dp))
                         }
@@ -1270,19 +1279,9 @@ fun FerricSlimSlider(
 }
 
 /**
- * Seals full-screen overlays against pointer passthrough onto underlying tabs or mini-player bars.
- * Consumes unhandled changes in [PointerEventPass.Main] (bottom-up) after interactive children
- * and scroll containers run, avoiding interference with child [PointerEventPass.Final] checks.
+ * Seals overlays against pointer passthrough onto underlying siblings without consuming DOWN or
+ * pre-slop MOVE events, preserving nested scroll containers, drag handles, and sliders intact.
  */
 fun Modifier.blockUnderlyingTouches(): Modifier = pointerInput(Unit) {
-    awaitPointerEventScope {
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Main)
-            event.changes.forEach { change ->
-                if (!change.isConsumed) {
-                    change.consume()
-                }
-            }
-        }
-    }
+    detectTapGestures(onTap = {})
 }

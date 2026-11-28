@@ -1014,6 +1014,11 @@ impl FerricMobileCore {
         Ok(())
     }
 
+    pub fn browse_genre(&self, genre: String) -> Result<(), FfiError> {
+        self.controller.browse_genre(genre)?;
+        Ok(())
+    }
+
     pub fn recent_searches(&self) -> Vec<String> {
         self.controller.recent_searches()
     }

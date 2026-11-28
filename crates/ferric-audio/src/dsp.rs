@@ -358,7 +358,7 @@ impl StereoEqProcessor {
         let target = if target_vol.is_finite() {
             target_vol.clamp(0.0, 1.5)
         } else {
-            0.85
+            1.0
         };
         if !current_vol.is_finite() {
             *current_vol = target;
@@ -399,7 +399,7 @@ impl StereoEqProcessor {
         let target = if volume.is_finite() {
             volume.clamp(0.0, 1.5)
         } else {
-            0.85
+            1.0
         };
         let mut cur = target;
         self.process_interleaved_stereo_ramped(samples, &mut cur, target);

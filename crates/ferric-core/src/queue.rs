@@ -291,6 +291,20 @@ impl PlayQueue {
         self.tracks.get(track_idx)
     }
 
+    pub fn backfill_current_duration(&mut self, duration_ms: u64) -> Option<Track> {
+        if duration_ms == 0 {
+            return None;
+        }
+        let pos = self.cursor?;
+        let track_idx = *self.order.get(pos)?;
+        let cur = self.tracks.get_mut(track_idx)?;
+        if cur.duration_ms == 0 {
+            cur.duration_ms = duration_ms;
+            return Some(cur.clone());
+        }
+        None
+    }
+
     pub fn current_track_index(&self) -> Option<usize> {
         let pos = self.cursor?;
         self.order.get(pos).copied()

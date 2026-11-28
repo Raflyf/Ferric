@@ -153,7 +153,7 @@ data class PlaybackUiState(
     val sleepTimerRemainingSecs: Long = 0L,
     val shuffle: Boolean = false,
     val repeatMode: FfiRepeatMode = FfiRepeatMode.OFF,
-    val localVolume: Float = 0.85f,
+    val localVolume: Float = 1.0f,
     val activeOutputRoute: String = "Phone Speaker",
     val connectState: FfiConnectState = FfiConnectState(
         localDeviceId = "",
@@ -176,15 +176,21 @@ data class PlaybackUiState(
  * Pure state reducer kept JVM-testable without native `.so` loading.
  */
 object PlaybackStateReducer {
-    fun applyProgress(prev: PlaybackProgress, t: FfiTelemetry): PlaybackProgress = PlaybackProgress(
-        positionMs = t.positionMs.toLong().coerceAtLeast(0L),
-        durationMs = t.durationMs.toLong().coerceAtLeast(0L),
-        spectrumBins = if (t.spectrumBins.size == 8) {
-            t.spectrumBins.map { it.toInt().coerceIn(0, 1000) }
-        } else {
-            prev.spectrumBins
-        },
-    )
+    fun applyProgress(prev: PlaybackProgress, t: FfiTelemetry): PlaybackProgress {
+        val reportedDur = t.durationMs.toLong().coerceAtLeast(0L)
+        val safeDur = if (reportedDur > 0L) reportedDur else prev.durationMs.coerceAtLeast(0L)
+        val rawPos = t.positionMs.toLong().coerceAtLeast(0L)
+        val safePos = if (safeDur > 0L) rawPos.coerceIn(0L, safeDur) else rawPos
+        return PlaybackProgress(
+            positionMs = safePos,
+            durationMs = safeDur,
+            spectrumBins = if (t.spectrumBins.size == 8) {
+                t.spectrumBins.map { it.toInt().coerceIn(0, 1000) }
+            } else {
+                prev.spectrumBins
+            },
+        )
+    }
 
     fun applyLowFreqTelemetry(state: PlaybackUiState, t: FfiTelemetry): PlaybackUiState {
         val nextDur = t.durationMs.toLong().coerceAtLeast(0L)
@@ -447,6 +453,13 @@ class CoreStateStore(private val appContext: Context) {
                         theme = runCatching { handle.applyThemePreset("Liquid Glass") }.getOrDefault(theme)
                     }
                 }
+                val userVol = if (prefs.contains("user_local_volume")) {
+                    prefs.getFloat("user_local_volume", 1.0f).coerceIn(0f, 1.5f)
+                } else {
+                    prefs.edit().putFloat("user_local_volume", 1.0f).apply()
+                    1.0f
+                }
+                runCatching { handle.setVolume(userVol) }
                 val eq = handle.getEq()
                 val eqPresets = handle.listEqPresets()
                 val autoEq = handle.searchAutoeq("")
@@ -463,6 +476,7 @@ class CoreStateStore(private val appContext: Context) {
                         eqPresets = eqPresets,
                         autoEqProfiles = autoEq,
                         dspSettings = dsp,
+                        localVolume = userVol,
                         connectState = connect,
                         listeningStats = stats ?: it.listeningStats,
                         isReady = true,
@@ -937,6 +951,15 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    fun browseGenre(genre: String) {
+        onlineSearchJob?.cancel()
+        onlineSearchJob = scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            runCatching { handle.browseGenre(genre) }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
+        }
+    }
+
     fun clearRecentSearches() {
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
@@ -1349,8 +1372,12 @@ class CoreStateStore(private val appContext: Context) {
 
     fun setConnectVolume(targetDeviceId: String, volumeNorm: Float) {
         val clamped = volumeNorm.coerceIn(0f, 1.5f)
-        if (targetDeviceId == _uiState.value.connectState.localDeviceId) {
+        if (targetDeviceId == _uiState.value.connectState.localDeviceId || targetDeviceId.isEmpty()) {
             _uiState.update { it.copy(localVolume = clamped) }
+            appContext.getSharedPreferences("ferric_device", Context.MODE_PRIVATE)
+                .edit()
+                .putFloat("user_local_volume", clamped)
+                .apply()
         }
         scope.launch {
             getOrCreateCore()?.connectSetRemoteVolume(targetDeviceId, clamped)

@@ -211,7 +211,7 @@ impl FerricController {
         let clamped = if volume_norm.is_finite() {
             volume_norm.clamp(0.0, 1.5)
         } else {
-            0.85
+            1.0
         };
         if target_device_id == self.cfg.device_id {
             self.set_volume(clamped);

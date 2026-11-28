@@ -89,8 +89,13 @@ struct ControllerState {
     stations_cache: Vec<RecommendedStation>,
     home_continuation: Option<String>,
     home_excluded_tracks: HashSet<String>,
+    home_excluded_track_fifo: VecDeque<String>,
     home_excluded_cards: HashSet<String>,
+    home_excluded_card_fifo: VecDeque<String>,
     home_excluded_artists: HashSet<String>,
+    home_excluded_artist_fifo: VecDeque<String>,
+    genre_browse_epochs: HashMap<String, usize>,
+    genre_excluded_tracks: HashMap<String, VecDeque<String>>,
     station_rotation_epoch: usize,
     home_more_cycle: usize,
     is_loading_more_home: bool,
@@ -192,8 +197,13 @@ impl FerricController {
                 stations_cache: Vec::new(),
                 home_continuation: None,
                 home_excluded_tracks: HashSet::new(),
+                home_excluded_track_fifo: VecDeque::new(),
                 home_excluded_cards: HashSet::new(),
+                home_excluded_card_fifo: VecDeque::new(),
                 home_excluded_artists: HashSet::new(),
+                home_excluded_artist_fifo: VecDeque::new(),
+                genre_browse_epochs: HashMap::new(),
+                genre_excluded_tracks: HashMap::new(),
                 station_rotation_epoch: 0,
                 home_more_cycle: 0,
                 is_loading_more_home: false,
@@ -537,7 +547,7 @@ impl FerricController {
     fn resolve_online_track_worker(self: &Arc<Self>, track: Track, gen_id: u64) {
         match self.resolve_stream_path_blocking(&track) {
             Ok((path, vid, codec, bitrate_kbps, duration_ms)) => {
-                let (is_still_current, pending_seek, was_paused) = {
+                let (is_still_current, pending_seek, was_paused, updated_cur) = {
                     let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
                     st.queue.update_track_cached_stream(
                         &track.id,
@@ -554,9 +564,17 @@ impl FerricController {
                         None
                     };
                     let paused = st.paused_while_resolving;
-                    (current, seek, paused)
+                    let cur_updated = if current && duration_ms > 0 && track.duration_ms == 0 {
+                        st.queue.current().cloned()
+                    } else {
+                        None
+                    };
+                    (current, seek, paused, cur_updated)
                 };
                 if is_still_current {
+                    if let Some(cur) = updated_cur {
+                        self.sink.on_now_playing(Some(cur));
+                    }
                     self.send_audio(EngineCommand::LoadAndPlayTrack {
                         path,
                         replay_gain_db: track.replay_gain_db,
@@ -1110,7 +1128,7 @@ impl FerricController {
         let clamped = if vol.is_finite() {
             vol.clamp(0.0, 1.5)
         } else {
-            0.85
+            1.0
         };
         {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -1324,11 +1342,23 @@ impl FerricController {
     fn monitor_tick(self: &Arc<Self>) -> bool {
         let snap = self.telemetry();
         let mut track_changed: Option<(Option<Track>, Vec<Track>, bool, u64)> = None;
+        let mut backfilled_now_playing: Option<Track> = None;
         let mut sleep_expired = false;
         let emit_telemetry;
 
         {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if snap.duration_ms > 0
+                && let Some(cur) = st.queue.backfill_current_duration(snap.duration_ms)
+            {
+                if let Some(tracker) = &mut st.play_tracker
+                    && tracker.track_id == cur.id
+                    && tracker.duration_ms == 0
+                {
+                    tracker.duration_ms = snap.duration_ms;
+                }
+                backfilled_now_playing = Some(cur);
+            }
             let now = Instant::now();
             let elapsed_ms = st
                 .last_tick_at
@@ -1414,6 +1444,10 @@ impl FerricController {
             self.pause();
             self.sink
                 .on_toast("Sleep timer finished; playback paused".to_string());
+        }
+
+        if let Some(cur) = backfilled_now_playing {
+            self.sink.on_now_playing(Some(cur));
         }
 
         if emit_telemetry {

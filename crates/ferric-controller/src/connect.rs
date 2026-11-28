@@ -94,9 +94,11 @@ impl FerricController {
         };
         let tele = self.telemetry();
         let is_playing = is_playing_override.unwrap_or(tele.is_playing);
-        let position_ms = pos_override_ms.unwrap_or(tele.position_ms);
         let snap = {
             let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let position_ms = pos_override_ms
+                .or(st.pending_handoff_seek_ms)
+                .unwrap_or(tele.position_ms);
             let current_track = st.queue.current().map(QueueEntry::from_track);
             let queue: Vec<QueueEntry> = st
                 .queue
@@ -505,7 +507,6 @@ impl FerricController {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.queue.repeat = state.repeat_mode;
             st.queue.set_shuffle(state.shuffle_enabled);
-            st.pending_handoff_seek_ms = Some(seek_target_ms);
         }
 
         if is_unmatched_local {
@@ -518,31 +519,28 @@ impl FerricController {
                 .on_toast(format!("Matching local track from {sender_name} online..."));
         }
 
-        if self
-            .play_queue_local_with_mode(
-                tracks,
-                idx,
-                "Ferric Connect".to_string(),
-                !state.is_playing,
-            )
-            .is_ok()
-        {
-            if seek_target_ms > 1_000 {
-                self.send_audio(EngineCommand::SeekMs(seek_target_ms));
+        match self.play_queue_local_with_handoff(
+            tracks,
+            idx,
+            "Ferric Connect".to_string(),
+            !state.is_playing,
+            Some(seek_target_ms),
+        ) {
+            Ok(()) => {
+                if !state.is_playing {
+                    self.send_audio(EngineCommand::Pause);
+                }
+                self.push_connect_playback_snapshot_override(
+                    Some(state.is_playing),
+                    Some(seek_target_ms),
+                );
+                self.sink
+                    .on_toast("Switched playback to this device".to_string());
             }
-            if !state.is_playing {
-                self.send_audio(EngineCommand::Pause);
+            Err(_) => {
+                let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                st.pending_handoff_seek_ms = None;
             }
-            self.push_connect_playback_snapshot_override(
-                Some(state.is_playing),
-                Some(seek_target_ms),
-            );
-            self.sink
-                .on_toast("Switched playback to this device".to_string());
-        }
-        {
-            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            st.pending_handoff_seek_ms = None;
         }
     }
 

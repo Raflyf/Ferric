@@ -656,6 +656,7 @@ class CoreStateStore(private val appContext: Context) {
                         isReady = true,
                     )
                 }
+                syncStreakAndWidgets(stats?.currentStreakDays?.toInt() ?: 0)
                 if (connect.localTcpPort.toInt() >= 1024) {
                     nsdHelper.syncRegistration(
                         deviceId = connect.localDeviceId,
@@ -1751,6 +1752,13 @@ class CoreStateStore(private val appContext: Context) {
         }
     }
 
+    private fun syncStreakAndWidgets(streakDays: Int) {
+        if (streakDays > 0) {
+            dev.livelydesk.ferric.widget.FerricWidgetPrefs.saveLastKnownStreak(appContext, streakDays)
+        }
+        FerricWidgetUpdater.updateAll(appContext, _uiState.value)
+    }
+
     fun refreshStorageAndStats() {
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
@@ -1762,6 +1770,9 @@ class CoreStateStore(private val appContext: Context) {
                     storageStats = storage ?: it.storageStats,
                     listeningStats = stats ?: it.listeningStats,
                 )
+            }
+            if (stats != null && stats.currentStreakDays.toInt() > 0) {
+                syncStreakAndWidgets(stats.currentStreakDays.toInt())
             }
         }
     }

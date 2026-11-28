@@ -1,6 +1,7 @@
 package dev.livelydesk.ferric.widget
 
 import android.app.PendingIntent
+import android.app.WallpaperManager
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
 import android.content.BroadcastReceiver
@@ -16,6 +17,8 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
+import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.View
@@ -57,7 +60,7 @@ private const val ACTION_WIDGET_LIKE = "dev.livelydesk.ferric.widget.ACTION_LIKE
 
 enum class FerricWidgetStyle(val id: String, val label: String) {
     GLASS("glass", "Glass"),
-    CLEAR_GLASS("clear_glass", "Liquid glass"),
+    CLEAR_GLASS("clear_glass", "Clear glass"),
     DARK("dark", "Dark"),
     LIGHT("light", "Light"),
     COVER_COLOR("cover_color", "Cover colour"),
@@ -200,6 +203,20 @@ object FerricWidgetPrefs {
             }
         }.apply()
     }
+
+    fun saveLastKnownStreak(context: Context, days: Int) {
+        if (days <= 0) return
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt("last_known_streak_days", days)
+            .apply()
+    }
+
+    fun loadLastKnownStreak(context: Context): Int =
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt("last_known_streak_days", 0)
 }
 
 class CompactStripWidgetProvider : AppWidgetProvider() {
@@ -302,6 +319,7 @@ object FerricWidgetRenderer {
         artBitmap: Bitmap?,
         coverShade: CoverShadeColors,
         pxPerDp: Float = 1.6f,
+        wallpaperTintArgb: Int? = null,
     ): Bitmap {
         val rawW = max(24, widthPx)
         val rawH = max(24, heightPx)
@@ -351,13 +369,17 @@ object FerricWidgetRenderer {
             .coerceAtMost(usableMin * 0.4f)
 
         val veils = if (isClear) {
-            // Luminous crystal-clear finish matching the in-app Home pill:
-            // very light cool frost mist + subtle dark edge anchor so white text reads on any wallpaper.
-            val frostMist = (0.025f + frost * 0.14f).coerceIn(0.025f, 0.18f)
-            val baseDark = (0.04f + frost * 0.08f).coerceIn(0.04f, 0.14f)
+            // Smoked translucent crystal panel tuned like the in-app Home pill:
+            // dark crystal anchor + sampled wallpaper tone + cool white frost veil so content pops over any wallpaper.
+            val wp = wallpaperTintArgb ?: Color.rgb(22, 30, 44)
+            val wpR = (Color.red(wp) * 0.55f + 16f).toInt().coerceIn(12, 130)
+            val wpG = (Color.green(wp) * 0.55f + 20f).toInt().coerceIn(14, 135)
+            val wpB = (Color.blue(wp) * 0.55f + 30f).toInt().coerceIn(18, 150)
+            val smokeAlpha = (0.24f + frost * 0.34f).coerceIn(0.24f, 0.58f)
+            val frostMist = (0.06f + frost * 0.16f).coerceIn(0.06f, 0.22f)
             intArrayOf(
-                floatArgb(baseDark, 8, 12, 22),
-                floatArgb(frostMist, 246, 250, 255),
+                floatArgb(smokeAlpha, wpR, wpG, wpB),
+                floatArgb(frostMist, 244, 248, 255),
             )
         } else {
             val avgLuma = averageLuma(frostedPixels)
@@ -911,6 +933,71 @@ object FerricWidgetRenderer {
         return bmp
     }
 
+    fun sampleWallpaperTint(context: Context): Int? = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            WallpaperManager.getInstance(context.applicationContext)
+                .getWallpaperColors(WallpaperManager.FLAG_SYSTEM)
+                ?.primaryColor
+                ?.toArgb()
+        } else {
+            null
+        }
+    }.getOrNull()
+
+    fun renderStreakBadgeBitmap(days: Int, isLight: Boolean): Bitmap {
+        val label = "${days.coerceAtLeast(0)}d"
+        val h = 48
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 24f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        val textW = textPaint.measureText(label)
+        val w = (48f + textW + 20f).roundToInt().coerceAtLeast(88)
+        val bmp = createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val rect = RectF(1.5f, 1.5f, w - 1.5f, h - 1.5f)
+        val r = h * 0.5f
+
+        c.drawRoundRect(
+            rect,
+            r,
+            r,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = if (isLight) Color.argb(215, 24, 28, 38) else Color.argb(190, 14, 18, 28)
+            },
+        )
+        c.drawRoundRect(
+            rect,
+            r,
+            r,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = 2f
+                color = Color.argb(110, 255, 255, 255)
+            },
+        )
+
+        // Crisp vector flame badge on the left
+        val fx = 24f
+        val flame = Path().apply {
+            moveTo(fx, 11f)
+            cubicTo(fx + 9f, 18f, fx + 10f, 30f, fx, 36f)
+            cubicTo(fx - 10f, 30f, fx - 8f, 19f, fx, 11f)
+            close()
+        }
+        c.drawPath(
+            flame,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(255, 168, 38)
+            },
+        )
+        val fm = textPaint.fontMetrics
+        val textY = h * 0.5f - (fm.ascent + fm.descent) * 0.5f
+        c.drawText(label, 42f, textY, textPaint)
+        return bmp
+    }
+
     fun renderTransportIcon(
         kind: String,
         fgArgb: Int,
@@ -1109,7 +1196,12 @@ object FerricWidgetUpdater {
         val elapsedStr = formatDurationMs(posMs)
         val totalStr = formatDurationMs(durMs)
         val density = context.resources.displayMetrics.density
-        val streakDays = state.listeningStats?.currentStreakDays?.toInt() ?: 0
+        val statsDays = state.listeningStats?.currentStreakDays?.toInt() ?: 0
+        if (statsDays > 0) {
+            FerricWidgetPrefs.saveLastKnownStreak(context, statsDays)
+        }
+        val streakDays = if (statsDays > 0) statsDays else FerricWidgetPrefs.loadLastKnownStreak(context)
+        val wallpaperTint = FerricWidgetRenderer.sampleWallpaperTint(context)
 
         val openAppIntent = PendingIntent.getActivity(
             context,
@@ -1155,7 +1247,7 @@ object FerricWidgetUpdater {
             val accent = FerricWidgetRenderer.resolveAccentArgb(cfg, state.coverShade)
 
             val (wPx, hPx, pxPerDp) = measureTargetPx(widgetId, defWdp, defHdp)
-            val bgBmp = FerricWidgetRenderer.renderGlassBackgroundBitmap(wPx, hPx, cfg, artBitmap, state.coverShade, pxPerDp)
+            val bgBmp = FerricWidgetRenderer.renderGlassBackgroundBitmap(wPx, hPx, cfg, artBitmap, state.coverShade, pxPerDp, wallpaperTint)
             views.setImageViewBitmap(R.id.widget_glass_bg, bgBmp)
 
             views.setTextViewText(R.id.widget_title, title)
@@ -1185,10 +1277,13 @@ object FerricWidgetUpdater {
             views.setImageViewBitmap(R.id.widget_btn_play, playBmp)
 
             if (hasProgressViews) {
-                views.setViewVisibility(R.id.widget_streak_badge, if (cfg.showStreak && streakDays > 0) View.VISIBLE else View.GONE)
-                if (cfg.showStreak && streakDays > 0) {
-                    views.setTextViewText(R.id.widget_streak_badge, "${streakDays}d streak")
-                    views.setTextColor(R.id.widget_streak_badge, accent)
+                val showStreakPill = cfg.showStreak && streakDays > 0
+                views.setViewVisibility(R.id.widget_streak_badge, if (showStreakPill) View.VISIBLE else View.GONE)
+                if (showStreakPill) {
+                    views.setImageViewBitmap(
+                        R.id.widget_streak_badge,
+                        FerricWidgetRenderer.renderStreakBadgeBitmap(streakDays, isLight),
+                    )
                 }
 
                 views.setViewVisibility(R.id.widget_btn_like, if (cfg.showLikeButton) View.VISIBLE else View.GONE)

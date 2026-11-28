@@ -42,18 +42,6 @@
                 android:orientation="vertical">
 
                 <TextView
-                    android:id="@+id/widget_streak_badge"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginBottom="2dp"
-                    android:ellipsize="end"
-                    android:maxLines="1"
-                    android:textColor="#FFFFFFFF"
-                    android:textSize="11sp"
-                    android:textStyle="bold"
-                    android:visibility="gone" />
-
-                <TextView
                     android:id="@+id/widget_title"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -83,56 +71,72 @@
                     android:textColor="#D8FFFFFF"
                     android:textSize="14sp" />
             </LinearLayout>
+
+            <ImageView
+                android:id="@+id/widget_streak_badge"
+                android:layout_width="64dp"
+                android:layout_height="24dp"
+                android:layout_gravity="top"
+                android:layout_marginStart="8dp"
+                android:contentDescription="@null"
+                android:scaleType="fitEnd"
+                android:visibility="gone" />
         </LinearLayout>
 
-        <LinearLayout
+        <FrameLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="horizontal">
+            android:layout_weight="1">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <ImageButton
+                    android:id="@+id/widget_btn_prev"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:layout_marginHorizontal="11dp"
+                    android:background="@android:color/transparent"
+                    android:contentDescription="@string/widget_prev"
+                    android:padding="2dp"
+                    android:scaleType="fitCenter" />
+
+                <ImageButton
+                    android:id="@+id/widget_btn_play"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:layout_marginHorizontal="11dp"
+                    android:background="@android:color/transparent"
+                    android:contentDescription="@string/widget_play_pause"
+                    android:padding="1dp"
+                    android:scaleType="fitCenter" />
+
+                <ImageButton
+                    android:id="@+id/widget_btn_next"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:layout_marginHorizontal="11dp"
+                    android:background="@android:color/transparent"
+                    android:contentDescription="@string/widget_next"
+                    android:padding="2dp"
+                    android:scaleType="fitCenter" />
+            </LinearLayout>
 
             <ImageButton
                 android:id="@+id/widget_btn_like"
-                android:layout_width="38dp"
-                android:layout_height="38dp"
-                android:layout_marginHorizontal="10dp"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
+                android:layout_gravity="end|center_vertical"
                 android:background="@android:color/transparent"
                 android:contentDescription="@string/widget_like"
                 android:padding="2dp"
                 android:scaleType="fitCenter"
                 android:visibility="gone" />
-
-            <ImageButton
-                android:id="@+id/widget_btn_prev"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:layout_marginHorizontal="14dp"
-                android:background="@android:color/transparent"
-                android:contentDescription="@string/widget_prev"
-                android:padding="2dp"
-                android:scaleType="fitCenter" />
-
-            <ImageButton
-                android:id="@+id/widget_btn_play"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:layout_marginHorizontal="14dp"
-                android:background="@android:color/transparent"
-                android:contentDescription="@string/widget_play_pause"
-                android:padding="1dp"
-                android:scaleType="fitCenter" />
-
-            <ImageButton
-                android:id="@+id/widget_btn_next"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:layout_marginHorizontal="14dp"
-                android:background="@android:color/transparent"
-                android:contentDescription="@string/widget_next"
-                android:padding="2dp"
-                android:scaleType="fitCenter" />
-        </LinearLayout>
+        </FrameLayout>
 
         <LinearLayout
             android:id="@+id/widget_progress_row"

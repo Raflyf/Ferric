@@ -208,13 +208,17 @@ private fun WidgetSettingsScreen(
             )
 
             // Live preview frame simulating home wallpaper behind Clear glass / Glass
+            val cachedStreak = remember { FerricWidgetPrefs.loadLastKnownStreak(context) }
+            val resolvedStreak = (state.listeningStats?.currentStreakDays?.toInt() ?: 0).let {
+                if (it > 0) it else if (cachedStreak > 0) cachedStreak else 1
+            }
             LiveWidgetPreviewBox(
                 config = config,
                 title = activeTrack?.title?.ifBlank { null } ?: "Ready to play",
                 artist = activeTrack?.artist?.ifBlank { null } ?: "Ferric",
                 isPlaying = activePlaying,
                 liked = activeTrack?.liked == true,
-                streakDays = state.listeningStats?.currentStreakDays?.toInt() ?: 3,
+                streakDays = resolvedStreak,
                 artBitmap = coverBmp,
                 coverShade = state.coverShade,
             )
@@ -356,6 +360,8 @@ private fun LiveWidgetPreviewBox(
     artBitmap: Bitmap?,
     coverShade: dev.livelydesk.ferric.ui.theme.CoverShadeColors,
 ) {
+    val context = LocalContext.current
+    val wpTint = remember { FerricWidgetRenderer.sampleWallpaperTint(context) }
     val bgBitmap = remember(
         config.style,
         config.accentSwatchIndex,
@@ -365,8 +371,9 @@ private fun LiveWidgetPreviewBox(
         config.frost,
         artBitmap,
         coverShade,
+        wpTint,
     ) {
-        FerricWidgetRenderer.renderGlassBackgroundBitmap(528, 256, config, artBitmap, coverShade, pxPerDp = 1.6f)
+        FerricWidgetRenderer.renderGlassBackgroundBitmap(528, 256, config, artBitmap, coverShade, pxPerDp = 1.6f, wallpaperTintArgb = wpTint)
     }
     val shapedCover = remember(artBitmap, config.coverShape, config.showCover) {
         if (config.showCover && artBitmap != null) {
@@ -460,14 +467,6 @@ private fun LiveWidgetPreviewBox(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.Center,
                     ) {
-                        if (config.showStreak && streakDays > 0) {
-                            Text(
-                                text = "${streakDays}d streak",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = accentColor,
-                            )
-                        }
                         Text(
                             text = title,
                             fontSize = config.textSize.titleSp.sp,
@@ -484,39 +483,31 @@ private fun LiveWidgetPreviewBox(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
+                    if (config.showStreak && streakDays > 0) {
+                        val streakBmp = remember(streakDays, isLight) {
+                            FerricWidgetRenderer.renderStreakBadgeBitmap(streakDays, isLight)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Image(
+                            bitmap = streakBmp.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .height(24.dp)
+                                .align(Alignment.Top),
+                        )
+                    }
                 }
 
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    contentAlignment = Alignment.Center,
                 ) {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(if (config.showLikeButton) 20.dp else 28.dp, Alignment.CenterHorizontally),
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (config.showLikeButton) {
-                            val likeIcon = remember(liked, accentColor, isLight) {
-                                val col = if (liked) {
-                                    AndroidColor.rgb(
-                                        (accentColor.red * 255).roundToInt(),
-                                        (accentColor.green * 255).roundToInt(),
-                                        (accentColor.blue * 255).roundToInt(),
-                                    )
-                                } else if (isLight) {
-                                    AndroidColor.rgb(20, 22, 28)
-                                } else {
-                                    AndroidColor.WHITE
-                                }
-                                FerricWidgetRenderer.renderTransportIcon(if (liked) "heart_on" else "heart_off", col)
-                            }
-                            Image(
-                                bitmap = likeIcon.asImageBitmap(),
-                                contentDescription = null,
-                                modifier = Modifier.size(36.dp),
-                            )
-                        }
                         if (config.showPrevNext) {
                             val prevBmp = remember(isLight) {
                                 FerricWidgetRenderer.renderTransportIcon(
@@ -540,6 +531,29 @@ private fun LiveWidgetPreviewBox(
                             }
                             Image(bitmap = nextBmp.asImageBitmap(), contentDescription = null, modifier = Modifier.size(38.dp))
                         }
+                    }
+                    if (config.showLikeButton) {
+                        val likeIcon = remember(liked, accentColor, isLight) {
+                            val col = if (liked) {
+                                AndroidColor.rgb(
+                                    (accentColor.red * 255).roundToInt(),
+                                    (accentColor.green * 255).roundToInt(),
+                                    (accentColor.blue * 255).roundToInt(),
+                                )
+                            } else if (isLight) {
+                                AndroidColor.rgb(20, 22, 28)
+                            } else {
+                                AndroidColor.WHITE
+                            }
+                            FerricWidgetRenderer.renderTransportIcon(if (liked) "heart_on" else "heart_off", col)
+                        }
+                        Image(
+                            bitmap = likeIcon.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .size(34.dp),
+                        )
                     }
                 }
 

@@ -420,6 +420,17 @@ impl FerricController {
         context: String,
         start_paused: bool,
     ) -> ControllerResult<()> {
+        self.play_queue_local_with_handoff(tracks, start_index, context, start_paused, None)
+    }
+
+    pub(crate) fn play_queue_local_with_handoff(
+        self: &Arc<Self>,
+        tracks: Vec<Track>,
+        start_index: usize,
+        context: String,
+        start_paused: bool,
+        handoff_seek_ms: Option<u64>,
+    ) -> ControllerResult<()> {
         if tracks.is_empty() {
             return Err(ControllerError::State(
                 "cannot play empty queue".to_string(),
@@ -434,6 +445,7 @@ impl FerricController {
             st.queue_context = context;
             st.last_finished_seq = current_seq;
             st.paused_while_resolving = start_paused;
+            st.pending_handoff_seek_ms = handoff_seek_ms;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
             st.extend_queue_gen = st.extend_queue_gen.wrapping_add(1);
             st.is_extending_queue = false;
@@ -470,7 +482,7 @@ impl FerricController {
         if should_auto_extend {
             let _ = self.extend_queue_up_next();
         }
-        self.push_connect_playback_snapshot();
+        self.push_connect_playback_snapshot_override(None, handoff_seek_ms);
         self.wake_monitor();
         Ok(())
     }
@@ -482,11 +494,20 @@ impl FerricController {
     ) -> ControllerResult<()> {
         let local_path = self.resolve_immediate_path(track);
         if let Some(path) = local_path {
+            let immediate_seek = {
+                let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                st.pending_handoff_seek_ms.take()
+            };
             self.send_audio(EngineCommand::LoadAndPlayTrack {
                 path,
                 replay_gain_db: track.replay_gain_db,
                 fallback_duration_ms: track.duration_ms,
             });
+            if let Some(ms) = immediate_seek
+                && ms > 1_000
+            {
+                self.send_audio(EngineCommand::SeekMs(ms));
+            }
             self.queue_upcoming_deck_b();
             self.prefetch_upcoming_online_track();
             return Ok(());
@@ -665,7 +686,7 @@ impl FerricController {
                     }
                     self.queue_upcoming_deck_b();
                     self.prefetch_upcoming_online_track();
-                    self.push_connect_playback_snapshot();
+                    self.push_connect_playback_snapshot_override(Some(!was_paused), pending_seek);
                     self.wake_monitor();
                 }
             }
@@ -1222,6 +1243,10 @@ impl FerricController {
                 position_ms: pos_ms,
             });
             return;
+        }
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.pending_handoff_seek_ms = None;
         }
         self.send_audio(EngineCommand::SeekMs(pos_ms));
         self.push_connect_playback_snapshot_override(None, Some(pos_ms));

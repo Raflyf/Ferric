@@ -4467,6 +4467,8 @@ pub struct App {
     #[rust]
     pending_handoff_paused: bool,
     #[rust]
+    last_seek_override: Option<(u64, std::time::Instant)>,
+    #[rust]
     last_remote_mirror_key: String,
     #[rust]
     was_controlling_remote: bool,
@@ -14451,12 +14453,20 @@ impl App {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        let effective_pos_ms = self
+            .pending_handoff_seek_ms
+            .or_else(|| {
+                self.last_seek_override.and_then(|(ms, at)| {
+                    (at.elapsed() < std::time::Duration::from_millis(800)).then_some(ms)
+                })
+            })
+            .unwrap_or(tele.position_ms);
         engine.update_local_playback(LocalPlaybackSnapshot {
             is_playing: tele.is_playing,
             current_track,
             queue,
             current_index,
-            position_ms: tele.position_ms,
+            position_ms: effective_pos_ms,
             volume_norm: self.session_state.volume,
             repeat_mode: self.queue.repeat,
             shuffle_enabled: self.queue.shuffle,
@@ -14825,6 +14835,7 @@ impl App {
                         if seek_ms > 1_000
                             && let Some(audio) = &self.audio
                         {
+                            self.last_seek_override = Some((seek_ms, std::time::Instant::now()));
                             audio.send(EngineCommand::SeekMs(seek_ms));
                         }
                         if !state.is_playing
@@ -16258,6 +16269,7 @@ impl App {
                             && seek_ms > 1_000
                             && let Some(audio) = &self.audio
                         {
+                            self.last_seek_override = Some((seek_ms, std::time::Instant::now()));
                             audio.send(EngineCommand::SeekMs(seek_ms));
                         }
                         let start_paused = self.pending_handoff_paused;

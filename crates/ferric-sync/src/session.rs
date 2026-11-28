@@ -1783,7 +1783,9 @@ impl EngineRunner {
             handoff_state.revision = self.revision;
             handoff_state.active_speaker = Some(new_speaker.clone());
             handoff_state.is_playing = start_playing;
-            handoff_state.anchor_utc_ms = unix_now_utc_ms();
+            if handoff_state.anchor_utc_ms == 0 {
+                handoff_state.anchor_utc_ms = unix_now_utc_ms();
+            }
 
             self.active_speaker_id = new_speaker.clone();
             self.yielded_guard_until = Some(Instant::now() + Duration::from_millis(900));
@@ -1836,7 +1838,9 @@ impl EngineRunner {
                 handoff_state.revision = self.revision;
                 handoff_state.active_speaker = Some(target_device_id.clone());
                 handoff_state.is_playing = self.local_playback.is_playing;
-                handoff_state.anchor_utc_ms = unix_now_utc_ms();
+                if handoff_state.anchor_utc_ms == 0 {
+                    handoff_state.anchor_utc_ms = unix_now_utc_ms();
+                }
 
                 self.active_speaker_id = target_device_id.clone();
                 self.yielded_guard_until = Some(Instant::now() + Duration::from_millis(900));
@@ -1954,6 +1958,7 @@ impl EngineRunner {
 
     fn build_local_session_state(&self) -> SessionState {
         let cur = self.local_playback.current_track.as_ref();
+        let now_utc = unix_now_utc_ms();
         SessionState {
             revision: self.revision,
             active_speaker: Some(self.active_speaker_id.clone()),
@@ -1967,7 +1972,7 @@ impl EngineRunner {
             anchor_utc_ms: if self.local_playback.anchor_utc_ms > 0 {
                 self.local_playback.anchor_utc_ms
             } else if self.local_playback.is_playing || cur.is_some() {
-                unix_now_utc_ms()
+                now_utc
             } else {
                 0
             },

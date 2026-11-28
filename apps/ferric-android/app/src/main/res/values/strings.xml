@@ -10,8 +10,8 @@
     <string name="widget_settings_title">Widget settings</string>
     <string name="widget_label_strip">Ferric Strip (4x1)</string>
     <string name="widget_label_square">Ferric Cover (2x2)</string>
-    <string name="widget_label_glass">Ferric Liquid Glass (4x2)</string>
+    <string name="widget_label_glass">Ferric Glass (4x2)</string>
     <string name="widget_desc_strip">Compact playback strip with transport controls</string>
     <string name="widget_desc_square">Square cover art widget with play and like actions</string>
-    <string name="widget_desc_glass">Optical Liquid Glass playback widget with customizable glass styles</string>
+    <string name="widget_desc_glass">Playback widget with frosted cover glass, clear glass, and solid styles</string>
 </resources>

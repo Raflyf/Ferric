@@ -1,10 +1,13 @@
 package dev.livelydesk.ferric.playback
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
@@ -12,10 +15,13 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.annotation.OptIn
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -23,6 +29,7 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.SimpleBasePlayer
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import coil3.SingletonImageLoader
@@ -34,6 +41,7 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import dev.livelydesk.ferric.FerricApp
 import dev.livelydesk.ferric.MainActivity
+import dev.livelydesk.ferric.R
 import dev.livelydesk.ferric.core.CoreStateStore
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
@@ -203,6 +211,17 @@ class FerricPlaybackService : MediaSessionService() {
         store = (application as FerricApp).store
         PlaybackFocusCoordinator.ensureInitialized(this, store)
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        setMediaNotificationProvider(
+            DefaultMediaNotificationProvider.Builder(this)
+                .setNotificationId(PLAYBACK_NOTIFICATION_ID)
+                .setChannelId(PLAYBACK_CHANNEL_ID)
+                .setChannelName(R.string.playback_notification_channel_name)
+                .build()
+                .apply {
+                    setSmallIcon(R.drawable.ic_launcher_monochrome)
+                },
+        )
+        promoteToForegroundImmediately()
 
         // Lazily initialize Rust Oboe audio inside the foreground MediaSessionService.
         serviceScope.launch(Dispatchers.IO) {
@@ -347,6 +366,60 @@ class FerricPlaybackService : MediaSessionService() {
         }
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        promoteToForegroundImmediately()
+        return super.onStartCommand(intent, flags, startId)
+    }
+
+    private fun ensurePlaybackChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        if (nm.getNotificationChannel(PLAYBACK_CHANNEL_ID) != null) return
+        val channel = NotificationChannel(
+            PLAYBACK_CHANNEL_ID,
+            getString(R.string.playback_notification_channel_name),
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            setShowBadge(false)
+            description = "Ferric media playback controls"
+        }
+        nm.createNotificationChannel(channel)
+    }
+
+    private fun promoteToForegroundImmediately() {
+        ensurePlaybackChannel()
+        val openAppPi = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val snap = if (::store.isInitialized) store.uiState.value else null
+        val title = snap?.currentTrack?.title?.ifBlank { null } ?: "Ferric"
+        val artist = snap?.currentTrack?.artist?.ifBlank { null } ?: "Preparing playback"
+        val notification = NotificationCompat.Builder(this, PLAYBACK_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle(title)
+            .setContentText(artist)
+            .setContentIntent(openAppPi)
+            .setOngoing(true)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
+        val fgType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        } else {
+            0
+        }
+        runCatching {
+            ServiceCompat.startForeground(this, PLAYBACK_NOTIFICATION_ID, notification, fgType)
+        }
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
         return mediaSession
     }
@@ -355,10 +428,16 @@ class FerricPlaybackService : MediaSessionService() {
         val st = store.uiState.value
         val activeLocalPlayback = st.isPlaying && st.connectState.isLocalActiveSpeaker
         if (!activeLocalPlayback) {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
             store.shutdown()
         }
         super.onTaskRemoved(rootIntent)
+    }
+
+    companion object {
+        private const val PLAYBACK_CHANNEL_ID = "ferric_playback"
+        private const val PLAYBACK_NOTIFICATION_ID = 1001
     }
 
     override fun onDestroy() {
@@ -375,10 +454,6 @@ class FerricPlaybackService : MediaSessionService() {
         mediaSession = null
         bridgePlayer = null
         serviceScope.cancel()
-        val st = store.uiState.value
-        if (!st.isPlaying || !st.connectState.isLocalActiveSpeaker) {
-            store.shutdown()
-        }
         super.onDestroy()
     }
 }

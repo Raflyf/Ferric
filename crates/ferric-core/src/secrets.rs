@@ -81,20 +81,26 @@ pub fn zeroize_bytes(buf: &mut [u8]) {
     compiler_fence(Ordering::SeqCst);
 }
 
-/// Scrub the backing heap bytes of a `String` before clearing it.
+/// Scrub all backing heap bytes (including spare capacity) before clearing.
 pub fn zeroize_string(s: &mut String) {
-    if !s.is_empty() {
-        // SAFETY: Writing all 0x00 bytes is valid UTF-8, and `clear()` immediately resets length to 0.
-        unsafe { zeroize_bytes(s.as_bytes_mut()) };
-        s.clear();
+    s.clear();
+    let cap = s.capacity();
+    if cap > 0 {
+        let ptr = s.as_mut_ptr();
+        // SAFETY: `s.as_mut_ptr()` points to `s.capacity()` valid bytes owned by `s`.
+        // `s.clear()` already set len to 0, so zeroing all `cap` bytes preserves valid UTF-8.
+        unsafe {
+            let full = std::slice::from_raw_parts_mut(ptr, cap);
+            zeroize_bytes(full);
+        }
     }
 }
 
 /// Fill `out` with cryptographically secure random bytes from the OS CSPRNG
-/// (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix). Fails closed on OS CSPRNG failure.
-pub fn csprng_fill(out: &mut [u8]) {
+/// (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix), returning an error on OS failure.
+pub fn try_csprng_fill(out: &mut [u8]) -> CoreResult<()> {
     if out.is_empty() {
-        return;
+        return Ok(());
     }
 
     #[cfg(target_os = "windows")]
@@ -120,26 +126,37 @@ pub fn csprng_fill(out: &mut [u8]) {
                     BCRYPT_USE_SYSTEM_PREFERRED_RNG,
                 )
             };
-            assert!(
-                status == 0,
-                "OS CSPRNG (BCryptGenRandom) failed with NTSTATUS 0x{:08x}",
-                status as u32
-            );
+            if status != 0 {
+                return Err(CoreError::SecretProtection(format!(
+                    "OS CSPRNG (BCryptGenRandom) failed with NTSTATUS 0x{:08x}",
+                    status as u32
+                )));
+            }
         }
+        Ok(())
     }
 
     #[cfg(unix)]
     {
         use std::io::Read;
-        let mut f =
-            std::fs::File::open("/dev/urandom").expect("OS CSPRNG (/dev/urandom) failed to open");
-        f.read_exact(out)
-            .expect("OS CSPRNG (/dev/urandom) failed to fill buffer");
+        let mut f = std::fs::File::open("/dev/urandom")?;
+        f.read_exact(out)?;
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "windows", unix)))]
     {
-        panic!("OS CSPRNG is unavailable on this platform");
+        Err(CoreError::SecretProtection(
+            "OS CSPRNG is unavailable on this platform".to_string(),
+        ))
+    }
+}
+
+/// Fill `out` with cryptographically secure random bytes from the OS CSPRNG
+/// (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix). Fails closed on OS CSPRNG failure.
+pub fn csprng_fill(out: &mut [u8]) {
+    if let Err(err) = try_csprng_fill(out) {
+        panic!("OS CSPRNG failure: {err}");
     }
 }
 
@@ -387,11 +404,11 @@ pub fn protect_secret(plain: &str) -> CoreResult<String> {
             .map_err(CoreError::SecretProtection)?;
         return Ok(format!("{prefix}{}", b64_encode(&ct)));
     }
-    if plain.starts_with(DPAPI_PREFIX) || plain.starts_with(KEYSTORE_PREFIX) {
-        return Ok(plain.to_string());
-    }
     #[cfg(target_os = "windows")]
     {
+        if plain.starts_with(DPAPI_PREFIX) {
+            return Ok(plain.to_string());
+        }
         let cipher =
             win_dpapi::protect_bytes(plain.as_bytes()).map_err(CoreError::SecretProtection)?;
         Ok(format!("{DPAPI_PREFIX}{}", b64_encode(&cipher)))

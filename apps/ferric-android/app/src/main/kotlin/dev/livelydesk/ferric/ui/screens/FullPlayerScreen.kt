@@ -164,6 +164,8 @@ private val SPEED_CYCLE = listOf(0.75f, 1.0f, 1.15f, 1.25f, 1.5f)
 fun FullPlayerScreen(
     state: PlaybackUiState,
     progressFlow: StateFlow<PlaybackProgress>,
+    overlayBackdrop: dev.livelydesk.ferric.ui.theme.FerricBackdropState? = null,
+    hasExternalOverlay: Boolean = false,
     onCollapse: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onNext: () -> Unit,
@@ -227,7 +229,7 @@ fun FullPlayerScreen(
         }
     }
 
-    // Deep cover-derived atmospheric base tone matching Auralys cardless full-bleed gradients
+    // Deep cover-derived atmospheric base tone for cardless full-bleed gradients
     val deepTone = remember(state.coverShade, palette.isLight, isStandardLayout, palette.canvas) {
         when {
             isStandardLayout -> palette.canvas
@@ -248,11 +250,20 @@ fun FullPlayerScreen(
     val onCanvasSecondary = onCanvasPrimary.copy(alpha = 0.70f)
     val artCorner = palette.cornerRadiusDp
 
+    val captureOverlayBackdrop = overlayBackdrop != null && (hasExternalOverlay || showSleepSheet)
+
     CompositionLocalProvider(LocalBackdropState provides playerBackdrop) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .blockUnderlyingTouches()
+                .let { mod ->
+                    if (overlayBackdrop != null) {
+                        mod.ferricBackdropSource(overlayBackdrop, enabled = captureOverlayBackdrop)
+                    } else {
+                        mod
+                    }
+                }
                 .background(deepTone),
         ) {
             // Layer 1: Edge-to-edge full-bleed cover art (or atmospheric blurred art) captured cleanly
@@ -326,7 +337,7 @@ fun FullPlayerScreen(
                             AuroraBackdrop(
                                 colors = state.coverShade,
                                 baseCanvas = deepTone,
-                                isPlaying = displayPlaying,
+                                isPlaying = displayPlaying && !showSleepSheet && !hasExternalOverlay,
                                 intensity = 0.80f,
                             )
                         }
@@ -372,7 +383,7 @@ fun FullPlayerScreen(
                         )
                     }
 
-                    // Auralys-style Floating Liquid Glass Audio | Video Segmented Pill
+                    // Floating Liquid Glass Audio | Video Segmented Pill
                     Row(
                         modifier = Modifier
                             .height(38.dp)
@@ -546,7 +557,7 @@ fun FullPlayerScreen(
                     }
                 }
 
-                // Completely Cardless Bottom Transport Controls directly on canvas (Auralys signature!)
+                // Cardless Bottom Transport Controls directly on canvas
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1384,6 +1395,7 @@ private fun DockedVideoStage(
     var selectedOptIdx by remember(video.trackId, video.options.size) { mutableIntStateOf(0) }
     val selectedOption = video.options.getOrNull(selectedOptIdx)
     var lastSyncSeekUptimeMs by remember { mutableLongStateOf(0L) }
+    var lastHandledSeekNonce by remember { mutableLongStateOf(state.seekSyncNonce) }
     var pendingInitialSeek by remember(selectedOption?.url) { mutableStateOf(true) }
     val latestPosMs by rememberUpdatedState(progress.positionMs)
     val latestPlaying by rememberUpdatedState(effectivePlaying)
@@ -1457,8 +1469,10 @@ private fun DockedVideoStage(
         exoPlayer.playWhenReady = effectivePlaying
         if (exoPlayer.playbackState == Player.STATE_READY) {
             val now = SystemClock.uptimeMillis()
+            val explicitSeek = state.seekSyncNonce != lastHandledSeekNonce
             val drift = abs(exoPlayer.currentPosition - progress.positionMs)
-            if (drift > 260L && (now - lastSyncSeekUptimeMs) > 850L) {
+            if (explicitSeek || (drift > 220L && (now - lastSyncSeekUptimeMs) > 650L)) {
+                lastHandledSeekNonce = state.seekSyncNonce
                 lastSyncSeekUptimeMs = now
                 exoPlayer.seekTo(progress.positionMs.coerceAtLeast(0L))
             }

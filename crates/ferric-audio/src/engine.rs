@@ -345,8 +345,6 @@ fn build_output_stream_and_producer(
     let err_telemetry = Arc::clone(telemetry);
 
     let err_fn = move |_err| {
-        #[cfg(debug_assertions)]
-        eprintln!("ferric-audio stream error: {_err}");
         err_telemetry.device_lost.store(true, Ordering::Release);
     };
 
@@ -456,6 +454,7 @@ struct OutputSlotState {
     active_device_name: String,
     stream_paused: bool,
     last_recovery_attempt: Option<std::time::Instant>,
+    switch_epoch: u64,
 }
 
 fn poll_recovery_inner(
@@ -463,31 +462,48 @@ fn poll_recovery_inner(
     telemetry: &Arc<AudioTelemetry>,
     cmd_tx: &Sender<EngineCommand>,
 ) -> bool {
-    let mut slot = slot_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !slot.stream_paused
-        && telemetry.idle_silent.load(Ordering::Acquire)
-        && !telemetry.is_playing.load(Ordering::Acquire)
-        && let Some(stream) = slot.stream.as_mut()
-    {
-        let _ = stream.pause();
-        slot.stream_paused = true;
-    }
-    if !telemetry.device_lost.load(Ordering::Acquire) {
-        return false;
-    }
-    let now = std::time::Instant::now();
-    if let Some(prev) = slot.last_recovery_attempt
-        && now.duration_since(prev) < Duration::from_millis(1_500)
-    {
-        return false;
-    }
-    slot.last_recovery_attempt = Some(now);
-    slot.stream = None;
+    let (preferred_device, old_stream, expected_epoch) = {
+        let mut slot = slot_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !slot.stream_paused
+            && telemetry.idle_silent.load(Ordering::Acquire)
+            && !telemetry.is_playing.load(Ordering::Acquire)
+            && let Some(stream) = slot.stream.as_mut()
+        {
+            let _ = stream.pause();
+            slot.stream_paused = true;
+        }
+        if !telemetry.device_lost.load(Ordering::Acquire) {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if let Some(prev) = slot.last_recovery_attempt
+            && now.duration_since(prev) < Duration::from_millis(1_500)
+        {
+            return false;
+        }
+        slot.last_recovery_attempt = Some(now);
+        slot.switch_epoch = slot.switch_epoch.wrapping_add(1);
+        (
+            slot.preferred_device.clone(),
+            slot.stream.take(),
+            slot.switch_epoch,
+        )
+    };
+    drop(old_stream);
+
     let want_play = telemetry.is_playing.load(Ordering::Acquire);
-    match build_output_stream_and_producer(telemetry, slot.preferred_device.as_deref(), want_play) {
+    match build_output_stream_and_producer(telemetry, preferred_device.as_deref(), want_play) {
         Ok((new_stream, new_producer, new_rate, active_name)) => {
+            let mut slot = slot_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if slot.switch_epoch != expected_epoch {
+                drop(slot);
+                drop(new_stream);
+                return false;
+            }
             slot.stream = Some(new_stream);
             slot.stream_paused = !want_play;
             telemetry.device_lost.store(false, Ordering::Release);
@@ -501,8 +517,13 @@ fn poll_recovery_inner(
         Err(_) => {
             // Preserve telemetry.is_playing so the next recovery retry resumes automatically
             // once Bluetooth/USB audio routing settles.
-            slot.stream_paused = true;
-            telemetry.device_lost.store(true, Ordering::Release);
+            let mut slot = slot_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if slot.switch_epoch == expected_epoch {
+                slot.stream_paused = true;
+                telemetry.device_lost.store(true, Ordering::Release);
+            }
             false
         }
     }
@@ -582,6 +603,7 @@ impl AudioEngine {
             active_device_name: active_device_name.clone(),
             stream_paused: true,
             last_recovery_attempt: None,
+            switch_epoch: 0,
         }));
         let supervisor_stop = Arc::new(AtomicBool::new(false));
         let supervisor_wake = Arc::new((Mutex::new(false), Condvar::new()));
@@ -665,6 +687,7 @@ impl AudioEngine {
                 active_device_name: "Headless (No Audio Device)".to_string(),
                 stream_paused: true,
                 last_recovery_attempt: None,
+                switch_epoch: 0,
             })),
             decode_handle: handle,
             supervisor_stop: Arc::new(AtomicBool::new(true)),
@@ -704,19 +727,31 @@ impl AudioEngine {
             return Ok(self.active_device_name.clone());
         }
         let want_play = self.telemetry.is_playing.load(Ordering::Acquire);
-        let mut slot = self
-            .output_slot
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        slot.preferred_device = cleaned_pref;
-        // Drop old stream first so exclusive/shared audio sessions release cleanly before re-opening.
-        slot.stream = None;
-        match build_output_stream_and_producer(
-            &self.telemetry,
-            slot.preferred_device.as_deref(),
-            want_play,
-        ) {
+        let (old_stream, expected_epoch) = {
+            let mut slot = self
+                .output_slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.preferred_device = cleaned_pref.clone();
+            slot.switch_epoch = slot.switch_epoch.wrapping_add(1);
+            // Drop old stream outside the mutex so exclusive/shared audio sessions release cleanly.
+            (slot.stream.take(), slot.switch_epoch)
+        };
+        drop(old_stream);
+        match build_output_stream_and_producer(&self.telemetry, cleaned_pref.as_deref(), want_play)
+        {
             Ok((new_stream, new_producer, new_rate, active_name)) => {
+                let mut slot = self
+                    .output_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if slot.switch_epoch != expected_epoch {
+                    let cur_name = slot.active_device_name.clone();
+                    drop(slot);
+                    drop(new_stream);
+                    self.active_device_name = cur_name.clone();
+                    return Ok(cur_name);
+                }
                 slot.stream = Some(new_stream);
                 slot.stream_paused = !want_play;
                 self.telemetry.device_lost.store(false, Ordering::Release);
@@ -730,7 +765,13 @@ impl AudioEngine {
             }
             Err(err) => {
                 self.telemetry.is_playing.store(false, Ordering::Release);
-                slot.stream_paused = true;
+                let mut slot = self
+                    .output_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if slot.switch_epoch == expected_epoch {
+                    slot.stream_paused = true;
+                }
                 Err(err)
             }
         }
@@ -1051,10 +1092,9 @@ fn probe_webm_duration_ms(path: &Path) -> Option<u64> {
     }
     use std::io::Read;
     let mut f = crate::content::open_audio_file(path).ok()?;
-    let mut buf = vec![0u8; 8192];
+    let mut buf = [0u8; 8192];
     let n = f.read(&mut buf).ok()?;
-    buf.truncate(n);
-    parse_ebml_info_duration_ms(&buf)
+    parse_ebml_info_duration_ms(&buf[..n])
 }
 
 impl ActiveDeck {
@@ -1176,7 +1216,7 @@ impl ActiveDeck {
         };
     }
 
-    fn seek_ms(&mut self, target_ms: u64) -> AudioResult<u64> {
+    fn seek_ms(&mut self, target_ms: u64, playback_speed: f32) -> AudioResult<u64> {
         let clamped_ms = if self.duration_ms > 50 {
             target_ms.min(self.duration_ms.saturating_sub(50))
         } else {
@@ -1200,7 +1240,7 @@ impl ActiveDeck {
         self.last_chunk_rms = 1.0;
         self.quiet_outro_frames = 0;
         if let Some(res) = &mut self.resampler {
-            res.reset();
+            res.reset(playback_speed);
         }
         // Symphonia demuxers land on the preceding keyframe/Cue/Ogg page (`actual_ts <= required_ts`).
         // Fast-forward decode and discard intermediate packets so WebM/Opus/Ogg/MP3 seeks land
@@ -1505,7 +1545,9 @@ impl StereoResampler {
         )
         .map_err(|e| AudioError::Decode(e.to_string()))?;
         let rel = 1.0 / f64::from(playback_speed.clamp(0.5, 2.0));
-        let _ = inner.set_resample_ratio_relative(rel, false);
+        inner
+            .set_resample_ratio_relative(rel, false)
+            .map_err(|e| AudioError::Decode(e.to_string()))?;
         let out_max = inner.output_frames_max() * 2 + 64;
         Ok(Self {
             inner,
@@ -1519,9 +1561,11 @@ impl StereoResampler {
         let _ = self.inner.set_resample_ratio_relative(rel, true);
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self, playback_speed: f32) {
         self.inner.reset();
         self.in_fifo.clear();
+        let rel = 1.0 / f64::from(playback_speed.clamp(0.5, 2.0));
+        let _ = self.inner.set_resample_ratio_relative(rel, false);
     }
 
     fn process_stereo(&mut self, input: &[f32], output: &mut Vec<f32>) {
@@ -1631,6 +1675,21 @@ fn promote_deck_b_to_a(
     true
 }
 
+struct PreloadRequest {
+    epoch: u64,
+    spec: QueuedTrackSpec,
+    out_rate: u32,
+    playback_speed: f32,
+    trim_lead: bool,
+}
+
+struct PreloadResult {
+    epoch: u64,
+    path: PathBuf,
+    same_album_consecutive: bool,
+    deck: Option<ActiveDeck>,
+}
+
 struct DecodeRuntime {
     codecs: CodecRegistry,
     eq: StereoEqProcessor,
@@ -1644,10 +1703,26 @@ struct DecodeRuntime {
     crossfade_state: Option<ActiveCrossfade>,
     micro_fade: MicroFade,
     raw_scratch: Vec<f32>,
+    preload_gen: u64,
+    preload_requested_gen: Option<u64>,
+    preload_req_tx: Option<Sender<PreloadRequest>>,
+    preload_res_rx: Receiver<PreloadResult>,
+    preload_res_tx: Sender<PreloadResult>,
+    preloader_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for DecodeRuntime {
+    fn drop(&mut self) {
+        self.preload_req_tx = None;
+        if let Some(handle) = self.preloader_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl DecodeRuntime {
     fn new(out_rate: u32, eq_config: &EqConfig) -> Self {
+        let (preload_res_tx, preload_res_rx) = mpsc::channel();
         Self {
             codecs: build_codec_registry(),
             eq: StereoEqProcessor::new(out_rate, eq_config),
@@ -1661,7 +1736,166 @@ impl DecodeRuntime {
             crossfade_state: None,
             micro_fade: MicroFade::Steady(1.0),
             raw_scratch: Vec::with_capacity(8192),
+            preload_gen: 1,
+            preload_requested_gen: None,
+            preload_req_tx: None,
+            preload_res_rx,
+            preload_res_tx,
+            preloader_handle: None,
         }
+    }
+
+    fn ensure_preloader_started(&mut self) -> Option<&Sender<PreloadRequest>> {
+        if self.preload_req_tx.is_none() {
+            let (req_tx, req_rx) = mpsc::channel::<PreloadRequest>();
+            let res_tx = self.preload_res_tx.clone();
+            if let Ok(handle) = thread::Builder::new()
+                .name("ferric-audio-preload".to_string())
+                .spawn(move || {
+                    let codecs = build_codec_registry();
+                    let mut scratch = Vec::with_capacity(8192);
+                    while let Ok(req) = req_rx.recv() {
+                        // Drain queued obsolete requests so only the latest generation opens disk/FFmpeg.
+                        let mut latest = req;
+                        while let Ok(newer) = req_rx.try_recv() {
+                            latest = newer;
+                        }
+                        let deck = match ActiveDeck::open(
+                            &latest.spec.path,
+                            latest.out_rate,
+                            latest.playback_speed,
+                            latest.spec.replay_gain_db,
+                            latest.spec.fallback_duration_ms,
+                            &codecs,
+                        ) {
+                            Ok(mut d) => {
+                                d.prime_first_chunk(
+                                    &mut scratch,
+                                    latest.trim_lead,
+                                    4.0,
+                                    latest.out_rate,
+                                    latest.playback_speed,
+                                );
+                                Some(d)
+                            }
+                            Err(_) => None,
+                        };
+                        let _ = res_tx.send(PreloadResult {
+                            epoch: latest.epoch,
+                            path: latest.spec.path,
+                            same_album_consecutive: latest.spec.same_album_consecutive,
+                            deck,
+                        });
+                    }
+                })
+            {
+                self.preload_req_tx = Some(req_tx);
+                self.preloader_handle = Some(handle);
+            }
+        }
+        self.preload_req_tx.as_ref()
+    }
+
+    fn bump_preload_gen(&mut self) {
+        self.preload_gen = self.preload_gen.wrapping_add(1);
+        self.preload_requested_gen = None;
+    }
+
+    fn apply_preloaded_result(&mut self, res: PreloadResult, out_rate: u32) -> bool {
+        if res.epoch != self.preload_gen || self.deck_b.is_some() {
+            return false;
+        }
+        let matches = self
+            .queued_next
+            .as_ref()
+            .is_some_and(|s| s.path == res.path);
+        if !matches {
+            return false;
+        }
+        self.queued_next = None;
+        if let Some(mut deck) = res.deck {
+            deck.update_output_rate(out_rate, self.dsp.playback_speed);
+            self.deck_b_same_album = res.same_album_consecutive;
+            self.deck_b = Some(deck);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn poll_preloaded_deck_b(&mut self, out_rate: u32) {
+        while let Ok(res) = self.preload_res_rx.try_recv() {
+            let _ = self.apply_preloaded_result(res, out_rate);
+        }
+    }
+
+    fn maybe_dispatch_deck_b_preload(&mut self, out_rate: u32) {
+        if self.deck_b.is_some() || self.preload_requested_gen == Some(self.preload_gen) {
+            return;
+        }
+        let (Some(da), Some(spec)) = (&self.deck_a, &self.queued_next) else {
+            return;
+        };
+        let eff_xfade_ms = if self.dsp.gapless_album_lock && spec.same_album_consecutive {
+            0
+        } else {
+            self.dsp.crossfade_ms
+        };
+        let preopen_window_ms = u64::from(eff_xfade_ms.saturating_add(8_000).max(12_000));
+        if da.duration_ms > 0 && da.remaining_ms() > preopen_window_ms {
+            return;
+        }
+        let trim_lead =
+            self.dsp.trim_silence && !(self.dsp.gapless_album_lock && spec.same_album_consecutive);
+        let req = PreloadRequest {
+            epoch: self.preload_gen,
+            spec: spec.clone(),
+            out_rate,
+            playback_speed: self.dsp.playback_speed,
+            trim_lead,
+        };
+        if let Some(tx) = self.ensure_preloader_started()
+            && tx.send(req).is_ok()
+        {
+            self.preload_requested_gen = Some(self.preload_gen);
+        }
+    }
+
+    fn promote_or_open_queued_next(&mut self, out_rate: u32, telemetry: &AudioTelemetry) -> bool {
+        self.poll_preloaded_deck_b(out_rate);
+        if self.deck_b.is_none() && self.preload_requested_gen == Some(self.preload_gen) {
+            // Wait briefly for in-flight preloader instead of opening the same file a second time.
+            while let Ok(res) = self.preload_res_rx.recv_timeout(Duration::from_millis(600)) {
+                let res_epoch = res.epoch;
+                if self.apply_preloaded_result(res, out_rate) || res_epoch == self.preload_gen {
+                    break;
+                }
+            }
+        }
+        if self.deck_b.is_none()
+            && let Some(s) = self.queued_next.take()
+            && let Ok(mut next_deck) = ActiveDeck::open(
+                &s.path,
+                out_rate,
+                self.dsp.playback_speed,
+                s.replay_gain_db,
+                s.fallback_duration_ms,
+                &self.codecs,
+            )
+        {
+            let trim_lead =
+                self.dsp.trim_silence && !(self.dsp.gapless_album_lock && s.same_album_consecutive);
+            next_deck.prime_first_chunk(
+                &mut self.raw_scratch,
+                trim_lead,
+                4.0,
+                out_rate,
+                self.dsp.playback_speed,
+            );
+            self.deck_b_same_album = s.same_album_consecutive;
+            self.deck_b = Some(next_deck);
+        }
+        self.promote_deck_b(telemetry, true)
     }
 
     fn load_primary(
@@ -1708,6 +1942,7 @@ impl DecodeRuntime {
                 self.crossfade_state = None;
                 self.deck_b = None;
                 self.queued_next = None;
+                self.bump_preload_gen();
                 self.micro_fade = if self.dsp.fade_in_play_ms > 0 {
                     MicroFade::FadingIn {
                         start_gain: 0.0,
@@ -1720,12 +1955,12 @@ impl DecodeRuntime {
                 self.deck_a = Some(deck);
             }
             Err(_err) => {
-                #[cfg(debug_assertions)]
-                eprintln!("ferric-audio open failed ({}): {_err}", path.display());
                 telemetry.is_playing.store(false, Ordering::Release);
                 telemetry.is_crossfading.store(false, Ordering::Relaxed);
                 self.deck_a = None;
                 self.deck_b = None;
+                self.queued_next = None;
+                self.bump_preload_gen();
                 self.crossfade_state = None;
                 self.bass_swap.reset();
             }
@@ -1790,6 +2025,7 @@ impl DecodeRuntime {
                 self.deck_b = Some(next_deck);
                 self.deck_b_same_album = false;
                 self.queued_next = None;
+                self.bump_preload_gen();
                 self.bass_swap.reset();
                 self.crossfade_state = Some(ActiveCrossfade {
                     elapsed_frames: 0,
@@ -1803,16 +2039,12 @@ impl DecodeRuntime {
                 self.micro_fade = MicroFade::Steady(1.0);
             }
             Err(_err) => {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "ferric-audio manual crossfade open failed ({}): {_err}",
-                    path.display()
-                );
                 telemetry.is_playing.store(false, Ordering::Release);
                 telemetry.is_crossfading.store(false, Ordering::Relaxed);
                 self.deck_a = None;
                 self.deck_b = None;
                 self.queued_next = None;
+                self.bump_preload_gen();
                 self.crossfade_state = None;
                 self.bass_swap.reset();
             }
@@ -1854,9 +2086,20 @@ impl DecodeRuntime {
                     self.queued_next = None;
                     return;
                 }
+                if self.crossfade_state.is_none()
+                    && self.queued_next.as_ref().is_some_and(|s| {
+                        s.path == p
+                            && s.same_album_consecutive == same_album_consecutive
+                            && s.replay_gain_db == replay_gain_db
+                            && s.fallback_duration_ms == fallback_duration_ms
+                    })
+                {
+                    return;
+                }
                 if self.crossfade_state.is_none() {
                     self.deck_b = None;
                 }
+                self.bump_preload_gen();
                 self.queued_next = Some(QueuedTrackSpec {
                     path: p,
                     same_album_consecutive,
@@ -1867,6 +2110,7 @@ impl DecodeRuntime {
             None => {
                 abort_pre_handoff_if_mismatched(self, None);
                 self.queued_next = None;
+                self.bump_preload_gen();
                 if self.crossfade_state.is_none() {
                     self.deck_b = None;
                 }
@@ -2029,6 +2273,7 @@ fn decode_loop(
                     rt.deck_a = None;
                     rt.deck_b = None;
                     rt.queued_next = None;
+                    rt.bump_preload_gen();
                     rt.crossfade_state = None;
                     rt.micro_fade = MicroFade::Steady(0.0);
                     rt.bass_swap.reset();
@@ -2038,15 +2283,16 @@ fn decode_loop(
                         .crossfade_state
                         .is_some_and(|xf| xf.ui_handed_off || xf.is_manual_switch)
                         && rt.deck_b.is_some();
+                    let speed = rt.dsp.playback_speed;
                     let seek_res = if seek_deck_b {
                         rt.deck_b
                             .as_mut()
-                            .and_then(|db| db.seek_ms(ms).ok())
+                            .and_then(|db| db.seek_ms(ms, speed).ok())
                             .inspect(|_| {
                                 rt.promote_deck_b(&telemetry, false);
                             })
                     } else {
-                        rt.deck_a.as_mut().and_then(|da| da.seek_ms(ms).ok())
+                        rt.deck_a.as_mut().and_then(|da| da.seek_ms(ms, speed).ok())
                     };
                     if let Some(actual) = seek_res {
                         telemetry.bump_epoch();
@@ -2188,51 +2434,9 @@ fn decode_loop(
             slots.min(2048)
         };
 
-        // 1. Proactively pre-open and prime Deck B within max(eff_xfade_ms + 8000, 12000) ms of Deck A end.
-        if rt.deck_b.is_none()
-            && let Some(da) = &rt.deck_a
-            && let Some(spec) = &rt.queued_next
-        {
-            let eff_xfade_ms = if rt.dsp.gapless_album_lock && spec.same_album_consecutive {
-                0
-            } else {
-                rt.dsp.crossfade_ms
-            };
-            let preopen_window_ms = u64::from(eff_xfade_ms.saturating_add(8_000).max(12_000));
-            if (da.duration_ms == 0 || da.remaining_ms() <= preopen_window_ms)
-                && let Some(s) = rt.queued_next.take()
-            {
-                match ActiveDeck::open(
-                    &s.path,
-                    out_rate,
-                    rt.dsp.playback_speed,
-                    s.replay_gain_db,
-                    s.fallback_duration_ms,
-                    &rt.codecs,
-                ) {
-                    Ok(mut next_deck) => {
-                        let trim_lead = rt.dsp.trim_silence
-                            && !(rt.dsp.gapless_album_lock && s.same_album_consecutive);
-                        next_deck.prime_first_chunk(
-                            &mut rt.raw_scratch,
-                            trim_lead,
-                            4.0,
-                            out_rate,
-                            rt.dsp.playback_speed,
-                        );
-                        rt.deck_b_same_album = s.same_album_consecutive;
-                        rt.deck_b = Some(next_deck);
-                    }
-                    Err(_err) => {
-                        #[cfg(debug_assertions)]
-                        eprintln!(
-                            "ferric-audio Deck B pre-open failed ({}): {_err}",
-                            s.path.display()
-                        );
-                    }
-                }
-            }
-        }
+        // 1. Poll background Deck B preloader and dispatch non-blocking pre-open when approaching end.
+        rt.poll_preloaded_deck_b(out_rate);
+        rt.maybe_dispatch_deck_b_preload(out_rate);
 
         // 2. Evaluate Smart Trailing-Silence Trigger + Crossfade Overlap Start.
         if rt.crossfade_state.is_none()
@@ -2349,8 +2553,19 @@ fn decode_loop(
                         rt.deck_b = None;
                         telemetry.is_crossfading.store(false, Ordering::Relaxed);
                         if xfade.ui_handed_off {
-                            unqueued_track_ended = true;
-                            None
+                            if rt.promote_or_open_queued_next(out_rate, &telemetry) {
+                                rt.deck_a.as_mut().and_then(|da| {
+                                    da.next_stereo_frame(
+                                        &mut rt.raw_scratch,
+                                        out_rate,
+                                        rt.dsp.playback_speed,
+                                        rt.dsp.replay_gain,
+                                    )
+                                })
+                            } else {
+                                unqueued_track_ended = true;
+                                None
+                            }
                         } else {
                             Some(sample_a)
                         }
@@ -2369,31 +2584,7 @@ fn decode_loop(
                 match primary {
                     Some(frame) => Some(frame),
                     None => {
-                        if rt.deck_b.is_none()
-                            && let Some(s) = rt.queued_next.take()
-                            && let Ok(mut next_deck) = ActiveDeck::open(
-                                &s.path,
-                                out_rate,
-                                rt.dsp.playback_speed,
-                                s.replay_gain_db,
-                                s.fallback_duration_ms,
-                                &rt.codecs,
-                            )
-                        {
-                            let trim_lead = rt.dsp.trim_silence
-                                && !(rt.dsp.gapless_album_lock && s.same_album_consecutive);
-                            next_deck.prime_first_chunk(
-                                &mut rt.raw_scratch,
-                                trim_lead,
-                                4.0,
-                                out_rate,
-                                rt.dsp.playback_speed,
-                            );
-                            rt.deck_b_same_album = s.same_album_consecutive;
-                            rt.deck_b = Some(next_deck);
-                        }
-
-                        if rt.promote_deck_b(&telemetry, true) {
+                        if rt.promote_or_open_queued_next(out_rate, &telemetry) {
                             rt.deck_a.as_mut().and_then(|da| {
                                 da.next_stereo_frame(
                                     &mut rt.raw_scratch,

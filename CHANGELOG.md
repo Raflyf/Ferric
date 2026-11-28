@@ -4,6 +4,26 @@ All notable changes to Ferric are documented in this file.
 
 ---
 
+## v0.1.3 (2026-11-28)
+
+### Added
+
+- **Overhanging Optical Convex Magnifier Pill & Reconfigurable Liquid Glass Widgets (Android):** Upgraded the bottom navigation pill with an optical 3D convex magnifying lens featuring rim chromatic dispersion while holding and sliding across tabs. Added `FerricWidgetConfigActivity` (`android:configure`, reconfigurable) supporting `Glass`, **`Liquid glass`** (Home-pill translucent liquid crystal without cover art background, with top crystal sheen and chrome/chromatic bevel rim), `Dark`, `Light`, `Cover colour`, accent swatches, shine/thickness/roundness/frost sliders, and visibility toggles.
+- **Standalone About Sheet & Streamlined `You` Hub (Android):** Separated `About` from `Settings` into a dedicated Liquid Glass sheet with live GitHub release checks, `Raflyf/Ferric` repository & `livelydesk.vercel.app/ferric` links, changelog/issue shortcuts, and creator support CTAs (`Buy me a coffee`, `Saweria`); reordered and streamlined the `You` hub with a quick stats pill.
+- **Synchronized Connect Queue & Like Mirroring (Desktop & Android):** Mirrored like state, `Play Next`, `Add to Queue`, queue item removal, and `Clear Up Next` actions bidirectionally over Ferric Connect, alongside version 1..=10 multi-group Reed-Solomon QR pairing support.
+
+### Fixed
+
+- **Android Foreground Service & Shutdown ANR:** Eliminated `Context.startForegroundService() did not then call Service.startForeground()` ANRs via immediate foreground promotion in `FerricPlaybackService`, aligned notification channel/ID with Media3 `DefaultMediaNotificationProvider`, moved `CoreStateStore.shutdown()` execution off the Main Thread, and paused background Connect/aurora timers when backgrounded.
+- **Full-Screen Player Popup Blur & Lyrics/Video Sync:** Shared `fullPlayerBackdrop` capture on demand for `FerricSnackbar` and overlay sheets over `FullPlayerScreen` (zero idle FBO cost), fixed local tracks skipping automatic lyrics/video lookup (`onNowPlayingChanged`), persisted per-track `lyrics_offset_ms` across sessions, tightened official music video duration matching (`<= 10 s` drift guard), and snapped ExoPlayer seeks immediately on seek-nonce changes.
+- **Ferric Connect Failover & Desktop UI Sync:** Drained queued `SyncFrame::Goodbye` frames on relay shutdown, tightened Connect heartbeat/peer TTL and force-failover timers so exiting Desktop/Android switches cleanly back to the live speaker without hanging, synced Desktop cards/buttons (`FerricCard`, `FerricBtn`, `FerricChipBtn`) to active Solid/Acrylic/Adaptive theme tokens, fixed bottom-bar Copy Link clipping, and placed the `Ferric` brand label cleanly at bottom-right on quote cards.
+
+### Security & Hardening
+
+- Stripped verbose/debug `android.util.Log` calls in release ProGuard rules, restricted release `network_security_config.xml` strictly to system certificate authorities (keeping user CAs debug-only), enforced CI release keystore verification, scrubbed `AccountSettings`/`SubsonicCredentials` secrets on drop, and eliminated stale audio/cloud/log artifacts.
+
+---
+
 ## v0.1.2 (2026-11-27)
 
 ### Added

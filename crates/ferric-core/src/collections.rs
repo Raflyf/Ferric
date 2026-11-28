@@ -111,43 +111,61 @@ impl DetailSortOrder {
     }
 }
 
+fn push_lower_trimmed(src: &str, out: &mut String) {
+    for c in src.trim().chars() {
+        out.push(c.to_ascii_lowercase());
+    }
+}
+
 /// Remove duplicate tracks from a playlist while preserving original order.
 /// Uses `HashSet` membership (`O(N)`) matching canonical ID, Spotify ID, YouTube ID, or `artist|title`.
 #[must_use]
 pub fn deduplicate_tracks_in_order(tracks: &[Track]) -> (Vec<Track>, usize) {
-    let mut seen_ids: HashSet<String> = HashSet::with_capacity(tracks.len());
+    let mut seen_ids: HashSet<&str> = HashSet::with_capacity(tracks.len());
+    let mut seen_sp: HashSet<&str> = HashSet::with_capacity(tracks.len() / 2);
+    let mut seen_yt: HashSet<&str> = HashSet::with_capacity(tracks.len() / 2);
+    let mut seen_meta: HashSet<String> = HashSet::with_capacity(tracks.len());
+    let mut meta_buf = String::with_capacity(64);
     let mut out = Vec::with_capacity(tracks.len());
     let mut removed = 0usize;
     for t in tracks {
-        let mut keys: Vec<String> = Vec::with_capacity(4);
-        keys.push(format!("id:{}", t.id));
-        if let Some(sp) = t
+        let sp = t
             .spotify_id
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            keys.push(format!("sp:{sp}"));
-        }
-        if let Some(yt) = t
+            .filter(|s| !s.is_empty());
+        let yt = t
             .youtube_video_id
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            keys.push(format!("yt:{yt}"));
+            .filter(|s| !s.is_empty());
+
+        let has_title = !t.title.trim().is_empty();
+        if has_title {
+            meta_buf.clear();
+            push_lower_trimmed(&t.artist, &mut meta_buf);
+            meta_buf.push('\x1f');
+            push_lower_trimmed(&t.title, &mut meta_buf);
         }
-        let norm_title = t.title.trim().to_ascii_lowercase();
-        let norm_artist = t.artist.trim().to_ascii_lowercase();
-        if !norm_title.is_empty() {
-            keys.push(format!("meta:{norm_artist}|{norm_title}"));
-        }
-        if keys.iter().any(|k| seen_ids.contains(k)) {
+
+        let is_dup = seen_ids.contains(t.id.as_str())
+            || sp.is_some_and(|id| seen_sp.contains(id))
+            || yt.is_some_and(|id| seen_yt.contains(id))
+            || (has_title && seen_meta.contains(&meta_buf));
+        if is_dup {
             removed += 1;
             continue;
         }
-        for k in keys {
-            seen_ids.insert(k);
+
+        seen_ids.insert(t.id.as_str());
+        if let Some(id) = sp {
+            seen_sp.insert(id);
+        }
+        if let Some(id) = yt {
+            seen_yt.insert(id);
+        }
+        if has_title {
+            seen_meta.insert(meta_buf.clone());
         }
         out.push(t.clone());
     }

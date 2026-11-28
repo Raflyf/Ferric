@@ -202,6 +202,8 @@ pub struct CloudSyncReport {
     pub etag_skipped: usize,
     #[serde(default)]
     pub rate_limited_skipped: usize,
+    #[serde(default)]
+    pub active_playlist_ids: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -617,13 +619,16 @@ impl LoopbackListener {
             if !state_matches {
                 let html = build_callback_html(
                     "Ferric Authorization Rejected",
-                    "Security state verification failed. Please retry connecting from Ferric.",
+                    "Security state verification failed. Waiting for the authorized browser callback.",
                     true,
                 );
                 write_http_html(&mut stream, "400 Bad Request", &html);
-                return Err(ProviderError::Http(
-                    "OAuth callback state mismatch".to_string(),
-                ));
+                if params.contains_key("code") {
+                    return Err(ProviderError::Http(
+                        "OAuth callback state mismatch".to_string(),
+                    ));
+                }
+                continue;
             }
 
             let Some(code) = params.get("code").filter(|c| !c.is_empty()).cloned() else {
@@ -1141,7 +1146,7 @@ pub fn sync_spotify_catalog_with_snapshots(
     let mut rate_limited_skipped = 0usize;
     let mut hit_rate_limit = false;
 
-    for page in 0..4_usize {
+    for page in 0..40_usize {
         let offset = page * 50;
         let url = format!("https://api.spotify.com/v1/me/tracks?limit=50&offset={offset}");
         let batch: SpotifyPaging<SpotifySavedTrackItem> =
@@ -1167,37 +1172,44 @@ pub fn sync_spotify_catalog_with_snapshots(
                 liked_tracks.push(track);
             }
         }
-        if batch.next.is_none() || liked_tracks.len() >= 200 {
+        if batch.next.is_none() || liked_tracks.len() >= 2_000 {
             break;
         }
     }
 
     let mut playlists = Vec::new();
+    let mut active_playlist_ids = Vec::new();
+    let mut seen_pl_ids: HashSet<String> = HashSet::new();
     if !hit_rate_limit {
-        let playlists_page: Option<SpotifyPaging<SpotifyPlaylistSummary>> =
-            match get_spotify_bearer_json(
-                &agent,
-                "https://api.spotify.com/v1/me/playlists?limit=30",
-                access_token,
-                web_session,
-            ) {
-                Ok(p) => Some(p),
-                Err(SpotifyFetchError::RateLimited { .. }) => {
-                    rate_limited_skipped += 1;
-                    None
-                }
-                Err(other) => return Err(other.into_provider_error()),
-            };
-
-        if let Some(playlists_page) = playlists_page {
+        for pl_page in 0..10_usize {
+            let pl_offset = pl_page * 50;
+            let playlists_url =
+                format!("https://api.spotify.com/v1/me/playlists?limit=50&offset={pl_offset}");
+            let playlists_page: SpotifyPaging<SpotifyPlaylistSummary> =
+                match get_spotify_bearer_json(&agent, &playlists_url, access_token, web_session) {
+                    Ok(p) => p,
+                    Err(SpotifyFetchError::RateLimited { .. }) => {
+                        rate_limited_skipped += 1;
+                        break;
+                    }
+                    Err(other) => return Err(other.into_provider_error()),
+                };
+            let has_more_playlists = playlists_page.next.is_some();
             let total_items = playlists_page.items.len();
+            if total_items == 0 {
+                break;
+            }
             playlists.reserve(total_items);
+            let mut pl_rate_limited = false;
             for (idx, pl) in playlists_page.items.into_iter().enumerate() {
-                if pl.id.trim().is_empty() {
+                let raw_id = pl.id.trim().to_string();
+                if raw_id.is_empty() || !seen_pl_ids.insert(raw_id.clone()) {
                     continue;
                 }
+                let local_key = format!("{playlist_id_prefix}{raw_id}");
+                active_playlist_ids.push(local_key.clone());
                 if should_skip_spotify_playlist_with_prefix(
-                    &pl.id,
+                    &raw_id,
                     pl.snapshot_id.as_deref(),
                     existing_snapshots,
                     playlist_id_prefix,
@@ -1205,42 +1217,69 @@ pub fn sync_spotify_catalog_with_snapshots(
                     etag_skipped += 1;
                     continue;
                 }
-                let tracks_url = format!(
-                    "https://api.spotify.com/v1/playlists/{}/tracks?limit=100&fields=items(track(id,name,duration_ms,artists(name),album(name),external_ids(isrc))),next",
-                    url_encode(&pl.id)
-                );
-                let tracks_page: SpotifyPaging<SpotifySavedTrackItem> =
-                    match get_spotify_bearer_json(&agent, &tracks_url, access_token, web_session) {
-                        Ok(p) => p,
-                        Err(SpotifyFetchError::RateLimited { .. }) => {
-                            rate_limited_skipped += total_items.saturating_sub(idx);
-                            break;
-                        }
-                        Err(other) => return Err(other.into_provider_error()),
-                    };
 
-                let mut bundle_tracks = Vec::with_capacity(tracks_page.items.len());
-                for item in tracks_page.items {
-                    if let Some(raw_track) = item.track {
-                        let is_liked = raw_track
-                            .id
-                            .as_deref()
-                            .is_some_and(|sid| liked_ids.contains(sid));
-                        if let Some(track) = map_spotify_track(raw_track, is_liked) {
-                            bundle_tracks.push(track);
+                let mut bundle_tracks = Vec::new();
+                let mut partial_page_failed = false;
+                for track_page in 0..20_usize {
+                    let t_offset = track_page * 100;
+                    let tracks_url = format!(
+                        "https://api.spotify.com/v1/playlists/{}/tracks?limit=100&offset={t_offset}&fields=items(track(id,name,duration_ms,artists(name),album(name),external_ids(isrc))),next",
+                        url_encode(&raw_id)
+                    );
+                    let tracks_page: SpotifyPaging<SpotifySavedTrackItem> =
+                        match get_spotify_bearer_json(
+                            &agent,
+                            &tracks_url,
+                            access_token,
+                            web_session,
+                        ) {
+                            Ok(p) => p,
+                            Err(SpotifyFetchError::RateLimited { .. }) => {
+                                rate_limited_skipped += total_items.saturating_sub(idx);
+                                pl_rate_limited = true;
+                                partial_page_failed = true;
+                                break;
+                            }
+                            Err(_) if track_page > 0 => {
+                                partial_page_failed = true;
+                                break;
+                            }
+                            Err(other) => return Err(other.into_provider_error()),
+                        };
+                    let has_next_tracks = tracks_page.next.is_some();
+                    let batch_len = tracks_page.items.len();
+                    for item in tracks_page.items {
+                        if let Some(raw_track) = item.track {
+                            let is_liked = raw_track
+                                .id
+                                .as_deref()
+                                .is_some_and(|sid| liked_ids.contains(sid));
+                            if let Some(track) = map_spotify_track(raw_track, is_liked) {
+                                bundle_tracks.push(track);
+                            }
                         }
                     }
+                    if !has_next_tracks || batch_len < 100 {
+                        break;
+                    }
+                }
+                if pl_rate_limited && bundle_tracks.is_empty() {
+                    break;
                 }
 
                 let playlist = Playlist {
-                    id: format!("{playlist_id_prefix}{}", pl.id),
+                    id: local_key,
                     name: if pl.name.trim().is_empty() {
                         "Spotify Playlist".to_string()
                     } else {
                         pl.name.trim().to_string()
                     },
                     source: TrackSource::Spotify,
-                    etag: pl.snapshot_id,
+                    etag: if partial_page_failed {
+                        None
+                    } else {
+                        pl.snapshot_id
+                    },
                     track_count: bundle_tracks.len(),
                     description: pl
                         .description
@@ -1252,6 +1291,12 @@ pub fn sync_spotify_catalog_with_snapshots(
                     playlist,
                     tracks: bundle_tracks,
                 });
+                if pl_rate_limited {
+                    break;
+                }
+            }
+            if pl_rate_limited || !has_more_playlists || total_items < 50 {
+                break;
             }
         }
     }
@@ -1263,6 +1308,7 @@ pub fn sync_spotify_catalog_with_snapshots(
         playlists,
         etag_skipped,
         rate_limited_skipped,
+        active_playlist_ids,
     })
 }
 
@@ -1670,6 +1716,7 @@ pub fn sync_youtube_catalog(
     )?;
 
     let mut playlists = Vec::new();
+    let mut active_playlist_ids = Vec::new();
     let mut etag_skipped = 0usize;
 
     for pl in playlists_resp.items {
@@ -1678,6 +1725,7 @@ pub fn sync_youtube_catalog(
             continue;
         }
         let canonical_pl_id = format!("ytmusic:playlist:{pl_id}");
+        active_playlist_ids.push(canonical_pl_id.clone());
         let prev_etag = known_etags
             .get(&canonical_pl_id)
             .or_else(|| known_etags.get(pl_id))
@@ -1788,6 +1836,7 @@ pub fn sync_youtube_catalog(
         playlists,
         etag_skipped,
         rate_limited_skipped: 0,
+        active_playlist_ids,
     })
 }
 

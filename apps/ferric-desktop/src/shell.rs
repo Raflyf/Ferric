@@ -289,7 +289,6 @@ mod win_impl {
     static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
     static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
     static TRAY_ADDED: AtomicBool = AtomicBool::new(false);
-    static MINI_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static WINDOW_HIDDEN_OR_MIN: AtomicBool = AtomicBool::new(false);
     static HIDDEN_IN_TRAY: AtomicBool = AtomicBool::new(false);
     static TRAY_EVENTS: OnceLock<Mutex<Vec<TrayEvent>>> = OnceLock::new();
@@ -1607,10 +1606,6 @@ mod win_impl {
         }
     }
 
-    pub fn set_mini_mode_flag(mini: bool) {
-        MINI_MODE_ACTIVE.store(mini, Ordering::Release);
-    }
-
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn SetProcessWorkingSetSizeEx(
@@ -1872,13 +1867,8 @@ mod win_impl {
                                 (mi.rcMonitor.bottom - mi.rcMonitor.top).max(1080);
                         }
                         let dpi = GetDpiForWindow(hwnd.0).max(96) as i32;
-                        if MINI_MODE_ACTIVE.load(Ordering::Relaxed) {
-                            (*mmi).ptMinTrackSize.x = (460 * dpi) / 96;
-                            (*mmi).ptMinTrackSize.y = (110 * dpi) / 96;
-                        } else {
-                            (*mmi).ptMinTrackSize.x = (960 * dpi) / 96;
-                            (*mmi).ptMinTrackSize.y = (620 * dpi) / 96;
-                        }
+                        (*mmi).ptMinTrackSize.x = (960 * dpi) / 96;
+                        (*mmi).ptMinTrackSize.y = (620 * dpi) / 96;
                         return LRESULT(0);
                     }
                 }
@@ -2245,14 +2235,6 @@ pub fn win32_update_taskbar_playback(title: &str, artist: &str, is_playing: bool
     win_impl::update_taskbar_playback(title, artist, is_playing);
     #[cfg(not(target_os = "windows"))]
     let _ = (title, artist, is_playing);
-}
-
-#[allow(dead_code)]
-pub fn win32_set_mini_mode_flag(mini: bool) {
-    #[cfg(target_os = "windows")]
-    win_impl::set_mini_mode_flag(mini);
-    #[cfg(not(target_os = "windows"))]
-    let _ = mini;
 }
 
 pub fn win32_poll_tray_events() -> Vec<TrayEvent> {

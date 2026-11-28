@@ -10,7 +10,10 @@ import android.os.Looper
 import java.net.Inet4Address
 import java.util.ArrayDeque
 import java.util.Collections
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicBoolean
 import uniffi.ferric_mobile_ffi.FfiDeviceKind
 
 private const val FERRIC_NSD_TYPE = "_ferric-connect._udp."
@@ -37,7 +40,18 @@ class ConnectNsdHelper(
     private val wifiManager: WifiManager? =
         context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val callbackExecutor = Executors.newSingleThreadExecutor()
+    private val workerPool = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "ferric-nsd-callback").apply { isDaemon = true }
+    }
+    private val acceptingCallbacks = AtomicBoolean(true)
+    private val callbackExecutor = Executor { runnable ->
+        if (!acceptingCallbacks.get()) return@Executor
+        try {
+            workerPool.execute(runnable)
+        } catch (_: RejectedExecutionException) {
+            // Safe ignore if Android ConnectivityThread delivers late unregister callbacks.
+        }
+    }
 
     private val activeInfoCallbacks = Collections.synchronizedSet(mutableSetOf<Any>())
     private val legacyResolveQueue = ArrayDeque<NsdServiceInfo>()
@@ -65,6 +79,7 @@ class ConnectNsdHelper(
         tcpPort: Int,
         roomTagsHex: String,
     ) {
+        acceptingCallbacks.set(true)
         val mgr = nsdManager ?: return
         if (tcpPort < 1024 || deviceId.isBlank()) return
         localDeviceId = deviceId
@@ -106,6 +121,7 @@ class ConnectNsdHelper(
         isForeground = foreground
         val mgr = nsdManager ?: return
         if (foreground) {
+            acceptingCallbacks.set(true)
             if (lastRegisteredKey != null) {
                 ensureDiscoveryStarted()
             }
@@ -155,7 +171,7 @@ class ConnectNsdHelper(
         legacyResolving = false
         lastRegisteredKey = null
         releaseMulticastLock()
-        callbackExecutor.shutdownNow()
+        acceptingCallbacks.set(false)
     }
 
     private fun stopDiscoveryLocked(mgr: NsdManager) {

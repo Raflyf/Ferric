@@ -8,54 +8,132 @@ const MASK_PATTERN_0: u8 = 0;
 struct VersionSpec {
     version: usize,
     size: usize,
-    num_blocks: usize,
-    data_codewords_per_block: usize,
-    ec_codewords_per_block: usize,
+    group1_blocks: usize,
+    group1_data_cw: usize,
+    group2_blocks: usize,
+    group2_data_cw: usize,
+    ec_cw_per_block: usize,
+    alignment_centers: &'static [usize],
 }
 
-/// ISO/IEC 18004 Table 7 & 9 parameters for Versions 1..=6 at Error Correction Level L.
-const VERSION_SPECS_L: [VersionSpec; 6] = [
+impl VersionSpec {
+    #[inline]
+    const fn total_data_codewords(self) -> usize {
+        self.group1_blocks * self.group1_data_cw + self.group2_blocks * self.group2_data_cw
+    }
+
+    #[inline]
+    const fn total_blocks(self) -> usize {
+        self.group1_blocks + self.group2_blocks
+    }
+
+    #[inline]
+    const fn count_bits(self) -> usize {
+        if self.version <= 9 { 8 } else { 16 }
+    }
+}
+
+/// ISO/IEC 18004 Table 7, 9 & Annex E parameters for Versions 1..=10 at Error Correction Level L.
+const VERSION_SPECS_L: [VersionSpec; 10] = [
     VersionSpec {
         version: 1,
         size: 21,
-        num_blocks: 1,
-        data_codewords_per_block: 19,
-        ec_codewords_per_block: 7,
+        group1_blocks: 1,
+        group1_data_cw: 19,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 7,
+        alignment_centers: &[],
     },
     VersionSpec {
         version: 2,
         size: 25,
-        num_blocks: 1,
-        data_codewords_per_block: 34,
-        ec_codewords_per_block: 10,
+        group1_blocks: 1,
+        group1_data_cw: 34,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 10,
+        alignment_centers: &[6, 18],
     },
     VersionSpec {
         version: 3,
         size: 29,
-        num_blocks: 1,
-        data_codewords_per_block: 55,
-        ec_codewords_per_block: 15,
+        group1_blocks: 1,
+        group1_data_cw: 55,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 15,
+        alignment_centers: &[6, 22],
     },
     VersionSpec {
         version: 4,
         size: 33,
-        num_blocks: 1,
-        data_codewords_per_block: 80,
-        ec_codewords_per_block: 20,
+        group1_blocks: 1,
+        group1_data_cw: 80,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 20,
+        alignment_centers: &[6, 26],
     },
     VersionSpec {
         version: 5,
         size: 37,
-        num_blocks: 1,
-        data_codewords_per_block: 108,
-        ec_codewords_per_block: 26,
+        group1_blocks: 1,
+        group1_data_cw: 108,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 26,
+        alignment_centers: &[6, 30],
     },
     VersionSpec {
         version: 6,
         size: 41,
-        num_blocks: 2,
-        data_codewords_per_block: 68,
-        ec_codewords_per_block: 18,
+        group1_blocks: 2,
+        group1_data_cw: 68,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 18,
+        alignment_centers: &[6, 34],
+    },
+    VersionSpec {
+        version: 7,
+        size: 45,
+        group1_blocks: 2,
+        group1_data_cw: 78,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 18,
+        alignment_centers: &[6, 22, 38],
+    },
+    VersionSpec {
+        version: 8,
+        size: 49,
+        group1_blocks: 2,
+        group1_data_cw: 97,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 22,
+        alignment_centers: &[6, 24, 42],
+    },
+    VersionSpec {
+        version: 9,
+        size: 53,
+        group1_blocks: 2,
+        group1_data_cw: 116,
+        group2_blocks: 0,
+        group2_data_cw: 0,
+        ec_cw_per_block: 24,
+        alignment_centers: &[6, 26, 46],
+    },
+    VersionSpec {
+        version: 10,
+        size: 57,
+        group1_blocks: 2,
+        group1_data_cw: 68,
+        group2_blocks: 2,
+        group2_data_cw: 69,
+        ec_cw_per_block: 18,
+        alignment_centers: &[6, 28, 50],
     },
 ];
 
@@ -123,19 +201,35 @@ pub fn compute_bch_format_bits(ecc_bits: u8, mask_pattern: u8) -> u16 {
     ((data << 10) | rem) ^ 0x5412
 }
 
+/// Compute 18-bit BCH(18, 6) Version Information for QR Versions 7..=40 (ISO/IEC 18004 Annex D).
+pub fn compute_bch_version_bits(version: usize) -> u32 {
+    let data = u32::try_from(version).unwrap_or(0) << 12;
+    let mut rem = data;
+    for bit in (12..18).rev() {
+        if (rem & (1 << bit)) != 0 {
+            rem ^= 0x1F25 << (bit - 12);
+        }
+    }
+    data | rem
+}
+
 fn push_bits(bit_buf: &mut Vec<bool>, val: usize, count: usize) {
     for shift in (0..count).rev() {
         bit_buf.push(((val >> shift) & 1) != 0);
     }
 }
 
-fn encode_byte_mode_codewords(payload: &[u8], total_data_codewords: usize) -> Vec<u8> {
+fn encode_byte_mode_codewords(
+    payload: &[u8],
+    count_bits: usize,
+    total_data_codewords: usize,
+) -> Vec<u8> {
     let capacity_bits = total_data_codewords * 8;
     let mut bits = Vec::with_capacity(capacity_bits);
 
-    // Byte mode indicator (0100) + 8-bit character count (Versions 1..=9).
+    // Byte mode indicator (0100) + 8-bit (V1..=9) or 16-bit (V10+) character count.
     push_bits(&mut bits, 0b0100, 4);
-    push_bits(&mut bits, payload.len(), 8);
+    push_bits(&mut bits, payload.len(), count_bits);
     for &b in payload {
         push_bits(&mut bits, usize::from(b), 8);
     }
@@ -166,26 +260,36 @@ fn encode_byte_mode_codewords(payload: &[u8], total_data_codewords: usize) -> Ve
 }
 
 fn interleave_blocks(data_codewords: &[u8], spec: VersionSpec) -> Vec<u8> {
-    let mut data_blocks = Vec::with_capacity(spec.num_blocks);
-    let mut ec_blocks = Vec::with_capacity(spec.num_blocks);
+    let num_blocks = spec.total_blocks();
+    let mut data_blocks = Vec::with_capacity(num_blocks);
+    let mut ec_blocks = Vec::with_capacity(num_blocks);
 
-    for b in 0..spec.num_blocks {
-        let start = b * spec.data_codewords_per_block;
-        let end = start + spec.data_codewords_per_block;
-        let slice = &data_codewords[start..end];
+    let mut offset = 0usize;
+    for _ in 0..spec.group1_blocks {
+        let slice = &data_codewords[offset..offset + spec.group1_data_cw];
+        offset += spec.group1_data_cw;
         data_blocks.push(slice);
-        ec_blocks.push(rs_compute_remainder(slice, spec.ec_codewords_per_block));
+        ec_blocks.push(rs_compute_remainder(slice, spec.ec_cw_per_block));
+    }
+    for _ in 0..spec.group2_blocks {
+        let slice = &data_codewords[offset..offset + spec.group2_data_cw];
+        offset += spec.group2_data_cw;
+        data_blocks.push(slice);
+        ec_blocks.push(rs_compute_remainder(slice, spec.ec_cw_per_block));
     }
 
-    let total_cw = spec.num_blocks * (spec.data_codewords_per_block + spec.ec_codewords_per_block);
+    let max_data_cw = spec.group1_data_cw.max(spec.group2_data_cw);
+    let total_cw = spec.total_data_codewords() + num_blocks * spec.ec_cw_per_block;
     let mut out = Vec::with_capacity(total_cw);
 
-    for col in 0..spec.data_codewords_per_block {
+    for col in 0..max_data_cw {
         for block in &data_blocks {
-            out.push(block[col]);
+            if let Some(&b) = block.get(col) {
+                out.push(b);
+            }
         }
     }
-    for col in 0..spec.ec_codewords_per_block {
+    for col in 0..spec.ec_cw_per_block {
         for ec in &ec_blocks {
             out.push(ec[col]);
         }
@@ -271,10 +375,20 @@ impl GridBuilder {
             }
         }
     }
+
+    fn place_version_info(&mut self, version_bits: u32) {
+        for i in 0..18_usize {
+            let bit = ((version_bits >> i) & 1) != 0;
+            let row = i / 3;
+            let col = self.size - 11 + (i % 3);
+            self.set_function(col, row, bit);
+            self.set_function(row, col, bit);
+        }
+    }
 }
 
 impl QrMatrix {
-    /// Encode a UTF-8 string into a standard ISO/IEC 18004 QR Code (Versions 1..=6, ECC Level L, Byte Mode).
+    /// Encode a UTF-8 string into a standard ISO/IEC 18004 QR Code (Versions 1..=10, ECC Level L, Byte Mode).
     pub fn encode(text: &str) -> SyncResult<Self> {
         let payload = text.as_bytes();
         if payload.is_empty() {
@@ -287,19 +401,19 @@ impl QrMatrix {
             .iter()
             .copied()
             .find(|s| {
-                let total_data = s.num_blocks * s.data_codewords_per_block;
-                // 4-bit mode + 8-bit char count = 12 header bits => total_data * 8 - 12 bits
-                payload.len() * 8 + 12 <= total_data * 8
+                let total_data = s.total_data_codewords();
+                let header_bits = 4 + s.count_bits();
+                payload.len().saturating_mul(8).saturating_add(header_bits) <= total_data * 8
             })
             .ok_or_else(|| {
                 SyncError::QrPayload(format!(
-                    "QR payload length ({} bytes) exceeds Version 6-L maximum (134 bytes)",
+                    "QR payload length ({} bytes) exceeds Version 10-L maximum (271 bytes)",
                     payload.len()
                 ))
             })?;
 
-        let total_data_cw = spec.num_blocks * spec.data_codewords_per_block;
-        let data_cw = encode_byte_mode_codewords(payload, total_data_cw);
+        let total_data_cw = spec.total_data_codewords();
+        let data_cw = encode_byte_mode_codewords(payload, spec.count_bits(), total_data_cw);
         let all_codewords = interleave_blocks(&data_cw, spec);
 
         let size = spec.size;
@@ -317,15 +431,27 @@ impl QrMatrix {
             grid.set_function(6, i, dark);
         }
 
-        // 3. Alignment pattern for Versions 2..=6 at (size - 7, size - 7)
-        if spec.version >= 2 {
-            grid.place_alignment(size - 7, size - 7);
+        // 3. Alignment patterns for Versions 2..=10 (skip coordinates overlapping the 3 corner finders).
+        for &ay in spec.alignment_centers {
+            for &ax in spec.alignment_centers {
+                let in_tl = ax <= 8 && ay <= 8;
+                let in_tr = ax >= size - 9 && ay <= 8;
+                let in_bl = ax <= 8 && ay >= size - 9;
+                if !in_tl && !in_tr && !in_bl {
+                    grid.place_alignment(ax, ay);
+                }
+            }
         }
 
         // 4. Always-dark module at (8, 4 * V + 9) == (8, size - 8)
         grid.set_function(8, 4 * spec.version + 9, true);
 
-        // 5. Reserve format areas (written cleanly with final BCH format bits)
+        // 5. Version Information blocks for Versions 7..=10
+        if spec.version >= 7 {
+            grid.place_version_info(compute_bch_version_bits(spec.version));
+        }
+
+        // 6. Reserve format areas (written cleanly with final BCH format bits)
         let format_bits = compute_bch_format_bits(ECC_LEVEL_L_BITS, MASK_PATTERN_0);
         grid.reserve_and_draw_format_bits(format_bits);
 
@@ -430,6 +556,22 @@ mod tests {
         }
         // Dark module at (8, size - 8)
         assert!(qr.get(8, qr.size - 8));
+
+        // Long pairing URIs (up to 271 bytes) use Versions 7..=10 with intact BCH Version Info
+        assert_eq!(compute_bch_version_bits(7), 0x07C94);
+        let long_uri = format!(
+            "ferric://pair?id=desktop_host_01&tok=0123456789abcdef0123456789abcdef&name={}&addr=[fd00:dead:beef::1]:54321",
+            "MyStudioDesktopMachineLongName"
+        );
+        assert!(long_uri.len() > 134 && long_uri.len() <= 271);
+        let qr_v7_plus = QrMatrix::encode(&long_uri).expect("encode v7..v10 qr");
+        assert!((45..=57).contains(&qr_v7_plus.size));
+        assert_finder_7x7(&qr_v7_plus, 0, 0);
+        assert!(qr_v7_plus.get(8, qr_v7_plus.size - 8));
+
+        let v10_uri = "a".repeat(260);
+        let qr_v10 = QrMatrix::encode(&v10_uri).expect("encode v10 qr");
+        assert_eq!(qr_v10.size, 57);
     }
 
     #[test]
@@ -457,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn supports_version_1_through_6_and_rejects_oversized_input() {
+    fn supports_version_1_through_10_and_rejects_oversized_input() {
         let v1 = QrMatrix::encode("ferric://v1").expect("v1");
         assert_eq!(v1.size, 21);
 
@@ -465,7 +607,11 @@ mod tests {
         let v6 = QrMatrix::encode(&v6_text).expect("v6");
         assert_eq!(v6.size, 41);
 
-        let too_long = "x".repeat(135);
+        let v10_text = "f".repeat(271);
+        let v10 = QrMatrix::encode(&v10_text).expect("v10");
+        assert_eq!(v10.size, 57);
+
+        let too_long = "x".repeat(272);
         assert!(QrMatrix::encode(&too_long).is_err());
         assert!(QrMatrix::encode("").is_err());
     }

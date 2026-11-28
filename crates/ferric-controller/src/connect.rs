@@ -244,6 +244,18 @@ impl FerricController {
         let _ = self.forward_remote_action(action);
     }
 
+    pub fn set_connect_foreground(&self, foreground: bool) {
+        let engine = {
+            self.connect
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        };
+        if let Some(e) = engine {
+            e.set_foreground(foreground);
+        }
+    }
+
     pub fn connect_pair_qr(&self, uri: String) {
         let engine = {
             self.connect
@@ -402,6 +414,26 @@ impl FerricController {
                 self.sink.on_queue_changed(up_next);
                 self.push_connect_playback_snapshot();
             }
+            RemoteAction::ToggleLike { track_id } => {
+                let _ = self.apply_like_state_locally(&track_id, None);
+                self.push_connect_playback_snapshot();
+            }
+            RemoteAction::PlayNextTrack(entry) => {
+                if let Some(track) = self.hydrate_connect_tracks(vec![entry]).into_iter().next() {
+                    self.play_next_local_only(track, false);
+                }
+            }
+            RemoteAction::AppendQueueTrack(entry) => {
+                if let Some(track) = self.hydrate_connect_tracks(vec![entry]).into_iter().next() {
+                    self.append_to_queue_local_only(track, false);
+                }
+            }
+            RemoteAction::RemoveQueueAt(offset) => {
+                self.remove_queue_item_local_only(offset);
+            }
+            RemoteAction::ClearUpNext => {
+                self.clear_up_next_local_only();
+            }
             RemoteAction::TransferActiveSpeaker { .. } | RemoteAction::SetSimulcastMode { .. } => {}
         }
     }
@@ -508,13 +540,18 @@ impl FerricController {
             self.sink
                 .on_toast("Switched playback to this device".to_string());
         }
+        {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.pending_handoff_seek_ms = None;
+        }
     }
 
     fn hydrate_connect_tracks(&self, entries: Vec<QueueEntry>) -> Vec<Track> {
+        let ids: Vec<String> = entries.iter().map(|e| e.track_id.clone()).collect();
         let local_map: HashMap<String, Track> = {
             let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.db
-                .list_tracks("")
+                .list_tracks_by_ids(&ids)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|t| (t.id.clone(), t))

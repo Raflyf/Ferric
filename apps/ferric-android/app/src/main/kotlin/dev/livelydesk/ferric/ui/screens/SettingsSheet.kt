@@ -22,7 +22,6 @@ import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Speaker
@@ -47,7 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import dev.livelydesk.ferric.BuildConfig
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
@@ -265,34 +263,6 @@ fun SettingsSheet(
                             Icon(Icons.Rounded.DeleteSweep, contentDescription = null, tint = palette.accent, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
                             Text("Delete All Offline Downloads", color = palette.accent)
-                        }
-                    }
-                }
-            }
-
-            if (matches("about", "version", "rust", "oboe", "uniffi", "ferric")) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .ferricGlassSurface(
-                            palette = palette,
-                            cornerRadius = palette.cornerRadiusDp,
-                            fallbackColor = palette.elevated,
-                        ),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Rounded.Info, contentDescription = null, tint = palette.accent, modifier = Modifier.size(22.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text("Ferric Android v${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleMedium, color = palette.textPrimary)
-                            Text(
-                                "Native Rust Oboe Dual-Deck Audio · UniFFI · SQLite WAL · Zero Telemetry",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = palette.textSecondary,
-                            )
                         }
                     }
                 }

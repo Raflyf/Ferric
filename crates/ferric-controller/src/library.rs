@@ -193,30 +193,18 @@ impl FerricController {
 
     pub fn list_liked_songs(&self) -> ControllerResult<Vec<Track>> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let all = st.db.list_tracks("")?;
-        Ok(all.into_iter().filter(|t| t.liked).collect())
+        Ok(st.db.list_liked_tracks()?)
     }
 
     pub fn list_local_songs(&self) -> ControllerResult<Vec<Track>> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let all = st.db.list_tracks("")?;
-        Ok(all
-            .into_iter()
-            .filter(|t| t.source == TrackSource::Local)
-            .collect())
+        Ok(st.db.list_local_tracks()?)
     }
 
     pub fn list_recent_songs(&self) -> ControllerResult<Vec<Track>> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let all = st.db.list_tracks("")?;
-        let by_id: HashMap<&str, &Track> = all.iter().map(|t| (t.id.as_str(), t)).collect();
-        let mut out = Vec::new();
-        for id in &st.session.recent_track_ids {
-            if let Some(t) = by_id.get(id.as_str()) {
-                out.push((*t).clone());
-            }
-        }
-        Ok(out)
+        let rows = st.db.list_tracks_by_ids(&st.session.recent_track_ids)?;
+        Ok(rows)
     }
 
     pub fn list_albums(&self) -> ControllerResult<Vec<AlbumSummary>> {
@@ -350,15 +338,15 @@ impl FerricController {
         sort: DetailSortOrder,
     ) -> ControllerResult<CollectionDetailSnapshot> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let all = st.db.list_tracks("")?;
-        let mut tracks: Vec<Track> = all
-            .into_iter()
-            .filter(|t| {
-                t.album.trim().eq_ignore_ascii_case(album_name.trim())
-                    && (artist_name.trim().is_empty()
-                        || t.artist.trim().eq_ignore_ascii_case(artist_name.trim()))
-            })
-            .collect();
+        let artist_opt = {
+            let trimmed = artist_name.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        };
+        let mut tracks = st.db.list_album_tracks(album_name.trim(), artist_opt)?;
         sort_detail_tracks(&mut tracks, sort);
         let thumb = tracks.iter().find_map(|t| t.thumbnail_url.clone());
         let source = tracks.first().map_or(TrackSource::Local, |t| t.source);
@@ -386,15 +374,8 @@ impl FerricController {
         sort: DetailSortOrder,
     ) -> ControllerResult<CollectionDetailSnapshot> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let all = st.db.list_tracks("")?;
         let target = artist_name.trim();
-        let mut tracks: Vec<Track> = all
-            .into_iter()
-            .filter(|t| {
-                t.artist.trim().eq_ignore_ascii_case(target)
-                    || ferric_core::text::contains_ascii_icase(&t.artist, target)
-            })
-            .collect();
+        let mut tracks = st.db.list_artist_tracks(target)?;
         sort_detail_tracks(&mut tracks, sort);
         let thumb = tracks.iter().find_map(|t| t.thumbnail_url.clone());
         let source = tracks.first().map_or(TrackSource::Local, |t| t.source);
@@ -478,17 +459,25 @@ impl FerricController {
                 "Playlist name cannot be empty".to_string(),
             ));
         }
-        let (sp_tok, ytm_sess) = {
+        let (sp_tok, ytm_sess, is_imported) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let imported = st
+                .db
+                .list_playlists()
+                .ok()
+                .and_then(|pls| pls.into_iter().find(|p| p.id == playlist_id))
+                .is_some_and(|p| p.description.starts_with("Imported "));
             st.db.rename_playlist(&playlist_id, &clean_name)?;
             (
                 active_spotify_token(&st.accounts),
                 active_ytm_session(&st.accounts),
+                imported,
             )
         };
         self.sink.on_library_changed();
 
         if playlist_id.starts_with("spotify:")
+            && !is_imported
             && let Some(tok) = sp_tok
         {
             let this = Arc::clone(self);
@@ -502,7 +491,7 @@ impl FerricController {
                         this.sink.on_spotify_auth_expired();
                     }
                 });
-        } else if playlist_id.starts_with("ytm:pl:") && ytm_sess.is_signed_in() {
+        } else if playlist_id.starts_with("ytm:pl:") && !is_imported && ytm_sess.is_signed_in() {
             let pid = playlist_id;
             let _ = thread::Builder::new()
                 .name("ferric-ytm-rename".to_string())
@@ -515,17 +504,25 @@ impl FerricController {
 
     /// Delete a playlist locally and unfollow/delete on Spotify or YouTube Music if synced.
     pub fn delete_playlist(self: &Arc<Self>, playlist_id: String) -> ControllerResult<()> {
-        let (sp_tok, ytm_sess) = {
+        let (sp_tok, ytm_sess, is_imported) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let imported = st
+                .db
+                .list_playlists()
+                .ok()
+                .and_then(|pls| pls.into_iter().find(|p| p.id == playlist_id))
+                .is_some_and(|p| p.description.starts_with("Imported "));
             st.db.delete_playlist(&playlist_id)?;
             (
                 active_spotify_token(&st.accounts),
                 active_ytm_session(&st.accounts),
+                imported,
             )
         };
         self.sink.on_library_changed();
 
         if playlist_id.starts_with("spotify:")
+            && !is_imported
             && let Some(tok) = sp_tok
         {
             let this = Arc::clone(self);
@@ -539,7 +536,7 @@ impl FerricController {
                         this.sink.on_spotify_auth_expired();
                     }
                 });
-        } else if playlist_id.starts_with("ytm:pl:") && ytm_sess.is_signed_in() {
+        } else if playlist_id.starts_with("ytm:pl:") && !is_imported && ytm_sess.is_signed_in() {
             let pid = playlist_id;
             let _ = thread::Builder::new()
                 .name("ferric-ytm-del".to_string())
@@ -556,18 +553,26 @@ impl FerricController {
         playlist_id: String,
         track: Track,
     ) -> ControllerResult<()> {
-        let (sp_tok, ytm_sess) = {
+        let (sp_tok, ytm_sess, is_imported) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let imported = st
+                .db
+                .list_playlists()
+                .ok()
+                .and_then(|pls| pls.into_iter().find(|p| p.id == playlist_id))
+                .is_some_and(|p| p.description.starts_with("Imported "));
             st.db.upsert_tracks(std::slice::from_ref(&track))?;
             st.db.add_track_to_playlist(&playlist_id, &track.id)?;
             (
                 active_spotify_token(&st.accounts),
                 active_ytm_session(&st.accounts),
+                imported,
             )
         };
         self.sink.on_library_changed();
 
         if playlist_id.starts_with("spotify:")
+            && !is_imported
             && let Some(tok) = sp_tok
         {
             let this = Arc::clone(self);
@@ -587,7 +592,7 @@ impl FerricController {
                         this.sink.on_spotify_auth_expired();
                     }
                 });
-        } else if playlist_id.starts_with("ytm:pl:") && ytm_sess.is_signed_in() {
+        } else if playlist_id.starts_with("ytm:pl:") && !is_imported && ytm_sess.is_signed_in() {
             let pid = playlist_id;
             let _ = thread::Builder::new()
                 .name("ferric-ytm-add".to_string())
@@ -611,8 +616,14 @@ impl FerricController {
         playlist_id: String,
         track_id: String,
     ) -> ControllerResult<()> {
-        let (track_opt, sp_tok, ytm_sess) = {
+        let (track_opt, sp_tok, ytm_sess, is_imported) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let imported = st
+                .db
+                .list_playlists()
+                .ok()
+                .and_then(|pls| pls.into_iter().find(|p| p.id == playlist_id))
+                .is_some_and(|p| p.description.starts_with("Imported "));
             let track = st
                 .db
                 .list_playlist_tracks(&playlist_id)
@@ -623,12 +634,14 @@ impl FerricController {
                 track,
                 active_spotify_token(&st.accounts),
                 active_ytm_session(&st.accounts),
+                imported,
             )
         };
         self.sink.on_library_changed();
 
         if let Some(track) = track_opt {
             if playlist_id.starts_with("spotify:")
+                && !is_imported
                 && let (Some(tok), Some(sp_id)) = (sp_tok, track.spotify_id)
             {
                 let this = Arc::clone(self);
@@ -643,6 +656,7 @@ impl FerricController {
                         }
                     });
             } else if playlist_id.starts_with("ytm:pl:")
+                && !is_imported
                 && ytm_sess.is_signed_in()
                 && let Some(vid) = track.youtube_video_id
             {
@@ -659,21 +673,33 @@ impl FerricController {
 
     /// Deduplicate tracks inside a playlist in-place (`O(N)`) and mirror replacement to Spotify if synced.
     pub fn deduplicate_playlist(self: &Arc<Self>, playlist_id: String) -> ControllerResult<usize> {
-        let (removed, kept_tracks, sp_tok) = {
+        let (removed, kept_tracks, sp_tok, is_imported) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let imported = st
+                .db
+                .list_playlists()
+                .ok()
+                .and_then(|pls| pls.into_iter().find(|p| p.id == playlist_id))
+                .is_some_and(|p| p.description.starts_with("Imported "));
             let tracks = st.db.list_playlist_tracks(&playlist_id)?;
             let (deduped, removed) = deduplicate_tracks_in_order(&tracks);
             if removed > 0 {
                 let ids: Vec<String> = deduped.iter().map(|t| t.id.clone()).collect();
                 st.db.replace_playlist_tracks(&playlist_id, &ids)?;
             }
-            (removed, deduped, active_spotify_token(&st.accounts))
+            (
+                removed,
+                deduped,
+                active_spotify_token(&st.accounts),
+                imported,
+            )
         };
         if removed > 0 {
             self.sink.on_library_changed();
             self.sink
                 .on_toast(format!("Removed {removed} duplicate tracks"));
             if playlist_id.starts_with("spotify:")
+                && !is_imported
                 && let Some(tok) = sp_tok
             {
                 let uris: Vec<String> = kept_tracks
@@ -805,38 +831,85 @@ impl FerricController {
         Ok(())
     }
 
-    /// Toggle Like locally + in active queue + mirror asynchronously to Spotify and/or YTM.
-    pub fn toggle_like(self: &Arc<Self>, track_id: &str) -> ControllerResult<bool> {
-        let (new_liked, track_opt, cur_changed, sp_tok, ytm_sess) = {
+    pub(crate) fn apply_like_state_locally(
+        &self,
+        track_id: &str,
+        liked_override: Option<bool>,
+    ) -> ControllerResult<(bool, Option<Track>, bool)> {
+        let (next_liked, found, cur_changed, ids_updated_in_queue) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let mut found = st
-                .db
-                .list_tracks("")?
-                .into_iter()
-                .find(|t| t.id == track_id);
+            let mut found = st.db.get_track_by_id(track_id)?;
             if found.is_none() {
                 found = st.queue.tracks().iter().find(|t| t.id == track_id).cloned();
                 if let Some(ref t) = found {
                     let _ = st.db.upsert_tracks(std::slice::from_ref(t));
                 }
             }
-            let next_liked = !found.as_ref().is_some_and(|t| t.liked);
-            st.db.set_track_liked(track_id, next_liked)?;
-            st.queue.set_track_liked(track_id, next_liked);
+            let next_liked =
+                liked_override.unwrap_or_else(|| !found.as_ref().is_some_and(|t| t.liked));
+
+            let mut target_ids = vec![track_id.to_string()];
+            if let Some(ref tr) = found {
+                if let Some(ref sid) = tr.spotify_id
+                    && let Ok(matches) = st.db.list_tracks_matching_spotify_id(sid)
+                {
+                    for m in matches {
+                        if !target_ids.contains(&m.id) {
+                            target_ids.push(m.id);
+                        }
+                    }
+                }
+                if let Some(ref vid) = tr.youtube_video_id
+                    && let Ok(matches) = st.db.list_tracks_matching_youtube_id(vid)
+                {
+                    for m in matches {
+                        if !target_ids.contains(&m.id) {
+                            target_ids.push(m.id);
+                        }
+                    }
+                }
+            }
+            st.db.set_tracks_liked_batch(&target_ids, next_liked)?;
+            for id in &target_ids {
+                st.queue.set_track_liked(id, next_liked);
+            }
             let cur = st.queue.current().cloned();
-            let is_cur = cur.as_ref().is_some_and(|t| t.id == track_id);
+            let is_cur = cur
+                .as_ref()
+                .is_some_and(|t| target_ids.iter().any(|id| id == &t.id));
             (
                 next_liked,
                 found,
                 if is_cur { Some(cur) } else { None },
-                active_spotify_token(&st.accounts),
-                active_ytm_session(&st.accounts),
+                target_ids,
             )
         };
+        let _ = ids_updated_in_queue;
+        let has_cur = cur_changed.is_some();
         if let Some(cur) = cur_changed {
             self.sink.on_now_playing(cur);
         }
         self.sink.on_library_changed();
+        Ok((next_liked, found, has_cur))
+    }
+
+    /// Toggle Like locally + canonical matches + active queue + Connect + Spotify/YTM.
+    pub fn toggle_like(self: &Arc<Self>, track_id: &str) -> ControllerResult<bool> {
+        let (new_liked, track_opt, _) = self.apply_like_state_locally(track_id, None)?;
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::ToggleLike {
+                track_id: track_id.to_string(),
+            });
+        } else {
+            self.push_connect_playback_snapshot();
+        }
+        let (sp_tok, ytm_sess) = {
+            let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            (
+                active_spotify_token(&st.accounts),
+                active_ytm_session(&st.accounts),
+            )
+        };
 
         if let Some(track) = track_opt {
             if let (Some(tok), Some(sp_id)) = (sp_tok, track.spotify_id.clone()) {
@@ -1028,6 +1101,16 @@ impl FerricController {
     // --- Queue operations ---
 
     pub fn play_next(&self, track: Track) {
+        if self.is_controlling_remote() {
+            let entry = ferric_sync::QueueEntry::from_track(&track);
+            self.forward_remote_action(ferric_sync::RemoteAction::PlayNextTrack(entry));
+            self.sink.on_toast(format!("Playing next: {}", track.title));
+            return;
+        }
+        self.play_next_local_only(track, true);
+    }
+
+    pub(crate) fn play_next_local_only(&self, track: Track, show_toast: bool) {
         let up_next = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.queue.insert_play_next(track.clone());
@@ -1039,10 +1122,24 @@ impl FerricController {
         };
         self.queue_upcoming_deck_b();
         self.sink.on_queue_changed(up_next);
-        self.sink.on_toast(format!("Playing next: {}", track.title));
+        self.push_connect_playback_snapshot();
+        if show_toast {
+            self.sink.on_toast(format!("Playing next: {}", track.title));
+        }
     }
 
     pub fn append_to_queue(&self, track: Track) {
+        if self.is_controlling_remote() {
+            let entry = ferric_sync::QueueEntry::from_track(&track);
+            self.forward_remote_action(ferric_sync::RemoteAction::AppendQueueTrack(entry));
+            self.sink
+                .on_toast(format!("Added to queue: {}", track.title));
+            return;
+        }
+        self.append_to_queue_local_only(track, true);
+    }
+
+    pub(crate) fn append_to_queue_local_only(&self, track: Track, show_toast: bool) {
         let up_next = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.queue.append_single_to_end(track.clone());
@@ -1054,8 +1151,11 @@ impl FerricController {
         };
         self.queue_upcoming_deck_b();
         self.sink.on_queue_changed(up_next);
-        self.sink
-            .on_toast(format!("Added to queue: {}", track.title));
+        self.push_connect_playback_snapshot();
+        if show_toast {
+            self.sink
+                .on_toast(format!("Added to queue: {}", track.title));
+        }
     }
 
     pub fn jump_to_upcoming(self: &Arc<Self>, offset: usize) -> ControllerResult<()> {
@@ -1107,6 +1207,14 @@ impl FerricController {
     }
 
     pub fn remove_queue_item(&self, offset: usize) -> bool {
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::RemoveQueueAt(offset));
+            return true;
+        }
+        self.remove_queue_item_local_only(offset)
+    }
+
+    pub(crate) fn remove_queue_item_local_only(&self, offset: usize) -> bool {
         let (removed, up_next) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let ok = st.queue.remove_upcoming(offset).is_some();
@@ -1116,11 +1224,20 @@ impl FerricController {
         if removed {
             self.queue_upcoming_deck_b();
             self.sink.on_queue_changed(up_next);
+            self.push_connect_playback_snapshot();
         }
         removed
     }
 
     pub fn clear_up_next(&self) {
+        if self.is_controlling_remote() {
+            self.forward_remote_action(ferric_sync::RemoteAction::ClearUpNext);
+            return;
+        }
+        self.clear_up_next_local_only();
+    }
+
+    pub(crate) fn clear_up_next_local_only(&self) {
         {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(cur) = st.queue.current().cloned() {
@@ -1131,6 +1248,7 @@ impl FerricController {
         }
         self.queue_upcoming_deck_b();
         self.sink.on_queue_changed(Vec::new());
+        self.push_connect_playback_snapshot();
     }
 
     pub fn save_queue_as_playlist(&self, name: String) -> ControllerResult<Playlist> {

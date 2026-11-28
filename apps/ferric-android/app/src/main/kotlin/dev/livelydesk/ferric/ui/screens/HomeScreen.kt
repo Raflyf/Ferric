@@ -86,12 +86,12 @@ private data class GoToTile(
 )
 
 /**
- * Editorial Auralys + Spotify hybrid Home screen:
+ * Editorial high-craft Home screen:
  * - Clean lightweight time-of-day greeting with zero header icon clutter (settings/accounts/themes
  *   live in the dedicated You tab).
  * - Compact recent track + daily streak chips when listening activity exists.
  * - Borderless frosted pill mood selector.
- * - Spotify-style 2-column quick access shortcuts (playlists & Liked Songs) OR Auralys 3x3
+ * - 2-column quick access shortcuts (playlists & Liked Songs) OR 3x3
  *   "Your go-tos" artwork grid.
  * - Horizontal paged 4-row borderless Quick Picks columns with peeking right column.
  * - Rich full-bleed showcase cards for Recommended Stations and personalized shelves.
@@ -188,7 +188,7 @@ fun HomeScreen(
         }
     }
 
-    // Build Auralys-style 3x3 "Your go-tos" artwork grid when user has rich visual discovery cards.
+    // Build 3x3 "Your go-tos" artwork grid when user has rich visual discovery cards.
     val goToArtworkTiles = remember(home.stations, home.shelves) {
         buildList {
             home.stations.forEach { st ->
@@ -289,7 +289,7 @@ fun HomeScreen(
                     }
                 }
 
-                // Compact recent song + daily streak row (Auralys touch)
+                // Compact recent song + daily streak row
                 if (latestTrack != null || streakDays > 0) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -388,7 +388,7 @@ fun HomeScreen(
             }
         }
 
-        // Borderless pill mood chips (Auralys + Spotify clean pill style)
+        // Borderless pill mood chips
         if (home.chips.isNotEmpty()) {
             item(key = "home_mood_chips") {
                 LazyRow(
@@ -442,7 +442,7 @@ fun HomeScreen(
             }
         }
 
-        // Quick Picks: horizontal paged 4-row borderless columns (Auralys / YTM signature!)
+        // Quick Picks: horizontal paged 4-row borderless columns
         if (quickPicks.isNotEmpty()) {
             item(key = "home_quick_picks") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -536,7 +536,7 @@ fun HomeScreen(
             }
         }
 
-        // Auralys-style 3-column visual "Your go-tos" grid (shown when stations/cards exist)
+        // 3-column visual "Your go-tos" grid (shown when stations/cards exist)
         if (goToArtworkTiles.size >= 3) {
             item(key = "home_your_gotos") {
                 Column(

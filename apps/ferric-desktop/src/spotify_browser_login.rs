@@ -498,7 +498,6 @@ mod tests {
     #[ignore = "launches a real browser window"]
     fn cdp_roundtrip() {
         let Some(exe) = find_browsers().into_iter().next() else {
-            eprintln!("no Chrome or Edge installed");
             return;
         };
         let profile =

@@ -2,14 +2,14 @@
 
 - **Date:** 2026-11-27
 - **Status:** Approved (2026-11-27; Builder Check audited against workspace crates)
-- **Repository:** `d:\code\project\music player\ferric` (monorepo alongside Ferric Windows Desktop `v0.1.2`)
-- **Primary Reference:** `D:\code\project\music player\reference\Auralys-4.3.6.apk` (inspected statically for UX architecture, Liquid Glass theming, player choreography, and mobile feature patterns) + Ferric Windows Desktop `v0.1.2`
+- **Repository:** `d:\code\project\music player\ferric` (monorepo alongside Ferric Windows Desktop `v0.1.3`)
+- **Primary Baseline:** Ferric Windows Desktop + touch-first optical Liquid Glass mobile architecture
 
 ---
 
 ## 1. Product Vision & UX Direction
 
-**Ferric Android** brings 100% of Ferric Desktop's native Rust audio engine, unified local/streaming library, two-way Spotify & YouTube Music account sync, and low-resource discipline to Android, paired with an expressive, touch-first mobile interface inspired by **Auralys 4.3.6** and modern Android music UX research (2025-2026).
+**Ferric Android** brings 100% of Ferric Desktop's native Rust audio engine, unified local/streaming library, two-way Spotify & YouTube Music account sync, and low-resource discipline to Android, paired with an expressive, touch-first optical Liquid Glass mobile interface.
 
 ### Core UX Principle: Familiar Navigation, Expressive Visuals
 - **Familiar navigation:** Fast bottom navigation (`Home`, `Search`, `Library`), instant 1-tap `Quick Picks`, swipeable Queue management, and zero-clutter search so users never hunt for basic actions.
@@ -33,7 +33,7 @@
    - **Player, Synced Lyrics & Video Clip:** Swipeable MiniPlayer (`Left/Right` skip, `Up` expand), Fullscreen Player with **Aurora Backdrop**, synced lyrics (`LRCLIB` + `Lyrics.ovh` + local `.lrc` via `ContentOpener` + embedded tags, `-0.5s`/`+0.5s` offset, tap line to seek), docked **Video Clip** toggle (ExoPlayer/Media3 video surface muted & clock-locked to Rust audio engine), Queue bottom sheet (drag reorder, Save Queue, Copy Queue), and clickable artist navigation.
    - **Android OS Foundation:** Foreground `MediaSessionService` (lazy Rust `AudioEngine` startup, media notification, lockscreen controls, Bluetooth/headset buttons, audio focus duck/pause, `ACTION_AUDIO_BECOMING_NOISY` pause on unplug), Android Keystore hardware-backed credential encryption, and zero-telemetry local SQLite WAL.
    - **Ferric Connect (Zero-Pairing Same-Account Auto-Connect on LAN + Desktop Parity):** Automatic discovery (`FRC2` UDP + mDNS/NSD) and ChaCha20-Poly1305 AEAD connection between Ferric Android and Ferric Windows Desktop signed in to the same Spotify or YouTube Music account (including mixed dual-account logins), Spotify-Connect-style bottom sheet / desktop side panel with active device badge, remote volume slider, full bidirectional playback/queue control, 1-tap speaker handoff (`This phone` <-> `Desktop PC`), plus QR Code pairing fallback for Guest Mode.
-2. **High-Impact Creative & Exploratory Features (Auralys-Inspired, Included in `v0.1`):**
+2. **High-Impact Optical & Mobile Experience Features (Included in `v0.1`):**
    - **Visual & Theme Studio:** `AMOLED Black`, `Liquid Glass`, `Obsidian Studio`, `Warm Cream Light`, `Editorial` toggle, `Adaptive Artwork Accent`, `CoverShade` glass tinting, UI font picker (`Inter`, `Plus Jakarta Sans`, `DM Sans`, `Space Grotesk`, `JetBrains Mono`), and player layout selector (`Standard`, `Full-Bleed`, `Liquid Glass`).
    - **Offline Downloads & Smart Audio Cache:** Download tracks/playlists to isolated persistent storage (`filesDir/ferric/offline_downloads/`) with storage cap controls and offline availability indicator.
    - **Lyrics Share Card / Mini Poster Generator:** Select 1-5 lyric lines or a playlist to generate and share styled `9:16 Story` or `1:1 Square` PNG cards (Liquid Glass / AMOLED / Adaptive Gradient).

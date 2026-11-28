@@ -171,7 +171,7 @@ fun LibraryScreen(
             }
         }
 
-        // Auralys-style crisp underline text tabs (All | Playlists | Songs | Albums | Artists)
+        // Crisp underline text tabs (All | Playlists | Songs | Albums | Artists)
         item(key = "lib_underline_tabs") {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                 items(LibraryTab.entries, key = { it.name }) { tab ->
@@ -203,7 +203,7 @@ fun LibraryScreen(
 
         when (activeTab) {
             LibraryTab.ALL -> {
-                // Clean borderless Collections (Auralys signature!)
+                // Clean borderless Collections
                 item(key = "collections_section_label") {
                     Text(
                         text = "Collections",

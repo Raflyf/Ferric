@@ -205,6 +205,13 @@ pub enum RemoteAction {
         enabled: bool,
         participants: Vec<DeviceId>,
     },
+    ToggleLike {
+        track_id: String,
+    },
+    PlayNextTrack(QueueEntry),
+    AppendQueueTrack(QueueEntry),
+    RemoveQueueAt(usize),
+    ClearUpNext,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

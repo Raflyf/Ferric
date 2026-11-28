@@ -250,11 +250,20 @@ impl LocalRoomKeys {
     }
 
     /// Up to 2 opaque 16-byte discovery tags advertised in `FRC2` UDP beacons and mDNS TXT records.
-    /// Slot 0 carries Spotify (or Guest QR if Spotify is absent); Slot 1 carries YouTube Music.
+    /// Slot 0 carries Spotify (or Guest QR if Spotify is absent); Slot 1 carries YouTube Music (or
+    /// Guest QR when Spotify is present and YTM is absent so simultaneous Guest QR pairing remains discoverable).
     #[must_use]
     pub fn advertised_tags(&self) -> [Option<[u8; 16]>; 2] {
         let slot0 = self.spotify.as_ref().or(self.guest.as_ref()).map(|r| r.tag);
-        let slot1 = self.ytm.as_ref().map(|r| r.tag);
+        let slot1 = self
+            .ytm
+            .as_ref()
+            .or(if self.spotify.is_some() {
+                self.guest.as_ref()
+            } else {
+                None
+            })
+            .map(|r| r.tag);
         [slot0, slot1]
     }
 

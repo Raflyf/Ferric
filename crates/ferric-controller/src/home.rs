@@ -109,11 +109,7 @@ fn merge_stations_rotated(
 fn clean_home_tracks(tracks: Vec<Track>) -> Vec<Track> {
     tracks
         .into_iter()
-        .filter(|t| {
-            !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
-                && !contains_ascii_icase(&t.album, "watching")
-                && !contains_ascii_icase(&t.artist, "watching")
-        })
+        .filter(|t| !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms))
         .collect()
 }
 
@@ -369,9 +365,7 @@ impl FerricController {
                 .list_tracks("")
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|t| {
-                    !t.id.starts_with("demo:") && !contains_ascii_icase(&t.album, "watching")
-                })
+                .filter(|t| !t.id.starts_with("demo:"))
                 .collect();
 
             let chips_snapshot = st.home_cache.chips.clone();
@@ -592,9 +586,7 @@ impl FerricController {
                 .list_tracks("")
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|t| {
-                    !t.id.starts_with("demo:") && !contains_ascii_icase(&t.album, "watching")
-                })
+                .filter(|t| !t.id.starts_with("demo:"))
                 .collect();
             let taste = build_home_taste_profile(&st, &lib, true);
             let mood = if !st.home_cache.chips.is_empty() {
@@ -651,9 +643,24 @@ impl FerricController {
                                 if existing_qp.insert(t.id.clone())
                                     && st.home_cache.quick_picks.len() < 48
                                 {
-                                    st.home_excluded_tracks.insert(t.id.clone());
-                                    if let Some(vid) = &t.youtube_video_id {
-                                        st.home_excluded_tracks.insert(vid.clone());
+                                    let tid = t.id.clone();
+                                    let vid = t.youtube_video_id.clone();
+                                    {
+                                        let s = &mut *st;
+                                        push_bounded_exclusion(
+                                            &mut s.home_excluded_tracks,
+                                            &mut s.home_excluded_track_fifo,
+                                            tid,
+                                            240,
+                                        );
+                                        if let Some(v) = vid {
+                                            push_bounded_exclusion(
+                                                &mut s.home_excluded_tracks,
+                                                &mut s.home_excluded_track_fifo,
+                                                v,
+                                                240,
+                                            );
+                                        }
                                     }
                                     st.home_cache.quick_picks.push(t);
                                 }
@@ -669,8 +676,18 @@ impl FerricController {
                                 if !sh.cards.is_empty()
                                     && existing_shelves.insert(sh.title.to_ascii_lowercase())
                                 {
-                                    for c in &sh.cards {
-                                        st.home_excluded_cards.insert(c.id.clone());
+                                    let card_ids: Vec<String> =
+                                        sh.cards.iter().map(|c| c.id.clone()).collect();
+                                    {
+                                        let s = &mut *st;
+                                        for cid in card_ids {
+                                            push_bounded_exclusion(
+                                                &mut s.home_excluded_cards,
+                                                &mut s.home_excluded_card_fifo,
+                                                cid,
+                                                120,
+                                            );
+                                        }
                                     }
                                     st.home_cache.shelves.push(sh.into());
                                     if st.home_cache.shelves.len() >= 48 {
@@ -734,12 +751,64 @@ impl FerricController {
     pub fn open_station(self: &Arc<Self>, station_id: &str) -> ControllerResult<()> {
         let (station, session, spotify_token, library_pool, liked_ids, gen_id) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(found) = st
+            let found = st
                 .stations_cache
                 .iter()
                 .find(|s| s.id == station_id)
                 .cloned()
-            else {
+                .or_else(|| {
+                    if let Some(pid) = station_id.strip_prefix("sp:station:") {
+                        let clean_pid = pid.trim();
+                        if !clean_pid.is_empty() {
+                            return Some(RecommendedStation {
+                                id: station_id.to_string(),
+                                title: "Recommended Radio".to_string(),
+                                display_name: "Radio".to_string(),
+                                subtitle: "Non-stop personalized radio".to_string(),
+                                palette_idx: 0,
+                                is_spotify_prebuilt_art: false,
+                                center_art_url: None,
+                                left_art_url: None,
+                                right_art_url: None,
+                                spotify_playlist_id: Some(clean_pid.to_string()),
+                                seed_video_id: None,
+                                seed_artist: String::new(),
+                                seed_title: String::new(),
+                                is_spotify_origin: true,
+                                cached_tracks: Vec::new(),
+                            });
+                        }
+                    }
+                    if let Some(rest) = station_id.strip_prefix("ferric:station:") {
+                        let slug = rest.split_once(':').map_or(rest, |(_, s)| s);
+                        let seed_name: String = slug
+                            .split('-')
+                            .filter(|w| !w.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !seed_name.is_empty() {
+                            return Some(RecommendedStation {
+                                id: station_id.to_string(),
+                                title: format!("{seed_name} Radio"),
+                                display_name: seed_name.clone(),
+                                subtitle: format!("Non-stop radio inspired by {seed_name}"),
+                                palette_idx: 0,
+                                is_spotify_prebuilt_art: false,
+                                center_art_url: None,
+                                left_art_url: None,
+                                right_art_url: None,
+                                spotify_playlist_id: None,
+                                seed_video_id: None,
+                                seed_artist: seed_name.clone(),
+                                seed_title: seed_name,
+                                is_spotify_origin: false,
+                                cached_tracks: Vec::new(),
+                            });
+                        }
+                    }
+                    None
+                });
+            let Some(found) = found else {
                 return Err(ControllerError::State(format!(
                     "station not found: {station_id}"
                 )));
@@ -998,9 +1067,7 @@ impl FerricController {
                 .list_tracks("")
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|t| {
-                    !t.id.starts_with("demo:") && !contains_ascii_icase(&t.album, "watching")
-                })
+                .filter(|t| !t.id.starts_with("demo:"))
                 .collect();
             let taste = build_home_taste_profile(&st, &lib, false);
             (

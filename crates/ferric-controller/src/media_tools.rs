@@ -89,19 +89,24 @@ impl FerricController {
     /// Load synced or plain lyrics for `track` (SQLite cache -> Android `content://` embedded tag ->
     /// local `.lrc`/embedded -> LRCLIB -> Lyrics.ovh) off the main thread.
     pub fn load_lyrics(self: &Arc<Self>, track: Track) {
-        let (gen_id, cached_lrc) = {
+        let (gen_id, cached_lrc, persisted_offset_ms) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.lyrics_gen = st.lyrics_gen.wrapping_add(1);
-            st.lyrics_offset_ms = 0;
+            let persisted = st
+                .db
+                .get_track_lyrics_offset(&track.id)
+                .unwrap_or(0)
+                .clamp(-10_000, 10_000);
+            st.lyrics_offset_ms = persisted;
             let key = lyrics_cache_key(&track);
             let cached = st.db.get_cached_lyrics(&key).ok().flatten();
-            (st.lyrics_gen, cached)
+            (st.lyrics_gen, cached, persisted)
         };
 
         if let Some(raw) = cached_lrc {
             let parsed = SyncedLyrics::parse_with_context(&raw, track.duration_ms, "Cached");
             if !parsed.lines.is_empty() {
-                let snap = to_lyrics_snapshot(track.id, parsed, 0);
+                let snap = to_lyrics_snapshot(track.id, parsed, persisted_offset_ms);
                 {
                     let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
                     st.lyrics_cache = snap.clone();
@@ -116,7 +121,7 @@ impl FerricController {
             lines: Vec::new(),
             source_name: String::new(),
             is_synced: false,
-            offset_ms: 0,
+            offset_ms: persisted_offset_ms,
             is_loading: true,
         };
         {
@@ -143,9 +148,10 @@ impl FerricController {
                         "Embedded Tag",
                     );
                     if !parsed.lines.is_empty() {
-                        let snap = to_lyrics_snapshot(track.id.clone(), parsed, 0);
                         let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
                         if st.lyrics_gen == gen_id {
+                            let snap =
+                                to_lyrics_snapshot(track.id.clone(), parsed, st.lyrics_offset_ms);
                             let _ = st
                                 .db
                                 .save_cached_lyrics(&lyrics_cache_key(&track), &embedded);
@@ -169,9 +175,10 @@ impl FerricController {
                     local_fs_path,
                 ) {
                     Ok(Some((parsed, raw_lrc))) => {
-                        let snap = to_lyrics_snapshot(track.id.clone(), parsed, 0);
                         let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
                         if st.lyrics_gen == gen_id {
+                            let snap =
+                                to_lyrics_snapshot(track.id.clone(), parsed, st.lyrics_offset_ms);
                             let _ = st
                                 .db
                                 .save_cached_lyrics(&lyrics_cache_key(&track), &raw_lrc);
@@ -181,16 +188,16 @@ impl FerricController {
                         }
                     }
                     Ok(None) | Err(_) => {
-                        let empty = LyricsSnapshot {
-                            track_id: track.id,
-                            lines: Vec::new(),
-                            source_name: "Unavailable".to_string(),
-                            is_synced: false,
-                            offset_ms: 0,
-                            is_loading: false,
-                        };
                         let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
                         if st.lyrics_gen == gen_id {
+                            let empty = LyricsSnapshot {
+                                track_id: track.id,
+                                lines: Vec::new(),
+                                source_name: "Unavailable".to_string(),
+                                is_synced: false,
+                                offset_ms: st.lyrics_offset_ms,
+                                is_loading: false,
+                            };
                             st.lyrics_cache = empty.clone();
                             drop(st);
                             this.sink.on_lyrics_loaded(empty);
@@ -209,6 +216,12 @@ impl FerricController {
                 .saturating_add(delta_ms)
                 .clamp(-10_000, 10_000);
             st.lyrics_cache.offset_ms = st.lyrics_offset_ms;
+            let track_id = st.lyrics_cache.track_id.clone();
+            if !track_id.is_empty() {
+                let _ = st
+                    .db
+                    .set_track_lyrics_offset(&track_id, st.lyrics_offset_ms);
+            }
             st.lyrics_cache.clone()
         };
         self.sink.on_lyrics_loaded(snap.clone());

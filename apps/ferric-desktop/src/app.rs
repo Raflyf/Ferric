@@ -196,16 +196,21 @@ live_design! {
         draw_bg: {
             uniform acrylic_on: 0.0
             uniform accent_col: #E86A2C
+            uniform card_col: #0D0E13
+            uniform border_col: #1D1F29
+            uniform tint_col: #0B0D14
             uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 8.0);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
-                let solid_fill = mix(vec4(0.052, 0.056, 0.076, 1.0), vec4(0.918, 0.890, 0.835, 1.0), self.light_mode);
-                let acrylic_fill = vec4(ink, 0.036 + 0.044 * self.light_mode);
+                let solid_fill = mix(self.card_col, vec4(0.918, 0.890, 0.835, 1.0), self.light_mode);
+                let acr_tint_rgb = clamp(self.tint_col.xyz * 1.40 + vec3(0.08, 0.08, 0.08), 0.0, 1.0);
+                let acr_rgb = mix(ink, acr_tint_rgb, 0.42 * (1.0 - self.light_mode));
+                let acrylic_fill = vec4(acr_rgb, 0.075 + 0.035 * self.light_mode);
                 sdf.fill_keep(mix(solid_fill, acrylic_fill, self.acrylic_on));
-                let solid_border = mix(vec4(0.114, 0.122, 0.161, 1.0), vec4(0.80, 0.76, 0.69, 1.0), self.light_mode);
-                let acrylic_border = vec4(ink, 0.075 + 0.085 * self.light_mode);
+                let solid_border = mix(self.border_col, vec4(0.80, 0.76, 0.69, 1.0), self.light_mode);
+                let acrylic_border = vec4(ink, 0.085 + 0.085 * self.light_mode);
                 sdf.stroke(mix(solid_border, acrylic_border, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -379,6 +384,9 @@ live_design! {
             instance down: 0.0
             uniform acrylic_on: 0.0
             uniform accent_col: #E86A2C
+            uniform surface_col: #14151D
+            uniform border_col: #252734
+            uniform tint_col: #0B0D14
             uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -388,15 +396,19 @@ live_design! {
                 let br = min(6.0, min(bw, bh) * 0.24);
                 sdf.box(inset, inset, bw, bh, br);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
-                let solid_idle = mix(mix(#14151D, #232737, self.hover), mix(#E4DDD0, #D9D0C0, self.hover), self.light_mode);
-                let solid_act = mix(mix(#2E1B11, vec4(self.accent_col.xyz, 0.16), self.light_mode), vec4(self.accent_col.xyz, 0.28), 0.36);
-                let acrylic_idle = mix(vec4(ink, 0.065 + 0.025 * self.light_mode), vec4(ink, 0.16), self.hover);
+                let hov_dark = vec4(clamp(self.surface_col.xyz + vec3(0.065, 0.068, 0.085), 0.0, 1.0), 1.0);
+                let solid_idle = mix(mix(self.surface_col, hov_dark, self.hover), mix(#E4DDD0, #D9D0C0, self.hover), self.light_mode);
+                let solid_act = mix(mix(vec4(clamp(self.surface_col.xyz * 0.8 + self.accent_col.xyz * 0.18, 0.0, 1.0), 1.0), vec4(self.accent_col.xyz, 0.16), self.light_mode), vec4(self.accent_col.xyz, 0.28), 0.36);
+                let acr_tint_rgb = clamp(self.tint_col.xyz * 1.35 + vec3(0.10, 0.10, 0.10), 0.0, 1.0);
+                let acr_rgb = mix(ink, acr_tint_rgb, 0.36 * (1.0 - self.light_mode));
+                let acrylic_idle = mix(vec4(acr_rgb, 0.095 + 0.025 * self.light_mode), vec4(acr_rgb, 0.19), self.hover);
                 let acrylic_act = vec4(self.accent_col.xyz, 0.26);
                 let bg = mix(mix(solid_idle, solid_act, self.active), mix(acrylic_idle, acrylic_act, self.active), self.acrylic_on);
                 let pressed = mix(bg, vec4(ink, 0.20), self.down * 0.20);
                 sdf.fill_keep(pressed);
-                let solid_b = mix(mix(mix(#252734, #484E68, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(self.accent_col.xyz, 0.88), self.active);
-                let acrylic_b = mix(vec4(ink, 0.11 + 0.07 * self.light_mode + 0.12 * self.hover), vec4(self.accent_col.xyz, 0.90), self.active);
+                let b_dark_hov = vec4(clamp(self.border_col.xyz + vec3(0.13, 0.13, 0.16), 0.0, 1.0), 1.0);
+                let solid_b = mix(mix(mix(self.border_col, b_dark_hov, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(self.accent_col.xyz, 0.88), self.active);
+                let acrylic_b = mix(vec4(ink, 0.12 + 0.07 * self.light_mode + 0.12 * self.hover), vec4(self.accent_col.xyz, 0.90), self.active);
                 sdf.stroke(mix(solid_b, acrylic_b, self.acrylic_on), 1.0);
                 return sdf.result;
             }
@@ -446,6 +458,9 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             uniform acrylic_on: 0.0
+            uniform surface_col: #14151D
+            uniform border_col: #242633
+            uniform tint_col: #0B0D14
             uniform light_mode: 0.0
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -453,14 +468,18 @@ live_design! {
                 let r = (self.rect_size.y - inset * 2.0) * 0.25;
                 sdf.box(inset, inset, self.rect_size.x - inset * 2.0, self.rect_size.y - inset * 2.0, r);
                 let ink = mix(vec3(1.0, 1.0, 1.0), vec3(0.05, 0.06, 0.10), self.light_mode);
-                let solid_idle = mix(mix(#14151D, #25293A, self.hover), mix(#E4DDD0, #D8CFC0, self.hover), self.light_mode);
-                let acrylic_idle = mix(vec4(ink, 0.065 + 0.025 * self.light_mode), vec4(ink, 0.17), self.hover);
+                let hov_dark = vec4(clamp(self.surface_col.xyz + vec3(0.068, 0.072, 0.090), 0.0, 1.0), 1.0);
+                let solid_idle = mix(mix(self.surface_col, hov_dark, self.hover), mix(#E4DDD0, #D8CFC0, self.hover), self.light_mode);
+                let acr_tint_rgb = clamp(self.tint_col.xyz * 1.35 + vec3(0.10, 0.10, 0.10), 0.0, 1.0);
+                let acr_rgb = mix(ink, acr_tint_rgb, 0.36 * (1.0 - self.light_mode));
+                let acrylic_idle = mix(vec4(acr_rgb, 0.085 + 0.025 * self.light_mode), vec4(acr_rgb, 0.19), self.hover);
                 let idle = mix(solid_idle, acrylic_idle, self.acrylic_on);
                 let act_dark = mix(#F4F5FA, #FFFFFF, self.hover);
                 let act_light = mix(#11131A, #222634, self.hover);
                 let bg = mix(idle, mix(act_dark, act_light, self.light_mode), self.active);
                 sdf.fill_keep(bg);
-                let idle_b = mix(mix(mix(#242633, #464B66, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(ink, 0.12 + 0.08 * self.light_mode + 0.12 * self.hover), self.acrylic_on);
+                let b_dark_hov = vec4(clamp(self.border_col.xyz + vec3(0.13, 0.13, 0.16), 0.0, 1.0), 1.0);
+                let idle_b = mix(mix(mix(self.border_col, b_dark_hov, self.hover), mix(#C8BFA8, #A89E88, self.hover), self.light_mode), vec4(ink, 0.12 + 0.08 * self.light_mode + 0.12 * self.hover), self.acrylic_on);
                 let act_b = mix(#FFFFFF, #11131A, self.light_mode);
                 sdf.stroke(mix(idle_b, act_b, self.active), 1.0);
                 return sdf.result;
@@ -3193,7 +3212,7 @@ live_design! {
                                                 <View> {
                                                     width: Fill, height: Fit, flow: Right, align: { y: 0.5 }, spacing: 10,
                                                     lbl_t_ab_name = <Label> { draw_text: { color: #F4F4F7, text_style: <THEME_FONT_DISPLAY> { font_size: 14.5 } }, text: "Ferric" }
-                                                    about_version_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.2 } }, text: "v0.1.2 · Windows x64" }
+                                                    about_version_lbl = <Label> { draw_text: { color: #E86A2C, text_style: <THEME_FONT_BOLD> { font_size: 9.2 } }, text: "v0.1.3 · Windows x64" }
                                                 }
                                                 lbl_m_ab_tagline = <Label> {
                                                     width: Fill,
@@ -3470,11 +3489,12 @@ live_design! {
                         bottom_bar = <AmbientBottomBar> {
                             // Left: 44x44 Cover Art + Title/Artist + Heart + Add Playlist + Copy Link
                             bottom_left_grp = <View> {
-                                width: 294,
+                                width: 300,
                                 height: Fill,
+                                padding: { left: 2, right: 4 }
                                 flow: Right,
                                 align: { y: 0.5 }
-                                spacing: 7,
+                                spacing: 5,
 
                                 np_art = <FerricCoverArt> {
                                     width: 44,
@@ -3522,8 +3542,10 @@ live_design! {
                                     }
                                 }
                                 np_copy_link_btn = <FerricIconBtn> {
-                                    width: 26, height: 26,
-                                    icon_walk: { width: 15, height: 15 }
+                                    width: 28, height: 26,
+                                    padding: 0,
+                                    align: { x: 0.5, y: 0.5 }
+                                    icon_walk: { width: 16, height: 9 }
                                     draw_icon: {
                                         svg_path: "M3.9 12C3.9 10.29 5.29 8.9 7 8.9H11V7H7C4.24 7 2 9.24 2 12C2 14.76 4.24 17 7 17H11V15.1H7C5.29 15.1 3.9 13.71 3.9 12ZM8 13H16V11H8V13ZM17 7H13V8.9H17C18.71 8.9 20.1 10.29 20.1 12C20.1 13.71 18.71 15.1 17 15.1H13V17H17C19.76 17 22 14.76 22 12C22 9.24 19.76 7 17 7Z"
                                         color: #707382
@@ -5006,7 +5028,7 @@ impl App {
         self.right_w_cur = self.right_w_target;
 
         let bar_h = (74.0 * z).max(64.0);
-        let left_grp_w = (294.0 * z).max(204.0);
+        let left_grp_w = (300.0 * z).max(208.0);
         let btn_sz = (28.0 * z).max(22.0);
         let icon_h = (15.0 * z).max(12.0);
         let bar_pad_x = (14.0 * z).max(8.0);
@@ -5083,7 +5105,7 @@ impl App {
             .apply_over(cx, live! { width: ((62.0 * z).max(46.0)) });
         let small_action_sz = (26.0 * z).max(22.0);
         let small_icon_sz = (15.0 * z).max(12.0);
-        for np_btn in [id!(np_like_btn), id!(np_add_pl_btn), id!(np_copy_link_btn)] {
+        for np_btn in [id!(np_like_btn), id!(np_add_pl_btn)] {
             self.ui.button(np_btn).apply_over(
                 cx,
                 live! {
@@ -5093,6 +5115,14 @@ impl App {
                 },
             );
         }
+        self.ui.button(id!(np_copy_link_btn)).apply_over(
+            cx,
+            live! {
+                width: ((28.0 * z).max(24.0)),
+                height: (small_action_sz),
+                icon_walk: { width: ((16.0 * z).max(12.0)), height: ((9.0 * z).max(7.0)) }
+            },
+        );
         let art_sz = (44.0 * z).max(34.0);
         let play_sz = (34.0 * z).max(28.0);
         self.ui
@@ -5623,7 +5653,7 @@ impl App {
             for ext in ["mp4", "webm", "mkv"] {
                 let cand = local_p.with_extension(ext);
                 if cand != *local_p && cand.is_file() {
-                    let uri = format!("file:///{}", cand.to_string_lossy().replace('\\', "/"));
+                    let uri = crate::video_player::path_to_file_uri(&cand);
                     self.video_track_id = Some(cur.id.clone());
                     self.video_is_official_mv = true;
                     self.video_streams = vec![VideoStreamOption {
@@ -7253,13 +7283,60 @@ impl App {
         self.ui.redraw(cx);
     }
 
+    fn theme_surface_tokens(&self) -> (Vec4, Vec4, Vec4, Vec4) {
+        let surface = rgba_vec4(&self.theme.surface_hex);
+        let border = rgba_vec4(&self.theme.border_hex);
+        let tint = self.current_acrylic_tint();
+        let is_amoled = self.theme.canvas_hex.eq_ignore_ascii_case("#000000");
+        let mix_w = if is_amoled && !self.theme.adaptive_acrylic_tint {
+            0.0_f32
+        } else if self.theme.adaptive_acrylic_tint {
+            0.22_f32
+        } else {
+            0.12_f32
+        };
+        let card_base = if is_amoled {
+            vec4(0.052, 0.056, 0.076, 1.0)
+        } else {
+            vec4(
+                (surface.x + 0.014).min(0.95),
+                (surface.y + 0.015).min(0.95),
+                (surface.z + 0.018).min(0.95),
+                1.0,
+            )
+        };
+        let card_col = vec4(
+            card_base.x + (tint.x - card_base.x) * mix_w,
+            card_base.y + (tint.y - card_base.y) * mix_w,
+            card_base.z + (tint.z - card_base.z) * mix_w,
+            1.0,
+        );
+        let btn_base = if is_amoled {
+            vec4(0.078, 0.082, 0.114, 1.0)
+        } else {
+            vec4(
+                (card_col.x + 0.032).min(0.96),
+                (card_col.y + 0.033).min(0.96),
+                (card_col.z + 0.038).min(0.96),
+                1.0,
+            )
+        };
+        let card_border = vec4(
+            border.x + (tint.x - border.x) * (mix_w * 0.8),
+            border.y + (tint.y - border.y) * (mix_w * 0.8),
+            border.z + (tint.z - border.z) * (mix_w * 0.8),
+            1.0,
+        );
+        (card_col, btn_base, card_border, tint)
+    }
+
     fn apply_adaptive_accent_live(&self, cx: &mut Cx) {
         let raw_accent = self.current_accent();
         let pal = self.adaptive_palette();
         let accent = rgba_to_vec4(pal.accent);
         let brand_accent = rgba_to_vec4(pal.brand_accent);
         let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
-        let acrylic_tint = self.current_acrylic_tint();
+        let (card_col, btn_col, card_border, acrylic_tint) = self.theme_surface_tokens();
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
         } else {
@@ -7338,12 +7415,41 @@ impl App {
         self.ui
             .ferric_bar_slider(id!(fs_vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (raw_accent) } });
-        self.ui
-            .ferric_bar_slider(id!(rs_conn_vol_slider))
-            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
-        self.ui
-            .label(id!(rs_conn_active_lbl))
-            .apply_over(cx, live! { draw_text: { color: (accent) } });
+        self.ui.view(id!(card_rs_conn_active)).apply_over(
+            cx,
+            live! {
+                draw_bg: {
+                    acrylic_on: (acr),
+                    accent_col: (accent),
+                    card_col: (card_col),
+                    border_col: (card_border),
+                    tint_col: (acrylic_tint),
+                    light_mode: (lm)
+                }
+            },
+        );
+        for cid in [
+            id!(rs_conn_local_btn),
+            id!(rs_conn_peer_0),
+            id!(rs_conn_peer_1),
+            id!(rs_conn_peer_2),
+            id!(rs_conn_peer_3),
+            id!(rs_conn_qr_btn),
+        ] {
+            self.ui.button(cid).apply_over(
+                cx,
+                live! {
+                    draw_bg: {
+                        acrylic_on: (acr),
+                        accent_col: (accent),
+                        surface_col: (btn_col),
+                        border_col: (card_border),
+                        tint_col: (acrylic_tint),
+                        light_mode: (lm)
+                    }
+                },
+            );
+        }
         self.ui.view(id!(top_search_box)).apply_over(
             cx,
             live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
@@ -10005,7 +10111,7 @@ impl App {
         let canvas = rgba_vec4(&self.theme.canvas_hex);
         let surface = rgba_vec4(&self.theme.surface_hex);
         let border = rgba_vec4(&self.theme.border_hex);
-        let acrylic_tint = self.current_acrylic_tint();
+        let (card_col, btn_col, card_border, acrylic_tint) = self.theme_surface_tokens();
 
         let op = self.theme.acrylic_opacity.clamp(0.18, 0.94);
         self.ui.view(id!(body)).apply_over(
@@ -10087,6 +10193,9 @@ impl App {
                     draw_bg: {
                         acrylic_on: (acr),
                         accent_col: (accent),
+                        card_col: (card_col),
+                        border_col: (card_border),
+                        tint_col: (acrylic_tint),
                         light_mode: (lm)
                     }
                 },
@@ -10601,7 +10710,14 @@ impl App {
             self.ui.button(btn_id).apply_over(
                 cx,
                 live! {
-                    draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                    draw_bg: {
+                        acrylic_on: (acr),
+                        accent_col: (accent),
+                        surface_col: (btn_col),
+                        border_col: (card_border),
+                        tint_col: (acrylic_tint),
+                        light_mode: (lm)
+                    }
                     draw_text: { color: (text_primary), color_hover: (icon_hover), color_focus: (icon_hover), color_down: (icon_hover) }
                 },
             );
@@ -10755,7 +10871,13 @@ impl App {
             self.ui.button(chip_id).apply_over(
                 cx,
                 live! {
-                    draw_bg: { acrylic_on: (acr), light_mode: (lm) }
+                    draw_bg: {
+                        acrylic_on: (acr),
+                        surface_col: (btn_col),
+                        border_col: (card_border),
+                        tint_col: (acrylic_tint),
+                        light_mode: (lm)
+                    }
                     draw_text: { color: (text_secondary), light_mode: (lm) }
                 },
             );
@@ -12770,7 +12892,12 @@ impl App {
             );
         }
         self.rebuild_library_views(cx);
-        self.spawn_cloud_like_track(saved, next_liked);
+        self.spawn_cloud_like_track(saved.clone(), next_liked);
+        if self.is_controlling_remote()
+            && let Some(engine) = &self.connect_engine
+        {
+            engine.send_remote_action(RemoteAction::ToggleLike { track_id: saved.id });
+        }
         next_liked
     }
 
@@ -14098,6 +14225,19 @@ impl App {
             self.ui
                 .ferric_play_btn(id!(fs_play_pause_btn))
                 .set_playing(cx, peer.is_playing);
+            let acr = if self.theme.acrylic_enabled {
+                1.0_f32
+            } else {
+                0.0_f32
+            };
+            self.ui.ferric_ambient_stage(id!(fs_backdrop)).set_state(
+                cx,
+                true,
+                peer.is_playing,
+                self.current_accent(),
+                acr,
+            );
+            self.last_fs_backdrop_playing = Some(peer.is_playing);
         }
         self.sync_playback_controls_only(cx);
 
@@ -14208,6 +14348,21 @@ impl App {
             self.ui
                 .ferric_play_btn(id!(fs_play_pause_btn))
                 .set_playing(cx, peer.is_playing);
+            if self.last_fs_backdrop_playing != Some(peer.is_playing) {
+                self.last_fs_backdrop_playing = Some(peer.is_playing);
+                let acr = if self.theme.acrylic_enabled {
+                    1.0_f32
+                } else {
+                    0.0_f32
+                };
+                self.ui.ferric_ambient_stage(id!(fs_backdrop)).set_state(
+                    cx,
+                    true,
+                    peer.is_playing,
+                    self.current_accent(),
+                    acr,
+                );
+            }
         }
 
         if !window_hidden && dur_ms > 0 {
@@ -14447,6 +14602,7 @@ impl App {
         let muted = rgba_to_vec4(pal.icon_idle);
         let txt_primary = rgba_to_vec4(pal.text_primary);
         let txt_secondary = rgba_to_vec4(pal.text_secondary);
+        let (card_col, btn_col, card_border, acrylic_tint) = self.theme_surface_tokens();
         let acr = if self.theme.acrylic_enabled {
             1.0_f32
         } else {
@@ -14455,7 +14611,16 @@ impl App {
         let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
         self.ui.view(id!(card_rs_conn_active)).apply_over(
             cx,
-            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
+            live! {
+                draw_bg: {
+                    acrylic_on: (acr),
+                    accent_col: (accent),
+                    card_col: (card_col),
+                    border_col: (card_border),
+                    tint_col: (acrylic_tint),
+                    light_mode: (lm)
+                }
+            },
         );
         self.ui
             .label(id!(rs_conn_active_lbl))
@@ -14488,7 +14653,15 @@ impl App {
         self.ui.button(id!(rs_conn_local_btn)).apply_over(
             cx,
             live! {
-                draw_bg: { active: (local_act), acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                draw_bg: {
+                    active: (local_act),
+                    acrylic_on: (acr),
+                    accent_col: (accent),
+                    surface_col: (btn_col),
+                    border_col: (card_border),
+                    tint_col: (acrylic_tint),
+                    light_mode: (lm)
+                }
                 draw_text: { color: (local_txt) }
             },
         );
@@ -14509,7 +14682,15 @@ impl App {
             self.ui.button(*btn_id).apply_over(
                 cx,
                 live! {
-                    draw_bg: { active: (if is_act { 1.0 } else { 0.0 }), acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                    draw_bg: {
+                        active: (if is_act { 1.0 } else { 0.0 }),
+                        acrylic_on: (acr),
+                        accent_col: (accent),
+                        surface_col: (btn_col),
+                        border_col: (card_border),
+                        tint_col: (acrylic_tint),
+                        light_mode: (lm)
+                    }
                     draw_text: { color: (p_txt) }
                 },
             );
@@ -14517,7 +14698,14 @@ impl App {
         self.ui.button(id!(rs_conn_qr_btn)).apply_over(
             cx,
             live! {
-                draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                draw_bg: {
+                    acrylic_on: (acr),
+                    accent_col: (accent),
+                    surface_col: (btn_col),
+                    border_col: (card_border),
+                    tint_col: (acrylic_tint),
+                    light_mode: (lm)
+                }
                 draw_text: { color: (txt_primary) }
             },
         );
@@ -14627,18 +14815,23 @@ impl App {
                         0
                     };
                     let seek_ms = state.base_position_ms.saturating_add(drift);
+                    let has_local_file = chosen.path.as_ref().is_some_and(|p| p.is_file());
                     self.pending_handoff_seek_ms = Some(seek_ms);
                     self.pending_handoff_paused = !state.is_playing;
                     self.play_track_inner(cx, chosen, true);
-                    if seek_ms > 1_000
-                        && let Some(audio) = &self.audio
-                    {
-                        audio.send(EngineCommand::SeekMs(seek_ms));
-                    }
-                    if !state.is_playing
-                        && let Some(audio) = &self.audio
-                    {
-                        audio.send(EngineCommand::Pause);
+                    if has_local_file {
+                        self.pending_handoff_seek_ms = None;
+                        self.pending_handoff_paused = false;
+                        if seek_ms > 1_000
+                            && let Some(audio) = &self.audio
+                        {
+                            audio.send(EngineCommand::SeekMs(seek_ms));
+                        }
+                        if !state.is_playing
+                            && let Some(audio) = &self.audio
+                        {
+                            audio.send(EngineCommand::Pause);
+                        }
                     }
                     self.sync_controls_from_state(cx);
                     self.refresh_right_sidebar(cx);
@@ -14748,6 +14941,62 @@ impl App {
                 self.mark_session_dirty();
                 self.sync_next_deck_to_engine();
                 self.sync_controls_from_state(cx);
+                self.refresh_right_sidebar(cx);
+            }
+            RemoteAction::ToggleLike { track_id } => {
+                if let Some(target) = self
+                    .all_tracks
+                    .iter()
+                    .find(|t| t.id == track_id)
+                    .or_else(|| self.queue.tracks().iter().find(|t| t.id == track_id))
+                    .cloned()
+                {
+                    let cur_liked = target.liked;
+                    let next_liked = !cur_liked;
+                    let mut saved = target;
+                    saved.liked = next_liked;
+                    if let Some(db) = &mut self.db {
+                        let _ = db.upsert_tracks(std::slice::from_ref(&saved));
+                        let _ = db.set_track_liked(&saved.id, next_liked);
+                    }
+                    if let Some(slot) = self.all_tracks.iter_mut().find(|t| t.id == saved.id) {
+                        slot.liked = next_liked;
+                    } else {
+                        self.all_tracks.push(saved.clone());
+                    }
+                    self.queue.set_track_liked(&saved.id, next_liked);
+                    self.sync_controls_from_state(cx);
+                    self.rebuild_library_views(cx);
+                }
+            }
+            RemoteAction::PlayNextTrack(entry) => {
+                if let Some(track) = self.hydrate_connect_tracks(vec![entry]).into_iter().next() {
+                    self.queue.insert_play_next(track);
+                    self.sync_next_deck_to_engine();
+                    self.prefetch_next_online_track();
+                    self.refresh_right_sidebar(cx);
+                }
+            }
+            RemoteAction::AppendQueueTrack(entry) => {
+                if let Some(track) = self.hydrate_connect_tracks(vec![entry]).into_iter().next() {
+                    self.queue.append_single_to_end(track);
+                    self.sync_next_deck_to_engine();
+                    self.refresh_right_sidebar(cx);
+                }
+            }
+            RemoteAction::RemoveQueueAt(offset) => {
+                if self.queue.remove_upcoming(offset).is_some() {
+                    self.sync_next_deck_to_engine();
+                    self.refresh_right_sidebar(cx);
+                }
+            }
+            RemoteAction::ClearUpNext => {
+                if let Some(cur) = self.queue.current().cloned() {
+                    self.queue.set_tracks(vec![cur], Some(0));
+                } else {
+                    self.queue.set_tracks(Vec::new(), None);
+                }
+                self.sync_next_deck_to_engine();
                 self.refresh_right_sidebar(cx);
             }
             RemoteAction::TransferActiveSpeaker { .. } | RemoteAction::SetSimulcastMode { .. } => {}
@@ -15078,17 +15327,29 @@ impl App {
                     cx.redraw_all();
                 }
                 TrayEvent::TogglePlayPause => {
-                    if let Some(a) = &self.audio {
+                    if self.is_controlling_remote() {
+                        if let Some(engine) = &self.connect_engine {
+                            engine.send_remote_action(RemoteAction::TogglePlayPause);
+                        }
+                    } else if let Some(a) = &self.audio {
                         a.send(EngineCommand::TogglePlayPause);
                     }
                 }
                 TrayEvent::NextTrack => {
-                    if let Some(next) = self.queue.next_track_manual().cloned() {
+                    if self.is_controlling_remote() {
+                        if let Some(engine) = &self.connect_engine {
+                            engine.send_remote_action(RemoteAction::SkipNext);
+                        }
+                    } else if let Some(next) = self.queue.next_track_manual().cloned() {
                         self.play_track(cx, next);
                     }
                 }
                 TrayEvent::PrevTrack => {
-                    if let Some(prev) = self.queue.prev_track().cloned() {
+                    if self.is_controlling_remote() {
+                        if let Some(engine) = &self.connect_engine {
+                            engine.send_remote_action(RemoteAction::SkipPrev);
+                        }
+                    } else if let Some(prev) = self.queue.prev_track().cloned() {
                         self.play_track(cx, prev);
                     }
                 }
@@ -16351,7 +16612,9 @@ impl App {
         }
 
         // 6. Audio Telemetry, Device Hot-Swap Recovery, Zero-Gap Crossfade Auto-Transition, Prefetch, Video Sync & Spectrum
-        if let Some(audio) = &mut self.audio {
+        if !self.is_controlling_remote()
+            && let Some(audio) = &mut self.audio
+        {
             audio.poll_device_recovery();
         }
         if let Some(audio) = &self.audio {
@@ -18027,14 +18290,22 @@ impl App {
             self.copy_queue_tracklist(cx);
         }
         if self.ui.button(id!(rs_clear_btn)).clicked(actions) {
-            if let Some(cur) = self.queue.current().cloned() {
-                self.queue.set_tracks(vec![cur], Some(0));
+            if self.is_controlling_remote() {
+                if let Some(engine) = &self.connect_engine {
+                    engine.send_remote_action(RemoteAction::ClearUpNext);
+                }
+                self.show_toast(cx, "Up next queue cleared");
             } else {
-                self.queue.set_tracks(Vec::new(), None);
+                if let Some(cur) = self.queue.current().cloned() {
+                    self.queue.set_tracks(vec![cur], Some(0));
+                } else {
+                    self.queue.set_tracks(Vec::new(), None);
+                }
+                self.sync_next_deck_to_engine();
+                self.refresh_right_sidebar(cx);
+                self.push_connect_playback_snapshot();
+                self.show_toast(cx, "Up next queue cleared");
             }
-            self.sync_next_deck_to_engine();
-            self.refresh_right_sidebar(cx);
-            self.show_toast(cx, "Up next queue cleared");
         }
         // History clicks in Right Sidebar
         let cur_id = self.queue.current().map(|t| t.id.clone());
@@ -18105,9 +18376,12 @@ impl App {
                 continue;
             }
             if rv.button(id!(rm_btn)).clicked(actions) {
-                if !self.is_controlling_remote()
-                    && let Some(removed) = self.queue.remove_upcoming(i)
-                {
+                if self.is_controlling_remote() {
+                    if let Some(engine) = &self.connect_engine {
+                        engine.send_remote_action(RemoteAction::RemoveQueueAt(i));
+                    }
+                    self.show_toast(cx, "Removed track from remote queue");
+                } else if let Some(removed) = self.queue.remove_upcoming(i) {
                     self.sync_next_deck_to_engine();
                     self.refresh_right_sidebar(cx);
                     self.push_connect_playback_snapshot();
@@ -19741,17 +20015,35 @@ impl App {
             } else if self.ui.button(id!(tm_play_next_btn)).clicked(actions) {
                 self.close_track_menu(cx);
                 let title = clip_text(&target.title, 22);
-                self.queue.insert_play_next(target);
-                self.sync_next_deck_to_engine();
-                self.prefetch_next_online_track();
-                self.refresh_right_sidebar(cx);
+                if self.is_controlling_remote() {
+                    if let Some(engine) = &self.connect_engine {
+                        engine.send_remote_action(RemoteAction::PlayNextTrack(
+                            QueueEntry::from_track(&target),
+                        ));
+                    }
+                } else {
+                    self.queue.insert_play_next(target);
+                    self.sync_next_deck_to_engine();
+                    self.prefetch_next_online_track();
+                    self.refresh_right_sidebar(cx);
+                    self.push_connect_playback_snapshot();
+                }
                 self.show_toast(cx, &format!("Playing next: '{title}'"));
             } else if self.ui.button(id!(tm_add_queue_btn)).clicked(actions) {
                 self.close_track_menu(cx);
                 let title = clip_text(&target.title, 22);
-                self.queue.append_single_to_end(target);
-                self.sync_next_deck_to_engine();
-                self.refresh_right_sidebar(cx);
+                if self.is_controlling_remote() {
+                    if let Some(engine) = &self.connect_engine {
+                        engine.send_remote_action(RemoteAction::AppendQueueTrack(
+                            QueueEntry::from_track(&target),
+                        ));
+                    }
+                } else {
+                    self.queue.append_single_to_end(target);
+                    self.sync_next_deck_to_engine();
+                    self.refresh_right_sidebar(cx);
+                    self.push_connect_playback_snapshot();
+                }
                 self.show_toast(cx, &format!("Added '{title}' to end of queue"));
             } else if self.ui.button(id!(tm_radio_btn)).clicked(actions) {
                 self.close_track_menu(cx);

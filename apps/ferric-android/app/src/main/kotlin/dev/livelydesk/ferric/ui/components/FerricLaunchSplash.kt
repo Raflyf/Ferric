@@ -40,7 +40,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * Sleek Auralys-inspired cold launch reveal animation built with authentic Ferric Type-I Cassette
+ * Sleek cold launch reveal animation built with authentic Ferric Type-I Cassette
  * copper geometry. Combines staggered icon motion + fade-in with sequential character reveal
  * (~1.4s hold + smooth 380ms dissolve) before detaching completely from Composition.
  */

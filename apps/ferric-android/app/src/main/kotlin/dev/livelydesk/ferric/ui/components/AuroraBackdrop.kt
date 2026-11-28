@@ -55,8 +55,8 @@ fun AuroraBackdrop(
     androidx.compose.runtime.LaunchedEffect(animate) {
         if (!animate) return@LaunchedEffect
         while (true) {
-            kotlinx.coroutines.delay(64L)
-            phaseState.floatValue = ((phaseState.floatValue + 0.022f) % (2.0 * PI)).toFloat()
+            kotlinx.coroutines.delay(80L)
+            phaseState.floatValue = ((phaseState.floatValue + 0.025f) % (2.0 * PI)).toFloat()
         }
     }
 

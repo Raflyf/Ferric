@@ -428,15 +428,14 @@ impl LanDiscoveryBeacon {
             return false;
         }
 
-        let src_ip_str = src_ip.to_string();
+        let existing_matches_src = |addr_str: &str| {
+            addr_str
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|sa| sa.ip() == src_ip)
+        };
         if let Some(existing) = self.peers.get(clean_id) {
-            let existing_ip = existing
-                .addr
-                .rsplit_once(':')
-                .map(|(ip, _)| ip)
-                .unwrap_or("");
             let is_fresh = now_ms.saturating_sub(existing.last_seen_ms) <= PEER_STALE_TIMEOUT_MS;
-            if existing_ip != src_ip_str {
+            if !existing_matches_src(&existing.addr) {
                 if !authenticated && is_fresh && self.connected_peers.contains(clean_id) {
                     return false;
                 }
@@ -447,9 +446,7 @@ impl LanDiscoveryBeacon {
                         .filter(|(id, p)| {
                             id.as_str() != clean_id
                                 && now_ms.saturating_sub(p.last_seen_ms) <= PEER_STALE_TIMEOUT_MS
-                                && p.addr
-                                    .rsplit_once(':')
-                                    .is_some_and(|(ip, _)| ip == src_ip_str)
+                                && existing_matches_src(&p.addr)
                         })
                         .count();
                     if same_ip_count >= MAX_PEERS_PER_IP {
@@ -463,9 +460,7 @@ impl LanDiscoveryBeacon {
                 .values()
                 .filter(|p| {
                     now_ms.saturating_sub(p.last_seen_ms) <= PEER_STALE_TIMEOUT_MS
-                        && p.addr
-                            .rsplit_once(':')
-                            .is_some_and(|(ip, _)| ip == src_ip_str)
+                        && existing_matches_src(&p.addr)
                 })
                 .count();
             if same_ip_count >= MAX_PEERS_PER_IP {
@@ -487,7 +482,7 @@ impl LanDiscoveryBeacon {
         } else {
             FERRIC_LAN_UDP_PORT
         };
-        let peer_addr = format!("{src_ip_str}:{effective_port}");
+        let peer_addr = std::net::SocketAddr::new(src_ip, effective_port).to_string();
         let device_name = sanitize_device_name(raw_name);
 
         let prev = self.peers.get(clean_id);

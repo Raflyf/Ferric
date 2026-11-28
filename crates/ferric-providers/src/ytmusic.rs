@@ -2401,10 +2401,7 @@ pub fn fetch_rich_home(
         let mut qp_seen: HashSet<String> = HashSet::with_capacity(32);
         let mut clean_picks = Vec::with_capacity(32);
         for t in raw_home_picks {
-            if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
-                || contains_ascii_icase(&t.album, b"watching")
-                || contains_ascii_icase(&t.artist, b"watching")
-            {
+            if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms) {
                 continue;
             }
             if !allow_indonesian
@@ -2593,11 +2590,8 @@ pub fn fetch_home_continuation(
     if let Ok(root) = cont_res {
         visitor_data = extract_visitor_data(&root, &session.visitor_data);
         collect_home_shelves(&root, &mut quick_picks, &mut seen_tracks, &mut shelves);
-        quick_picks.retain(|t| {
-            !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
-                && !contains_ascii_icase(&t.album, b"watching")
-                && !contains_ascii_icase(&t.artist, b"watching")
-        });
+        quick_picks
+            .retain(|t| !is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms));
         all_tracks.extend(quick_picks.iter().cloned());
         collect_music_items(
             &root,
@@ -2645,9 +2639,7 @@ pub fn fetch_home_continuation(
             let mut qp_set: HashSet<String> = quick_picks.iter().map(|q| q.id.clone()).collect();
             let mut all_set: HashSet<String> = all_tracks.iter().map(|a| a.id.clone()).collect();
             for t in res.tracks.into_iter().take(12) {
-                if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms)
-                    || contains_ascii_icase(&t.album, b"watching")
-                {
+                if is_low_quality_radio_candidate(&t.title, &t.artist, "", t.duration_ms) {
                     continue;
                 }
                 if qp_set.insert(t.id.clone()) && quick_picks.len() < 24 {
@@ -4924,16 +4916,16 @@ fn score_music_video_candidate(
 
     if track_duration_ms > 0 && cand.duration_ms > 0 {
         let diff_ms = track_duration_ms.abs_diff(cand.duration_ms);
-        if diff_ms <= 8_000 {
-            score += 45;
-        } else if diff_ms <= 22_000 {
-            score += 18;
-        } else if diff_ms <= 45_000 {
-            score -= 10;
-        } else if diff_ms <= 90_000 {
-            score -= 90;
+        if diff_ms <= 4_000 {
+            score += 55;
+        } else if diff_ms <= 8_000 {
+            score += 25;
+        } else if diff_ms <= 14_000 {
+            score -= 20;
+        } else if diff_ms <= 25_000 {
+            score -= 110;
         } else {
-            score -= 220;
+            score -= 240;
         }
     }
 
@@ -5196,6 +5188,21 @@ pub fn resolve_music_video_streams(
             && let Ok(streams) = extract_video_streams_from_player(&root)
             && !is_static_art_track(&root, &streams)
         {
+            if fallback_art.is_some() && track_duration_ms > 0 {
+                let omv_dur_ms = if cand.duration_ms > 0 {
+                    cand.duration_ms
+                } else {
+                    root.pointer("/videoDetails/lengthSeconds")
+                        .and_then(Value::as_str)
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(|s| s.saturating_mul(1_000))
+                        .unwrap_or(0)
+                };
+                // Avoid swapping to an OMV whose intro/skit shifts audio sync past 10s when an Art Track matches.
+                if omv_dur_ms > 0 && track_duration_ms.abs_diff(omv_dur_ms) > 10_000 {
+                    continue;
+                }
+            }
             return Ok(ResolvedVideoStreams {
                 video_id: cand.video_id,
                 is_official_mv: true,
@@ -5720,8 +5727,41 @@ pub fn collect_music_items(
     }
 }
 
+fn is_live_viewer_badge(subtitle: &str) -> bool {
+    if ferric_core::text::contains_ascii_icase(subtitle, "watching now") {
+        return true;
+    }
+    let bytes = subtitle.as_bytes();
+    for needle in [b"watching".as_slice(), b"waiting".as_slice()] {
+        let nlen = needle.len();
+        if bytes.len() <= nlen {
+            continue;
+        }
+        for i in 0..=bytes.len() - nlen {
+            if bytes[i..i + nlen].eq_ignore_ascii_case(needle) {
+                let prefix = &subtitle[..i];
+                let before_token = prefix.trim_end();
+                if before_token
+                    .as_bytes()
+                    .last()
+                    .is_some_and(|b| b.is_ascii_digit() || matches!(b, b'K' | b'k' | b'M' | b'm'))
+                {
+                    let word = before_token
+                        .split(|c: char| c.is_whitespace() || c == '•' || c == '·')
+                        .next_back()
+                        .unwrap_or("");
+                    if word.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn is_non_music_subtitle(subtitle: &str) -> bool {
-    ferric_core::text::contains_ascii_icase(subtitle, "watching")
+    is_live_viewer_badge(subtitle)
         || ferric_core::text::contains_ascii_icase(subtitle, "live now")
         || ferric_core::text::contains_ascii_icase(subtitle, "livestream")
         || ferric_core::text::starts_with_ascii_icase(subtitle, "episode •")
@@ -5993,7 +6033,6 @@ fn collect_home_shelves(
                     for entry in contents {
                         if let Some(resp) = entry.get("musicResponsiveListItemRenderer")
                             && let Some(track) = parse_responsive_item(resp, &shelf_title)
-                            && !ferric_core::text::contains_ascii_icase(&track.album, "watching")
                             && seen_tracks
                                 .insert(track.youtube_video_id.clone().unwrap_or_default())
                         {
@@ -6001,10 +6040,6 @@ fn collect_home_shelves(
                         }
                         if let Some(two_row) = entry.get("musicTwoRowItemRenderer") {
                             if let Some(track) = parse_two_row_song(two_row, &shelf_title)
-                                && !ferric_core::text::contains_ascii_icase(
-                                    &track.album,
-                                    "watching",
-                                )
                                 && seen_tracks
                                     .insert(track.youtube_video_id.clone().unwrap_or_default())
                             {

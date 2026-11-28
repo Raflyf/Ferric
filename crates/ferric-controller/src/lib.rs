@@ -584,11 +584,42 @@ impl FerricController {
         ))
     }
 
+    fn persist_resolved_metadata(
+        db: &mut LibraryDb,
+        track: &Track,
+        vid: Option<&str>,
+        duration_ms: u64,
+    ) {
+        let needs_vid = track.youtube_video_id.is_none() && vid.is_some();
+        let needs_dur = track.duration_ms == 0 && duration_ms > 0;
+        if !needs_vid && !needs_dur {
+            return;
+        }
+        if let Ok(mut db_track) = db
+            .get_track_by_id(&track.id)
+            .map(|o| o.unwrap_or_else(|| track.clone()))
+        {
+            if db_track.youtube_video_id.is_none() {
+                db_track.youtube_video_id = vid.map(str::to_owned);
+            }
+            if db_track.duration_ms == 0 && duration_ms > 0 {
+                db_track.duration_ms = duration_ms;
+            }
+            let _ = db.upsert_tracks(std::slice::from_ref(&db_track));
+        }
+    }
+
     fn resolve_online_track_worker(self: &Arc<Self>, track: Track, gen_id: u64) {
         match self.resolve_stream_path_blocking(&track) {
             Ok((path, vid, codec, bitrate_kbps, duration_ms)) => {
                 let (is_still_current, pending_seek, was_paused, updated_cur) = {
                     let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    Self::persist_resolved_metadata(
+                        &mut st.db,
+                        &track,
+                        vid.as_deref(),
+                        duration_ms,
+                    );
                     st.queue.update_track_cached_stream(
                         &track.id,
                         path.clone(),
@@ -692,6 +723,12 @@ impl FerricController {
                 {
                     let still_relevant = {
                         let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
+                        Self::persist_resolved_metadata(
+                            &mut st.db,
+                            &candidate,
+                            vid.as_deref(),
+                            duration_ms,
+                        );
                         st.queue.update_track_cached_stream(
                             &candidate.id,
                             path,
@@ -831,6 +868,10 @@ impl FerricController {
             self.forward_remote_action(ferric_sync::RemoteAction::Pause);
             return;
         }
+        self.pause_local_only();
+    }
+
+    pub(crate) fn pause_local_only(&self) {
         {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.paused_while_resolving = true;
@@ -994,7 +1035,27 @@ impl FerricController {
                 .filter(|a| !a.is_empty())
                 .collect();
 
-            let lib = st.db.list_tracks("").unwrap_or_default();
+            let mut lib = st.db.list_liked_tracks().unwrap_or_default();
+            let mut seen_lib: HashSet<String> = lib.iter().map(|t| t.id.clone()).collect();
+            for t in st
+                .db
+                .list_tracks_by_ids(&st.session.recent_track_ids)
+                .unwrap_or_default()
+            {
+                if seen_lib.insert(t.id.clone()) {
+                    lib.push(t);
+                }
+            }
+            if lib.len() < 40 {
+                for t in st.db.list_local_tracks().unwrap_or_default() {
+                    if seen_lib.insert(t.id.clone()) {
+                        lib.push(t);
+                    }
+                    if lib.len() >= 120 {
+                        break;
+                    }
+                }
+            }
             st.extend_queue_gen = st.extend_queue_gen.wrapping_add(1);
             st.is_extending_queue = true;
             (
@@ -1350,6 +1411,16 @@ impl FerricController {
         st.db.shrink_memory();
     }
 
+    /// Query GitHub Releases for a newer stable Ferric version relative to `current_version`.
+    pub fn check_latest_release(
+        &self,
+        current_version: &str,
+    ) -> Result<Option<(String, String, String, String)>, String> {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let found = ferric_providers::updater::check_latest_release(current_version, &cancel)?;
+        Ok(found.map(|r| (r.tag, r.version, r.release_url, r.summary)))
+    }
+
     /// Flush session resume state, stop background monitor thread, and tear down audio cleanly.
     pub fn shutdown(&self) {
         self.monitor_sync
@@ -1484,7 +1555,7 @@ impl FerricController {
         }
 
         if sleep_expired {
-            self.pause();
+            self.pause_local_only();
             self.sink
                 .on_toast("Sleep timer finished; playback paused".to_string());
         }

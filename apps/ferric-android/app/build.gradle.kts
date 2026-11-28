@@ -14,8 +14,8 @@ android {
         applicationId = "dev.livelydesk.ferric"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.2"
+        versionCode = 2
+        versionName = "0.1.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -39,8 +39,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = signingConfigs.findByName("release")
-                ?: signingConfigs.getByName("debug")
+            val releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning == null && System.getenv("CI")?.isNotBlank() == true) {
+                error("CI release builds require FERRIC_KEYSTORE_PATH / keystore secrets.")
+            }
+            signingConfig = releaseSigning ?: signingConfigs.getByName("debug")
         }
         debug {
             applicationIdSuffix = ".debug"

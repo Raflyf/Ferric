@@ -101,6 +101,12 @@ pub struct SubsonicCredentials {
     pub password: String,
 }
 
+impl Drop for SubsonicCredentials {
+    fn drop(&mut self) {
+        ferric_core::secrets::zeroize_string(&mut self.password);
+    }
+}
+
 impl std::fmt::Debug for SubsonicCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubsonicCredentials")
@@ -650,13 +656,75 @@ fn map_subsonic_song(song: SubsonicSong) -> Option<Track> {
     })
 }
 
+const MAX_SUBSONIC_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+
+fn redact_subsonic_url_error(err: &str) -> String {
+    match err.find('?') {
+        Some(q) => {
+            let tail = &err[q..];
+            let end = tail
+                .find(|c: char| c.is_whitespace() || c == ')' || c == ']' || c == '"')
+                .unwrap_or(tail.len());
+            format!("{}?[REDACTED]{}", &err[..q], &tail[end..])
+        }
+        None => err.to_string(),
+    }
+}
+
+fn prune_subsonic_cache_lru(cache_dir: &std::path::Path, max_bytes: u64, keep: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    let mut files: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("subsonic_") || name.ends_with(".part") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let size = meta.len();
+        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        total = total.saturating_add(size);
+        files.push((path, size, mtime));
+    }
+    if total <= max_bytes {
+        return;
+    }
+    files.sort_by_key(|(_, _, mtime)| *mtime);
+    for (path, size, _) in files {
+        if total <= max_bytes {
+            break;
+        }
+        if path == keep {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
 fn fetch_subsonic_response(agent: &ureq::Agent, url: &str) -> ProviderResult<SubsonicResponseBody> {
     let resp = agent
         .get(url)
         .header("Accept", "application/json")
         .header("User-Agent", concat!("Ferric/", env!("CARGO_PKG_VERSION")))
         .call()
-        .map_err(|e| ProviderError::Http(format!("Subsonic request failed: {e}")))?;
+        .map_err(|e| {
+            ProviderError::Http(format!(
+                "Subsonic request failed: {}",
+                redact_subsonic_url_error(&e.to_string())
+            ))
+        })?;
 
     let status = resp.status().as_u16();
     let bytes = resp
@@ -878,7 +946,12 @@ pub fn download_and_cache_subsonic_stream(
         .get(&url)
         .header("User-Agent", concat!("Ferric/", env!("CARGO_PKG_VERSION")))
         .call()
-        .map_err(|e| ProviderError::Http(format!("Subsonic stream request failed: {e}")))?;
+        .map_err(|e| {
+            ProviderError::Http(format!(
+                "Subsonic stream request failed: {}",
+                redact_subsonic_url_error(&e.to_string())
+            ))
+        })?;
 
     let status = resp.status().as_u16();
     if status != 200 {
@@ -940,6 +1013,8 @@ pub fn download_and_cache_subsonic_stream(
         let _ = std::fs::remove_file(&dest_path);
         std::fs::rename(&part_path, &dest_path).map_err(|_| err)?;
     }
+
+    prune_subsonic_cache_lru(cache_dir, MAX_SUBSONIC_CACHE_BYTES, &dest_path);
 
     Ok(CachedSubsonicStream {
         path: dest_path,

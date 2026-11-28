@@ -40,7 +40,8 @@ pub const DEFAULT_RELAY_BROKERS: &[&str] = &[
 ];
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
-const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(25);
+const SOCKET_READ_TIMEOUT_FG: Duration = Duration::from_millis(45);
+const SOCKET_READ_TIMEOUT_BG: Duration = Duration::from_millis(320);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(4);
 const MQTT_KEEPALIVE_SECS: u16 = 25;
 const PING_INTERVAL: Duration = Duration::from_secs(10);
@@ -73,7 +74,7 @@ pub struct RelayEnvelope {
     pub frame: SyncFrame,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayRoomSpec {
     pub slot: MatchedRoomSlot,
     pub key: RoomKey,
@@ -102,6 +103,7 @@ pub enum RelayEvent {
 
 enum RelayCmd {
     UpdateRooms(Vec<RelayRoomSpec>),
+    SetForeground(bool),
     Publish {
         topic: String,
         room_key: RoomKey,
@@ -345,6 +347,10 @@ impl RelayClient {
         let _ = self.cmd_tx.send(RelayCmd::UpdateRooms(rooms));
     }
 
+    pub fn set_foreground(&self, foreground: bool) {
+        let _ = self.cmd_tx.send(RelayCmd::SetForeground(foreground));
+    }
+
     pub fn publish_envelope(&self, topic: &str, room_key: RoomKey, envelope: RelayEnvelope) {
         let _ = self.cmd_tx.send(RelayCmd::Publish {
             topic: topic.to_string(),
@@ -495,7 +501,11 @@ fn dial_mqtt_websocket(
         }
         match ws.read() {
             Ok(Message::Binary(bytes)) => {
-                if bytes.len() >= 4 && (bytes[0] & 0xF0) == MQTT_CONNACK && bytes[3] == 0 {
+                if bytes.len() >= 4
+                    && (bytes[0] & 0xF0) == MQTT_CONNACK
+                    && bytes[1] == 2
+                    && bytes[3] == 0
+                {
                     break;
                 }
                 return Err(SyncError::AuthFailed);
@@ -515,16 +525,19 @@ fn dial_mqtt_websocket(
         }
     }
 
-    match ws.get_ref() {
-        RelayTransportStream::Plain(s) => {
-            let _ = s.set_read_timeout(Some(SOCKET_READ_TIMEOUT));
-        }
-        RelayTransportStream::Tls(s) => {
-            let _ = s.get_ref().set_read_timeout(Some(SOCKET_READ_TIMEOUT));
-        }
-    }
+    let _ = apply_ws_read_timeout(&mut ws, SOCKET_READ_TIMEOUT_FG);
 
     Ok(ws)
+}
+
+fn apply_ws_read_timeout(
+    ws: &mut WebSocket<RelayTransportStream>,
+    timeout: Duration,
+) -> io::Result<()> {
+    match ws.get_ref() {
+        RelayTransportStream::Plain(s) => s.set_read_timeout(Some(timeout)),
+        RelayTransportStream::Tls(s) => s.get_ref().set_read_timeout(Some(timeout)),
+    }
 }
 
 fn relay_worker_loop(
@@ -540,10 +553,10 @@ fn relay_worker_loop(
         return;
     };
     let mut epoch_salt = [0u8; 16];
-    csprng_fill(&mut epoch_salt);
-    let mut tx_seq = 1u64;
+    let mut tx_seq: u64;
     let mut packet_id_seq = 1u16;
     let mut rooms: Vec<RelayRoomSpec> = Vec::new();
+    let mut foreground = true;
     let mut replay_guard = ReplayGuard::new();
     let mut broker_idx = 0usize;
     let mut fail_streak = 0u32;
@@ -568,20 +581,27 @@ fn relay_worker_loop(
                 RelayCmd::UpdateRooms(next_rooms) => {
                     rooms = next_rooms;
                 }
+                RelayCmd::SetForeground(fg) => {
+                    foreground = fg;
+                }
                 RelayCmd::Publish { .. } => {}
             }
         }
 
         if rooms.is_empty() || endpoints.is_empty() {
             set_status(false, "");
-            match cmd_rx.recv_timeout(Duration::from_millis(350)) {
+            match cmd_rx.recv() {
                 Ok(RelayCmd::Shutdown) => break 'outer,
                 Ok(RelayCmd::UpdateRooms(next_rooms)) => rooms = next_rooms,
-                _ => {}
+                Ok(RelayCmd::SetForeground(fg)) => foreground = fg,
+                Ok(RelayCmd::Publish { .. }) => {}
+                Err(_) => break 'outer,
             }
             continue;
         }
 
+        csprng_fill(&mut epoch_salt);
+        tx_seq = 1;
         let ep = &endpoints[broker_idx % endpoints.len()];
         let lwt_will = build_lwt_will(&local_device_id, &rooms);
         let Ok(mut ws) = dial_mqtt_websocket(ep, &tls_cfg, lwt_will.as_ref()) else {
@@ -593,23 +613,39 @@ fn relay_worker_loop(
             set_status(false, "");
             let wait_until = Instant::now() + backoff;
             backoff = (backoff * 2).min(RECONNECT_MAX_BACKOFF);
-            while Instant::now() < wait_until && !shutdown.load(Ordering::Acquire) {
-                match cmd_rx.recv_timeout(Duration::from_millis(180)) {
+            while !shutdown.load(Ordering::Acquire) {
+                let Some(rem) = wait_until.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                match cmd_rx.recv_timeout(rem) {
                     Ok(RelayCmd::Shutdown) => break 'outer,
                     Ok(RelayCmd::UpdateRooms(next_rooms)) => {
-                        let had_none = rooms.is_empty();
+                        let changed = next_rooms != rooms;
                         rooms = next_rooms;
-                        if had_none && !rooms.is_empty() {
+                        if changed && !rooms.is_empty() {
                             backoff = RECONNECT_MIN_BACKOFF;
                             break;
                         }
                     }
-                    _ => {}
+                    Ok(RelayCmd::SetForeground(fg)) => {
+                        foreground = fg;
+                    }
+                    Ok(RelayCmd::Publish { .. }) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break 'outer,
                 }
             }
             continue;
         };
 
+        let _ = apply_ws_read_timeout(
+            &mut ws,
+            if foreground {
+                SOCKET_READ_TIMEOUT_FG
+            } else {
+                SOCKET_READ_TIMEOUT_BG
+            },
+        );
         backoff = RECONNECT_MIN_BACKOFF;
         fail_streak = 0;
         let mut subscribed_topics: Vec<String> = rooms.iter().map(|r| r.topic.clone()).collect();
@@ -628,11 +664,24 @@ fn relay_worker_loop(
         let mut rx_buf: Vec<u8> = Vec::with_capacity(4096);
         let mut graceful_shutdown = false;
 
-        'session: while !shutdown.load(Ordering::Acquire) {
+        'session: loop {
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
                     RelayCmd::Shutdown => {
                         graceful_shutdown = true;
+                    }
+                    RelayCmd::SetForeground(fg) => {
+                        if foreground != fg {
+                            foreground = fg;
+                            let _ = apply_ws_read_timeout(
+                                &mut ws,
+                                if foreground {
+                                    SOCKET_READ_TIMEOUT_FG
+                                } else {
+                                    SOCKET_READ_TIMEOUT_BG
+                                },
+                            );
+                        }
                     }
                     RelayCmd::UpdateRooms(next_rooms) => {
                         let next_topics: Vec<String> =
@@ -906,7 +955,11 @@ fn try_pop_mqtt_packet(buf: &mut Vec<u8>) -> Option<(u8, Vec<u8>)> {
         if (b & 0x80) == 0 {
             break;
         }
-        mul *= 128;
+        let Some(next_mul) = mul.checked_mul(128) else {
+            buf.clear();
+            return None;
+        };
+        mul = next_mul;
     }
     if buf.len() < idx + rem_len {
         return None;

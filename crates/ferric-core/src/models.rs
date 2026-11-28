@@ -524,6 +524,15 @@ impl AccountSettings {
     }
 }
 
+impl Drop for AccountSettings {
+    fn drop(&mut self) {
+        self.zeroize_spotify_direct_secrets();
+        self.zeroize_spotify_web_secrets();
+        self.zeroize_youtube_secrets();
+        self.zeroize_subsonic_secrets();
+    }
+}
+
 /// Persistent offline download metadata stored in `filesDir/ferric/offline_downloads/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OfflineDownloadRecord {
@@ -1046,10 +1055,15 @@ fn sanitize_m3u_local_path(raw_line: &str, base_dir: Option<&std::path::Path>) -
         p
     };
 
-    if let Ok(meta) = std::fs::symlink_metadata(&resolved)
-        && meta.file_type().is_symlink()
-    {
-        return None;
+    let mut check_prefix = PathBuf::new();
+    for comp in resolved.components() {
+        check_prefix.push(comp);
+        if matches!(comp, Component::Normal(_))
+            && let Ok(meta) = std::fs::symlink_metadata(&check_prefix)
+            && meta.file_type().is_symlink()
+        {
+            return None;
+        }
     }
     if let Ok(canon) = std::fs::canonicalize(&resolved) {
         let canon_str = canon.to_string_lossy();

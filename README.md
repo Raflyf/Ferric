@@ -90,8 +90,8 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 
 | Package | Best for |
 | :--- | :--- |
-| [Windows installer (`ferricsetup-v0.1.2.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.2.msi>) | Per-user installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
-| [Portable ZIP (`Ferric-v0.1.2-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.2-windows-x86_64.zip>) | Running without installation |
+| [Windows installer (`ferricsetup-v0.1.3.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.3.msi>) | Per-user installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
+| [Portable ZIP (`Ferric-v0.1.3-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.3-windows-x86_64.zip>) | Running without installation |
 | [SHA-256 checksums (`SHA256SUMS.txt`)](<https://github.com/Raflyf/Ferric/releases/latest/download/SHA256SUMS.txt>) | Verifying installer and portable archive integrity before running |
 
 **Requirements:** Windows 10 or Windows 11 on a 64-bit (`x86_64`) PC. No administrator rights are required. Native Windows Acrylic backdrop works best on Windows 11.
@@ -130,7 +130,7 @@ Optional support via [Buy me a coffee](<https://yapp.ink/raflyf>) or [Saweria](<
 
 ## Code signing policy
 
-Ferric releases (including `v0.1.2`) are currently **unsigned** (no Authenticode code-signing certificate is active). Windows Defender SmartScreen may show an unknown-publisher warning on new releases. All official installers, portable archives, and `SHA256SUMS.txt` manifests are compiled transparently from public source via [GitHub Actions](<.github/workflows/release.yml>). Always download from [GitHub Releases](<https://github.com/Raflyf/Ferric/releases>), verify SHA-256 digests before installing, and keep Windows security protections enabled.
+Ferric releases (including `v0.1.3`) are currently **unsigned** (no Authenticode code-signing certificate is active). Windows Defender SmartScreen may show an unknown-publisher warning on new releases. All official installers, portable archives, and `SHA256SUMS.txt` manifests are compiled transparently from public source via [GitHub Actions](<.github/workflows/release.yml>). Always download from [GitHub Releases](<https://github.com/Raflyf/Ferric/releases>), verify SHA-256 digests before installing, and keep Windows security protections enabled.
 
 ## Privacy policy
 

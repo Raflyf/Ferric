@@ -465,7 +465,7 @@ fun Modifier.ferricLiquidGlass(
     val shape = RoundedCornerShape(cornerRadius)
     val opacityNorm = palette.glassOpacity.coerceIn(0.15f, 0.95f)
 
-    // Clear smoked crystal optics matching Auralys: underlying colors shine cleanly through with
+    // Clear smoked crystal optics: underlying colors shine cleanly through with
     // zero chalky white milk wash while white typography & icons stay razor-sharp.
     val anchorAlpha = when {
         anchorAlphaOverride != null -> anchorAlphaOverride.coerceIn(0f, 0.85f)

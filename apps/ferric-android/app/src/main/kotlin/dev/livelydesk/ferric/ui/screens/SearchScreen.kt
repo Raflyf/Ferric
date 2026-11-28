@@ -284,7 +284,7 @@ fun SearchScreen(
                     }
                 }
 
-                // Segmented Online | Device scope pill (Auralys signature!)
+                // Segmented Online | Device scope pill
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

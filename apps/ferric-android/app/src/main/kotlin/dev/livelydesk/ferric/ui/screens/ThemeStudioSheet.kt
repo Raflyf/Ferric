@@ -116,7 +116,7 @@ fun ThemeStudioSheet(
         ) {
             Text("Theme & Visual Studio", style = MaterialTheme.typography.titleLarge, color = palette.textPrimary)
             Text(
-                "100% compatible with Ferric Desktop v0.1.2 .ferric-theme.json files.",
+                "100% compatible with Ferric Desktop v0.1.3 .ferric-theme.json files.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = palette.textSecondary,
             )

@@ -2,8 +2,9 @@
 //! Relay runtime shared identically by Ferric Android (`ferric-controller`) and Ferric Desktop.
 
 use crate::crypto::{
-    AeadChannel, AeadReceiver, AeadSender, LocalRoomKeys, MatchedRoomSlot, compute_handshake_mac,
-    ct_eq, decode_room_tags_hex, derive_qr_room, derive_relay_topic, encode_room_tags_hex,
+    AeadChannel, AeadReceiver, AeadSender, LocalRoomKeys, MatchedRoomSlot, RoomKey,
+    compute_handshake_mac, ct_eq, decode_room_tags_hex, derive_qr_room, derive_relay_topic,
+    encode_room_tags_hex,
 };
 use crate::lan::{
     DiscoveredPeer, LanDiscoveryBeacon, detect_local_lan_ip, is_lan_or_loopback,
@@ -28,14 +29,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HANDSHAKE_MAGIC: &[u8; 4] = b"FCH1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const BEACON_INTERVAL: Duration = Duration::from_secs(3);
-const RELAY_HELLO_INTERVAL: Duration = Duration::from_secs(5);
-const RELAY_PEER_TTL: Duration = Duration::from_secs(14);
+const RELAY_HELLO_INTERVAL: Duration = Duration::from_secs(4);
+const RELAY_PEER_TTL: Duration = Duration::from_secs(10);
 const RELAY_STATE_HEARTBEAT: Duration = Duration::from_millis(3_500);
-const LAN_PING_INTERVAL: Duration = Duration::from_secs(5);
-const LAN_READ_TIMEOUT: Duration = Duration::from_secs(12);
-const PENDING_TAKEOVER_TIMEOUT: Duration = Duration::from_millis(2_200);
+const LAN_PING_INTERVAL: Duration = Duration::from_secs(4);
+const LAN_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const PENDING_TAKEOVER_TIMEOUT: Duration = Duration::from_millis(1_200);
 const MAX_RELAY_QUEUE_BYTES: usize = 44 * 1024;
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(3);
+const BG_BEACON_INTERVAL: Duration = Duration::from_secs(20);
+const BG_PING_INTERVAL: Duration = Duration::from_secs(15);
+const BG_RELAY_HELLO_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_CONNECTED_PEERS: usize = 8;
 const MAX_HANDSHAKE_ID_LEN: usize = 64;
 
@@ -174,7 +178,21 @@ enum EngineCommand {
     RegenerateQrToken {
         reply: mpsc::Sender<String>,
     },
+    SetForeground(bool),
     Shutdown,
+}
+
+enum RunnerMsg {
+    Cmd(EngineCommand),
+    Int(InternalMsg),
+}
+
+fn format_host_port(ip: &str, port: u16) -> String {
+    if ip.contains(':') && !ip.starts_with('[') {
+        format!("[{ip}]:{port}")
+    } else {
+        format!("{ip}:{port}")
+    }
 }
 
 enum InternalMsg {
@@ -259,7 +277,7 @@ pub struct ConnectEngine {
     local_device_name: String,
     local_tcp_port: u16,
     local_udp_port: u16,
-    cmd_tx: mpsc::Sender<EngineCommand>,
+    cmd_tx: mpsc::Sender<RunnerMsg>,
     latest_snapshot: Arc<Mutex<ConnectSnapshot>>,
     qr_uri: Arc<Mutex<String>>,
     shutdown_flag: Arc<AtomicBool>,
@@ -317,7 +335,7 @@ impl ConnectEngine {
             device_name: clean_name.clone(),
         };
         let initial_qr_uri =
-            initial_qr_payload.to_uri_with_addr(Some(&format!("{local_ip}:{local_tcp_port}")));
+            initial_qr_payload.to_uri_with_addr(Some(&format_host_port(&local_ip, local_tcp_port)));
 
         let initial_snapshot = ConnectSnapshot {
             local_device_id: cfg.device_id.clone(),
@@ -338,11 +356,10 @@ impl ConnectEngine {
         let latest_snapshot = Arc::new(Mutex::new(initial_snapshot));
         let qr_uri = Arc::new(Mutex::new(initial_qr_uri));
         let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (int_tx, int_rx) = mpsc::channel();
+        let (ev_tx, ev_rx) = mpsc::channel::<RunnerMsg>();
 
         if enable_lan {
-            let accept_tx = int_tx.clone();
+            let accept_tx = ev_tx.clone();
             let accept_shutdown = Arc::clone(&shutdown_flag);
             let _ = thread::Builder::new()
                 .name("ferric-conn-acc".to_string())
@@ -351,14 +368,16 @@ impl ConnectEngine {
                         match listener.accept() {
                             Ok((stream, addr)) => {
                                 if is_lan_or_loopback(addr.ip()) {
-                                    let _ = accept_tx.send(InternalMsg::IncomingTcp(stream, addr));
+                                    let _ = accept_tx.send(RunnerMsg::Int(
+                                        InternalMsg::IncomingTcp(stream, addr),
+                                    ));
                                 }
                             }
                             Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                                thread::sleep(Duration::from_millis(60));
+                                thread::sleep(Duration::from_millis(140));
                             }
                             Err(_) => {
-                                thread::sleep(Duration::from_millis(120));
+                                thread::sleep(Duration::from_millis(200));
                             }
                         }
                     }
@@ -367,12 +386,12 @@ impl ConnectEngine {
             drop(listener);
         }
 
-        let relay_tx = int_tx.clone();
+        let relay_tx = ev_tx.clone();
         let relay_client = RelayClient::start(
             cfg.device_id.clone(),
             relay_urls_override,
             Arc::new(move |ev| {
-                let _ = relay_tx.send(InternalMsg::Relay(ev));
+                let _ = relay_tx.send(RunnerMsg::Int(InternalMsg::Relay(ev)));
             }),
         );
 
@@ -382,6 +401,7 @@ impl ConnectEngine {
         let dev_id = cfg.device_id.clone();
         let dev_name = clean_name.clone();
         let dev_kind = cfg.device_kind;
+        let cmd_tx = ev_tx.clone();
 
         let handle = thread::Builder::new()
             .name("ferric-connect".to_string())
@@ -402,6 +422,7 @@ impl ConnectEngine {
                     beacon,
                     relay_client,
                     relay_connected: false,
+                    foreground: true,
                     last_relay_hello_at: None,
                     last_relay_state_at: None,
                     last_relay_state_sig: None,
@@ -420,12 +441,12 @@ impl ConnectEngine {
                     mono_epoch: Instant::now(),
                     yielded_guard_until: None,
                     pending_local_takeover: None,
-                    int_tx,
+                    int_tx: ev_tx,
                     on_event,
                     latest_snapshot: state_snap_arc,
                     qr_uri: qr_uri_arc,
                 };
-                runner.run(cmd_rx, int_rx, worker_shutdown);
+                runner.run(ev_rx, worker_shutdown);
             })?;
 
         Ok(Self {
@@ -485,16 +506,20 @@ impl ConnectEngine {
     }
 
     pub fn update_accounts(&self, spotify_user_id: String, youtube_account_id: String) {
-        let _ = self.cmd_tx.send(EngineCommand::UpdateAccounts {
-            spotify_user_id,
-            youtube_account_id,
-        });
+        let _ = self
+            .cmd_tx
+            .send(RunnerMsg::Cmd(EngineCommand::UpdateAccounts {
+                spotify_user_id,
+                youtube_account_id,
+            }));
     }
 
     pub fn update_local_playback(&self, snap: LocalPlaybackSnapshot) {
         let _ = self
             .cmd_tx
-            .send(EngineCommand::UpdateLocalPlayback(Box::new(snap)));
+            .send(RunnerMsg::Cmd(EngineCommand::UpdateLocalPlayback(
+                Box::new(snap),
+            )));
     }
 
     /// Feed a peer discovered via Android `NsdManager` / OS mDNS (`_ferric-connect._udp.local.`).
@@ -514,35 +539,45 @@ impl ConnectEngine {
             return;
         }
         let room_tags = decode_room_tags_hex(room_tags_hex);
-        let _ = self.cmd_tx.send(EngineCommand::IngestMdnsPeer {
-            device_id,
-            device_name,
-            device_kind,
-            ip,
-            tcp_port,
-            room_tags,
-        });
+        let _ = self
+            .cmd_tx
+            .send(RunnerMsg::Cmd(EngineCommand::IngestMdnsPeer {
+                device_id,
+                device_name,
+                device_kind,
+                ip,
+                tcp_port,
+                room_tags,
+            }));
     }
 
     pub fn transfer_active_speaker(&self, target_device_id: String) {
         let _ = self
             .cmd_tx
-            .send(EngineCommand::TransferActiveSpeaker { target_device_id });
+            .send(RunnerMsg::Cmd(EngineCommand::TransferActiveSpeaker {
+                target_device_id,
+            }));
     }
 
     pub fn send_remote_action(&self, action: RemoteAction) {
-        let _ = self.cmd_tx.send(EngineCommand::SendRemoteAction(action));
+        let _ = self
+            .cmd_tx
+            .send(RunnerMsg::Cmd(EngineCommand::SendRemoteAction(action)));
     }
 
     pub fn pair_with_qr_uri(&self, uri: String) {
-        let _ = self.cmd_tx.send(EngineCommand::PairWithQrUri { uri });
+        let _ = self
+            .cmd_tx
+            .send(RunnerMsg::Cmd(EngineCommand::PairWithQrUri { uri }));
     }
 
     pub fn regenerate_qr_uri(&self) -> String {
         let (tx, rx) = mpsc::channel();
         if self
             .cmd_tx
-            .send(EngineCommand::RegenerateQrToken { reply: tx })
+            .send(RunnerMsg::Cmd(EngineCommand::RegenerateQrToken {
+                reply: tx,
+            }))
             .is_ok()
             && let Ok(uri) = rx.recv_timeout(Duration::from_secs(2))
         {
@@ -551,9 +586,15 @@ impl ConnectEngine {
         self.qr_pairing_uri()
     }
 
+    pub fn set_foreground(&self, foreground: bool) {
+        let _ = self
+            .cmd_tx
+            .send(RunnerMsg::Cmd(EngineCommand::SetForeground(foreground)));
+    }
+
     pub fn shutdown(&self) {
         self.shutdown_flag.store(true, Ordering::SeqCst);
-        let _ = self.cmd_tx.send(EngineCommand::Shutdown);
+        let _ = self.cmd_tx.send(RunnerMsg::Cmd(EngineCommand::Shutdown));
         if let Some(handle) = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = handle.join();
         }
@@ -588,6 +629,7 @@ struct EngineRunner {
     beacon: LanDiscoveryBeacon,
     relay_client: RelayClient,
     relay_connected: bool,
+    foreground: bool,
     last_relay_hello_at: Option<Instant>,
     last_relay_state_at: Option<Instant>,
     last_relay_state_sig: Option<RelayStateSig>,
@@ -606,7 +648,7 @@ struct EngineRunner {
     mono_epoch: Instant,
     yielded_guard_until: Option<Instant>,
     pending_local_takeover: Option<(String, Instant)>,
-    int_tx: mpsc::Sender<InternalMsg>,
+    int_tx: mpsc::Sender<RunnerMsg>,
     on_event: Arc<dyn Fn(ConnectEvent) + Send + Sync>,
     latest_snapshot: Arc<Mutex<ConnectSnapshot>>,
     qr_uri: Arc<Mutex<String>>,
@@ -779,30 +821,31 @@ impl EngineRunner {
         }
     }
 
-    fn run(
-        &mut self,
-        cmd_rx: mpsc::Receiver<EngineCommand>,
-        int_rx: mpsc::Receiver<InternalMsg>,
-        shutdown: Arc<AtomicBool>,
-    ) {
+    fn run(&mut self, ev_rx: mpsc::Receiver<RunnerMsg>, shutdown: Arc<AtomicBool>) {
         self.publish_snapshot();
         let mut guest_relay_armed = false;
-        let mut pending_cmd: Option<EngineCommand> = None;
+        let mut pending_msg: Option<RunnerMsg> = None;
 
         while !shutdown.load(Ordering::Relaxed) {
             let mut dirty = false;
 
-            while let Some(cmd) = pending_cmd.take().or_else(|| cmd_rx.try_recv().ok()) {
-                match cmd {
-                    EngineCommand::Shutdown => {
+            while let Some(msg) = pending_msg.take().or_else(|| ev_rx.try_recv().ok()) {
+                match msg {
+                    RunnerMsg::Cmd(EngineCommand::Shutdown) => {
                         self.send_goodbye_to_peers();
                         self.relay_client.shutdown();
                         return;
                     }
-                    EngineCommand::UpdateAccounts {
+                    RunnerMsg::Cmd(EngineCommand::SetForeground(fg)) => {
+                        if self.foreground != fg {
+                            self.foreground = fg;
+                            self.relay_client.set_foreground(fg);
+                        }
+                    }
+                    RunnerMsg::Cmd(EngineCommand::UpdateAccounts {
                         spotify_user_id,
                         youtube_account_id,
-                    } => {
+                    }) => {
                         let new_keys = LocalRoomKeys {
                             spotify: crate::crypto::derive_spotify_room(&spotify_user_id),
                             ytm: crate::crypto::derive_ytm_room(&youtube_account_id),
@@ -830,7 +873,7 @@ impl EngineRunner {
                             dirty = true;
                         }
                     }
-                    EngineCommand::UpdateLocalPlayback(snap) => {
+                    RunnerMsg::Cmd(EngineCommand::UpdateLocalPlayback(snap)) => {
                         let was_playing = self.local_playback.is_playing;
                         let prev_track = self
                             .local_playback
@@ -864,14 +907,14 @@ impl EngineRunner {
                             self.broadcast_local_state(queue_changed);
                         }
                     }
-                    EngineCommand::IngestMdnsPeer {
+                    RunnerMsg::Cmd(EngineCommand::IngestMdnsPeer {
                         device_id,
                         device_name,
                         device_kind,
                         ip,
                         tcp_port,
                         room_tags,
-                    } => {
+                    }) => {
                         if self.enable_lan {
                             let now_ms = unix_now_ms();
                             if self.beacon.ingest_mdns_peer(
@@ -888,21 +931,21 @@ impl EngineRunner {
                             }
                         }
                     }
-                    EngineCommand::TransferActiveSpeaker { target_device_id } => {
+                    RunnerMsg::Cmd(EngineCommand::TransferActiveSpeaker { target_device_id }) => {
                         self.handle_local_transfer_request(target_device_id);
                         dirty = true;
                     }
-                    EngineCommand::SendRemoteAction(action) => {
+                    RunnerMsg::Cmd(EngineCommand::SendRemoteAction(action)) => {
                         self.handle_local_remote_action(action);
                     }
-                    EngineCommand::PairWithQrUri { uri } => {
+                    RunnerMsg::Cmd(EngineCommand::PairWithQrUri { uri }) => {
                         guest_relay_armed = true;
                         self.handle_pair_qr_uri(&uri);
                         self.sync_relay_rooms(true);
                         self.last_relay_hello_at = None;
                         dirty = true;
                     }
-                    EngineCommand::RegenerateQrToken { reply } => {
+                    RunnerMsg::Cmd(EngineCommand::RegenerateQrToken { reply }) => {
                         guest_relay_armed = true;
                         let tok = csprng_hex(16);
                         self.qr_token_hex = tok.clone();
@@ -914,9 +957,9 @@ impl EngineRunner {
                             token_hex: tok,
                             device_name: self.local_device_name.clone(),
                         };
-                        let uri = payload.to_uri_with_addr(Some(&format!(
-                            "{}:{}",
-                            self.local_ip, self.local_tcp_port
+                        let uri = payload.to_uri_with_addr(Some(&format_host_port(
+                            &self.local_ip,
+                            self.local_tcp_port,
                         )));
                         {
                             let mut slot = self.qr_uri.lock().unwrap_or_else(|p| p.into_inner());
@@ -927,24 +970,19 @@ impl EngineRunner {
                         let _ = reply.send(uri);
                         dirty = true;
                     }
-                }
-            }
-
-            while let Ok(msg) = int_rx.try_recv() {
-                match msg {
-                    InternalMsg::IncomingTcp(stream, addr) => {
+                    RunnerMsg::Int(InternalMsg::IncomingTcp(stream, addr)) => {
                         if self.enable_lan {
                             self.spawn_inbound_handshake(stream, addr);
                         }
                     }
-                    InternalMsg::PeerEstablished {
+                    RunnerMsg::Int(InternalMsg::PeerEstablished {
                         device_id,
                         device_name,
                         device_kind,
                         addr,
                         conn_id,
                         writer,
-                    } => {
+                    }) => {
                         self.on_peer_established(
                             device_id,
                             device_name,
@@ -955,19 +993,22 @@ impl EngineRunner {
                         );
                         dirty = true;
                     }
-                    InternalMsg::PeerFrame { device_id, frame } => {
+                    RunnerMsg::Int(InternalMsg::PeerFrame { device_id, frame }) => {
                         if self.on_peer_frame(&device_id, frame) {
                             dirty = true;
                         }
                     }
-                    InternalMsg::PeerClosed { device_id, conn_id } => {
+                    RunnerMsg::Int(InternalMsg::PeerClosed { device_id, conn_id }) => {
                         let mut expired_snapshot = None;
                         if let Some(peer) = self.connected.get_mut(&device_id)
                             && peer.lan_conn_id == conn_id
                         {
                             peer.lan_writer = None;
                             peer.lan_addr = None;
-                            if !peer.is_connected() {
+                            let relay_recent = peer.relay_last_seen.is_some_and(|t| {
+                                self.relay_connected && t.elapsed() < Duration::from_secs(5)
+                            });
+                            if !peer.is_connected() || !relay_recent {
                                 expired_snapshot = self.connected.remove(&device_id).map(|p| {
                                     (
                                         p.device_name,
@@ -988,7 +1029,7 @@ impl EngineRunner {
                             dirty = true;
                         }
                     }
-                    InternalMsg::Relay(ev) => {
+                    RunnerMsg::Int(InternalMsg::Relay(ev)) => {
                         if self.on_relay_event(ev) {
                             dirty = true;
                         }
@@ -996,16 +1037,43 @@ impl EngineRunner {
                 }
             }
 
+            let beacon_interval = if self.foreground {
+                BEACON_INTERVAL
+            } else {
+                BG_BEACON_INTERVAL
+            };
+            let ping_interval = if self.foreground {
+                LAN_PING_INTERVAL
+            } else {
+                BG_PING_INTERVAL
+            };
+            let relay_hello_interval = if self.foreground {
+                RELAY_HELLO_INTERVAL
+            } else {
+                BG_RELAY_HELLO_INTERVAL
+            };
+
             let now_ms = unix_now_ms();
             if self.enable_lan {
                 let should_beacon = self
                     .last_beacon_at
-                    .is_none_or(|t| t.elapsed() >= BEACON_INTERVAL);
+                    .is_none_or(|t| t.elapsed() >= beacon_interval);
                 if should_beacon {
                     self.last_beacon_at = Some(Instant::now());
                     let detected_ip = detect_local_lan_ip();
                     if detected_ip != "127.0.0.1" && detected_ip != self.local_ip {
                         self.local_ip = detected_ip;
+                        let payload = PairingPayload {
+                            endpoint_id: self.local_device_id.clone(),
+                            token_hex: self.qr_token_hex.clone(),
+                            device_name: self.local_device_name.clone(),
+                        };
+                        let updated_uri = payload.to_uri_with_addr(Some(&format_host_port(
+                            &self.local_ip,
+                            self.local_tcp_port,
+                        )));
+                        let mut slot = self.qr_uri.lock().unwrap_or_else(|p| p.into_inner());
+                        *slot = updated_uri;
                         dirty = true;
                     }
                     if self.keys.has_any_room() {
@@ -1035,7 +1103,7 @@ impl EngineRunner {
             if !self.connected.is_empty()
                 && self
                     .last_lan_ping_at
-                    .is_none_or(|t| t.elapsed() >= LAN_PING_INTERVAL)
+                    .is_none_or(|t| t.elapsed() >= ping_interval)
             {
                 self.last_lan_ping_at = Some(Instant::now());
                 self.send_ping_to_peers();
@@ -1045,7 +1113,7 @@ impl EngineRunner {
                 && self.keys.has_any_room()
                 && self
                     .last_relay_hello_at
-                    .is_none_or(|t| t.elapsed() >= RELAY_HELLO_INTERVAL)
+                    .is_none_or(|t| t.elapsed() >= relay_hello_interval)
             {
                 self.last_relay_hello_at = Some(Instant::now());
                 self.send_relay_hello();
@@ -1070,7 +1138,9 @@ impl EngineRunner {
                 dirty = true;
             }
 
-            if self.last_relay_sweep_at.elapsed() >= Duration::from_secs(2) {
+            if !self.connected.is_empty()
+                && self.last_relay_sweep_at.elapsed() >= Duration::from_secs(2)
+            {
                 self.last_relay_sweep_at = Instant::now();
                 let expired: Vec<String> = self
                     .connected
@@ -1099,13 +1169,39 @@ impl EngineRunner {
                 self.publish_snapshot();
             }
 
-            let wait = if self.connected.is_empty() {
-                Duration::from_millis(60)
-            } else {
-                Duration::from_millis(25)
+            let until_next = |last: Option<Instant>, interval: Duration| -> Duration {
+                match last {
+                    Some(t) => interval.saturating_sub(t.elapsed()),
+                    None => Duration::ZERO,
+                }
             };
-            match cmd_rx.recv_timeout(wait) {
-                Ok(c) => pending_cmd = Some(c),
+            let mut wait = Duration::from_secs(25);
+            if self.enable_lan {
+                wait = wait.min(until_next(self.last_beacon_at, beacon_interval));
+                if self.foreground {
+                    // Poll inbound UDP beacons crisply while foregrounded without busy spinning when backgrounded.
+                    wait = wait.min(if self.connected.is_empty() {
+                        Duration::from_millis(120)
+                    } else {
+                        Duration::from_millis(450)
+                    });
+                }
+            }
+            if !self.connected.is_empty() {
+                wait = wait.min(until_next(self.last_lan_ping_at, ping_interval));
+                wait = wait.min(until_next(
+                    Some(self.last_relay_sweep_at),
+                    Duration::from_secs(2),
+                ));
+            }
+            if self.relay_connected && self.keys.has_any_room() {
+                wait = wait.min(until_next(self.last_relay_hello_at, relay_hello_interval));
+            }
+            if let Some((_, asked_at)) = &self.pending_local_takeover {
+                wait = wait.min(PENDING_TAKEOVER_TIMEOUT.saturating_sub(asked_at.elapsed()));
+            }
+            match ev_rx.recv_timeout(wait) {
+                Ok(m) => pending_msg = Some(m),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
@@ -1121,7 +1217,7 @@ impl EngineRunner {
         let mut fresh_map = HashMap::with_capacity(peers.len());
 
         for p in peers {
-            if let Some((slot, key)) = self.keys.match_remote_tags(&p.room_tags) {
+            if let Some((slot, _, room_key)) = self.keys.match_remote_tags_zeroizing(&p.room_tags) {
                 let needs_lan = match self.connected.get(&p.device_id) {
                     None => true,
                     Some(existing) => !existing.has_lan(),
@@ -1148,7 +1244,7 @@ impl EngineRunner {
                     {
                         self.last_dial_attempt
                             .insert(p.device_id.clone(), Instant::now());
-                        self.spawn_outbound_handshake(addr, slot, key, p.device_id.clone());
+                        self.spawn_outbound_handshake(addr, slot, room_key, p.device_id.clone());
                     }
                 }
                 fresh_map.insert(p.device_id.clone(), p);
@@ -1168,7 +1264,7 @@ impl EngineRunner {
         &self,
         addr: SocketAddr,
         slot: MatchedRoomSlot,
-        room_key: [u8; 32],
+        room_key: RoomKey,
         expected_peer_id: String,
     ) {
         let local_id = self.local_device_id.clone();
@@ -1183,7 +1279,7 @@ impl EngineRunner {
                     perform_outbound_handshake(
                         addr,
                         slot,
-                        &room_key,
+                        room_key.as_bytes(),
                         &local_id,
                         &local_name,
                         local_kind,
@@ -1193,14 +1289,14 @@ impl EngineRunner {
                         return;
                     }
                     let writer_arc = Arc::new(Mutex::new(writer));
-                    let _ = int_tx.send(InternalMsg::PeerEstablished {
+                    let _ = int_tx.send(RunnerMsg::Int(InternalMsg::PeerEstablished {
                         device_id: peer_id.clone(),
                         device_name: peer_name,
                         device_kind: peer_kind,
                         addr,
                         conn_id,
                         writer: Arc::clone(&writer_arc),
-                    });
+                    }));
                     run_peer_reader(peer_id, conn_id, rx_stream, aead_rx, int_tx);
                 }
             });
@@ -1223,14 +1319,14 @@ impl EngineRunner {
                     perform_inbound_handshake(stream, &keys, &local_id, &local_name, local_kind)
                 {
                     let writer_arc = Arc::new(Mutex::new(writer));
-                    let _ = int_tx.send(InternalMsg::PeerEstablished {
+                    let _ = int_tx.send(RunnerMsg::Int(InternalMsg::PeerEstablished {
                         device_id: peer_id.clone(),
                         device_name: peer_name,
                         device_kind: peer_kind,
                         addr,
                         conn_id,
                         writer: Arc::clone(&writer_arc),
-                    });
+                    }));
                     run_peer_reader(peer_id, conn_id, rx_stream, aead_rx, int_tx);
                 }
             });
@@ -1400,11 +1496,11 @@ impl EngineRunner {
                 false
             }
             SyncFrame::Goodbye { device_id } => {
-                let target_id = if device_id.is_empty() {
-                    peer_id.to_string()
-                } else {
-                    device_id
-                };
+                // Only tear down the authenticated sender's own peer entry; never let Peer A drop Peer B.
+                if !device_id.is_empty() && device_id != peer_id {
+                    return false;
+                }
+                let target_id = peer_id.to_string();
                 self.discovered.remove(&target_id);
                 self.beacon.remove_peer(&target_id);
                 let removed = self.connected.remove(&target_id).map(|p| {
@@ -1527,7 +1623,7 @@ impl EngineRunner {
                     if winner == peer_id {
                         self.active_speaker_id = peer_id.to_string();
                         self.pending_local_takeover = None;
-                        self.revision = self.revision.max(st.revision);
+                        self.revision = self.revision.max(st.revision).saturating_add(1);
                         let speaker_name = self
                             .connected
                             .get(peer_id)
@@ -1542,14 +1638,15 @@ impl EngineRunner {
                         changed = true;
                     }
                 } else if let Some(active) = &st.active_speaker
-                    && st.revision > self.revision
                     && active != &self.local_device_id
+                    && (st.revision > self.revision
+                        || (self.active_speaker_id == peer_id && st.revision >= self.revision))
                 {
                     if self.active_speaker_id != *active {
                         changed = true;
                     }
                     self.active_speaker_id = active.clone();
-                    self.revision = st.revision;
+                    self.revision = self.revision.max(st.revision);
                 }
 
                 changed
@@ -1760,10 +1857,16 @@ impl EngineRunner {
             }
         } else {
             let active_id = self.active_speaker_id.clone();
-            let active_reachable = self
-                .connected
-                .get(&active_id)
-                .is_some_and(|p| p.has_lan() || (self.relay_connected && p.has_live_relay()));
+            let already_pending = target_device_id == self.local_device_id
+                && self
+                    .pending_local_takeover
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &active_id);
+            let active_reachable = !already_pending
+                && self
+                    .connected
+                    .get(&active_id)
+                    .is_some_and(|p| p.has_lan() || (self.relay_connected && p.has_live_relay()));
             if !active_reachable {
                 let snap = self.connected.remove(&active_id).map(|p| {
                     (
@@ -1827,7 +1930,7 @@ impl EngineRunner {
             (self.on_event)(ConnectEvent::Toast("Invalid pairing token".to_string()));
             return;
         };
-        let key = guest_room.key;
+        let room_key = guest_room.room_key();
         self.qr_token_hex = payload.token_hex;
         self.keys.guest = Some(guest_room);
         self.last_beacon_at = None;
@@ -1836,7 +1939,7 @@ impl EngineRunner {
             && let Ok(addr) = addr_str.parse::<SocketAddr>()
             && is_lan_or_loopback(addr.ip())
         {
-            self.spawn_outbound_handshake(addr, MatchedRoomSlot::GuestQr, key, String::new());
+            self.spawn_outbound_handshake(addr, MatchedRoomSlot::GuestQr, room_key, String::new());
             (self.on_event)(ConnectEvent::Toast(format!(
                 "Pairing with {}...",
                 payload.device_name
@@ -2315,7 +2418,7 @@ fn perform_inbound_handshake(
         return Err(SyncError::AuthFailed);
     }
     let slot = MatchedRoomSlot::from_u8(hdr[4]).ok_or(SyncError::AuthFailed)?;
-    let Some(room_key) = keys.key_for_slot(slot) else {
+    let Some((room_key, _)) = keys.key_and_tag_for_slot(slot) else {
         let _ = stream.write_all(&[b'F', b'C', b'H', b'1', 0, 0]);
         return Err(SyncError::AuthFailed);
     };
@@ -2335,7 +2438,7 @@ fn perform_inbound_handshake(
 
     let mut nonce_b = [0u8; 16];
     csprng_fill(&mut nonce_b);
-    let mac_b = compute_handshake_mac(&room_key, &nonce_a, &nonce_b, &peer_id, local_id);
+    let mac_b = compute_handshake_mac(room_key.as_bytes(), &nonce_a, &nonce_b, &peer_id, local_id);
 
     let local_id_bytes = local_id.as_bytes();
     let mut resp = Vec::with_capacity(6 + local_id_bytes.len() + 16 + 32);
@@ -2350,12 +2453,14 @@ fn perform_inbound_handshake(
 
     let mut mac_a = [0u8; 32];
     stream.read_exact(&mut mac_a)?;
-    let expected_mac_a = compute_handshake_mac(&room_key, &nonce_b, &nonce_a, local_id, &peer_id);
+    let expected_mac_a =
+        compute_handshake_mac(room_key.as_bytes(), &nonce_b, &nonce_a, local_id, &peer_id);
     if !ct_eq(&mac_a, &expected_mac_a) {
         return Err(SyncError::AuthFailed);
     }
 
-    let (tx, mut rx) = AeadChannel::from_handshake(&room_key, &nonce_a, &nonce_b, false).split();
+    let (tx, mut rx) =
+        AeadChannel::from_handshake(room_key.as_bytes(), &nonce_a, &nonce_b, false).split();
     let rx_stream = stream.try_clone()?;
     let mut writer = PeerWriter { stream, tx };
 
@@ -2401,7 +2506,7 @@ fn run_peer_reader(
     conn_id: u64,
     mut stream: TcpStream,
     mut rx: AeadReceiver,
-    int_tx: mpsc::Sender<InternalMsg>,
+    int_tx: mpsc::Sender<RunnerMsg>,
 ) {
     let mut idle_timeouts = 0u8;
     loop {
@@ -2409,10 +2514,10 @@ fn run_peer_reader(
             Ok(frame) => {
                 idle_timeouts = 0;
                 if int_tx
-                    .send(InternalMsg::PeerFrame {
+                    .send(RunnerMsg::Int(InternalMsg::PeerFrame {
                         device_id: peer_id.clone(),
                         frame,
-                    })
+                    }))
                     .is_err()
                 {
                     break;
@@ -2425,10 +2530,10 @@ fn run_peer_reader(
                 idle_timeouts += 1;
             }
             Err(_) => {
-                let _ = int_tx.send(InternalMsg::PeerClosed {
+                let _ = int_tx.send(RunnerMsg::Int(InternalMsg::PeerClosed {
                     device_id: peer_id,
                     conn_id,
-                });
+                }));
                 break;
             }
         }

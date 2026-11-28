@@ -1,15 +1,17 @@
 <resources>
     <string name="app_name">Ferric</string>
+    <string name="playback_notification_channel_name">Playback</string>
     <string name="widget_ready">Ready to play</string>
-    <string name="widget_brand_tag">FERRIC · LIQUID GLASS</string>
+    <string name="widget_brand_tag">FERRIC</string>
     <string name="widget_prev">Previous track</string>
     <string name="widget_play_pause">Play or pause</string>
     <string name="widget_next">Next track</string>
     <string name="widget_like">Toggle like</string>
+    <string name="widget_settings_title">Widget settings</string>
     <string name="widget_label_strip">Ferric Strip (4x1)</string>
     <string name="widget_label_square">Ferric Cover (2x2)</string>
     <string name="widget_label_glass">Ferric Liquid Glass (4x2)</string>
     <string name="widget_desc_strip">Compact playback strip with transport controls</string>
     <string name="widget_desc_square">Square cover art widget with play and like actions</string>
-    <string name="widget_desc_glass">Liquid Glass card with artwork and playback controls</string>
+    <string name="widget_desc_glass">Optical Liquid Glass playback widget with customizable glass styles</string>
 </resources>

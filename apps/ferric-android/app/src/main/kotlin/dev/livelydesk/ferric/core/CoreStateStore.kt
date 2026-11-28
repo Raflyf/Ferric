@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.compose.runtime.Immutable
 import coil3.SingletonImageLoader
+import dev.livelydesk.ferric.BuildConfig
 import dev.livelydesk.ferric.auth.SilentSpotifyRefresher
 import dev.livelydesk.ferric.auth.WebCookieCleaner
 import dev.livelydesk.ferric.connect.ConnectNsdHelper
@@ -17,6 +18,7 @@ import dev.livelydesk.ferric.widget.FerricWidgetUpdater
 import java.io.File
 import java.util.TimeZone
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,6 +68,16 @@ data class PlaybackProgress(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val spectrumBins: List<Int> = List(8) { 0 },
+)
+
+@Immutable
+data class UpdateCheckOutcome(
+    val hasUpdate: Boolean = false,
+    val upToDate: Boolean = false,
+    val tag: String? = null,
+    val releaseUrl: String? = null,
+    val summary: String? = null,
+    val error: String? = null,
 )
 
 data class PlaybackUiState(
@@ -212,6 +224,14 @@ fun PlaybackUiState.activeDisplayTrack(): FfiTrack? {
     )
 }
 
+fun PlaybackUiState.activeDisplayIsPlaying(): Boolean {
+    if (connectState.isLocalActiveSpeaker) return isPlaying
+    val peer = connectState.peers.firstOrNull {
+        it.connected && it.deviceId == connectState.activeSpeakerId
+    } ?: return isPlaying
+    return peer.isPlaying
+}
+
 /**
  * Pure state reducer kept JVM-testable without native `.so` loading.
  */
@@ -284,6 +304,8 @@ class CoreStateStore(private val appContext: Context) {
     @Volatile
     private var core: FerricMobileCore? = null
 
+    private val appForeground = AtomicBoolean(true)
+
     @Volatile
     private var lastExtractedArtUrl: String? = null
 
@@ -310,6 +332,9 @@ class CoreStateStore(private val appContext: Context) {
 
     @Volatile
     private var pendingRemoteSeekTargetMs: Long = 0L
+
+    @Volatile
+    private var lastWidgetProgressPushMonoMs: Long = 0L
 
     private val _uiState = MutableStateFlow(
         PlaybackUiState(
@@ -373,11 +398,18 @@ class CoreStateStore(private val appContext: Context) {
         override fun onPlaybackTelemetry(telemetry: FfiTelemetry) {
             val prevPlaying = _uiState.value.isPlaying
             // High-frequency progress goes exclusively to playbackProgress (zero root recomposition).
-            _playbackProgress.update { PlaybackStateReducer.applyProgress(it, telemetry) }
+            val nextProg = PlaybackStateReducer.applyProgress(_playbackProgress.value, telemetry)
+            _playbackProgress.value = nextProg
             // Low-frequency state only triggers _uiState emission when discrete values actually change.
             _uiState.update { PlaybackStateReducer.applyLowFreqTelemetry(it, telemetry) }
             if (prevPlaying != telemetry.isPlaying) {
                 FerricWidgetUpdater.updateAll(appContext, _uiState.value)
+            } else if (telemetry.isPlaying) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - lastWidgetProgressPushMonoMs >= 3_000L && FerricWidgetUpdater.hasAnyWidgets(appContext)) {
+                    lastWidgetProgressPushMonoMs = now
+                    FerricWidgetUpdater.updateProgressOnly(appContext, _uiState.value, nextProg)
+                }
             }
         }
 
@@ -403,7 +435,7 @@ class CoreStateStore(private val appContext: Context) {
                 _uiState.update {
                     it.copy(
                         lyricsState = FfiLyricsState(
-                            trackId = track.id,
+                            trackId = "",
                             lines = emptyList(),
                             sourceName = "",
                             isSynced = false,
@@ -411,7 +443,7 @@ class CoreStateStore(private val appContext: Context) {
                             isLoading = false,
                         ),
                         videoStreams = FfiVideoStreamsState(
-                            trackId = track.id,
+                            trackId = "",
                             videoId = track.youtubeVideoId.orEmpty(),
                             isOfficialMv = false,
                             options = emptyList(),
@@ -463,8 +495,10 @@ class CoreStateStore(private val appContext: Context) {
 
         override fun onConnectStateChanged(state: FfiConnectState) {
             var trackSwitchedId: String? = null
+            var refreshWidgets = false
             _uiState.update { prev ->
                 val prevDisplay = prev.activeDisplayTrack()
+                val prevPlaying = prev.activeDisplayIsPlaying()
                 val activeRemote = if (!state.isLocalActiveSpeaker) {
                     state.peers.firstOrNull { it.connected && it.deviceId == state.activeSpeakerId }
                 } else {
@@ -479,6 +513,12 @@ class CoreStateStore(private val appContext: Context) {
                     prev.copy(connectState = state)
                 }
                 val nextDisplay = nextBase.activeDisplayTrack()
+                val nextPlaying = nextBase.activeDisplayIsPlaying()
+                if (nextDisplay?.id != prevDisplay?.id || nextPlaying != prevPlaying ||
+                    nextDisplay?.title != prevDisplay?.title
+                ) {
+                    refreshWidgets = true
+                }
                 if (activeRemote != null && activeRemote.nowPlayingTitle.isNotBlank()) {
                     extractCoverShadeAsync(nextDisplay?.thumbnailUrl ?: activeRemote.nowPlayingThumbnailUrl)
                 }
@@ -504,6 +544,25 @@ class CoreStateStore(private val appContext: Context) {
                     )
                 } else {
                     nextBase
+                }
+            }
+            if (refreshWidgets) {
+                FerricWidgetUpdater.updateAll(appContext, _uiState.value)
+            } else if (!state.isLocalActiveSpeaker) {
+                val peer = state.peers.firstOrNull {
+                    it.connected && it.deviceId == state.activeSpeakerId
+                }
+                if (peer != null) {
+                    val nowMono = android.os.SystemClock.elapsedRealtime()
+                    if (nowMono - lastWidgetProgressPushMonoMs >= 3_000L && FerricWidgetUpdater.hasAnyWidgets(appContext)) {
+                        lastWidgetProgressPushMonoMs = nowMono
+                        val syncProg = PlaybackProgress(
+                            positionMs = peer.positionMs.toLong().coerceAtLeast(0L),
+                            durationMs = peer.durationMs.toLong().coerceAtLeast(0L),
+                            spectrumBins = _playbackProgress.value.spectrumBins,
+                        )
+                        FerricWidgetUpdater.updateProgressOnly(appContext, _uiState.value, syncProg)
+                    }
                 }
             }
             updateRemoteProgressTicker(state)
@@ -544,6 +603,7 @@ class CoreStateStore(private val appContext: Context) {
         scope.launch {
             val colors = CoverShadeExtractor.extract(appContext, artUrl)
             _uiState.update { it.copy(coverShade = colors) }
+            FerricWidgetUpdater.updateAll(appContext, _uiState.value)
         }
     }
 
@@ -649,7 +709,19 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun setAppForeground(foreground: Boolean) {
+        val changed = appForeground.getAndSet(foreground) != foreground
         nsdHelper.setAppForeground(foreground)
+        if (changed) {
+            scope.launch { core?.setConnectForeground(foreground) }
+            if (!foreground) {
+                remoteTickerKey = ""
+                remoteProgressJob?.cancel()
+                remoteProgressJob = null
+            } else {
+                refreshOutputRoute()
+                updateRemoteProgressTicker(_uiState.value.connectState)
+            }
+        }
     }
 
     // --- Playback & Queue ---
@@ -872,7 +944,7 @@ class CoreStateStore(private val appContext: Context) {
         }
 
         val nextKey = "${peer.deviceId}|${peer.activeTrackId.orEmpty()}|${peer.isPlaying}|$durMs"
-        if (!peer.isPlaying) {
+        if (!peer.isPlaying || !appForeground.get()) {
             remoteTickerKey = ""
             remoteProgressJob?.cancel()
             remoteProgressJob = null
@@ -897,8 +969,12 @@ class CoreStateStore(private val appContext: Context) {
                 val nextPos = (remoteAnchorPosMs + elapsed).let { p ->
                     if (liveDur > 0L) p.coerceIn(0L, liveDur) else p
                 }
-                _playbackProgress.update { prev ->
-                    prev.copy(positionMs = nextPos, durationMs = liveDur)
+                val nextProg = PlaybackProgress(positionMs = nextPos, durationMs = liveDur, spectrumBins = _playbackProgress.value.spectrumBins)
+                _playbackProgress.value = nextProg
+                val nowMono = android.os.SystemClock.elapsedRealtime()
+                if (nowMono - lastWidgetProgressPushMonoMs >= 3_000L && FerricWidgetUpdater.hasAnyWidgets(appContext)) {
+                    lastWidgetProgressPushMonoMs = nowMono
+                    FerricWidgetUpdater.updateProgressOnly(appContext, _uiState.value, nextProg)
                 }
             }
         }
@@ -1707,12 +1783,47 @@ class CoreStateStore(private val appContext: Context) {
         scope.launch { core?.trimMemory() }
     }
 
+    fun checkForUpdates(onResult: (UpdateCheckOutcome) -> Unit) {
+        scope.launch {
+            val outcome = runCatching {
+                val handle = getOrCreateCore()
+                    ?: error("Core runtime unavailable")
+                val found = handle.checkLatestRelease(BuildConfig.VERSION_NAME)
+                if (found != null) {
+                    UpdateCheckOutcome(
+                        hasUpdate = true,
+                        tag = found.tag,
+                        releaseUrl = found.releaseUrl,
+                        summary = found.summary.ifBlank { "New Ferric release ${found.tag} is available." },
+                    )
+                } else {
+                    UpdateCheckOutcome(
+                        upToDate = true,
+                        summary = "You are on the latest Ferric release (v${BuildConfig.VERSION_NAME}).",
+                    )
+                }
+            }.getOrElse { err ->
+                UpdateCheckOutcome(
+                    error = err.message ?: "Unable to reach GitHub Releases.",
+                )
+            }
+            withContext(Dispatchers.Main) {
+                onResult(outcome)
+            }
+        }
+    }
+
     fun shutdown() {
         sleepTimerPollJob?.cancel()
+        sleepTimerPollJob = null
+        remoteProgressJob?.cancel()
+        remoteProgressJob = null
         nsdHelper.shutdown()
-        synchronized(coreLock) {
-            core?.shutdown()
-            core = null
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            synchronized(coreLock) {
+                core?.shutdown()
+                core = null
+            }
         }
     }
 

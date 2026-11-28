@@ -28,7 +28,6 @@ import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayCircle
@@ -59,10 +58,8 @@ import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
 
 /**
- * Dedicated "You" tab inspired by Auralys's serene grouped hub:
- * cleanly houses History, Listening Stats & Streak, Ferric Connect, Theme Studio, Equalizer & DSP,
- * side-by-side branded YouTube Music & Spotify account cards, OpenSubsonic, and Settings so Home
- * stays spacious and uncluttered.
+ * Cleanly structured "You" hub ordered for rapid scanning:
+ * Header + live streak summary -> Accounts -> Playback & Studio -> Activity -> Settings & About.
  */
 @Composable
 fun YouScreen(
@@ -79,6 +76,7 @@ fun YouScreen(
     onSyncSpotify: () -> Unit,
     onOpenAccounts: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenAbout: () -> Unit,
 ) {
     val palette = LocalFerricPalette.current
     val accounts = state.accountStatus
@@ -95,98 +93,59 @@ fun YouScreen(
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 16.dp, bottom = 180.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 176.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // Header + compact quick stats chip
         item(key = "you_header") {
-            Text(
-                text = "You",
-                style = MaterialTheme.typography.displaySmall,
-                fontWeight = FontWeight.Light,
-                color = palette.textPrimary,
-            )
-        }
-
-        // Group 1: Activity & Insights
-        item(key = "you_activity_group") {
-            GroupedHubCard(background = cardBg, border = dividerColor) {
-                HubActionRow(
-                    icon = Icons.Rounded.History,
-                    title = "History",
-                    subtitle = if (state.recentTracks.isNotEmpty()) {
-                        "${state.recentTracks.size} recently played"
-                    } else {
-                        "Your listening history"
-                    },
-                    onClick = onOpenHistory,
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "You",
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.Light,
+                    color = palette.textPrimary,
                 )
-                HorizontalDivider(color = dividerColor, modifier = Modifier.padding(horizontal = 16.dp))
-                HubActionRow(
-                    icon = Icons.Rounded.BarChart,
-                    title = "Stats & Recap",
-                    subtitle = state.listeningStats?.let { st ->
-                        if (st.totalPlays > 0uL) {
-                            "${st.totalPlays} plays · ${st.currentStreakDays}d streak"
-                        } else {
-                            "Local play insights & daily streak"
-                        }
-                    } ?: "Local play insights & daily streak",
-                    onClick = onOpenStats,
-                )
+                val st = state.listeningStats
+                if (st != null && st.totalPlays > 0uL) {
+                    Box(
+                        modifier = Modifier
+                            .ferricGlassSurface(
+                                palette = palette,
+                                cornerRadius = 999.dp,
+                                fallbackColor = cardBg,
+                            )
+                            .clickable(onClick = onOpenStats)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            text = "${st.currentStreakDays}d streak · ${st.totalPlays} plays",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = palette.textPrimary,
+                        )
+                    }
+                }
             }
         }
 
-        // Group 2: Connect, Appearance & Audio Engine
-        item(key = "you_studio_group") {
-            GroupedHubCard(background = cardBg, border = dividerColor) {
-                HubActionRow(
-                    icon = Icons.Rounded.Devices,
-                    title = "Ferric Connect",
-                    subtitle = if (connectedPeers.isNotEmpty()) {
-                        "Connected to ${connectedPeers.joinToString { it.deviceName }}"
-                    } else if (state.connectState.isAccountReady) {
-                        if (state.connectState.relayConnected) {
-                            "Cloud E2EE & Wi-Fi Connect active"
-                        } else {
-                            "Auto-Connect ready across networks"
-                        }
-                    } else {
-                        "Link Desktop & phone across any network"
-                    },
-                    badgeText = if (connectedPeers.isNotEmpty()) "${connectedPeers.size} LIVE" else null,
-                    badgeColor = Color(0xFF22C55E),
-                    onClick = onOpenConnect,
-                )
-                HorizontalDivider(color = dividerColor, modifier = Modifier.padding(horizontal = 16.dp))
-                HubActionRow(
-                    icon = Icons.Rounded.Palette,
-                    title = "Theme Studio",
-                    subtitle = "${state.themeConfig?.name ?: "Liquid Glass"} · ${displayUiFontName(state.themeConfig?.fontFamily)}",
-                    onClick = onOpenThemeStudio,
-                )
-                HorizontalDivider(color = dividerColor, modifier = Modifier.padding(horizontal = 16.dp))
-                HubActionRow(
-                    icon = Icons.Rounded.Equalizer,
-                    title = "Equalizer & Audio DSP",
-                    subtitle = "${if (state.eqConfig?.enabled == true) state.eqConfig.presetName else "Flat"} · ${state.activeOutputRoute}",
-                    onClick = onOpenEqualizer,
-                )
-            }
-        }
-
-        // Group 3: Side-by-side Branded Account Cards (Auralys signature!)
-        item(key = "you_accounts_cards") {
+        // Section 1: Streaming Accounts & Personal Server
+        item(key = "you_accounts_section") {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     BrandedAccountTile(
                         title = "YouTube Music",
                         statusLine = if (accounts.youtubeConnected) {
                             accounts.youtubeChannelName.ifBlank { "${accounts.youtubePlaylistCount} playlists" }
                         } else {
-                            "Sign in to sync library & personalized Home"
+                            "Sync library & Home"
                         },
                         connected = accounts.youtubeConnected,
                         tintColor = Color(0xFFFF2B4A),
@@ -201,7 +160,7 @@ fun YouScreen(
                         statusLine = if (accounts.spotifyConnected) {
                             accounts.spotifyUserName.ifBlank { "${accounts.spotifyPlaylistCount} playlists" }
                         } else {
-                            "Connect for 2-way playlists & Auto-Connect"
+                            "Playlists & Auto-Connect"
                         },
                         connected = accounts.spotifyConnected,
                         tintColor = Color(0xFF1ED760),
@@ -213,66 +172,90 @@ fun YouScreen(
                     )
                 }
 
-                // Compact OpenSubsonic / Navidrome card
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .ferricGlassSurface(
-                            palette = palette,
-                            cornerRadius = palette.cornerRadiusDp,
-                            fallbackColor = cardBg,
-                        )
-                        .clickable(onClick = onOpenAccounts),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(palette.accent.copy(alpha = 0.16f)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.CloudQueue,
-                                contentDescription = null,
-                                tint = palette.accent,
-                                modifier = Modifier.size(20.dp),
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "OpenSubsonic / Navidrome",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = palette.textPrimary,
-                            )
-                            Text(
-                                text = if (accounts.subsonicConnected) {
-                                    "${accounts.subsonicUrl} (${accounts.subsonicUsername})"
-                                } else {
-                                    "Stream lossless FLAC from your personal server"
-                                },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = palette.textSecondary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                            contentDescription = null,
-                            tint = palette.textSecondary,
-                        )
-                    }
+                GroupedHubCard(background = cardBg, border = dividerColor) {
+                    HubActionRow(
+                        icon = Icons.Rounded.CloudQueue,
+                        title = "OpenSubsonic / Navidrome",
+                        subtitle = if (accounts.subsonicConnected) {
+                            "${accounts.subsonicUrl} (${accounts.subsonicUsername})"
+                        } else {
+                            "Personal lossless server"
+                        },
+                        onClick = onOpenAccounts,
+                    )
                 }
             }
         }
 
-        // Group 4: Settings & App Info
-        item(key = "you_settings_group") {
+        // Section 2: Connect, Audio Engine & Visual Appearance
+        item(key = "you_playback_studio_group") {
+            GroupedHubCard(background = cardBg, border = dividerColor) {
+                HubActionRow(
+                    icon = Icons.Rounded.Devices,
+                    title = "Ferric Connect",
+                    subtitle = if (connectedPeers.isNotEmpty()) {
+                        "Connected to ${connectedPeers.joinToString { it.deviceName }}"
+                    } else if (state.connectState.isAccountReady) {
+                        if (state.connectState.relayConnected) {
+                            "Cloud E2EE & Wi-Fi ready"
+                        } else {
+                            "Auto-Connect ready"
+                        }
+                    } else {
+                        "Link Desktop & phone"
+                    },
+                    badgeText = if (connectedPeers.isNotEmpty()) "${connectedPeers.size} LIVE" else null,
+                    badgeColor = Color(0xFF22C55E),
+                    onClick = onOpenConnect,
+                )
+                HorizontalDivider(color = dividerColor, modifier = Modifier.padding(horizontal = 16.dp))
+                HubActionRow(
+                    icon = Icons.Rounded.Equalizer,
+                    title = "Equalizer & Audio DSP",
+                    subtitle = "${if (state.eqConfig?.enabled == true) state.eqConfig.presetName else "Flat"} · ${state.activeOutputRoute}",
+                    onClick = onOpenEqualizer,
+                )
+                HorizontalDivider(color = dividerColor, modifier = Modifier.padding(horizontal = 16.dp))
+                HubActionRow(
+                    icon = Icons.Rounded.Palette,
+                    title = "Theme Studio",
+                    subtitle = "${state.themeConfig?.name ?: "Liquid Glass"} · ${displayUiFontName(state.themeConfig?.fontFamily)}",
+                    onClick = onOpenThemeStudio,
+                )
+            }
+        }
+
+        // Section 3: Listening Activity
+        item(key = "you_activity_group") {
+            GroupedHubCard(background = cardBg, border = dividerColor) {
+                HubActionRow(
+                    icon = Icons.Rounded.History,
+                    title = "History",
+                    subtitle = if (state.recentTracks.isNotEmpty()) {
+                        "${state.recentTracks.size} recently played"
+                    } else {
+                        "Recently played tracks"
+                    },
+                    onClick = onOpenHistory,
+                )
+                HorizontalDivider(color = dividerColor, modifier = Modifier.padding(horizontal = 16.dp))
+                HubActionRow(
+                    icon = Icons.Rounded.BarChart,
+                    title = "Stats & Recap",
+                    subtitle = state.listeningStats?.let { st ->
+                        if (st.totalPlays > 0uL) {
+                            "${st.totalPlays} plays · ${st.currentStreakDays}d streak"
+                        } else {
+                            "Local play insights & streak"
+                        }
+                    } ?: "Local play insights & streak",
+                    onClick = onOpenStats,
+                )
+            }
+        }
+
+        // Section 4: Separated Settings & About
+        item(key = "you_app_group") {
             GroupedHubCard(background = cardBg, border = dividerColor) {
                 HubActionRow(
                     icon = Icons.Rounded.Settings,
@@ -283,10 +266,9 @@ fun YouScreen(
                 HorizontalDivider(color = dividerColor, modifier = Modifier.padding(horizontal = 16.dp))
                 HubActionRow(
                     icon = Icons.Rounded.Info,
-                    title = "Ferric Android v${BuildConfig.VERSION_NAME}",
-                    subtitle = "Native Rust Oboe Dual-Deck · SQLite WAL · Zero Telemetry",
-                    onClick = onOpenSettings,
-                    showChevron = false,
+                    title = "About Ferric",
+                    subtitle = "v${BuildConfig.VERSION_NAME} · Updates, links & support",
+                    onClick = onOpenAbout,
                 )
             }
         }
@@ -343,16 +325,16 @@ private fun HubActionRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = palette.textPrimary.copy(alpha = 0.88f),
-            modifier = Modifier.size(22.dp),
+            modifier = Modifier.size(21.dp),
         )
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(13.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -379,7 +361,6 @@ private fun HubActionRow(
                     }
                 }
             }
-            Spacer(Modifier.height(1.dp))
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodyMedium,
@@ -446,8 +427,8 @@ private fun BrandedAccountTile(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -456,7 +437,7 @@ private fun BrandedAccountTile(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(34.dp)
                         .clip(CircleShape)
                         .background(tintColor.copy(alpha = 0.22f)),
                     contentAlignment = Alignment.Center,
@@ -465,13 +446,13 @@ private fun BrandedAccountTile(
                         imageVector = icon,
                         contentDescription = null,
                         tint = tintColor,
-                        modifier = Modifier.size(20.dp),
+                        modifier = Modifier.size(19.dp),
                     )
                 }
                 if (connected) {
                     Box(
                         modifier = Modifier
-                            .size(9.dp)
+                            .size(8.dp)
                             .clip(CircleShape)
                             .background(tintColor),
                     )
@@ -487,11 +468,10 @@ private fun BrandedAccountTile(
             )
             Text(
                 text = statusLine,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
                 color = palette.textSecondary,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.height(36.dp),
             )
             if (palette.isLiquidGlass) {
                 Box(
@@ -503,7 +483,7 @@ private fun BrandedAccountTile(
                             accentGlow = tintColor,
                         )
                         .clickable(onClick = onAction)
-                        .padding(horizontal = 16.dp, vertical = 9.dp),
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
@@ -516,7 +496,7 @@ private fun BrandedAccountTile(
                 Button(
                     onClick = onAction,
                     shape = RoundedCornerShape(999.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (connected) {
                             palette.textPrimary.copy(alpha = 0.14f)

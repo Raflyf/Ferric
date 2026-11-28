@@ -78,6 +78,7 @@ import dev.livelydesk.ferric.ui.components.FerricLaunchSplash
 import dev.livelydesk.ferric.ui.components.FerricSnackbar
 import dev.livelydesk.ferric.ui.components.FerricTab
 import dev.livelydesk.ferric.ui.components.FloatingLiquidGlassDock
+import dev.livelydesk.ferric.ui.screens.AboutSheet
 import dev.livelydesk.ferric.ui.screens.AccountsSheet
 import dev.livelydesk.ferric.ui.screens.ConnectSheet
 import dev.livelydesk.ferric.ui.screens.DetailScreen
@@ -204,7 +205,9 @@ private fun FerricMainShell(
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetHost = rememberFerricSheetHostState()
     val sheetBackdrop = rememberFerricBackdropState()
+    val fullPlayerBackdrop = rememberFerricBackdropState()
     val hasActiveSheets = sheetHost.hasActiveSheets
+    val hasActiveSnackbar = snackbarHostState.currentSnackbarData != null
 
     var activeTab by rememberSaveable { mutableStateOf(FerricTab.HOME) }
     var dockCollapsed by rememberSaveable { mutableStateOf(false) }
@@ -215,6 +218,7 @@ private fun FerricMainShell(
     var showEqSheet by rememberSaveable { mutableStateOf(false) }
     var showThemeSheet by rememberSaveable { mutableStateOf(false) }
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
+    var showAboutSheet by rememberSaveable { mutableStateOf(false) }
     var showStatsSheet by rememberSaveable { mutableStateOf(false) }
     var showShareCardSheet by rememberSaveable { mutableStateOf(false) }
     var shareCardInitialPosMs by rememberSaveable { mutableLongStateOf(0L) }
@@ -645,6 +649,7 @@ private fun FerricMainShell(
                                     onSyncSpotify = { store.syncSpotify() },
                                     onOpenAccounts = { showAccountsSheet = true },
                                     onOpenSettings = { showSettingsSheet = true },
+                                    onOpenAbout = { showAboutSheet = true },
                                 )
                             }
                         }
@@ -752,6 +757,8 @@ private fun FerricMainShell(
             FullPlayerScreen(
                 state = state,
                 progressFlow = store.playbackProgress,
+                overlayBackdrop = fullPlayerBackdrop,
+                hasExternalOverlay = hasActiveSheets || hasActiveSnackbar,
                 onCollapse = { showFullPlayer = false },
                 onTogglePlayPause = { store.togglePlayPause() },
                 onNext = { store.next() },
@@ -785,7 +792,7 @@ private fun FerricMainShell(
         // Layer 4: In-Window Optical Liquid Glass Sheet Portal matching Home Pill optics
         FerricSheetPortalOverlay(
             host = sheetHost,
-            sheetBackdrop = sheetBackdrop,
+            sheetBackdrop = if (showFullPlayer && fullPlayerBackdrop.hasRecorded) fullPlayerBackdrop else sheetBackdrop,
         )
 
         // Layer 5: Top-most theme-synced floating toast pill above dock, sheets & FullPlayer
@@ -801,6 +808,7 @@ private fun FerricMainShell(
             else -> 88.dp
         }
         val snackBackdrop = when {
+            showFullPlayer && fullPlayerBackdrop.hasRecorded -> fullPlayerBackdrop
             hasActiveSheets && sheetBackdrop.hasRecorded -> sheetBackdrop
             !showFullPlayer && backdropState.hasRecorded -> backdropState
             else -> null
@@ -817,7 +825,7 @@ private fun FerricMainShell(
             }
         }
 
-        // Layer 6: Cold-start Auralys-style animated Ferric Type-I cassette splash intro
+        // Layer 6: Cold-start animated Ferric Type-I cassette splash intro
         if (showLaunchSplash) {
             FerricLaunchSplash(onFinished = { showLaunchSplash = false })
         }
@@ -944,6 +952,15 @@ private fun FerricMainShell(
             onClearAudioCache = { store.clearAudioCache() },
             onClearArtworkCache = { store.clearArtworkCache() },
             onDeleteAllOffline = { store.deleteAllOfflineDownloads() },
+        )
+    }
+
+    if (showAboutSheet) {
+        AboutSheet(
+            state = state,
+            onCheckForUpdates = { callback -> store.checkForUpdates(callback) },
+            onMessage = { msg -> store.postToast(msg) },
+            onDismiss = { showAboutSheet = false },
         )
     }
 

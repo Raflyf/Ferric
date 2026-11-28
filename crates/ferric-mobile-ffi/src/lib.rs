@@ -738,6 +738,14 @@ impl ControllerEventSink for EventSinkBridge {
     }
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FfiReleaseInfo {
+    pub tag: String,
+    pub version: String,
+    pub release_url: String,
+    pub summary: String,
+}
+
 #[derive(uniffi::Object)]
 pub struct FerricMobileCore {
     controller: Arc<FerricController>,
@@ -1425,6 +1433,10 @@ impl FerricMobileCore {
         self.controller.connect_pair_qr(uri);
     }
 
+    pub fn set_connect_foreground(&self, foreground: bool) {
+        self.controller.set_connect_foreground(foreground);
+    }
+
     pub fn connect_get_qr_code(&self, regenerate: bool) -> FfiQrCode {
         let (uri, size, modules) = self.controller.connect_qr_matrix(regenerate);
         FfiQrCode {
@@ -1491,6 +1503,24 @@ impl FerricMobileCore {
 
     pub fn clear_artwork_cache(&self) -> u64 {
         self.controller.clear_artwork_cache()
+    }
+
+    pub fn check_latest_release(
+        &self,
+        current_version: String,
+    ) -> Result<Option<FfiReleaseInfo>, FfiError> {
+        let res = self
+            .controller
+            .check_latest_release(&current_version)
+            .map_err(|reason| FfiError::Internal { reason })?;
+        Ok(
+            res.map(|(tag, version, release_url, summary)| FfiReleaseInfo {
+                tag,
+                version,
+                release_url,
+                summary,
+            }),
+        )
     }
 
     pub fn shutdown(&self) {

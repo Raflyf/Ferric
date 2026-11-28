@@ -2,7 +2,7 @@
 
 use crate::types::AccountStatusSnapshot;
 use crate::{ControllerError, ControllerResult, FerricController};
-use ferric_core::models::AccountSettings;
+use ferric_core::models::{AccountSettings, TrackSource};
 use ferric_providers::spotify_web::{SpotifyWebSyncError, sync_spotify_web_catalog};
 use ferric_providers::subsonic::{SubsonicCredentials, sync_subsonic_catalog};
 use ferric_providers::ytmusic::{YtmSession, fetch_account_library};
@@ -132,6 +132,45 @@ impl FerricController {
                         let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
                         let _ = st.db.delete_demo_tracks();
                         let _ = st.db.upsert_tracks(&report.liked_tracks);
+                        if report.rate_limited_skipped == 0 {
+                            let active_liked_sp: std::collections::HashSet<&str> = report
+                                .liked_tracks
+                                .iter()
+                                .filter_map(|t| t.spotify_id.as_deref())
+                                .collect();
+                            if let Ok(liked_rows) = st.db.list_liked_tracks() {
+                                let unliked_ids: Vec<String> = liked_rows
+                                    .into_iter()
+                                    .filter(|t| {
+                                        t.source == TrackSource::Spotify
+                                            && t.spotify_id
+                                                .as_deref()
+                                                .is_some_and(|sid| !active_liked_sp.contains(sid))
+                                    })
+                                    .map(|t| t.id)
+                                    .collect();
+                                if !unliked_ids.is_empty() {
+                                    let _ = st.db.set_tracks_liked_batch(&unliked_ids, false);
+                                }
+                            }
+                            let active_pl_ids: std::collections::HashSet<&str> = report
+                                .active_playlist_ids
+                                .iter()
+                                .map(String::as_str)
+                                .collect();
+                            if let Ok(existing_pls) = st.db.list_playlists() {
+                                for pl in existing_pls {
+                                    if pl.source == TrackSource::Spotify
+                                        && (pl.id.starts_with("spotify:playlist:")
+                                            || pl.id.starts_with("spotify:premium:playlist:"))
+                                        && !pl.description.starts_with("Imported ")
+                                        && !active_pl_ids.contains(pl.id.as_str())
+                                    {
+                                        let _ = st.db.delete_playlist(&pl.id);
+                                    }
+                                }
+                            }
+                        }
                         for bundle in &report.playlists {
                             let _ = st.db.upsert_tracks(&bundle.tracks);
                             let ids: Vec<String> =
@@ -265,6 +304,44 @@ impl FerricController {
                         let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
                         let _ = st.db.delete_demo_tracks();
                         let _ = st.db.upsert_tracks(&lib.liked_tracks);
+                        if !lib.liked_tracks.is_empty() {
+                            let active_yt_vids: std::collections::HashSet<&str> = lib
+                                .liked_tracks
+                                .iter()
+                                .filter_map(|t| t.youtube_video_id.as_deref())
+                                .collect();
+                            if let Ok(liked_rows) = st.db.list_liked_tracks() {
+                                let unliked_ids: Vec<String> = liked_rows
+                                    .into_iter()
+                                    .filter(|t| {
+                                        t.source == TrackSource::YouTubeMusic
+                                            && t.youtube_video_id
+                                                .as_deref()
+                                                .is_some_and(|vid| !active_yt_vids.contains(vid))
+                                    })
+                                    .map(|t| t.id)
+                                    .collect();
+                                if !unliked_ids.is_empty() {
+                                    let _ = st.db.set_tracks_liked_batch(&unliked_ids, false);
+                                }
+                            }
+                        }
+                        if !lib.playlists.is_empty() {
+                            let active_ytm_pls: std::collections::HashSet<&str> =
+                                lib.playlists.iter().map(|(pl, _)| pl.id.as_str()).collect();
+                            if let Ok(existing_pls) = st.db.list_playlists() {
+                                for pl in existing_pls {
+                                    if pl.source == TrackSource::YouTubeMusic
+                                        && (pl.id.starts_with("ytm:pl:")
+                                            || pl.id.starts_with("ytmusic:playlist:"))
+                                        && !pl.description.starts_with("Imported ")
+                                        && !active_ytm_pls.contains(pl.id.as_str())
+                                    {
+                                        let _ = st.db.delete_playlist(&pl.id);
+                                    }
+                                }
+                            }
+                        }
                         for (pl, tracks) in &lib.playlists {
                             let _ = st.db.upsert_tracks(tracks);
                             let ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();

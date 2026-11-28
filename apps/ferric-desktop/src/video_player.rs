@@ -12,6 +12,20 @@ pub struct VideoViewportRect {
     pub height: i32,
 }
 
+pub(crate) fn path_to_file_uri(path: &std::path::Path) -> String {
+    let norm = path.to_string_lossy().replace('\\', "/");
+    let mut out = String::from("file:///");
+    for b in norm.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~' | b':') {
+            out.push(char::from(b));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(&mut out, "%{b:02X}");
+        }
+    }
+    out
+}
+
 #[cfg(target_os = "windows")]
 mod imp {
     use super::VideoViewportRect;
@@ -78,6 +92,27 @@ mod imp {
         }
     }
 
+    fn pct_decode_uri_path(raw: &str) -> Option<String> {
+        let mut bytes = Vec::with_capacity(raw.len());
+        let b = raw.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' {
+                if i + 2 >= b.len() {
+                    return None;
+                }
+                let h = std::str::from_utf8(&b[i + 1..i + 3]).ok()?;
+                let val = u8::from_str_radix(h, 16).ok()?;
+                bytes.push(val);
+                i += 3;
+            } else {
+                bytes.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(bytes).ok()
+    }
+
     fn is_allowed_local_video_uri(raw: &str) -> bool {
         let Some(rest) = raw.strip_prefix("file:///") else {
             return false;
@@ -85,7 +120,10 @@ mod imp {
         if raw.bytes().any(|b| b.is_ascii_control()) || rest.starts_with('/') {
             return false;
         }
-        let path = Path::new(rest);
+        let Some(decoded) = pct_decode_uri_path(rest) else {
+            return false;
+        };
+        let path = Path::new(&decoded);
         for comp in path.components() {
             match comp {
                 Component::Prefix(pref) => match pref.kind() {
@@ -212,7 +250,6 @@ mod imp {
             }
 
             let (tx, rx) = mpsc::channel::<VideoCmd>();
-            let (hwnd_tx, _hwnd_rx) = mpsc::channel::<isize>();
             let profile_dir = self.profile_dir.clone();
             // Fresh per-session AtomicIsize prevents a closing previous worker from clobbering
             // a newly spawned worker's active HWND.
@@ -230,7 +267,6 @@ mod imp {
                         playing,
                         initially_visible,
                         rx,
-                        hwnd_tx,
                         shared_hwnd,
                     );
                 })
@@ -493,7 +529,6 @@ mod imp {
         initial_playing: bool,
         initially_visible: bool,
         cmd_rx: Receiver<VideoCmd>,
-        hwnd_tx: Sender<isize>,
         shared_hwnd: Arc<AtomicIsize>,
     ) -> Result<(), String> {
         let _ = std::fs::create_dir_all(&profile_dir);
@@ -544,7 +579,6 @@ mod imp {
         .map_err(|e| format!("Video window create failed: {e}"))?;
 
         shared_hwnd.store(hwnd.0 as isize, Ordering::Release);
-        let _ = hwnd_tx.send(hwnd.0 as isize);
 
         // SAFETY: Position docked stage cleanly; only show immediately when `initially_visible` is true
         // so Cover -> Video morph animations can pre-buffer silently without popping at an intermediate rect.
@@ -899,9 +933,6 @@ mod imp {
                     LRESULT(0)
                 }
                 WM_CLOSE => {
-                    if let Some(st) = clone_host_state(hwnd) {
-                        let _ = st.controller.Close();
-                    }
                     let _ = DestroyWindow(hwnd);
                     LRESULT(0)
                 }

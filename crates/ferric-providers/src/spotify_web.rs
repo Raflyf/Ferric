@@ -948,7 +948,7 @@ pub fn sync_spotify_web_catalog_with_prefix(
 
     let mut liked_tracks = Vec::new();
     let mut liked_ids = HashSet::new();
-    for page in 0..10_usize {
+    for page in 0..40_usize {
         thread::sleep(Duration::from_millis(140));
         let offset = page * 50;
         let liked_val = match call_pathfinder(
@@ -973,7 +973,7 @@ pub fn sync_spotify_web_catalog_with_prefix(
             liked_tracks.push(track);
         }
         if batch_len < 50
-            || liked_tracks.len() >= 500
+            || liked_tracks.len() >= 2_000
             || total_count.is_some_and(|tot| offset + batch_len >= tot)
         {
             break;
@@ -982,7 +982,7 @@ pub fn sync_spotify_web_catalog_with_prefix(
 
     let mut stubs: Vec<PathfinderPlaylistStub> = Vec::new();
     let mut seen_pl_ids: HashSet<String> = HashSet::new();
-    for page in 0..3_usize {
+    for page in 0..10_usize {
         thread::sleep(Duration::from_millis(140));
         let offset = page * 50;
         let library_val = match call_pathfinder(
@@ -1028,12 +1028,14 @@ pub fn sync_spotify_web_catalog_with_prefix(
     }
 
     let mut playlists = Vec::with_capacity(stubs.len());
+    let mut active_playlist_ids = Vec::with_capacity(stubs.len());
     let mut etag_skipped = 0usize;
     let mut rate_limited_skipped = 0usize;
     let total_stubs = stubs.len();
 
     for (idx, stub) in stubs.into_iter().enumerate() {
         let local_key = format!("{playlist_id_prefix}{}", stub.id);
+        active_playlist_ids.push(local_key.clone());
         if let Some(rev) = stub.revision_id.as_deref()
             && existing_snapshots
                 .get(&local_key)
@@ -1078,7 +1080,7 @@ pub fn sync_spotify_web_catalog_with_prefix(
 
         if first_raw_count >= 100 && total_pl_tracks.is_none_or(|tot| tot > 100) {
             let mut partial_page_failed = false;
-            for page in 1..5_usize {
+            for page in 1..20_usize {
                 let offset = page * 100;
                 if total_pl_tracks.is_some_and(|tot| offset >= tot) {
                     break;
@@ -1129,6 +1131,7 @@ pub fn sync_spotify_web_catalog_with_prefix(
         playlists,
         etag_skipped,
         rate_limited_skipped,
+        active_playlist_ids,
     })
 }
 

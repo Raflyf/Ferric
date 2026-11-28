@@ -287,10 +287,13 @@ live_design! {
             }
             draw_bg: {
                 instance hover: 0.0
+                uniform light_mode: 0.0
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 5.0);
-                    sdf.fill(vec4(0.86, 0.22, 0.26, 0.24 * self.hover));
+                    let d_dark = vec4(0.86, 0.22, 0.26, 0.24 * self.hover);
+                    let d_light = vec4(0.75, 0.14, 0.18, 0.16 * self.hover);
+                    sdf.fill(mix(d_dark, d_light, self.light_mode));
                     return sdf.result;
                 }
             }
@@ -802,8 +805,18 @@ impl Widget for TrackList {
         let count = tracks.len();
         let row_h = (46.0 * zoom) as f64;
         let art_sz = (34.0 * zoom) as f64;
+        let idx_w = (22.0 * zoom).max(16.0) as f64;
+        let album_w = (148.0 * zoom).max(90.0) as f64;
+        let dur_w = (44.0 * zoom).max(34.0) as f64;
+        let row_btn_sz = (26.0 * zoom).max(20.0) as f64;
+        let row_icon_sz = (14.0 * zoom).max(11.0) as f64;
         let title_fs = (9.6 * zoom) as f64;
         let sub_fs = (8.4 * zoom) as f64;
+        let del_hover = if light_mode > 0.5 {
+            vec4(0.75, 0.14, 0.18, 1.0)
+        } else {
+            vec4(1.0, 0.42, 0.48, 1.0)
+        };
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
@@ -893,6 +906,8 @@ impl Widget for TrackList {
                             cx,
                             live! {
                                 height: (row_h),
+                                padding: { left: (10.0 * zoom), right: (12.0 * zoom), top: 4, bottom: 4 }
+                                spacing: (10.0 * zoom),
                                 draw_bg: {
                                     active: (if is_active { 1.0 } else { 0.0 }),
                                     accent_col: (accent),
@@ -900,22 +915,33 @@ impl Widget for TrackList {
                                     light_mode: (light_mode)
                                 }
                                 art_tile = { width: (art_sz), height: (art_sz) }
-                                idx_lbl = { draw_text: { color: (idx_col), text_style: { font_size: (sub_fs) } } }
-                                album_lbl = { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
-                                dur_lbl = { draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
+                                idx_lbl = { width: (idx_w), draw_text: { color: (idx_col), text_style: { font_size: (sub_fs) } } }
+                                album_lbl = { width: (album_w), padding: { right: 6 }, draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
+                                dur_lbl = { width: (dur_w), draw_text: { color: (text_secondary), text_style: { font_size: (sub_fs) } } }
                                 queue_add_btn = {
+                                    width: (row_btn_sz), height: (row_btn_sz),
+                                    icon_walk: { width: (row_icon_sz), height: (row_icon_sz) }
                                     draw_bg: { light_mode: (light_mode) }
                                     draw_icon: { color: (icon_idle), color_hover: (icon_hover) }
                                 }
                                 like_btn = {
+                                    width: (row_btn_sz), height: (row_btn_sz),
+                                    icon_walk: { width: (row_icon_sz), height: (row_icon_sz) }
                                     draw_bg: { light_mode: (light_mode) }
                                     draw_icon: { color: (like_col), color_hover: (icon_hover) }
                                 }
                                 pl_add_btn = {
+                                    width: (row_btn_sz), height: (row_btn_sz),
+                                    icon_walk: { width: (row_icon_sz), height: (row_icon_sz) }
                                     draw_bg: { light_mode: (light_mode) }
                                     draw_icon: { color: (icon_idle), color_hover: (icon_hover) }
                                 }
-                                delete_btn = { draw_icon: { color: (icon_idle) } }
+                                delete_btn = {
+                                    width: (row_btn_sz), height: (row_btn_sz),
+                                    icon_walk: { width: (row_icon_sz), height: (row_icon_sz) }
+                                    draw_bg: { light_mode: (light_mode) }
+                                    draw_icon: { color: (icon_idle), color_hover: (del_hover), color_down: (del_hover) }
+                                }
                             },
                         );
                         // `title_lbl` and `artist_lbl` are nested inside `info_col`, so direct `row.apply_over`

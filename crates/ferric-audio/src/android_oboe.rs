@@ -98,8 +98,9 @@ pub(crate) fn build_output_stream_and_producer(
     _preferred_device: Option<&str>,
     start_playing: bool,
 ) -> AudioResult<(AndroidOutputStream, rtrb::Producer<RingFrame>, u32, String)> {
-    // Default ~340 ms ring buffer at 48 kHz; expand dynamically to >= 300 ms for 96/192 kHz USB DACs.
-    let initial_frames: usize = 16_384;
+    // Allocate 28,800 frames upfront (300 ms at 96 kHz, 600 ms at 48 kHz) so 48/96 kHz outputs
+    // open Oboe in a single native call; expand only if a USB DAC negotiates >96 kHz (e.g. 192 kHz).
+    let initial_frames: usize = 28_800;
     let (mut stream, mut producer, mut out_rate) = open_oboe_stream(telemetry, initial_frames)?;
 
     let desired_frames = ((out_rate as usize).saturating_mul(300) / 1_000).max(initial_frames);

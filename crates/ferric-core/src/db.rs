@@ -130,6 +130,16 @@ impl LibraryDb {
             CREATE INDEX IF NOT EXISTS idx_lyrics_cache_updated
                 ON lyrics_cache(updated_at);
 
+            CREATE TABLE IF NOT EXISTS track_lyrics_offsets (
+                track_id TEXT PRIMARY KEY,
+                offset_ms INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tracks_spotify_id
+                ON tracks(spotify_id) WHERE spotify_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_tracks_youtube_id
+                ON tracks(youtube_video_id) WHERE youtube_video_id IS NOT NULL;
+
             CREATE TABLE IF NOT EXISTS paired_devices (
                 device_id TEXT PRIMARY KEY,
                 device_name TEXT NOT NULL,
@@ -301,6 +311,34 @@ impl LibraryDb {
             params![i64::from(liked), track_id],
         )?;
         Ok(())
+    }
+
+    pub fn set_tracks_liked_batch(
+        &mut self,
+        track_ids: &[String],
+        liked: bool,
+    ) -> CoreResult<usize> {
+        if track_ids.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.transaction()?;
+        let val = i64::from(liked);
+        let mut updated = 0usize;
+        for chunk in track_ids.chunks(200) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("UPDATE tracks SET liked = ? WHERE id IN ({placeholders})");
+            let mut stmt = tx.prepare(&sql)?;
+            let params_iter = std::iter::once(rusqlite::types::Value::Integer(val)).chain(
+                chunk
+                    .iter()
+                    .map(|id| rusqlite::types::Value::Text(id.clone())),
+            );
+            updated += stmt.execute(rusqlite::params_from_iter(params_iter))?;
+        }
+        tx.commit()?;
+        Ok(updated)
     }
 
     pub fn delete_track(&mut self, track_id: &str) -> CoreResult<()> {
@@ -797,7 +835,44 @@ impl LibraryDb {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut by_id = HashMap::with_capacity(ids.len());
+        let mut unique_ids = Vec::with_capacity(ids.len());
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        for id in ids {
+            if seen.insert(id.as_str()) {
+                unique_ids.push(id.as_str());
+            }
+        }
+        let mut by_id = HashMap::with_capacity(unique_ids.len());
+        for chunk in unique_ids.chunks(200) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT id, title, artist, album, duration_ms, file_path, source, \
+                 codec, sample_rate, bit_depth, bitrate_kbps, isrc, \
+                 spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url \
+                 FROM tracks WHERE id IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(chunk.iter().copied()),
+                row_to_track,
+            )?;
+            for item in rows {
+                let track = item?;
+                by_id.insert(track.id.clone(), track);
+            }
+        }
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(track) = by_id.get(id) {
+                out.push(track.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn list_tracks_by_source(&self, source: TrackSource) -> CoreResult<Vec<Track>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -805,21 +880,91 @@ impl LibraryDb {
                 codec, sample_rate, bit_depth, bitrate_kbps, isrc,
                 spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
             FROM tracks
-            WHERE id = ?1
+            WHERE source = ?1
             "#,
         )?;
-        for id in ids {
-            if !by_id.contains_key(id)
-                && let Some(track) = stmt.query_row([id], row_to_track).optional()?
-            {
-                by_id.insert(id.clone(), track);
-            }
+        let rows = stmt.query_map([source.as_badge()], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
         }
-        let mut out = Vec::with_capacity(by_id.len());
-        for id in ids {
-            if let Some(track) = by_id.get(id) {
-                out.push(track.clone());
-            }
+        out.shrink_to_fit();
+        Ok(out)
+    }
+
+    pub fn list_tracks_matching_spotify_id(&self, spotify_id: &str) -> CoreResult<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                id, title, artist, album, duration_ms, file_path, source,
+                codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+            FROM tracks
+            WHERE spotify_id = ?1
+            "#,
+        )?;
+        let rows = stmt.query_map([spotify_id], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_tracks_matching_youtube_id(&self, video_id: &str) -> CoreResult<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                id, title, artist, album, duration_ms, file_path, source,
+                codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+            FROM tracks
+            WHERE youtube_video_id = ?1
+            "#,
+        )?;
+        let rows = stmt.query_map([video_id], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn find_track_by_isrc(&self, isrc: &str) -> CoreResult<Option<Track>> {
+        let track = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    id, title, artist, album, duration_ms, file_path, source,
+                    codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                    spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+                FROM tracks
+                WHERE isrc = ?1 COLLATE NOCASE
+                LIMIT 1
+                "#,
+                [isrc],
+                row_to_track,
+            )
+            .optional()?;
+        Ok(track)
+    }
+
+    pub fn list_tracks_by_title_artist(&self, title: &str, artist: &str) -> CoreResult<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                id, title, artist, album, duration_ms, file_path, source,
+                codec, sample_rate, bit_depth, bitrate_kbps, isrc,
+                spotify_id, youtube_video_id, replay_gain_db, liked, thumbnail_url
+            FROM tracks
+            WHERE title = ?1 COLLATE NOCASE AND artist = ?2 COLLATE NOCASE
+            "#,
+        )?;
+        let rows = stmt.query_map(params![title, artist], row_to_track)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
         }
         Ok(out)
     }
@@ -1176,6 +1321,35 @@ impl LibraryDb {
         Ok(self.get_setting("discord_rpc")?.unwrap_or_default())
     }
 
+    pub fn get_track_lyrics_offset(&self, track_id: &str) -> CoreResult<i64> {
+        let offset = self
+            .conn
+            .query_row(
+                "SELECT offset_ms FROM track_lyrics_offsets WHERE track_id = ?1",
+                [track_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(offset.clamp(-30_000, 30_000))
+    }
+
+    pub fn set_track_lyrics_offset(&self, track_id: &str, offset_ms: i64) -> CoreResult<()> {
+        let clamped = offset_ms.clamp(-30_000, 30_000);
+        if clamped == 0 {
+            self.conn.execute(
+                "DELETE FROM track_lyrics_offsets WHERE track_id = ?1",
+                [track_id],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO track_lyrics_offsets (track_id, offset_ms) VALUES (?1, ?2)",
+                params![track_id, clamped],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn get_cached_lyrics(&self, track_key: &str) -> CoreResult<Option<String>> {
         let val = self
             .conn
@@ -1196,10 +1370,10 @@ impl LibraryDb {
                 "INSERT OR REPLACE INTO lyrics_cache (track_key, synced_lrc, updated_at) VALUES (?1, ?2, strftime('%s','now'))",
                 params![track_key, lrc],
             )?;
-            let _ = self.conn.execute(
-                "DELETE FROM lyrics_cache WHERE track_key NOT IN (SELECT track_key FROM lyrics_cache ORDER BY updated_at DESC LIMIT ?1)",
+            self.conn.execute(
+                "DELETE FROM lyrics_cache WHERE track_key NOT IN (SELECT track_key FROM lyrics_cache ORDER BY updated_at DESC, rowid DESC LIMIT ?1)",
                 params![MAX_LYRICS_CACHE_ROWS],
-            );
+            )?;
             Ok(())
         })();
         match res {
@@ -1311,9 +1485,10 @@ impl LibraryDb {
         if track_id.trim().is_empty() || listened_ms == 0 {
             return Ok(());
         }
+        let clamped_ms = i64::try_from(listened_ms).unwrap_or(i64::MAX);
         self.conn.execute(
             "INSERT INTO play_history (track_id, artist, played_at, listened_ms) VALUES (?1, ?2, ?3, ?4)",
-            params![track_id, artist.trim(), played_at, listened_ms as i64],
+            params![track_id, artist.trim(), played_at, clamped_ms],
         )?;
         Ok(())
     }
@@ -1329,44 +1504,43 @@ impl LibraryDb {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
 
-        let mut day_set = std::collections::BTreeSet::<i64>::new();
-        {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT played_at FROM play_history ORDER BY played_at ASC")?;
-            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-            for row in rows {
-                let ts = row?;
-                day_set.insert(ts.saturating_add(tz_offset_secs).div_euclid(86_400));
-            }
-        }
-
-        let mut longest_streak = 0u32;
-        let mut run = 0u32;
-        let mut prev_day: Option<i64> = None;
-        for &d in &day_set {
-            if prev_day.is_some_and(|p| d == p + 1) {
-                run = run.saturating_add(1);
-            } else {
-                run = 1;
-            }
-            if run > longest_streak {
-                longest_streak = run;
-            }
-            prev_day = Some(d);
-        }
-
         let today = now_unix_secs
             .saturating_add(tz_offset_secs)
             .div_euclid(86_400);
+        let mut longest_streak = 0u32;
         let mut current_streak = 0u32;
-        if let Some(&last_day) = day_set.iter().next_back()
-            && (last_day == today || last_day == today - 1)
         {
-            let mut cursor = last_day;
-            while day_set.contains(&cursor) {
-                current_streak = current_streak.saturating_add(1);
-                cursor -= 1;
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT \
+                    CASE WHEN (played_at + ?1) >= 0 THEN (played_at + ?1) / 86400 \
+                    ELSE ((played_at + ?1) - 86399) / 86400 END AS day_bucket \
+                 FROM play_history ORDER BY day_bucket ASC",
+            )?;
+            let rows = stmt.query_map([tz_offset_secs], |r| r.get::<_, i64>(0))?;
+            let mut run = 0u32;
+            let mut prev_day: Option<i64> = None;
+            let mut last_valid_day: Option<i64> = None;
+            let mut last_valid_run = 0u32;
+            for row in rows {
+                let d = row?;
+                if prev_day.is_some_and(|p| d == p + 1) {
+                    run = run.saturating_add(1);
+                } else {
+                    run = 1;
+                }
+                if run > longest_streak {
+                    longest_streak = run;
+                }
+                if d <= today {
+                    last_valid_day = Some(d);
+                    last_valid_run = run;
+                }
+                prev_day = Some(d);
+            }
+            if let Some(last) = last_valid_day
+                && (last == today || last == today - 1)
+            {
+                current_streak = last_valid_run;
             }
         }
 
@@ -1737,16 +1911,14 @@ mod tests {
     #[test]
     fn account_secrets_roundtrip_and_encrypt_at_rest_on_windows() {
         let db = LibraryDb::open_in_memory().expect("open memory db");
-        let acct = AccountSettings {
-            youtube_connected: true,
-            youtube_cookie: "SAPISID=secret_cookie_val".to_string(),
-            youtube_sapisid: "secret_sapisid_val".to_string(),
-            spotify_web_connected: true,
-            spotify_web_access_token: "secret_sp_web_tok".to_string(),
-            spotify_web_cookie: "secret_sp_dc_cookie_val".to_string(),
-            subsonic_password: "secret_subsonic_pw".to_string(),
-            ..AccountSettings::default()
-        };
+        let mut acct = AccountSettings::default();
+        acct.youtube_connected = true;
+        acct.youtube_cookie = "SAPISID=secret_cookie_val".to_string();
+        acct.youtube_sapisid = "secret_sapisid_val".to_string();
+        acct.spotify_web_connected = true;
+        acct.spotify_web_access_token = "secret_sp_web_tok".to_string();
+        acct.spotify_web_cookie = "secret_sp_dc_cookie_val".to_string();
+        acct.subsonic_password = "secret_subsonic_pw".to_string();
         db.save_accounts(&acct).expect("save accounts");
         let raw_json: String = db
             .conn
@@ -1773,13 +1945,11 @@ mod tests {
         assert_eq!(loaded.subsonic_password, "secret_subsonic_pw");
 
         // Legacy shared-slot Spotify Web session migrates cleanly into isolated web fields.
-        let legacy = AccountSettings {
-            spotify_connected: true,
-            spotify_user_name: "Rafly".to_string(),
-            spotify_access_token: "legacy_web_tok".to_string(),
-            spotify_web_cookie: "legacy_sp_dc".to_string(),
-            ..AccountSettings::default()
-        };
+        let mut legacy = AccountSettings::default();
+        legacy.spotify_connected = true;
+        legacy.spotify_user_name = "Rafly".to_string();
+        legacy.spotify_access_token = "legacy_web_tok".to_string();
+        legacy.spotify_web_cookie = "legacy_sp_dc".to_string();
         db.save_accounts(&legacy).expect("save legacy");
         let migrated = db.load_accounts().expect("load migrated");
         assert!(!migrated.spotify_connected);
@@ -2004,13 +2174,11 @@ mod tests {
         );
 
         // AccountSettings stable IDs persist cleanly
-        let acct = AccountSettings {
-            spotify_connected: true,
-            spotify_user_id: "rafly_spotify_id_01".to_string(),
-            youtube_connected: true,
-            youtube_account_id: "rafly@example.com".to_string(),
-            ..AccountSettings::default()
-        };
+        let mut acct = AccountSettings::default();
+        acct.spotify_connected = true;
+        acct.spotify_user_id = "rafly_spotify_id_01".to_string();
+        acct.youtube_connected = true;
+        acct.youtube_account_id = "rafly@example.com".to_string();
         db.save_accounts(&acct).expect("save accounts");
         let loaded = db.load_accounts().expect("load accounts");
         assert_eq!(loaded.spotify_user_id, "rafly_spotify_id_01");
@@ -2018,5 +2186,62 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lyrics_offset_batch_like_and_batched_id_lookup_work() {
+        let mut db = LibraryDb::open_in_memory().expect("open mem db");
+        let make_track = |id: &str, title: &str, artist: &str| Track {
+            id: id.to_string(),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: "Test Album".to_string(),
+            duration_ms: 120_000,
+            path: None,
+            source: TrackSource::Local,
+            codec: "WAV".to_string(),
+            sample_rate: 44_100,
+            bit_depth: 16,
+            bitrate_kbps: 1411,
+            isrc: None,
+            spotify_id: None,
+            youtube_video_id: None,
+            thumbnail_url: None,
+            replay_gain_db: 0,
+            liked: false,
+        };
+        let t1 = make_track("demo:1", "Alpha", "Artist A");
+        let t2 = make_track("demo:2", "Beta", "Artist B");
+        db.upsert_tracks(&[t1.clone(), t2.clone()]).expect("upsert");
+
+        db.set_track_lyrics_offset(&t1.id, 45_000)
+            .expect("set offset");
+        assert_eq!(
+            db.get_track_lyrics_offset(&t1.id).expect("get offset"),
+            30_000
+        );
+        db.set_track_lyrics_offset(&t1.id, -450)
+            .expect("set neg offset");
+        assert_eq!(
+            db.get_track_lyrics_offset(&t1.id).expect("get neg offset"),
+            -450
+        );
+
+        let batch = db
+            .list_tracks_by_ids(&[t2.id.clone(), t1.id.clone(), t2.id.clone()])
+            .expect("batch lookup");
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0].id, t2.id);
+        assert_eq!(batch[1].id, t1.id);
+        assert_eq!(batch[2].id, t2.id);
+
+        db.set_tracks_liked_batch(&[t1.id.clone(), t2.id.clone()], true)
+            .expect("batch like");
+        assert_eq!(db.list_liked_tracks().expect("liked").len(), 2);
+        db.set_tracks_liked_batch(std::slice::from_ref(&t1.id), false)
+            .expect("batch unlike");
+        let liked = db.list_liked_tracks().expect("liked after");
+        assert_eq!(liked.len(), 1);
+        assert_eq!(liked[0].id, t2.id);
     }
 }

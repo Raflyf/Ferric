@@ -309,11 +309,11 @@ fun ShareCardSheet(
                                 )
                                 .ferricLiquidGlass(
                                     cornerRadius = cardCorner,
-                                    blurRadius = 13.dp,
-                                    refractionHeight = 16.dp,
-                                    refractionAmount = 11.dp,
-                                    chromaticDispersion = 0.62f,
-                                    saturation = 1.52f,
+                                    blurRadius = 11.dp,
+                                    refractionHeight = 20.dp,
+                                    refractionAmount = 22.dp,
+                                    chromaticDispersion = 0.88f,
+                                    saturation = 1.55f,
                                     veilScale = 0.40f,
                                     alwaysGlass = true,
                                     tier = GlassTier.HERO_LENS,

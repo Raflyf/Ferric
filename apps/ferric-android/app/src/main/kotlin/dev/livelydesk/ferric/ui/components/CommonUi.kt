@@ -576,7 +576,7 @@ half4 main(float2 coord) {
 
     float magPull = zoomPower * (0.68 + 0.32 * clamp(1.0 - dot(normCenter, normCenter), 0.0, 1.0));
     float2 grad = gradSdRoundedRect(centered, halfSize, min(r * 1.4, minHalf));
-    float2 rimBend = -grad * (domeFactor * domeFactor * rimWidth * 0.34);
+    float2 rimBend = grad * (domeFactor * domeFactor * rimWidth * 0.42);
     float2 safeMax = max(bufferSize - float2(0.5), float2(1.0));
     float2 samplePos = clamp(
         (halfSize + centered * (1.0 - magPull) + rimBend) - offset,
@@ -585,7 +585,7 @@ half4 main(float2 coord) {
     );
 
     float dispersion = chromaAberration * (0.28 + 0.72 * domeFactor);
-    float2 chromaOffset = grad * (dispersion * 2.8);
+    float2 chromaOffset = grad * (dispersion * 3.6);
     float2 redPos = clamp(samplePos + chromaOffset, float2(0.5), safeMax);
     float2 bluePos = clamp(samplePos - chromaOffset, float2(0.5), safeMax);
 
@@ -785,12 +785,12 @@ private fun FloatingNavPill(
                 )
                 .ferricLiquidGlass(
                     cornerRadius = glassRadius,
-                    blurRadius = 12.dp,
-                    refractionHeight = 16.dp,
-                    refractionAmount = 11.dp,
-                    chromaticDispersion = 0.65f,
-                    saturation = 1.50f,
-                    veilScale = 0.30f,
+                    blurRadius = 7.5.dp,
+                    refractionHeight = 24.dp,
+                    refractionAmount = 22.dp,
+                    chromaticDispersion = 0.85f,
+                    saturation = 1.56f,
+                    veilScale = 0.28f,
                     tier = GlassTier.HERO_LENS,
                     alwaysGlass = palette.isLiquidGlass,
                 ),
@@ -1195,12 +1195,12 @@ private fun FloatingMiniPlayerPill(
                     .matchParentSize()
                     .ferricLiquidGlass(
                         cornerRadius = 30.dp,
-                        blurRadius = 12.dp,
-                        refractionHeight = 15.dp,
-                        refractionAmount = 10.dp,
-                        chromaticDispersion = 0.65f,
-                        saturation = 1.52f,
-                        veilScale = 0.34f,
+                        blurRadius = 7.dp,
+                        refractionHeight = 20.dp,
+                        refractionAmount = 21.dp,
+                        chromaticDispersion = 0.85f,
+                        saturation = 1.58f,
+                        veilScale = 0.30f,
                         tier = GlassTier.HERO_LENS,
                         alwaysGlass = palette.isLiquidGlass,
                     ),
@@ -1471,12 +1471,12 @@ fun FerricSnackbar(
             if (palette.isLiquidGlass) {
                 base.ferricLiquidGlass(
                     cornerRadius = snackCorner,
-                    blurRadius = 12.dp,
-                    refractionHeight = 14.dp,
-                    refractionAmount = 10.dp,
-                    chromaticDispersion = 0.65f,
-                    saturation = 1.52f,
-                    veilScale = 0.42f,
+                    blurRadius = 7.5.dp,
+                    refractionHeight = 18.dp,
+                    refractionAmount = 20.dp,
+                    chromaticDispersion = 0.82f,
+                    saturation = 1.56f,
+                    veilScale = 0.38f,
                     alwaysGlass = true,
                     tier = GlassTier.HERO_LENS,
                 )
@@ -1635,12 +1635,12 @@ fun FerricUpdateDialogOverlay(
                             .matchParentSize()
                             .ferricLiquidGlass(
                                 cornerRadius = cardCorner,
-                                blurRadius = 14.dp,
-                                refractionHeight = 16.dp,
-                                refractionAmount = 10.dp,
-                                chromaticDispersion = 0.55f,
-                                saturation = 1.50f,
-                                veilScale = 0.58f,
+                                blurRadius = 12.dp,
+                                refractionHeight = 20.dp,
+                                refractionAmount = 20.dp,
+                                chromaticDispersion = 0.82f,
+                                saturation = 1.55f,
+                                veilScale = 0.56f,
                                 alwaysGlass = true,
                                 tier = GlassTier.HERO_LENS,
                                 accentGlow = palette.accent,

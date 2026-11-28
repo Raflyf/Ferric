@@ -16,7 +16,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -284,10 +285,11 @@ fun Modifier.ferricBackdropSource(
             }
         }
 
-// Continuous full-surface iOS 26 convex optical Liquid Glass lens + smooth rim dispersion AGSL shader (API 33+).
+// Full-surface iOS 26 convex optical Liquid Glass lens + symmetrical rim dispersion AGSL shader (API 33+).
 private const val REFRACTION_DISPERSION_AGSL = """
 uniform shader content;
 uniform float2 bufferSize;
+uniform float4 backdropBounds;
 uniform float2 halfSize;
 uniform float minHalf;
 uniform float2 offset;
@@ -324,6 +326,13 @@ float2 gradSdRoundedRect(float2 coord, float2 halfSize, float radius) {
     }
 }
 
+// Smooth damped circle meniscus (preserves iOS 26 lens bend with finite rim slope at sd=0).
+float smoothCircleMap(float x) {
+    float c = clamp(x, 0.0, 1.0) * 0.945;
+    float norm = 1.0 - sqrt(1.0 - 0.945 * 0.945);
+    return (1.0 - sqrt(1.0 - c * c)) / max(norm, 1e-4);
+}
+
 half4 main(float2 coord) {
     float2 pillCoord = coord + offset;
     float2 centeredCoord = pillCoord - halfSize;
@@ -332,44 +341,45 @@ half4 main(float2 coord) {
     float sd = min(sdRoundedRect(centeredCoord, halfSize, radius), 0.0);
     float distIn = -sd;
 
-    // 1. Symmetrical inward meniscus profile along all sides & rounded corners (finite slope -> clean rims)
+    // 1. Full-surface optical curve across 100% of pill depth (center spine u=1 -> rim u=0)
+    float u = clamp(distIn / max(minHalf, 1.0), 0.0, 1.0);
+    float s = 1.0 - u;
+    float fullSurfaceCurve = sin(s * 1.5707963);
+
+    // 2. Smooth bevel shoulder blended into the whole surface (no isolated ring boundary)
     float edgeT = clamp(1.0 - (distIn / max(refractionHeight, 1.0)), 0.0, 1.0);
-    float rimSmooth = edgeT * edgeT * (3.0 - 2.0 * edgeT);
-    float meniscus = rimSmooth * (0.42 + 0.58 * edgeT);
+    float rimCurve = smoothCircleMap(edgeT);
+    float combinedCurve = mix(fullSurfaceCurve, rimCurve, 0.30);
 
-    // 2. Continuous full-surface convex lens dome extending from rim through the entire center
-    float depthFrac = clamp(distIn / max(minHalf, 1.0), 0.0, 1.0);
-    float2 aspectCoord = centeredCoord / max(halfSize, float2(1.0));
-    float radialSq = clamp(dot(aspectCoord, aspectCoord), 0.0, 1.0);
-    float centerDome = (1.0 - radialSq * 0.55) * depthFrac;
-
-    // Strictly symmetrical boundary normal + subtle aspect-normalized radial dome blend (zero L/R skew)
-    float gradRadius = min(radius, minHalf);
+    // Strictly symmetrical boundary normal + aspect-normalized radial normal (identical on all sides)
+    float gradRadius = min(radius * 1.25, minHalf);
     float2 gradBase = gradSdRoundedRect(centeredCoord, halfSize, gradRadius);
-    float2 domeDir = dot(aspectCoord, aspectCoord) > 1e-5 ? normalize(aspectCoord) : float2(0.0);
+    float2 aspectCoord = centeredCoord / max(halfSize, float2(1.0));
+    float2 radialDir = dot(aspectCoord, aspectCoord) > 1e-5 ? normalize(aspectCoord) : float2(0.0);
     float2 grad = depthEffect > 0.5
-        ? normalize(gradBase + domeDir * (0.20 * (1.0 - depthFrac)))
+        ? normalize(gradBase + radialDir * (0.28 * (1.0 - 0.35 * u)))
         : gradBase;
 
-    // Inward optical refraction (meniscus bevel) + smooth center-to-edge magnification convergence
-    float2 rimBend = -grad * (meniscus * refractionAmount);
-    float2 interiorMag = -centeredCoord * (0.048 * centerDome);
-    float2 safeMax = max(bufferSize - float2(0.5), float2(1.0));
-    float2 refractedCoord = clamp(coord + rimBend + interiorMag, float2(0.5), safeMax);
+    // Inward convex barrel dome + full-surface lens bend: curves text & art across center AND rims
+    // while strictly sampling inside captured screen bounds (zero right/left border clamping streaks).
+    float2 barrelPull = centeredCoord * float2(0.068 * (0.45 + 0.55 * u), 0.24 * (0.35 + 0.65 * u));
+    float2 lensShift = -(barrelPull + grad * (combinedCurve * refractionAmount));
+    float2 safeMin = max(float2(0.5), backdropBounds.xy);
+    float2 safeMax = min(max(bufferSize - float2(0.5), float2(1.0)), max(backdropBounds.zw, safeMin + float2(1.0)));
+    float2 refractedCoord = clamp(coord + lensShift, safeMin, safeMax);
 
     if (chromaticAberration <= 0.001) {
         return content.eval(refractedCoord);
     }
 
-    // Refined crystal prism dispersion peaking cleanly at rounded corners & bevels with subtle center continuity
-    float cornerFactor = clamp(abs(aspectCoord.x) * abs(aspectCoord.y) * 1.45, 0.0, 1.0);
-    float dispStrength = chromaticAberration * (0.22 * (1.0 - depthFrac * 0.72) + 0.78 * meniscus * (0.35 + 0.65 * cornerFactor));
-    float2 chromaDir = dot(grad, grad) > 1e-4 ? grad : domeDir;
-    float2 dispersedCoord = chromaDir * (dispStrength * 3.4);
+    // Symmetrical prism dispersion flowing gently across the whole glass surface into rounded corners
+    float cornerBias = 0.36 + 0.64 * clamp(abs(aspectCoord.x) * abs(aspectCoord.y) * 1.35, 0.0, 1.0);
+    float dispStrength = chromaticAberration * (0.32 * fullSurfaceCurve + 0.68 * rimCurve * cornerBias);
+    float2 dispersedCoord = grad * min(dispStrength * (refractionAmount * 0.20 + 2.0), 5.2);
 
     half4 refr = content.eval(refractedCoord);
-    half4 refrRed = content.eval(clamp(refractedCoord + dispersedCoord, float2(0.5), safeMax));
-    half4 refrBlue = content.eval(clamp(refractedCoord - dispersedCoord, float2(0.5), safeMax));
+    half4 refrRed = content.eval(clamp(refractedCoord + dispersedCoord, safeMin, safeMax));
+    half4 refrBlue = content.eval(clamp(refractedCoord - dispersedCoord, safeMin, safeMax));
     return half4(refrRed.r, refr.g, refrBlue.b, refr.a);
 }
 """
@@ -434,6 +444,10 @@ private fun buildChainedGlassRenderEffect(
     cache: GlassCache,
     paddedWidthPx: Float,
     paddedHeightPx: Float,
+    backdropMinX: Float,
+    backdropMinY: Float,
+    backdropMaxX: Float,
+    backdropMaxY: Float,
     widthPx: Float,
     heightPx: Float,
     padPx: Float,
@@ -468,6 +482,7 @@ private fun buildChainedGlassRenderEffect(
     val minHalf = min(halfW, halfH)
     val clampedRadius = radiusPx.coerceAtMost(minHalf)
     shader.setFloatUniform("bufferSize", paddedWidthPx, paddedHeightPx)
+    shader.setFloatUniform("backdropBounds", backdropMinX, backdropMinY, backdropMaxX, backdropMaxY)
     shader.setFloatUniform("halfSize", halfW, halfH)
     shader.setFloatUniform("minHalf", minHalf)
     shader.setFloatUniform("offset", -padPx, -padPx)
@@ -519,10 +534,10 @@ private fun buildApi33RimBrush(
  */
 fun Modifier.ferricLiquidGlass(
     cornerRadius: Dp = 28.dp,
-    blurRadius: Dp = 12.dp,
-    refractionHeight: Dp = 16.dp,
-    refractionAmount: Dp = 10.dp,
-    chromaticDispersion: Float = 0.60f,
+    blurRadius: Dp = 7.5.dp,
+    refractionHeight: Dp = 22.dp,
+    refractionAmount: Dp = 22.dp,
+    chromaticDispersion: Float = 0.85f,
     tintAlpha: Float? = null,
     alwaysGlass: Boolean = false,
     tier: GlassTier = GlassTier.HERO_LENS,
@@ -641,11 +656,11 @@ fun Modifier.ferricLiquidGlass(
             }
             val intSize = IntSize(w.roundToInt().coerceAtLeast(1), h.roundToInt().coerceAtLeast(1))
             val radiusPx = min(cornerRadius.toPx(), min(w, h) * 0.5f)
-            val blurScale = (0.76f + opacityNorm * 0.42f).coerceIn(0.65f, 1.30f)
-            val blurPx = (blurRadius.toPx() * blurScale).coerceIn(5f, 64f)
+            val blurScale = (0.70f + opacityNorm * 0.40f).coerceIn(0.60f, 1.25f)
+            val blurPx = (blurRadius.toPx() * blurScale).coerceIn(4f, 56f)
             val halfMinPx = min(w, h) * 0.5f
-            val refHeightPx = refractionHeight.toPx().coerceAtMost(halfMinPx * 0.68f)
-            val refAmountPx = refractionAmount.toPx().coerceAtMost(halfMinPx * 0.44f)
+            val refHeightPx = refractionHeight.toPx().coerceAtMost(halfMinPx * 0.85f)
+            val refAmountPx = refractionAmount.toPx().coerceAtMost(halfMinPx * 0.78f)
 
             if (cache.cachedPathSize != size || cache.cachedPathRadius != radiusPx) {
                 cache.cachedPath.reset()
@@ -689,7 +704,7 @@ fun Modifier.ferricLiquidGlass(
                 val elementPos = screenOffsetProvider?.invoke() ?: cache.elementOffset
                 val dx = elementPos.x - activeBackdrop.rootOffset.x
                 val dy = elementPos.y - activeBackdrop.rootOffset.y
-                val padPx = ceil(max(blurPx, refAmountPx * 1.45f).toDouble()).toInt().coerceIn(10, 72)
+                val padPx = ceil(max(blurPx * 1.4f, refAmountPx * 1.35f).toDouble()).toInt().coerceIn(12, 96)
                 val padF = padPx.toFloat()
                 val paddedW = (intSize.width + 2 * padPx).coerceAtLeast(1)
                 val paddedH = (intSize.height + 2 * padPx).coerceAtLeast(1)
@@ -697,6 +712,8 @@ fun Modifier.ferricLiquidGlass(
                 val effectDirty = cache.cachedEffect == null ||
                     cache.lastSize != intSize ||
                     cache.lastPadPx != padPx ||
+                    abs(cache.lastDx - dx) > 0.5f ||
+                    abs(cache.lastDy - dy) > 0.5f ||
                     abs(cache.lastRadiusPx - radiusPx) > 0.25f ||
                     abs(cache.lastBlurPx - blurPx) > 0.35f ||
                     abs(cache.lastSaturation - saturation) > 0.02f ||
@@ -715,10 +732,18 @@ fun Modifier.ferricLiquidGlass(
                     cache.lastRefractionAmountPx = refAmountPx
                     cache.lastDispersion = chromaticDispersion
                     cache.lastLightMode = palette.isLight
+                    val bMinX = (padF - dx + 2f).coerceIn(1f, paddedW - 2f)
+                    val bMinY = (padF - dy + 2f).coerceIn(1f, paddedH - 2f)
+                    val bMaxX = (padF - dx + activeBackdrop.contentSize.width.toFloat() - 2f).coerceIn(bMinX + 1f, paddedW - 1f)
+                    val bMaxY = (padF - dy + activeBackdrop.contentSize.height.toFloat() - 2f).coerceIn(bMinY + 1f, paddedH - 1f)
                     cache.cachedEffect = buildChainedGlassRenderEffect(
                         cache = cache,
                         paddedWidthPx = paddedW.toFloat(),
                         paddedHeightPx = paddedH.toFloat(),
+                        backdropMinX = bMinX,
+                        backdropMinY = bMinY,
+                        backdropMaxX = bMaxX,
+                        backdropMaxY = bMaxY,
                         widthPx = w,
                         heightPx = h,
                         padPx = padF,
@@ -1030,11 +1055,11 @@ private fun FerricSheetWindowItem(
                                 .matchParentSize()
                                 .ferricLiquidGlass(
                                     cornerRadius = sheetCorner,
-                                    blurRadius = 15.dp,
-                                    refractionHeight = 18.dp,
-                                    refractionAmount = 11.dp,
-                                    chromaticDispersion = 0.55f,
-                                    saturation = 1.52f,
+                                    blurRadius = 13.dp,
+                                    refractionHeight = 22.dp,
+                                    refractionAmount = 22.dp,
+                                    chromaticDispersion = 0.82f,
+                                    saturation = 1.55f,
                                     veilScale = 0.56f,
                                     alwaysGlass = true,
                                     tier = GlassTier.HERO_LENS,
@@ -1336,21 +1361,21 @@ fun FerricSlimSlider(
             .height(28.dp)
             .onSizeChanged { trackWidthPx = it.width.coerceAtLeast(1) }
             .pointerInput(valueRange, steps) {
-                detectTapGestures { offset ->
-                    emitForX(offset.x)
-                    currentOnFinished?.invoke()
-                }
-            }
-            .pointerInput(valueRange, steps) {
-                detectHorizontalDragGestures(
-                    onDragStart = { offset -> emitForX(offset.x) },
-                    onHorizontalDrag = { change, _ ->
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    emitForX(down.position.x)
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                        if (change == null || !change.pressed || event.changes.none { it.pressed }) {
+                            currentOnFinished?.invoke()
+                            break
+                        }
                         change.consume()
                         emitForX(change.position.x)
-                    },
-                    onDragEnd = { currentOnFinished?.invoke() },
-                    onDragCancel = { currentOnFinished?.invoke() },
-                )
+                    }
+                }
             },
     ) {
         val midY = size.height * 0.5f

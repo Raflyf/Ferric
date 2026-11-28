@@ -4,8 +4,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -51,8 +52,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -114,14 +118,62 @@ fun EqualizerSheet(
     val palette = LocalFerricPalette.current
     var selectedTab by rememberSaveable { mutableStateOf(EqStudioTab.GRAPHIC) }
     var autoEqQuery by remember { mutableStateOf("") }
-    var draftEq by remember(eqConfig) { mutableStateOf(eqConfig) }
+    val bandGains = remember { mutableStateListOf<Float>() }
+    var draftEnabled by remember { mutableStateOf(eqConfig?.enabled ?: false) }
+    var draftPresetName by remember { mutableStateOf(eqConfig?.presetName ?: "Flat") }
+    var draftPreampDb by remember { mutableFloatStateOf(eqConfig?.preampDb ?: 0f) }
+    var isAdjustingSlider by remember { mutableStateOf(false) }
+    var lastLiveDispatchMs by remember { mutableLongStateOf(0L) }
     var draftCrossfadeSec by remember(dspSettings?.crossfadeMs) {
         mutableFloatStateOf(((dspSettings?.crossfadeMs?.toFloat() ?: 0f) / 1000f).coerceIn(0f, 12f))
     }
-    LaunchedEffect(eqConfig) { draftEq = eqConfig }
+
+    LaunchedEffect(eqConfig) {
+        if (!isAdjustingSlider && eqConfig != null) {
+            draftEnabled = eqConfig.enabled
+            draftPresetName = eqConfig.presetName
+            draftPreampDb = eqConfig.preampDb
+            if (bandGains.size != eqConfig.bands.size) {
+                bandGains.clear()
+                eqConfig.bands.forEach { bandGains.add(it.gainDb) }
+            } else {
+                eqConfig.bands.forEachIndexed { idx, band ->
+                    if (bandGains[idx] != band.gainDb) bandGains[idx] = band.gainDb
+                }
+            }
+        }
+    }
+
+    fun snapshotEqConfig(
+        enabledOverride: Boolean = draftEnabled,
+        presetOverride: String = draftPresetName,
+        preampOverride: Float = draftPreampDb,
+    ): FfiEqConfig? {
+        val base = eqConfig ?: return null
+        val updatedBands = base.bands.mapIndexed { idx, band ->
+            val g = bandGains.getOrElse(idx) { band.gainDb }
+            if (g == band.gainDb) band else band.copy(gainDb = g)
+        }
+        return base.copy(
+            enabled = enabledOverride,
+            presetName = presetOverride,
+            preampDb = preampOverride,
+            bands = updatedBands,
+        )
+    }
+
+    fun dispatchThrottledLiveEq() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastLiveDispatchMs >= 75L) {
+            lastLiveDispatchMs = now
+            snapshotEqConfig()?.let(onUpdateEq)
+        }
+    }
 
     val cardRadius = palette.cornerRadiusDp
-    val activeEq = draftEq
+    val curveDbBuffer = remember { FloatArray(EqCurveMath.DEFAULT_POINTS) }
+    val curveLinePath = remember { Path() }
+    val curveFillPath = remember { Path() }
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     FerricModalBottomSheet(
@@ -131,7 +183,7 @@ fun EqualizerSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(rememberScrollState(), enabled = !isAdjustingSlider)
                 .padding(horizontal = 18.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -147,23 +199,22 @@ fun EqualizerSheet(
                         style = MaterialTheme.typography.titleLarge,
                         color = palette.textPrimary,
                     )
-                    if (activeEq != null) {
+                    if (eqConfig != null) {
                         Text(
-                            text = "${activeEq.presetName} · ${if (activeEq.enabled) "Active" else "Bypassed"}",
+                            text = "$draftPresetName · ${if (draftEnabled) "Active" else "Bypassed"}",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = if (activeEq.enabled) palette.accent else palette.textSecondary,
+                            color = if (draftEnabled) palette.accent else palette.textSecondary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
-                if (activeEq != null) {
+                if (eqConfig != null) {
                     Switch(
-                        checked = activeEq.enabled,
-                        onCheckedChange = {
-                            val updated = activeEq.copy(enabled = it)
-                            draftEq = updated
-                            onUpdateEq(updated)
+                        checked = draftEnabled,
+                        onCheckedChange = { next ->
+                            draftEnabled = next
+                            snapshotEqConfig(enabledOverride = next)?.let(onUpdateEq)
                         },
                         colors = SwitchDefaults.colors(checkedTrackColor = palette.accent),
                     )
@@ -201,10 +252,9 @@ fun EqualizerSheet(
 
             when (selectedTab) {
                 EqStudioTab.GRAPHIC -> {
+                    val activeEq = eqConfig
                     if (activeEq != null) {
-                        val curve = remember(activeEq) { EqCurveMath.evaluateCurveDb(activeEq) }
-
-                        // Frequency Response Plot with symmetrical dB guides
+                        // Frequency Response Plot with zero-allocation real-time draw evaluation
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -242,39 +292,46 @@ fun EqualizerSheet(
                                             strokeWidth = if (frac == 0.5f) 2f else 1f,
                                         )
                                     }
-                                    if (curve.size >= 2) {
-                                        val linePath = Path()
-                                        val fillPath = Path()
-                                        curve.forEachIndexed { idx, db ->
-                                            val x = w * idx.toFloat() / (curve.size - 1)
-                                            val y = midY - (db / 16f) * (h * 0.46f)
-                                            if (idx == 0) {
-                                                linePath.moveTo(x, y)
-                                                fillPath.moveTo(x, midY)
-                                                fillPath.lineTo(x, y)
-                                            } else {
-                                                linePath.lineTo(x, y)
-                                                fillPath.lineTo(x, y)
-                                            }
+                                    val gains = if (bandGains.size == activeEq.bands.size) bandGains else null
+                                    EqCurveMath.evaluateCurveDbInto(
+                                        outDb = curveDbBuffer,
+                                        bands = activeEq.bands,
+                                        bandGainsOverride = gains,
+                                        preampDb = draftPreampDb,
+                                        enabled = draftEnabled,
+                                    )
+                                    val pts = EqCurveMath.DEFAULT_POINTS
+                                    curveLinePath.reset()
+                                    curveFillPath.reset()
+                                    for (idx in 0 until pts) {
+                                        val x = w * idx.toFloat() / (pts - 1)
+                                        val y = midY - (curveDbBuffer[idx] / 16f) * (h * 0.46f)
+                                        if (idx == 0) {
+                                            curveLinePath.moveTo(x, y)
+                                            curveFillPath.moveTo(x, midY)
+                                            curveFillPath.lineTo(x, y)
+                                        } else {
+                                            curveLinePath.lineTo(x, y)
+                                            curveFillPath.lineTo(x, y)
                                         }
-                                        fillPath.lineTo(w, midY)
-                                        fillPath.close()
-
-                                        drawPath(
-                                            path = fillPath,
-                                            brush = Brush.verticalGradient(
-                                                listOf(
-                                                    palette.accent.copy(alpha = if (activeEq.enabled) 0.30f else 0.12f),
-                                                    palette.accent.copy(alpha = 0.02f),
-                                                ),
-                                            ),
-                                        )
-                                        drawPath(
-                                            path = linePath,
-                                            color = if (activeEq.enabled) palette.accent else palette.textSecondary,
-                                            style = Stroke(width = 4.5f, cap = StrokeCap.Round),
-                                        )
                                     }
+                                    curveFillPath.lineTo(w, midY)
+                                    curveFillPath.close()
+
+                                    drawPath(
+                                        path = curveFillPath,
+                                        brush = Brush.verticalGradient(
+                                            listOf(
+                                                palette.accent.copy(alpha = if (draftEnabled) 0.30f else 0.12f),
+                                                palette.accent.copy(alpha = 0.02f),
+                                            ),
+                                        ),
+                                    )
+                                    drawPath(
+                                        path = curveLinePath,
+                                        color = if (draftEnabled) palette.accent else palette.textSecondary,
+                                        style = Stroke(width = 4.5f, cap = StrokeCap.Round),
+                                    )
                                 }
                             }
                         }
@@ -289,7 +346,7 @@ fun EqualizerSheet(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 items(eqPresets, key = { it }) { preset ->
-                                    val selected = activeEq.presetName.equals(preset, ignoreCase = true)
+                                    val selected = draftPresetName.equals(preset, ignoreCase = true)
                                     FerricChoicePill(
                                         label = preset,
                                         selected = selected,
@@ -299,10 +356,12 @@ fun EqualizerSheet(
                             }
                             TextButton(
                                 onClick = {
+                                    isAdjustingSlider = false
+                                    for (i in bandGains.indices) bandGains[i] = 0f
+                                    draftPreampDb = 0f
+                                    draftPresetName = "Flat"
                                     val flatBands = activeEq.bands.map { it.copy(gainDb = 0f) }
-                                    val reset = activeEq.copy(bands = flatBands, preampDb = 0f, presetName = "Flat")
-                                    draftEq = reset
-                                    onUpdateEq(reset)
+                                    onUpdateEq(activeEq.copy(bands = flatBands, preampDb = 0f, presetName = "Flat"))
                                 },
                             ) {
                                 Icon(Icons.Rounded.Refresh, contentDescription = "Reset Flat", tint = palette.textSecondary, modifier = Modifier.size(16.dp))
@@ -324,11 +383,12 @@ fun EqualizerSheet(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                                    .padding(horizontal = 6.dp, vertical = 12.dp),
                                 horizontalArrangement = Arrangement.SpaceEvenly,
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 activeEq.bands.forEachIndexed { idx, band ->
+                                    val gainDb = bandGains.getOrElse(idx) { band.gainDb }
                                     val freqShort = if (band.freqHz >= 1000f) {
                                         "${(band.freqHz / 1000f).roundToInt()}k"
                                     } else {
@@ -340,27 +400,37 @@ fun EqualizerSheet(
                                         verticalArrangement = Arrangement.spacedBy(6.dp),
                                     ) {
                                         Text(
-                                            text = if (kotlin.math.abs(band.gainDb) < 0.05f) {
+                                            text = if (kotlin.math.abs(gainDb) < 0.05f) {
                                                 "0"
                                             } else {
-                                                String.format(Locale.US, "%+.0f", band.gainDb)
+                                                String.format(Locale.US, "%+.1f", gainDb).removeSuffix(".0")
                                             },
                                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                                            color = if (kotlin.math.abs(band.gainDb) >= 0.3f) palette.accent else palette.textSecondary,
+                                            color = if (kotlin.math.abs(gainDb) >= 0.3f) palette.accent else palette.textSecondary,
                                             textAlign = TextAlign.Center,
                                             maxLines = 1,
                                         )
                                         VerticalEqFader(
-                                            gainDb = band.gainDb,
-                                            activeColor = if (activeEq.enabled) palette.accent else palette.textSecondary,
+                                            gainDb = gainDb,
+                                            activeColor = if (draftEnabled) palette.accent else palette.textSecondary,
                                             trackColor = palette.border,
+                                            onStart = {
+                                                isAdjustingSlider = true
+                                                if (bandGains.size != activeEq.bands.size) {
+                                                    bandGains.clear()
+                                                    activeEq.bands.forEach { bandGains.add(it.gainDb) }
+                                                }
+                                            },
                                             onChange = { nextDb ->
-                                                val nextBands = activeEq.bands.toMutableList()
-                                                nextBands[idx] = band.copy(gainDb = nextDb)
-                                                draftEq = activeEq.copy(bands = nextBands, presetName = "Custom")
+                                                if (idx in bandGains.indices) {
+                                                    bandGains[idx] = nextDb
+                                                }
+                                                draftPresetName = "Custom"
+                                                dispatchThrottledLiveEq()
                                             },
                                             onCommit = {
-                                                draftEq?.let(onUpdateEq)
+                                                isAdjustingSlider = false
+                                                snapshotEqConfig()?.let(onUpdateEq)
                                             },
                                         )
                                         Text(
@@ -394,18 +464,22 @@ fun EqualizerSheet(
                                 ) {
                                     Text("Preamp Gain", color = palette.textPrimary, style = MaterialTheme.typography.titleSmall)
                                     Text(
-                                        text = String.format(Locale.US, "%+.1f dB", activeEq.preampDb),
+                                        text = String.format(Locale.US, "%+.1f dB", draftPreampDb),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = palette.accent,
                                     )
                                 }
                                 FerricSlimSlider(
-                                    value = activeEq.preampDb.coerceIn(-12f, 12f),
+                                    value = draftPreampDb.coerceIn(-12f, 12f),
                                     onValueChange = { v ->
-                                        draftEq = activeEq.copy(preampDb = v, presetName = "Custom")
+                                        isAdjustingSlider = true
+                                        draftPreampDb = (v * 10f).roundToInt() / 10f
+                                        draftPresetName = "Custom"
+                                        dispatchThrottledLiveEq()
                                     },
                                     onValueChangeFinished = {
-                                        draftEq?.let(onUpdateEq)
+                                        isAdjustingSlider = false
+                                        snapshotEqConfig()?.let(onUpdateEq)
                                     },
                                     valueRange = -12f..12f,
                                 )
@@ -466,7 +540,7 @@ fun EqualizerSheet(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         items(autoEqProfiles, key = { it.name }) { prof ->
-                            val selected = activeEq?.presetName.equals(prof.name, ignoreCase = true)
+                            val selected = draftPresetName.equals(prof.name, ignoreCase = true)
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -622,9 +696,13 @@ private fun VerticalEqFader(
     gainDb: Float,
     activeColor: Color,
     trackColor: Color,
+    onStart: () -> Unit,
     onChange: (Float) -> Unit,
     onCommit: () -> Unit,
 ) {
+    val currentOnStart by rememberUpdatedState(onStart)
+    val currentOnChange by rememberUpdatedState(onChange)
+    val currentOnCommit by rememberUpdatedState(onCommit)
     var heightPx by remember { mutableIntStateOf(1) }
     val clamped = gainDb.coerceIn(-12f, 12f)
     // +12 dB at top (frac = 0), -12 dB at bottom (frac = 1)
@@ -633,29 +711,36 @@ private fun VerticalEqFader(
     fun yToGain(y: Float): Float {
         val frac = (y / heightPx.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
         val raw = 12f - frac * 24f
-        return (raw * 2f).roundToInt() / 2f
+        return (raw * 10f).roundToInt() / 10f
     }
 
     Box(
         modifier = Modifier
-            .width(30.dp)
-            .height(148.dp)
-            .onSizeChanged { heightPx = it.height }
+            .width(34.dp)
+            .height(152.dp)
+            .onSizeChanged { heightPx = it.height.coerceAtLeast(1) }
             .pointerInput(Unit) {
-                detectTapGestures { offset ->
-                    onChange(yToGain(offset.y))
-                    onCommit()
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    currentOnStart()
+                    currentOnChange(yToGain(down.position.y))
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                            if (change == null || !change.pressed || event.changes.none { it.pressed }) {
+                                currentOnCommit()
+                                break
+                            }
+                            change.consume()
+                            currentOnChange(yToGain(change.position.y))
+                        }
+                    } catch (e: Throwable) {
+                        currentOnCommit()
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                    }
                 }
-            }
-            .pointerInput(Unit) {
-                detectVerticalDragGestures(
-                    onDragEnd = { onCommit() },
-                    onDragCancel = { onCommit() },
-                    onVerticalDrag = { change, _ ->
-                        change.consume()
-                        onChange(yToGain(change.position.y))
-                    },
-                )
             },
         contentAlignment = Alignment.Center,
     ) {

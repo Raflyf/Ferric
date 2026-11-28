@@ -179,6 +179,16 @@ impl LanDiscoveryBeacon {
         }
     }
 
+    /// Purge a peer immediately after a clean `Goodbye` or confirmed disconnect.
+    pub fn remove_peer(&mut self, device_id: &str) {
+        let clean = device_id.trim();
+        if clean.is_empty() {
+            return;
+        }
+        self.connected_peers.remove(clean);
+        self.peers.remove(clean);
+    }
+
     /// Update a peer's IP address following an authenticated handshake (bypasses unauthenticated IP pinning).
     pub fn update_authenticated_peer_ip(
         &mut self,

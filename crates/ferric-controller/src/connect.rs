@@ -75,6 +75,14 @@ impl FerricController {
     }
 
     pub(crate) fn push_connect_playback_snapshot(&self) {
+        self.push_connect_playback_snapshot_override(None, None);
+    }
+
+    pub(crate) fn push_connect_playback_snapshot_override(
+        &self,
+        is_playing_override: Option<bool>,
+        pos_override_ms: Option<u64>,
+    ) {
         let engine = {
             self.connect
                 .lock()
@@ -85,6 +93,8 @@ impl FerricController {
             return;
         };
         let tele = self.telemetry();
+        let is_playing = is_playing_override.unwrap_or(tele.is_playing);
+        let position_ms = pos_override_ms.unwrap_or(tele.position_ms);
         let snap = {
             let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let current_track = st.queue.current().map(QueueEntry::from_track);
@@ -100,11 +110,11 @@ impl FerricController {
                 .and_then(|cur| queue.iter().position(|t| t.track_id == cur.track_id))
                 .unwrap_or(0);
             LocalPlaybackSnapshot {
-                is_playing: tele.is_playing,
+                is_playing,
                 current_track,
                 queue,
                 current_index,
-                position_ms: tele.position_ms,
+                position_ms,
                 volume_norm: st.session.volume,
                 repeat_mode: st.queue.repeat,
                 shuffle_enabled: st.queue.shuffle,
@@ -124,7 +134,11 @@ impl FerricController {
         };
         engine.is_some_and(|e| {
             let snap = e.snapshot();
-            !snap.is_local_active_speaker && snap.peers.iter().any(|p| p.connected)
+            !snap.is_local_active_speaker
+                && snap
+                    .peers
+                    .iter()
+                    .any(|p| p.connected && p.device_id == snap.active_speaker_id)
         })
     }
 
@@ -310,15 +324,21 @@ impl FerricController {
                 let _ = self.play_local_only();
             }
             RemoteAction::Pause => {
+                {
+                    let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    st.paused_while_resolving = true;
+                }
                 self.send_audio(EngineCommand::Pause);
-                self.push_connect_playback_snapshot();
+                self.push_connect_playback_snapshot_override(Some(false), None);
+                self.wake_monitor();
             }
             RemoteAction::TogglePlayPause => {
                 let _ = self.toggle_play_pause_local_only();
             }
             RemoteAction::SeekTo { position_ms } => {
                 self.send_audio(EngineCommand::SeekMs(position_ms));
-                self.push_connect_playback_snapshot();
+                self.push_connect_playback_snapshot_override(None, Some(position_ms));
+                self.wake_monitor();
             }
             RemoteAction::SkipNext => {
                 let _ = self.next_local_only();
@@ -333,7 +353,12 @@ impl FerricController {
                 };
                 if !tracks.is_empty() {
                     let clamped = index.min(tracks.len() - 1);
-                    let _ = self.play_queue_local_only(tracks, clamped, ctx);
+                    let this = Arc::clone(self);
+                    let _ = std::thread::Builder::new()
+                        .name("ferric-connect-jump".to_string())
+                        .spawn(move || {
+                            let _ = this.play_queue_local_only(tracks, clamped, ctx);
+                        });
                 }
             }
             RemoteAction::PlayQueue {
@@ -341,11 +366,16 @@ impl FerricController {
                 start_index,
                 context,
             } => {
-                let hydrated = self.hydrate_connect_tracks(tracks);
-                if !hydrated.is_empty() {
-                    let idx = start_index.min(hydrated.len() - 1);
-                    let _ = self.play_queue_local_only(hydrated, idx, context);
-                }
+                let this = Arc::clone(self);
+                let _ = std::thread::Builder::new()
+                    .name("ferric-connect-queue".to_string())
+                    .spawn(move || {
+                        let hydrated = this.hydrate_connect_tracks(tracks);
+                        if !hydrated.is_empty() {
+                            let idx = start_index.min(hydrated.len() - 1);
+                            let _ = this.play_queue_local_only(hydrated, idx, context);
+                        }
+                    });
             }
             RemoteAction::SetVolume { volume_norm, .. } => {
                 self.set_volume(volume_norm);
@@ -377,6 +407,20 @@ impl FerricController {
     }
 
     fn apply_became_active_speaker(
+        self: &Arc<Self>,
+        state: SessionState,
+        queue: Vec<QueueEntry>,
+        current_index: usize,
+    ) {
+        let this = Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("ferric-connect-handoff".to_string())
+            .spawn(move || {
+                this.apply_became_active_speaker_worker(state, queue, current_index);
+            });
+    }
+
+    fn apply_became_active_speaker_worker(
         self: &Arc<Self>,
         state: SessionState,
         queue: Vec<QueueEntry>,
@@ -418,7 +462,12 @@ impl FerricController {
         } else {
             0
         };
-        let seek_target_ms = state.base_position_ms.saturating_add(drift_ms);
+        let adj_seek = state.base_position_ms.saturating_add(drift_ms);
+        let seek_target_ms = if state.duration_ms > 0 {
+            adj_seek.min(state.duration_ms)
+        } else {
+            adj_seek
+        };
 
         {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -428,7 +477,6 @@ impl FerricController {
         }
 
         if is_unmatched_local {
-            // v0.1 policy: attempt online title+artist match via standard resolver; warn if strictly local.
             let sender_name = if state.device_name.is_empty() {
                 "other device".to_string()
             } else {
@@ -453,6 +501,10 @@ impl FerricController {
             if !state.is_playing {
                 self.send_audio(EngineCommand::Pause);
             }
+            self.push_connect_playback_snapshot_override(
+                Some(state.is_playing),
+                Some(seek_target_ms),
+            );
             self.sink
                 .on_toast("Switched playback to this device".to_string());
         }

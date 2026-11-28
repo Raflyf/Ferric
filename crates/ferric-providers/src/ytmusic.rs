@@ -4924,10 +4924,16 @@ fn score_music_video_candidate(
 
     if track_duration_ms > 0 && cand.duration_ms > 0 {
         let diff_ms = track_duration_ms.abs_diff(cand.duration_ms);
-        if diff_ms <= 45_000 {
-            score += 20;
-        } else if diff_ms > 180_000 {
-            score -= 45;
+        if diff_ms <= 8_000 {
+            score += 45;
+        } else if diff_ms <= 22_000 {
+            score += 18;
+        } else if diff_ms <= 45_000 {
+            score -= 10;
+        } else if diff_ms <= 90_000 {
+            score -= 90;
+        } else {
+            score -= 220;
         }
     }
 

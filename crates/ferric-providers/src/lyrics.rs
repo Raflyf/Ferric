@@ -84,12 +84,21 @@ impl SyncedLyrics {
     pub fn parse_with_context(raw: &str, duration_ms: u64, source_name: impl Into<String>) -> Self {
         let raw = raw.trim_start_matches('\u{feff}');
         let source = source_name.into();
+        let mut lrc_offset_ms: i64 = 0;
         let mut lines = Vec::new();
         let mut timestamps = Vec::with_capacity(4);
 
         for row in raw.lines() {
             let mut rest = row.trim();
             if !rest.starts_with('[') {
+                continue;
+            }
+            if let Some(inner) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+                && let Some((k, v)) = inner.split_once(':')
+                && k.trim().eq_ignore_ascii_case("offset")
+                && let Ok(parsed_off) = v.trim().parse::<i64>()
+            {
+                lrc_offset_ms = parsed_off.clamp(-30_000, 30_000);
                 continue;
             }
             timestamps.clear();
@@ -112,8 +121,10 @@ impl SyncedLyrics {
                 continue;
             }
             for &ts_ms in &timestamps {
+                // LRC `[offset:+N]` means timestamps run early by N ms; subtract offset for true playback alignment.
+                let adjusted = (ts_ms as i64 - lrc_offset_ms).max(0) as u64;
                 lines.push(LyricLine {
-                    timestamp_ms: ts_ms,
+                    timestamp_ms: adjusted,
                     text: text.to_string(),
                 });
             }
@@ -446,8 +457,14 @@ fn score_lrclib_candidate(
     {
         let target_secs = duration_ms as f64 / 1000.0;
         let diff_secs = (cand_secs - target_secs).abs();
-        let penalty = (diff_secs * 40.0).min(2_500.0) as i64;
-        score -= penalty;
+        if diff_secs <= 3.0 {
+            score += 600;
+        } else if diff_secs <= 8.0 {
+            score += 200;
+        } else {
+            let penalty = (diff_secs * 110.0).min(12_000.0) as i64;
+            score -= penalty;
+        }
     }
 
     if let Some(body_text) = synced_text.or(plain_text) {

@@ -175,6 +175,43 @@ data class PlaybackUiState(
     val isReady: Boolean = false,
 )
 
+fun PlaybackUiState.activeDisplayTrack(): FfiTrack? {
+    if (connectState.isLocalActiveSpeaker) return currentTrack
+    val peer = connectState.peers.firstOrNull {
+        it.connected && it.deviceId == connectState.activeSpeakerId
+    } ?: return currentTrack
+    val qIdx = connectState.activeRemoteQueueIndex.toInt()
+    val fromIdx = connectState.activeRemoteQueue.getOrNull(qIdx)
+    val queueMatch = when {
+        fromIdx != null && (peer.activeTrackId == null || fromIdx.id == peer.activeTrackId) -> fromIdx
+        !peer.activeTrackId.isNullOrBlank() -> connectState.activeRemoteQueue.firstOrNull { it.id == peer.activeTrackId }
+        else -> null
+    }
+    if (queueMatch != null) return queueMatch
+    if (peer.nowPlayingTitle.isBlank() && peer.activeTrackId.isNullOrBlank()) return currentTrack
+    val tid = peer.activeTrackId?.takeIf { it.isNotBlank() } ?: "remote:${peer.deviceId}"
+    val ytVid = tid.removePrefix("yt:video:").takeIf { tid.startsWith("yt:video:") && it.isNotBlank() }
+    val spId = tid.removePrefix("sp:track:").takeIf { tid.startsWith("sp:track:") && it.isNotBlank() }
+    return FfiTrack(
+        id = tid,
+        title = peer.nowPlayingTitle,
+        artist = peer.nowPlayingArtist,
+        album = "",
+        durationMs = peer.durationMs,
+        path = null,
+        source = if (ytVid != null) FfiTrackSource.YOU_TUBE_MUSIC else FfiTrackSource.SPOTIFY,
+        codec = if (peer.viaRelay) "CLOUD" else "WIFI",
+        sampleRate = 48_000u,
+        bitDepth = 16u,
+        bitrateKbps = 128u,
+        spotifyId = spId,
+        youtubeVideoId = ytVid,
+        thumbnailUrl = peer.nowPlayingThumbnailUrl,
+        replayGainDb = 0,
+        liked = false,
+    )
+}
+
 /**
  * Pure state reducer kept JVM-testable without native `.so` loading.
  */
@@ -255,6 +292,24 @@ class CoreStateStore(private val appContext: Context) {
     private var autoEqSearchJob: Job? = null
     private var sleepTimerPollJob: Job? = null
     private var remoteProgressJob: Job? = null
+
+    @Volatile
+    private var remoteTickerKey: String = ""
+
+    @Volatile
+    private var remoteAnchorPosMs: Long = 0L
+
+    @Volatile
+    private var remoteAnchorMonoMs: Long = 0L
+
+    @Volatile
+    private var remoteDurationMs: Long = 0L
+
+    @Volatile
+    private var pendingRemoteSeekHoldUntilMonoMs: Long = 0L
+
+    @Volatile
+    private var pendingRemoteSeekTargetMs: Long = 0L
 
     private val _uiState = MutableStateFlow(
         PlaybackUiState(
@@ -347,6 +402,14 @@ class CoreStateStore(private val appContext: Context) {
                 extractCoverShadeAsync(track.thumbnailUrl)
                 _uiState.update {
                     it.copy(
+                        lyricsState = FfiLyricsState(
+                            trackId = track.id,
+                            lines = emptyList(),
+                            sourceName = "",
+                            isSynced = false,
+                            offsetMs = 0L,
+                            isLoading = false,
+                        ),
                         videoStreams = FfiVideoStreamsState(
                             trackId = track.id,
                             videoId = track.youtubeVideoId.orEmpty(),
@@ -399,14 +462,15 @@ class CoreStateStore(private val appContext: Context) {
         }
 
         override fun onConnectStateChanged(state: FfiConnectState) {
+            var trackSwitchedId: String? = null
             _uiState.update { prev ->
+                val prevDisplay = prev.activeDisplayTrack()
                 val activeRemote = if (!state.isLocalActiveSpeaker) {
                     state.peers.firstOrNull { it.connected && it.deviceId == state.activeSpeakerId }
                 } else {
                     null
                 }
-                if (activeRemote != null && activeRemote.nowPlayingTitle.isNotBlank()) {
-                    extractCoverShadeAsync(activeRemote.nowPlayingThumbnailUrl)
+                val nextBase = if (activeRemote != null && activeRemote.nowPlayingTitle.isNotBlank()) {
                     prev.copy(
                         connectState = state,
                         miniPlayerDismissed = false,
@@ -414,8 +478,38 @@ class CoreStateStore(private val appContext: Context) {
                 } else {
                     prev.copy(connectState = state)
                 }
+                val nextDisplay = nextBase.activeDisplayTrack()
+                if (activeRemote != null && activeRemote.nowPlayingTitle.isNotBlank()) {
+                    extractCoverShadeAsync(nextDisplay?.thumbnailUrl ?: activeRemote.nowPlayingThumbnailUrl)
+                }
+                val nextId = nextDisplay?.id.orEmpty()
+                if (nextDisplay?.id != prevDisplay?.id && !state.isLocalActiveSpeaker && nextId.isNotBlank()) {
+                    trackSwitchedId = nextId
+                    nextBase.copy(
+                        lyricsState = FfiLyricsState(
+                            trackId = "",
+                            lines = emptyList(),
+                            sourceName = "",
+                            isSynced = false,
+                            offsetMs = 0L,
+                            isLoading = false,
+                        ),
+                        videoStreams = FfiVideoStreamsState(
+                            trackId = "",
+                            videoId = nextDisplay?.youtubeVideoId.orEmpty(),
+                            isOfficialMv = false,
+                            options = emptyList(),
+                            isLoading = false,
+                        ),
+                    )
+                } else {
+                    nextBase
+                }
             }
             updateRemoteProgressTicker(state)
+            if (trackSwitchedId != null) {
+                loadLyricsForCurrent()
+            }
             if (state.localTcpPort.toInt() >= 1024) {
                 nsdHelper.syncRegistration(
                     deviceId = state.localDeviceId,
@@ -694,6 +788,13 @@ class CoreStateStore(private val appContext: Context) {
 
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceAtLeast(0L)
+        val nowMono = android.os.SystemClock.elapsedRealtime()
+        if (!_uiState.value.connectState.isLocalActiveSpeaker) {
+            pendingRemoteSeekTargetMs = clamped
+            pendingRemoteSeekHoldUntilMonoMs = nowMono + 1_600L
+            remoteAnchorPosMs = clamped
+            remoteAnchorMonoMs = nowMono
+        }
         _playbackProgress.update { it.copy(positionMs = clamped) }
         _uiState.update { it.copy(seekSyncNonce = it.seekSyncNonce + 1L) }
         scope.launch { core?.seekMs(clamped.toULong()) }
@@ -729,12 +830,21 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     private fun updateRemoteProgressTicker(connectState: FfiConnectState) {
-        remoteProgressJob?.cancel()
-        remoteProgressJob = null
-        if (connectState.isLocalActiveSpeaker) return
+        if (connectState.isLocalActiveSpeaker) {
+            remoteTickerKey = ""
+            remoteProgressJob?.cancel()
+            remoteProgressJob = null
+            return
+        }
         val peer = connectState.peers.firstOrNull {
             it.connected && it.deviceId == connectState.activeSpeakerId
-        } ?: return
+        }
+        if (peer == null) {
+            remoteTickerKey = ""
+            remoteProgressJob?.cancel()
+            remoteProgressJob = null
+            return
+        }
 
         val durMs = peer.durationMs.toLong().coerceAtLeast(0L)
         val anchorWall = peer.anchorUtcMs
@@ -746,27 +856,49 @@ class CoreStateStore(private val appContext: Context) {
         val basePos = (peer.positionMs.toLong() + driftAtReceive).let { raw ->
             if (durMs > 0L) raw.coerceIn(0L, durMs) else raw.coerceAtLeast(0L)
         }
-        _playbackProgress.update { prev ->
-            prev.copy(positionMs = basePos, durationMs = durMs)
+        val nowMono = android.os.SystemClock.elapsedRealtime()
+        val inSeekHold = nowMono < pendingRemoteSeekHoldUntilMonoMs &&
+            kotlin.math.abs(basePos - pendingRemoteSeekTargetMs) > 1_200L
+        if (!inSeekHold) {
+            pendingRemoteSeekHoldUntilMonoMs = 0L
+            remoteAnchorPosMs = basePos
+            remoteAnchorMonoMs = nowMono
+            remoteDurationMs = durMs
+            _playbackProgress.update { prev ->
+                prev.copy(positionMs = basePos, durationMs = durMs)
+            }
+        } else {
+            remoteDurationMs = durMs
         }
-        if (!peer.isPlaying) return
 
-        val startMonoMs = android.os.SystemClock.elapsedRealtime()
+        val nextKey = "${peer.deviceId}|${peer.activeTrackId.orEmpty()}|${peer.isPlaying}|$durMs"
+        if (!peer.isPlaying) {
+            remoteTickerKey = ""
+            remoteProgressJob?.cancel()
+            remoteProgressJob = null
+            return
+        }
+        if (nextKey == remoteTickerKey && remoteProgressJob?.isActive == true) {
+            return
+        }
+        remoteTickerKey = nextKey
+        remoteProgressJob?.cancel()
         remoteProgressJob = scope.launch {
             while (true) {
-                delay(500L)
+                delay(200L)
                 val latest = _uiState.value.connectState
                 if (latest.isLocalActiveSpeaker) break
                 val livePeer = latest.peers.firstOrNull {
                     it.connected && it.deviceId == latest.activeSpeakerId
                 } ?: break
                 if (!livePeer.isPlaying) break
-                val elapsed = (android.os.SystemClock.elapsedRealtime() - startMonoMs).coerceAtLeast(0L)
-                val nextPos = (basePos + elapsed).let { p ->
-                    if (durMs > 0L) p.coerceIn(0L, durMs) else p
+                val elapsed = (android.os.SystemClock.elapsedRealtime() - remoteAnchorMonoMs).coerceAtLeast(0L)
+                val liveDur = remoteDurationMs
+                val nextPos = (remoteAnchorPosMs + elapsed).let { p ->
+                    if (liveDur > 0L) p.coerceIn(0L, liveDur) else p
                 }
                 _playbackProgress.update { prev ->
-                    prev.copy(positionMs = nextPos, durationMs = durMs)
+                    prev.copy(positionMs = nextPos, durationMs = liveDur)
                 }
             }
         }
@@ -844,7 +976,19 @@ class CoreStateStore(private val appContext: Context) {
     // --- M3 Synced Lyrics, Video Clip, EQ / AutoEq / APO & Theme Studio ---
 
     fun loadLyricsForCurrent() {
-        val track = _uiState.value.currentTrack ?: return
+        val track = _uiState.value.activeDisplayTrack() ?: return
+        _uiState.update {
+            it.copy(
+                lyricsState = FfiLyricsState(
+                    trackId = track.id,
+                    lines = emptyList(),
+                    sourceName = "",
+                    isSynced = false,
+                    offsetMs = 0L,
+                    isLoading = true,
+                ),
+            )
+        }
         scope.launch { getOrCreateCore()?.loadLyrics(track) }
     }
 
@@ -853,7 +997,18 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun resolveVideoForCurrent() {
-        val track = _uiState.value.currentTrack ?: return
+        val track = _uiState.value.activeDisplayTrack() ?: return
+        _uiState.update {
+            it.copy(
+                videoStreams = FfiVideoStreamsState(
+                    trackId = track.id,
+                    videoId = track.youtubeVideoId.orEmpty(),
+                    isOfficialMv = false,
+                    options = emptyList(),
+                    isLoading = true,
+                ),
+            )
+        }
         scope.launch { getOrCreateCore()?.resolveVideoStreams(track) }
     }
 

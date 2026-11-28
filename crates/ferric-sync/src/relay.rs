@@ -40,12 +40,13 @@ pub const DEFAULT_RELAY_BROKERS: &[&str] = &[
 ];
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
-const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(90);
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(25);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(4);
 const MQTT_KEEPALIVE_SECS: u16 = 25;
-const PING_INTERVAL: Duration = Duration::from_secs(14);
+const PING_INTERVAL: Duration = Duration::from_secs(10);
+const PONG_TIMEOUT: Duration = Duration::from_secs(8);
 const RECONNECT_MIN_BACKOFF: Duration = Duration::from_secs(2);
-const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(25);
+const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(20);
 const MAX_RELAY_PACKET_BYTES: usize = 56 * 1024;
 const MAX_REPLAY_SENDERS: usize = 64;
 
@@ -60,6 +61,7 @@ const MQTT_UNSUBSCRIBE_FLAGS: u8 = 0xA2;
 const MQTT_UNSUBACK: u8 = 0xB0;
 const MQTT_PINGREQ: u8 = 0xC0;
 const MQTT_PINGRESP: u8 = 0xD0;
+const MQTT_DISCONNECT: u8 = 0xE0;
 
 /// Authenticated inner envelope transported encrypted inside `FCR1` relay packets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -405,9 +407,31 @@ fn connect_tcp_with_timeout(host: &str, port: u16, timeout: Duration) -> io::Res
     Err(last_err)
 }
 
+fn build_lwt_will(local_device_id: &str, rooms: &[RelayRoomSpec]) -> Option<(String, Vec<u8>)> {
+    let primary = rooms.first()?;
+    let env = RelayEnvelope {
+        sender_id: local_device_id.to_string(),
+        sender_name: String::new(),
+        sender_kind: DeviceKind::Desktop,
+        target_id: None,
+        frame: SyncFrame::Goodbye {
+            device_id: local_device_id.to_string(),
+        },
+    };
+    let plain = postcard::to_stdvec(&env).ok()?;
+    let mut lwt_salt = [0u8; 16];
+    csprng_fill(&mut lwt_salt);
+    let sealed = seal_relay_packet(primary.key.as_bytes(), &lwt_salt, 1, &plain).ok()?;
+    if sealed.len() > u16::MAX as usize {
+        return None;
+    }
+    Some((primary.topic.clone(), sealed))
+}
+
 fn dial_mqtt_websocket(
     endpoint: &BrokerEndpoint,
     tls_cfg: &Arc<ClientConfig>,
+    lwt_will: Option<&(String, Vec<u8>)>,
 ) -> SyncResult<WebSocket<RelayTransportStream>> {
     let tcp = connect_tcp_with_timeout(&endpoint.host, endpoint.port, CONNECT_TIMEOUT)?;
     let _ = tcp.set_nodelay(true);
@@ -454,11 +478,12 @@ fn dial_mqtt_websocket(
             ))
         })?;
 
-    // Send MQTT v3.1.1 CONNECT packet with random ephemeral client ID (zero PII on wire).
+    // Send MQTT v3.1.1 CONNECT packet with random ephemeral client ID + encrypted Goodbye Last Will.
     let mut rnd = [0u8; 8];
     csprng_fill(&mut rnd);
     let client_id = format!("fc-{}", hex_encode(&rnd));
-    let connect_pkt = encode_mqtt_connect(&client_id, MQTT_KEEPALIVE_SECS);
+    let will_ref = lwt_will.map(|(t, p)| (t.as_str(), p.as_slice()));
+    let connect_pkt = encode_mqtt_connect(&client_id, MQTT_KEEPALIVE_SECS, will_ref);
     ws.send(Message::Binary(connect_pkt.into()))
         .map_err(|e| io::Error::new(ErrorKind::BrokenPipe, e.to_string()))?;
 
@@ -521,6 +546,7 @@ fn relay_worker_loop(
     let mut rooms: Vec<RelayRoomSpec> = Vec::new();
     let mut replay_guard = ReplayGuard::new();
     let mut broker_idx = 0usize;
+    let mut fail_streak = 0u32;
     let mut backoff = RECONNECT_MIN_BACKOFF;
 
     let set_status = |is_conn: bool, label: &str| {
@@ -548,7 +574,7 @@ fn relay_worker_loop(
 
         if rooms.is_empty() || endpoints.is_empty() {
             set_status(false, "");
-            match cmd_rx.recv_timeout(Duration::from_millis(500)) {
+            match cmd_rx.recv_timeout(Duration::from_millis(350)) {
                 Ok(RelayCmd::Shutdown) => break 'outer,
                 Ok(RelayCmd::UpdateRooms(next_rooms)) => rooms = next_rooms,
                 _ => {}
@@ -557,13 +583,18 @@ fn relay_worker_loop(
         }
 
         let ep = &endpoints[broker_idx % endpoints.len()];
-        let Ok(mut ws) = dial_mqtt_websocket(ep, &tls_cfg) else {
-            broker_idx = broker_idx.wrapping_add(1);
+        let lwt_will = build_lwt_will(&local_device_id, &rooms);
+        let Ok(mut ws) = dial_mqtt_websocket(ep, &tls_cfg, lwt_will.as_ref()) else {
+            fail_streak = fail_streak.saturating_add(1);
+            if fail_streak >= 2 {
+                broker_idx = broker_idx.wrapping_add(1);
+                fail_streak = 0;
+            }
             set_status(false, "");
             let wait_until = Instant::now() + backoff;
             backoff = (backoff * 2).min(RECONNECT_MAX_BACKOFF);
             while Instant::now() < wait_until && !shutdown.load(Ordering::Acquire) {
-                match cmd_rx.recv_timeout(Duration::from_millis(250)) {
+                match cmd_rx.recv_timeout(Duration::from_millis(180)) {
                     Ok(RelayCmd::Shutdown) => break 'outer,
                     Ok(RelayCmd::UpdateRooms(next_rooms)) => {
                         let had_none = rooms.is_empty();
@@ -579,8 +610,8 @@ fn relay_worker_loop(
             continue;
         };
 
-        // Reset backoff and subscribe to all active opaque room topics.
         backoff = RECONNECT_MIN_BACKOFF;
+        fail_streak = 0;
         let mut subscribed_topics: Vec<String> = rooms.iter().map(|r| r.topic.clone()).collect();
         if !subscribed_topics.is_empty() {
             packet_id_seq = packet_id_seq.wrapping_add(1).max(1);
@@ -592,13 +623,17 @@ fn relay_worker_loop(
         }
         set_status(true, &ep.label);
 
-        let mut last_ping_at = Instant::now();
+        let mut last_ping_sent_at = Instant::now();
+        let mut awaiting_pingresp_since: Option<Instant> = None;
         let mut rx_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut graceful_shutdown = false;
 
         'session: while !shutdown.load(Ordering::Acquire) {
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
-                    RelayCmd::Shutdown => break 'outer,
+                    RelayCmd::Shutdown => {
+                        graceful_shutdown = true;
+                    }
                     RelayCmd::UpdateRooms(next_rooms) => {
                         let next_topics: Vec<String> =
                             next_rooms.iter().map(|r| r.topic.clone()).collect();
@@ -657,19 +692,31 @@ fn relay_worker_loop(
                         if ws.send(Message::Binary(mqtt_pkt.into())).is_err() {
                             break 'session;
                         }
-                        last_ping_at = Instant::now();
                     }
                 }
             }
 
-            if last_ping_at.elapsed() >= PING_INTERVAL {
+            if graceful_shutdown || shutdown.load(Ordering::Acquire) {
+                let _ = ws.send(Message::Binary(vec![MQTT_DISCONNECT, 0].into()));
+                let _ = ws.close(None);
+                break 'outer;
+            }
+
+            if let Some(sent_at) = awaiting_pingresp_since
+                && sent_at.elapsed() >= PONG_TIMEOUT
+            {
+                break 'session;
+            }
+
+            if awaiting_pingresp_since.is_none() && last_ping_sent_at.elapsed() >= PING_INTERVAL {
                 if ws
                     .send(Message::Binary(vec![MQTT_PINGREQ, 0].into()))
                     .is_err()
                 {
                     break 'session;
                 }
-                last_ping_at = Instant::now();
+                last_ping_sent_at = Instant::now();
+                awaiting_pingresp_since = Some(last_ping_sent_at);
             }
 
             match ws.read() {
@@ -689,7 +736,10 @@ fn relay_worker_loop(
                                     );
                                 }
                             }
-                            MQTT_PINGRESP | MQTT_SUBACK | MQTT_UNSUBACK | MQTT_CONNACK => {}
+                            MQTT_PINGRESP => {
+                                awaiting_pingresp_since = None;
+                            }
+                            MQTT_SUBACK | MQTT_UNSUBACK | MQTT_CONNACK => {}
                             _ => {}
                         }
                     }
@@ -707,8 +757,12 @@ fn relay_worker_loop(
             }
         }
 
+        let _ = ws.send(Message::Binary(vec![MQTT_DISCONNECT, 0].into()));
         let _ = ws.close(None);
-        broker_idx = broker_idx.wrapping_add(1);
+        // Prefer reconverging onto primary broker so peers never split permanently across different public brokers.
+        if !broker_idx.is_multiple_of(endpoints.len()) {
+            broker_idx = 0;
+        }
         set_status(false, "");
     }
 
@@ -778,13 +832,29 @@ fn encode_mqtt_packet(header: u8, body: &[u8]) -> Vec<u8> {
     out
 }
 
-fn encode_mqtt_connect(client_id: &str, keepalive_secs: u16) -> Vec<u8> {
-    let mut body = Vec::with_capacity(14 + client_id.len());
+fn push_mqtt_bin(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = bytes.len().min(u16::MAX as usize) as u16;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&bytes[..usize::from(len)]);
+}
+
+fn encode_mqtt_connect(
+    client_id: &str,
+    keepalive_secs: u16,
+    will: Option<(&str, &[u8])>,
+) -> Vec<u8> {
+    let extra = will.map_or(0, |(t, p)| 4 + t.len() + p.len());
+    let mut body = Vec::with_capacity(14 + client_id.len() + extra);
     push_mqtt_utf8(&mut body, "MQTT");
     body.push(4); // Protocol level 4 (MQTT 3.1.1)
-    body.push(0x02); // Clean Session
+    let flags = if will.is_some() { 0x06 } else { 0x02 }; // Clean Session (+ Will QoS0)
+    body.push(flags);
     body.extend_from_slice(&keepalive_secs.to_be_bytes());
     push_mqtt_utf8(&mut body, client_id);
+    if let Some((will_topic, will_payload)) = will {
+        push_mqtt_utf8(&mut body, will_topic);
+        push_mqtt_bin(&mut body, will_payload);
+    }
     encode_mqtt_packet(MQTT_CONNECT, &body)
 }
 

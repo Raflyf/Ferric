@@ -221,6 +221,9 @@ pub enum SyncFrame {
         device_name: String,
         device_kind: DeviceKind,
     },
+    Goodbye {
+        device_id: DeviceId,
+    },
     Ping {
         client_send_mono_ms: u64,
         client_wall_utc_ms: i64,

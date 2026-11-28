@@ -63,6 +63,7 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.size.Precision
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.core.activeDisplayTrack
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
 import dev.livelydesk.ferric.ui.theme.FerricEaseOut
@@ -91,7 +92,7 @@ fun ShareCardSheet(
     val context = LocalContext.current
     val palette = LocalFerricPalette.current
     val scope = rememberCoroutineScope()
-    val track = state.currentTrack ?: return
+    val track = state.activeDisplayTrack() ?: return
     val rawLines = state.lyricsState.lines
     val indexedNonBlank = remember(track.id, rawLines.size) {
         rawLines.mapIndexedNotNull { idx, line ->

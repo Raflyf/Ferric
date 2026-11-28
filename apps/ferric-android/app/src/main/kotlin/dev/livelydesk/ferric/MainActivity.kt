@@ -69,6 +69,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.livelydesk.ferric.auth.WebLoginActivity
 import dev.livelydesk.ferric.auth.WebLoginTarget
 import dev.livelydesk.ferric.core.CoreStateStore
+import dev.livelydesk.ferric.core.activeDisplayTrack
 import dev.livelydesk.ferric.playback.FerricPlaybackService
 import dev.livelydesk.ferric.playback.OutputRouteHelper
 import dev.livelydesk.ferric.ui.components.AddToPlaylistDialog
@@ -175,6 +176,16 @@ class MainActivity : ComponentActivity() {
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controllerFuture = null
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        val store = (application as FerricApp).store
+        val st = store.uiState.value
+        val activeLocalPlayback = st.isPlaying && st.connectState.isLocalActiveSpeaker
+        if (isFinishing && !activeLocalPlayback) {
+            store.shutdown()
+        }
+        super.onDestroy()
     }
 }
 
@@ -944,7 +955,7 @@ private fun FerricMainShell(
         )
     }
 
-    if (showShareCardSheet && state.currentTrack != null) {
+    if (showShareCardSheet && state.activeDisplayTrack() != null) {
         ShareCardSheet(
             state = state,
             initialPositionMs = shareCardInitialPosMs,

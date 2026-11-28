@@ -57,11 +57,14 @@ fn read_embedded_lyrics_via_content_opener(uri: &str) -> Option<String> {
 }
 
 fn lyrics_cache_key(track: &Track) -> String {
-    format!(
-        "{}|{}",
-        track.artist.trim().to_ascii_lowercase(),
-        track.title.trim().to_ascii_lowercase()
-    )
+    let artist = track.artist.trim().to_ascii_lowercase();
+    let title = track.title.trim().to_ascii_lowercase();
+    if track.duration_ms > 0 {
+        let dur_bucket = track.duration_ms / 5_000;
+        format!("{artist}|{title}|d{dur_bucket}")
+    } else {
+        format!("{artist}|{title}")
+    }
 }
 
 fn to_lyrics_snapshot(track_id: String, parsed: SyncedLyrics, offset_ms: i64) -> LyricsSnapshot {

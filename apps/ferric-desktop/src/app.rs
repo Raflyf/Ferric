@@ -3470,11 +3470,11 @@ live_design! {
                         bottom_bar = <AmbientBottomBar> {
                             // Left: 44x44 Cover Art + Title/Artist + Heart + Add Playlist + Copy Link
                             bottom_left_grp = <View> {
-                                width: 280,
+                                width: 294,
                                 height: Fill,
                                 flow: Right,
                                 align: { y: 0.5 }
-                                spacing: 8,
+                                spacing: 7,
 
                                 np_art = <FerricCoverArt> {
                                     width: 44,
@@ -3514,14 +3514,16 @@ live_design! {
                                     }
                                 }
                                 np_add_pl_btn = <FerricIconBtn> {
-                                    width: 24, height: 24,
+                                    width: 26, height: 26,
+                                    icon_walk: { width: 15, height: 15 }
                                     draw_icon: {
                                         svg_path: "M19 13H13V19H11V13H5V11H11V5H13V11H19V13Z"
                                         color: #707382
                                     }
                                 }
                                 np_copy_link_btn = <FerricIconBtn> {
-                                    width: 24, height: 24,
+                                    width: 26, height: 26,
+                                    icon_walk: { width: 15, height: 15 }
                                     draw_icon: {
                                         svg_path: "M3.9 12C3.9 10.29 5.29 8.9 7 8.9H11V7H7C4.24 7 2 9.24 2 12C2 14.76 4.24 17 7 17H11V15.1H7C5.29 15.1 3.9 13.71 3.9 12ZM8 13H16V11H8V13ZM17 7H13V8.9H17C18.71 8.9 20.1 10.29 20.1 12C20.1 13.71 18.71 15.1 17 15.1H13V17H17C19.76 17 22 14.76 22 12C22 9.24 19.76 7 17 7Z"
                                         color: #707382
@@ -4555,6 +4557,10 @@ pub struct App {
     #[rust]
     last_discord_tick_at: Option<Instant>,
     #[rust]
+    last_conn_vol_sent_at: Option<Instant>,
+    #[rust]
+    last_remote_track_key: String,
+    #[rust]
     last_discord_track_id: String,
     #[rust]
     last_discord_playing: Option<bool>,
@@ -5000,7 +5006,7 @@ impl App {
         self.right_w_cur = self.right_w_target;
 
         let bar_h = (74.0 * z).max(64.0);
-        let left_grp_w = (280.0 * z).max(190.0);
+        let left_grp_w = (294.0 * z).max(204.0);
         let btn_sz = (28.0 * z).max(22.0);
         let icon_h = (15.0 * z).max(12.0);
         let bar_pad_x = (14.0 * z).max(8.0);
@@ -5075,6 +5081,18 @@ impl App {
         self.ui
             .ferric_bar_slider(id!(vol_slider))
             .apply_over(cx, live! { width: ((62.0 * z).max(46.0)) });
+        let small_action_sz = (26.0 * z).max(22.0);
+        let small_icon_sz = (15.0 * z).max(12.0);
+        for np_btn in [id!(np_like_btn), id!(np_add_pl_btn), id!(np_copy_link_btn)] {
+            self.ui.button(np_btn).apply_over(
+                cx,
+                live! {
+                    width: (small_action_sz),
+                    height: (small_action_sz),
+                    icon_walk: { width: (small_icon_sz), height: (small_icon_sz) }
+                },
+            );
+        }
         let art_sz = (44.0 * z).max(34.0);
         let play_sz = (34.0 * z).max(28.0);
         self.ui
@@ -5418,14 +5436,20 @@ impl App {
         let Some(rect) = self.compute_video_viewport_rect(cx) else {
             return;
         };
-        let (pos_sec, playing) = self
-            .audio
-            .as_ref()
-            .map(|a| {
-                let s = a.telemetry();
-                (s.position_ms as f64 / 1000.0, s.is_playing)
-            })
-            .unwrap_or((0.0, true));
+        let (pos_sec, playing) = if let Some(peer) = self.active_remote_peer() {
+            (
+                peer.interpolated_position_ms() as f64 / 1000.0,
+                peer.is_playing,
+            )
+        } else {
+            self.audio
+                .as_ref()
+                .map(|a| {
+                    let s = a.telemetry();
+                    (s.position_ms as f64 / 1000.0, s.is_playing)
+                })
+                .unwrap_or((0.0, true))
+        };
         let mv_tag = if self.video_is_official_mv {
             "Official MV"
         } else {
@@ -5556,7 +5580,7 @@ impl App {
     }
 
     fn open_native_video_stage(&mut self, cx: &mut Cx) {
-        let Some(cur) = self.queue.current().cloned() else {
+        let Some(cur) = self.effective_display_track() else {
             self.show_toast(cx, "Play a song first to watch its video clip");
             return;
         };
@@ -6332,7 +6356,10 @@ impl App {
         }
         self.start_motion(cx);
         self.sync_video_bounds(cx);
-        let pos_ms = self.audio.as_ref().map_or(0, |a| a.telemetry().position_ms);
+        let pos_ms = self.active_remote_peer().map_or_else(
+            || self.audio.as_ref().map_or(0, |a| a.telemetry().position_ms),
+            |p| p.interpolated_position_ms(),
+        );
         self.update_lyrics_display(cx, pos_ms);
         self.ui.redraw(cx);
     }
@@ -6436,10 +6463,14 @@ impl App {
         } else {
             0.0_f32
         };
-        let (is_playing, pos_ms) = self.audio.as_ref().map_or((false, 0), |a| {
-            let t = a.telemetry();
-            (t.is_playing, t.position_ms)
-        });
+        let (is_playing, pos_ms) = if let Some(peer) = self.active_remote_peer() {
+            (peer.is_playing, peer.interpolated_position_ms())
+        } else {
+            self.audio.as_ref().map_or((false, 0), |a| {
+                let t = a.telemetry();
+                (t.is_playing, t.position_ms)
+            })
+        };
         if open {
             let t0 = if self.video_open { 1.0 } else { 0.0 };
             self.fs_video_morph_t = t0;
@@ -7098,6 +7129,12 @@ impl App {
         self.ui
             .ferric_bar_slider(id!(vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui
+            .ferric_bar_slider(id!(rs_conn_vol_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui
+            .label(id!(rs_conn_active_lbl))
+            .apply_over(cx, live! { draw_text: { color: (accent) } });
         self.ui.view(id!(top_search_box)).apply_over(
             cx,
             live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
@@ -7122,7 +7159,7 @@ impl App {
         let icon_hover = rgba_to_vec4(pal.icon_hover);
         let muted = rgba_to_vec4(pal.icon_idle);
         let icon_muted = rgba_to_vec4(pal.icon_muted);
-        let is_liked = self.queue.current().is_some_and(|cur| {
+        let is_liked = self.effective_display_track().is_some_and(|cur| {
             self.all_tracks
                 .iter()
                 .find(|t| t.id == cur.id)
@@ -7293,8 +7330,20 @@ impl App {
             .ferric_bar_slider(id!(vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
         self.ui
+            .ferric_bar_slider(id!(rs_conn_vol_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui
+            .label(id!(rs_conn_active_lbl))
+            .apply_over(cx, live! { draw_text: { color: (accent) } });
+        self.ui
             .ferric_bar_slider(id!(fs_vol_slider))
             .apply_over(cx, live! { draw_bg: { fill_col: (raw_accent) } });
+        self.ui
+            .ferric_bar_slider(id!(rs_conn_vol_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        self.ui
+            .label(id!(rs_conn_active_lbl))
+            .apply_over(cx, live! { draw_text: { color: (accent) } });
         self.ui.view(id!(top_search_box)).apply_over(
             cx,
             live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
@@ -7316,7 +7365,7 @@ impl App {
         }
         let muted = rgba_to_vec4(pal.icon_idle);
         let icon_muted = rgba_to_vec4(pal.icon_muted);
-        let is_liked = self.queue.current().is_some_and(|cur| {
+        let is_liked = self.effective_display_track().is_some_and(|cur| {
             self.all_tracks
                 .iter()
                 .find(|t| t.id == cur.id)
@@ -8696,6 +8745,11 @@ impl App {
         self.ui
             .view(id!(qh_header))
             .set_visible(cx, !hist.is_empty());
+        let row_lm = if self.adaptive_palette().is_light {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
         for (i, rid) in [id!(qh_0), id!(qh_1), id!(qh_2)].into_iter().enumerate() {
             let rv = self.ui.view(rid);
             if let Some(t) = hist.get(i) {
@@ -8705,7 +8759,8 @@ impl App {
                     live! {
                         draw_bg: {
                             acrylic_on: (acr),
-                            accent_col: (accent)
+                            accent_col: (accent),
+                            light_mode: (row_lm)
                         }
                     },
                 );
@@ -8751,7 +8806,8 @@ impl App {
                 draw_bg: {
                     active: 1.0,
                     acrylic_on: (acr),
-                    accent_col: (accent)
+                    accent_col: (accent),
+                    light_mode: (row_lm)
                 }
             },
         );
@@ -8847,7 +8903,8 @@ impl App {
                     live! {
                         draw_bg: {
                             acrylic_on: (acr),
-                            accent_col: (accent)
+                            accent_col: (accent),
+                            light_mode: (radio_lm)
                         }
                     },
                 );
@@ -9888,15 +9945,7 @@ impl App {
             .text_input(id!(discord_client_id_input))
             .set_text(cx, &self.discord_settings.client_id);
         self.refresh_discord_preview(cx);
-
-        let eff_vol = self.effective_volume();
-        self.ui
-            .ferric_bar_slider(id!(vol_slider))
-            .set_value(cx, f64::from(eff_vol));
-        self.ui
-            .ferric_bar_slider(id!(fs_vol_slider))
-            .set_value(cx, f64::from(eff_vol));
-        self.sync_transport_mode_icons(cx);
+        self.sync_playback_controls_only(cx);
 
         self.ui
             .text_input(id!(sub_url_input))
@@ -9907,6 +9956,20 @@ impl App {
         self.ui
             .ferric_toggle(id!(auto_update_toggle))
             .set_active(cx, self.update_settings.auto_check_on_startup);
+    }
+
+    fn sync_playback_controls_only(&self, cx: &mut Cx) {
+        let eff_vol = self.effective_volume();
+        self.ui
+            .ferric_bar_slider(id!(vol_slider))
+            .set_value(cx, f64::from(eff_vol));
+        self.ui
+            .ferric_bar_slider(id!(fs_vol_slider))
+            .set_value(cx, f64::from(eff_vol));
+        self.ui
+            .ferric_bar_slider(id!(rs_conn_vol_slider))
+            .set_value(cx, f64::from(eff_vol));
+        self.sync_transport_mode_icons(cx);
     }
 
     fn apply_theme_live(&self, cx: &mut Cx) {
@@ -10011,6 +10074,7 @@ impl App {
             id!(card_st_update),
             id!(card_st_keys),
             id!(card_conn_main),
+            id!(card_rs_conn_active),
             id!(card_ab_hero),
             id!(card_ab_links),
             id!(card_ab_support),
@@ -10482,6 +10546,12 @@ impl App {
             id!(open_releases_btn),
             id!(connect_gen_pair_btn),
             id!(connect_copy_pair_btn),
+            id!(rs_conn_local_btn),
+            id!(rs_conn_peer_0),
+            id!(rs_conn_peer_1),
+            id!(rs_conn_peer_2),
+            id!(rs_conn_peer_3),
+            id!(rs_conn_qr_btn),
             id!(about_web_btn),
             id!(about_github_btn),
             id!(about_changelog_btn),
@@ -10665,6 +10735,7 @@ impl App {
             id!(tint_smoke_btn),
             id!(rs_tab_queue),
             id!(rs_tab_lyrics),
+            id!(rs_tab_connect),
             id!(aq_low_btn),
             id!(aq_norm_btn),
             id!(aq_high_btn),
@@ -10826,6 +10897,7 @@ impl App {
         for sid in [
             id!(seek_slider),
             id!(vol_slider),
+            id!(rs_conn_vol_slider),
             id!(xfade_slider),
             id!(fadein_slider),
             id!(eq_preamp_slider),
@@ -10987,6 +11059,7 @@ impl App {
             id!(lbl_t_ab_support),
             id!(lbl_t_ab_sys),
             id!(np_title_lbl),
+            id!(rs_conn_now_lbl),
             id!(lbl_t_powerbar),
             id!(update_popup_title),
             id!(tm_title_lbl),
@@ -11051,6 +11124,9 @@ impl App {
             id!(lbl_m_history),
             id!(q_upnext_header),
             id!(q_radio_status),
+            id!(lbl_m_rs_vol),
+            id!(lbl_m_rs_switch),
+            id!(rs_conn_status_lbl),
             id!(rs_lyr_source),
             id!(np_artist_lbl),
             id!(pos_lbl),
@@ -12961,10 +13037,13 @@ impl App {
             return;
         }
         let shifted = (raw_pos_ms as i64 + self.lyrics_offset_ms).max(0) as u64;
-        let is_playing = self
-            .audio
-            .as_ref()
-            .is_some_and(|a| a.telemetry().is_playing);
+        let is_playing = if let Some(peer) = self.active_remote_peer() {
+            peer.is_playing
+        } else {
+            self.audio
+                .as_ref()
+                .is_some_and(|a| a.telemetry().is_playing)
+        };
         let lines = &self.synced_lyrics.lines;
         let idx = match lines.binary_search_by_key(&shifted, |l| l.timestamp_ms) {
             Ok(i) => i,
@@ -13877,9 +13956,12 @@ impl App {
     }
 
     fn is_controlling_remote(&self) -> bool {
-        self.connect_snap
-            .as_ref()
-            .is_some_and(|s| !s.is_local_active_speaker && s.peers.iter().any(|p| p.connected))
+        self.connect_snap.as_ref().is_some_and(|s| {
+            !s.is_local_active_speaker
+                && s.peers
+                    .iter()
+                    .any(|p| p.connected && p.device_id == s.active_speaker_id)
+        })
     }
 
     fn active_remote_peer(&self) -> Option<&ferric_sync::ConnectPeerInfo> {
@@ -13996,6 +14078,15 @@ impl App {
             q_idx,
             q_next,
         );
+        let track_key = format!(
+            "{}|{}|{}|{:?}",
+            track_id,
+            peer.now_playing_title,
+            peer.now_playing_artist,
+            peer.now_playing_thumbnail_url
+        );
+        let track_changed = self.last_remote_track_key != track_key;
+        self.last_remote_track_key = track_key;
         let meta_changed = self.last_remote_mirror_key != mirror_key;
         self.last_remote_mirror_key = mirror_key;
         self.was_controlling_remote = true;
@@ -14008,7 +14099,7 @@ impl App {
                 .ferric_play_btn(id!(fs_play_pause_btn))
                 .set_playing(cx, peer.is_playing);
         }
-        self.sync_controls_from_state(cx);
+        self.sync_playback_controls_only(cx);
 
         if meta_changed {
             self.last_pos_txt.clear();
@@ -14060,7 +14151,7 @@ impl App {
             win32_update_tray_tooltip(&format!("Ferric · On {} - {title}", peer.device_name));
             win32_update_taskbar_playback(&title, &peer.now_playing_artist, peer.is_playing);
 
-            if let Some(ref tr) = remote_track {
+            if track_changed && let Some(ref tr) = remote_track {
                 if let Some(cache) = &mut self.artwork {
                     cache.pin_active_track(Some(tr));
                 }
@@ -14085,6 +14176,19 @@ impl App {
                 self.sync_fullscreen_backdrop_artwork(cx);
                 self.apply_adaptive_accent_live(cx);
                 self.load_lyrics_for_track(cx, tr);
+                if self.video_open && self.video_track_id.as_deref() != Some(tr.id.as_str()) {
+                    self.open_native_video_stage(cx);
+                }
+            } else if !track_changed && remote_track.is_some() {
+                let pal = self.adaptive_palette();
+                let accent = rgba_to_vec4(pal.accent);
+                self.ui.ferric_cover_art(id!(np_art)).set_state(
+                    cx,
+                    peer.is_playing,
+                    0.55,
+                    accent,
+                    false,
+                );
             }
             self.refresh_right_sidebar(cx);
         }
@@ -14139,10 +14243,27 @@ impl App {
             self.update_lyrics_display(cx, pos_ms);
         }
 
+        if self.video_open
+            && self
+                .last_video_sync
+                .is_none_or(|t| t.elapsed() >= Duration::from_millis(350))
+        {
+            self.last_video_sync = Some(Instant::now());
+            if let Some(vp) = &self.video_player
+                && vp.is_open()
+            {
+                vp.sync_playback(pos_ms as f64 / 1000.0, peer.is_playing);
+            }
+            self.sync_video_bounds(cx);
+        }
+        if let Some(smtc) = &mut self.smtc {
+            smtc.sync_playback(peer.is_playing, pos_ms, dur_ms);
+        }
+
         let desired = if window_hidden {
             if peer.is_playing { 500 } else { 1000 }
         } else if peer.is_playing {
-            250
+            220
         } else {
             350
         };
@@ -14324,6 +14445,82 @@ impl App {
         let pal = self.adaptive_palette();
         let accent = rgba_to_vec4(pal.accent);
         let muted = rgba_to_vec4(pal.icon_idle);
+        let txt_primary = rgba_to_vec4(pal.text_primary);
+        let txt_secondary = rgba_to_vec4(pal.text_secondary);
+        let acr = if self.theme.acrylic_enabled {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        let lm = if pal.is_light { 1.0_f32 } else { 0.0_f32 };
+        self.ui.view(id!(card_rs_conn_active)).apply_over(
+            cx,
+            live! { draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) } },
+        );
+        self.ui
+            .label(id!(rs_conn_active_lbl))
+            .apply_over(cx, live! { draw_text: { color: (accent) } });
+        self.ui
+            .label(id!(rs_conn_now_lbl))
+            .apply_over(cx, live! { draw_text: { color: (txt_primary) } });
+        self.ui
+            .label(id!(lbl_m_rs_vol))
+            .apply_over(cx, live! { draw_text: { color: (txt_secondary) } });
+        self.ui
+            .label(id!(lbl_m_rs_switch))
+            .apply_over(cx, live! { draw_text: { color: (txt_secondary) } });
+        self.ui
+            .label(id!(rs_conn_status_lbl))
+            .apply_over(cx, live! { draw_text: { color: (txt_secondary) } });
+        self.ui
+            .ferric_bar_slider(id!(rs_conn_vol_slider))
+            .apply_over(cx, live! { draw_bg: { fill_col: (accent) } });
+        let local_act = if snap.is_local_active_speaker {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        let local_txt = if snap.is_local_active_speaker {
+            accent
+        } else {
+            txt_primary
+        };
+        self.ui.button(id!(rs_conn_local_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { active: (local_act), acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                draw_text: { color: (local_txt) }
+            },
+        );
+        for (idx, btn_id) in [
+            id!(rs_conn_peer_0),
+            id!(rs_conn_peer_1),
+            id!(rs_conn_peer_2),
+            id!(rs_conn_peer_3),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let is_act = snap
+                .peers
+                .get(idx)
+                .is_some_and(|p| p.device_id == snap.active_speaker_id);
+            let p_txt = if is_act { accent } else { txt_primary };
+            self.ui.button(*btn_id).apply_over(
+                cx,
+                live! {
+                    draw_bg: { active: (if is_act { 1.0 } else { 0.0 }), acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                    draw_text: { color: (p_txt) }
+                },
+            );
+        }
+        self.ui.button(id!(rs_conn_qr_btn)).apply_over(
+            cx,
+            live! {
+                draw_bg: { acrylic_on: (acr), accent_col: (accent), light_mode: (lm) }
+                draw_text: { color: (txt_primary) }
+            },
+        );
         let has_peer = snap.peers.iter().any(|p| p.connected);
         self.ui.button(id!(bar_connect_btn)).apply_over(
             cx,
@@ -14341,6 +14538,7 @@ impl App {
                 } else if self.was_controlling_remote {
                     self.was_controlling_remote = false;
                     self.last_remote_mirror_key.clear();
+                    self.last_remote_track_key.clear();
                     self.last_pos_txt.clear();
                     self.last_dur_txt.clear();
                     self.last_codec_txt.clear();
@@ -14392,6 +14590,7 @@ impl App {
             } => {
                 self.was_controlling_remote = false;
                 self.last_remote_mirror_key.clear();
+                self.last_remote_track_key.clear();
                 let mut tracks = self.hydrate_connect_tracks(queue);
                 if tracks.is_empty()
                     && let Some(tid) = state.track_id.clone()
@@ -14487,16 +14686,22 @@ impl App {
                 }
             }
             RemoteAction::SkipNext => {
+                self.pending_handoff_seek_ms = None;
+                self.pending_handoff_paused = false;
                 if let Some(next) = self.queue.next_track_manual().cloned() {
                     self.play_track_inner(cx, next, true);
                 }
             }
             RemoteAction::SkipPrev => {
+                self.pending_handoff_seek_ms = None;
+                self.pending_handoff_paused = false;
                 if let Some(prev) = self.queue.prev_track().cloned() {
                     self.play_track_inner(cx, prev, true);
                 }
             }
             RemoteAction::JumpToQueueIndex { index } => {
+                self.pending_handoff_seek_ms = None;
+                self.pending_handoff_paused = false;
                 let tracks = self.queue.tracks().to_vec();
                 if !tracks.is_empty() {
                     let idx = index.min(tracks.len() - 1);
@@ -14510,6 +14715,8 @@ impl App {
                 start_index,
                 ..
             } => {
+                self.pending_handoff_seek_ms = None;
+                self.pending_handoff_paused = false;
                 let hydrated = self.hydrate_connect_tracks(tracks);
                 if !hydrated.is_empty() {
                     let idx = start_index.min(hydrated.len() - 1);
@@ -14519,17 +14726,18 @@ impl App {
                 }
             }
             RemoteAction::SetVolume { volume_norm, .. } => {
-                let vol = volume_norm.clamp(0.0, 1.5);
+                let vol = volume_norm.clamp(0.0, 1.0);
                 self.session_state.volume = vol;
                 if let Some(audio) = &self.audio {
                     audio.send(EngineCommand::SetVolume(vol));
                 }
-                self.sync_controls_from_state(cx);
+                self.sync_playback_controls_only(cx);
                 self.mark_session_dirty();
             }
             RemoteAction::SetRepeat(mode) => {
                 self.queue.repeat = mode;
                 self.session_state.repeat = mode;
+                self.mark_session_dirty();
                 self.sync_next_deck_to_engine();
                 self.sync_controls_from_state(cx);
                 self.refresh_right_sidebar(cx);
@@ -14537,6 +14745,7 @@ impl App {
             RemoteAction::SetShuffle(enabled) => {
                 self.queue.set_shuffle(enabled);
                 self.session_state.shuffle = enabled;
+                self.mark_session_dirty();
                 self.sync_next_deck_to_engine();
                 self.sync_controls_from_state(cx);
                 self.refresh_right_sidebar(cx);
@@ -14885,6 +15094,9 @@ impl App {
                 }
                 TrayEvent::QuitApp => {
                     self.flush_session_state_now();
+                    if let Some(engine) = self.connect_engine.take() {
+                        engine.shutdown();
+                    }
                     self.close_native_video_stage(cx);
                     win32_force_quit();
                     cx.quit();
@@ -15029,7 +15241,12 @@ impl App {
                     {
                         let _ = db.save_cached_lyrics(&track_id, &lrc_raw);
                     }
-                    if self.queue.current().map(|t| t.id.as_str()) == Some(track_id.as_str()) {
+                    if self
+                        .effective_display_track()
+                        .as_ref()
+                        .map(|t| t.id.as_str())
+                        == Some(track_id.as_str())
+                    {
                         if window_hidden {
                             self.synced_lyrics = parsed;
                             self.ui_dirty_while_hidden = true;
@@ -15046,8 +15263,10 @@ impl App {
                             self.ui.label(id!(fs_lyr_source)).set_text(cx, &lbl);
                             self.synced_lyrics = parsed;
                             self.push_lyrics_to_views(cx);
-                            let pos_ms =
-                                self.audio.as_ref().map_or(0, |a| a.telemetry().position_ms);
+                            let pos_ms = self.active_remote_peer().map_or_else(
+                                || self.audio.as_ref().map_or(0, |a| a.telemetry().position_ms),
+                                |p| p.interpolated_position_ms(),
+                            );
                             self.update_lyrics_display(cx, pos_ms);
                         }
                     }
@@ -15959,6 +16178,9 @@ impl App {
                             match launch_verified_installer(&path, &updates_dir, &sha256) {
                                 Ok(()) => {
                                     self.flush_session_state_now();
+                                    if let Some(engine) = self.connect_engine.take() {
+                                        engine.shutdown();
+                                    }
                                     self.close_native_video_stage(cx);
                                     win32_force_quit();
                                     cx.quit();
@@ -16040,12 +16262,24 @@ impl App {
                     }
                 }
                 SmtcCommand::SetPositionMs(target_ms) => {
-                    if let Some(a) = &self.audio {
+                    if let Some(engine) = remote_engine {
+                        engine.send_remote_action(RemoteAction::SeekTo {
+                            position_ms: target_ms,
+                        });
+                    } else if let Some(a) = &self.audio {
                         a.send(EngineCommand::SeekMs(target_ms));
                     }
                 }
                 SmtcCommand::SeekRelativeMs(delta_ms) => {
-                    if let Some(a) = &self.audio {
+                    if let Some(engine) = remote_engine
+                        && let Some(peer) = self.active_remote_peer()
+                    {
+                        let cur_ms = peer.interpolated_position_ms() as i64;
+                        let target_ms = (cur_ms + delta_ms).max(0) as u64;
+                        engine.send_remote_action(RemoteAction::SeekTo {
+                            position_ms: target_ms,
+                        });
+                    } else if let Some(a) = &self.audio {
                         let cur_ms = a.telemetry().position_ms as i64;
                         let target_ms = (cur_ms + delta_ms).max(0) as u64;
                         a.send(EngineCommand::SeekMs(target_ms));
@@ -16453,6 +16687,10 @@ impl App {
             if self.dsp.close_to_tray {
                 win32_close_active_window();
             } else {
+                self.flush_session_state_now();
+                if let Some(engine) = self.connect_engine.take() {
+                    engine.shutdown();
+                }
                 self.close_native_video_stage(cx);
                 win32_force_quit();
                 cx.quit();
@@ -17651,12 +17889,46 @@ impl App {
             .changed(actions)
         {
             let vol = (cvol as f32).clamp(0.0, 1.0);
+            self.ui
+                .ferric_bar_slider(id!(vol_slider))
+                .set_value(cx, f64::from(vol));
+            self.ui
+                .ferric_bar_slider(id!(fs_vol_slider))
+                .set_value(cx, f64::from(vol));
+            if self.is_controlling_remote() {
+                if self
+                    .last_conn_vol_sent_at
+                    .is_none_or(|t| t.elapsed() >= Duration::from_millis(90))
+                    && let Some(peer) = self.active_remote_peer().cloned()
+                    && let Some(engine) = &self.connect_engine
+                {
+                    self.last_conn_vol_sent_at = Some(Instant::now());
+                    engine.send_remote_action(RemoteAction::SetVolume {
+                        target_device: peer.device_id,
+                        volume_norm: vol,
+                    });
+                }
+            } else {
+                self.session_state.volume = vol;
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::SetVolume(vol));
+                }
+                self.sync_playback_controls_only(cx);
+            }
+        }
+        if let Some(cvol) = self
+            .ui
+            .ferric_bar_slider(id!(rs_conn_vol_slider))
+            .released(actions)
+        {
+            let vol = (cvol as f32).clamp(0.0, 1.0);
             if self.is_controlling_remote()
-                && let Some(snap) = &self.connect_snap
+                && let Some(peer) = self.active_remote_peer().cloned()
                 && let Some(engine) = &self.connect_engine
             {
+                self.last_conn_vol_sent_at = Some(Instant::now());
                 engine.send_remote_action(RemoteAction::SetVolume {
-                    target_device: snap.active_speaker_id.clone(),
+                    target_device: peer.device_id,
                     volume_norm: vol,
                 });
             } else {
@@ -17664,7 +17936,8 @@ impl App {
                 if let Some(audio) = &self.audio {
                     audio.send(EngineCommand::SetVolume(vol));
                 }
-                self.sync_controls_from_state(cx);
+                self.mark_session_dirty();
+                self.push_connect_playback_snapshot();
             }
         }
         if self.ui.button(id!(rs_conn_qr_btn)).clicked(actions) {
@@ -17863,17 +18136,17 @@ impl App {
         }
 
         if self.ui.button(id!(np_add_pl_btn)).clicked(actions)
-            && let Some(cur) = self.queue.current().cloned()
+            && let Some(cur) = self.effective_display_track()
         {
             self.open_track_menu(cx, cur);
         }
         if self.ui.button(id!(np_copy_link_btn)).clicked(actions)
-            && let Some(cur) = self.queue.current().cloned()
+            && let Some(cur) = self.effective_display_track()
         {
             self.copy_track_share_link(cx, &cur);
         }
         if view_clicked(&self.ui.view(id!(np_artist_hit)), actions)
-            && let Some(cur) = self.queue.current().cloned()
+            && let Some(cur) = self.effective_display_track()
         {
             self.open_artist_for_name(cx, &cur.artist);
         }
@@ -18039,7 +18312,7 @@ impl App {
         }
         if (self.ui.button(id!(np_like_btn)).clicked(actions)
             || self.ui.button(id!(fs_like_btn)).clicked(actions))
-            && let Some(cur) = self.queue.current().cloned()
+            && let Some(cur) = self.effective_display_track()
         {
             let next_liked = self.toggle_track_like(cx, &cur);
             self.trigger_icon_pulse(cx, id!(np_like_btn), 3.0);
@@ -18106,6 +18379,21 @@ impl App {
                 self.ui
                     .ferric_bar_slider(id!(fs_vol_slider))
                     .set_value(cx, vol);
+                self.ui
+                    .ferric_bar_slider(id!(rs_conn_vol_slider))
+                    .set_value(cx, vol);
+                if self
+                    .last_conn_vol_sent_at
+                    .is_none_or(|t| t.elapsed() >= Duration::from_millis(90))
+                    && let Some(peer) = self.active_remote_peer().cloned()
+                    && let Some(engine) = &self.connect_engine
+                {
+                    self.last_conn_vol_sent_at = Some(Instant::now());
+                    engine.send_remote_action(RemoteAction::SetVolume {
+                        target_device: peer.device_id,
+                        volume_norm: (vol as f32).clamp(0.0, 1.0),
+                    });
+                }
             } else {
                 let was_muted = self.session_state.volume < 0.01;
                 self.session_state.volume = vol as f32;
@@ -18116,7 +18404,7 @@ impl App {
                 if let Some(audio) = &self.audio {
                     audio.send(EngineCommand::SetVolume(vol as f32));
                 }
-                self.sync_controls_from_state(cx);
+                self.sync_playback_controls_only(cx);
                 if was_muted != now_muted {
                     self.ui
                         .ferric_volume_btn(id!(vol_mute_btn))
@@ -19884,21 +20172,40 @@ impl AppMain for App {
                 self.navigate_to_entry(cx, next);
                 return;
             }
-            if ke.modifiers.shift
-                && ke.key_code == KeyCode::ArrowRight
-                && let Some(next) = self.queue.next_track_manual().cloned()
-            {
-                self.play_track(cx, next);
-                return;
+            if ke.modifiers.shift && ke.key_code == KeyCode::ArrowRight {
+                if self.is_controlling_remote()
+                    && let Some(engine) = &self.connect_engine
+                {
+                    engine.send_remote_action(RemoteAction::SkipNext);
+                    return;
+                } else if let Some(next) = self.queue.next_track_manual().cloned() {
+                    self.play_track(cx, next);
+                    return;
+                }
             }
-            if ke.modifiers.shift
-                && ke.key_code == KeyCode::ArrowLeft
-                && let Some(prev) = self.queue.prev_track().cloned()
-            {
-                self.play_track(cx, prev);
-                return;
+            if ke.modifiers.shift && ke.key_code == KeyCode::ArrowLeft {
+                if self.is_controlling_remote()
+                    && let Some(engine) = &self.connect_engine
+                {
+                    engine.send_remote_action(RemoteAction::SkipPrev);
+                    return;
+                } else if let Some(prev) = self.queue.prev_track().cloned() {
+                    self.play_track(cx, prev);
+                    return;
+                }
             }
             if ke.modifiers.control && ke.key_code == KeyCode::ArrowUp {
+                if self.is_controlling_remote()
+                    && let Some(peer) = self.active_remote_peer().cloned()
+                    && let Some(engine) = &self.connect_engine
+                {
+                    let next_v = (peer.volume_norm + 0.05).min(1.0);
+                    engine.send_remote_action(RemoteAction::SetVolume {
+                        target_device: peer.device_id,
+                        volume_norm: next_v,
+                    });
+                    return;
+                }
                 self.session_state.volume = (self.session_state.volume + 0.05).min(1.0);
                 if self.session_state.volume > 0.02 {
                     self.pre_mute_volume = self.session_state.volume;
@@ -19907,10 +20214,21 @@ impl AppMain for App {
                     a.send(EngineCommand::SetVolume(self.session_state.volume));
                 }
                 self.mark_session_dirty();
-                self.sync_controls_from_state(cx);
+                self.sync_playback_controls_only(cx);
                 return;
             }
             if ke.modifiers.control && ke.key_code == KeyCode::ArrowDown {
+                if self.is_controlling_remote()
+                    && let Some(peer) = self.active_remote_peer().cloned()
+                    && let Some(engine) = &self.connect_engine
+                {
+                    let next_v = (peer.volume_norm - 0.05).max(0.0);
+                    engine.send_remote_action(RemoteAction::SetVolume {
+                        target_device: peer.device_id,
+                        volume_norm: next_v,
+                    });
+                    return;
+                }
                 self.session_state.volume = (self.session_state.volume - 0.05).max(0.0);
                 if self.session_state.volume > 0.02 {
                     self.pre_mute_volume = self.session_state.volume;
@@ -19919,7 +20237,7 @@ impl AppMain for App {
                     a.send(EngineCommand::SetVolume(self.session_state.volume));
                 }
                 self.mark_session_dirty();
-                self.sync_controls_from_state(cx);
+                self.sync_playback_controls_only(cx);
                 return;
             }
             let typing = self.is_text_input_focused(cx);
@@ -19930,46 +20248,99 @@ impl AppMain for App {
                 && !ke.modifiers.alt
                 && !ke.modifiers.shift
             {
-                if ke.key_code == KeyCode::Space
-                    && let Some(audio) = &self.audio
-                {
-                    let snap = audio.telemetry();
-                    if !snap.is_playing && self.queue.current().is_none() {
-                        let pool = self.home_quick_picks_pool();
-                        if let Some(first) = pool.first().cloned() {
-                            self.queue.set_tracks(pool, Some(0));
-                            self.play_track(cx, first);
+                if ke.key_code == KeyCode::Space {
+                    if self.is_controlling_remote()
+                        && let Some(engine) = &self.connect_engine
+                    {
+                        engine.send_remote_action(RemoteAction::TogglePlayPause);
+                        return;
+                    }
+                    if let Some(audio) = &self.audio {
+                        let snap = audio.telemetry();
+                        if !snap.is_playing && self.queue.current().is_none() {
+                            let pool = self.home_quick_picks_pool();
+                            if let Some(first) = pool.first().cloned() {
+                                self.queue.set_tracks(pool, Some(0));
+                                self.play_track(cx, first);
+                            } else {
+                                self.load_and_play_demo_suite(cx);
+                            }
                         } else {
-                            self.load_and_play_demo_suite(cx);
+                            audio.send(EngineCommand::TogglePlayPause);
                         }
-                    } else {
-                        audio.send(EngineCommand::TogglePlayPause);
+                        return;
                     }
-                    return;
                 }
-                if ke.key_code == KeyCode::ArrowRight
-                    && let Some(audio) = &self.audio
-                {
-                    let snap = audio.telemetry();
-                    if snap.duration_ms > 0 {
-                        let next_ms = snap.position_ms.saturating_add(5_000).min(snap.duration_ms);
-                        audio.send(EngineCommand::SeekMs(next_ms));
-                        self.update_lyrics_display(cx, next_ms);
+                if ke.key_code == KeyCode::ArrowRight {
+                    if self.is_controlling_remote()
+                        && let Some(peer) = self.active_remote_peer().cloned()
+                        && let Some(engine) = &self.connect_engine
+                    {
+                        if peer.duration_ms > 0 {
+                            let next_ms = peer
+                                .interpolated_position_ms()
+                                .saturating_add(5_000)
+                                .min(peer.duration_ms);
+                            engine.send_remote_action(RemoteAction::SeekTo {
+                                position_ms: next_ms,
+                            });
+                            self.update_lyrics_display(cx, next_ms);
+                        }
+                        return;
                     }
-                    return;
+                    if let Some(audio) = &self.audio {
+                        let snap = audio.telemetry();
+                        if snap.duration_ms > 0 {
+                            let next_ms =
+                                snap.position_ms.saturating_add(5_000).min(snap.duration_ms);
+                            audio.send(EngineCommand::SeekMs(next_ms));
+                            self.update_lyrics_display(cx, next_ms);
+                        }
+                        return;
+                    }
                 }
-                if ke.key_code == KeyCode::ArrowLeft
-                    && let Some(audio) = &self.audio
-                {
-                    let snap = audio.telemetry();
-                    if snap.duration_ms > 0 {
-                        let next_ms = snap.position_ms.saturating_sub(5_000);
-                        audio.send(EngineCommand::SeekMs(next_ms));
-                        self.update_lyrics_display(cx, next_ms);
+                if ke.key_code == KeyCode::ArrowLeft {
+                    if self.is_controlling_remote()
+                        && let Some(peer) = self.active_remote_peer().cloned()
+                        && let Some(engine) = &self.connect_engine
+                    {
+                        if peer.duration_ms > 0 {
+                            let next_ms = peer.interpolated_position_ms().saturating_sub(5_000);
+                            engine.send_remote_action(RemoteAction::SeekTo {
+                                position_ms: next_ms,
+                            });
+                            self.update_lyrics_display(cx, next_ms);
+                        }
+                        return;
                     }
-                    return;
+                    if let Some(audio) = &self.audio {
+                        let snap = audio.telemetry();
+                        if snap.duration_ms > 0 {
+                            let next_ms = snap.position_ms.saturating_sub(5_000);
+                            audio.send(EngineCommand::SeekMs(next_ms));
+                            self.update_lyrics_display(cx, next_ms);
+                        }
+                        return;
+                    }
                 }
                 if ke.key_code == KeyCode::KeyM {
+                    if self.is_controlling_remote()
+                        && let Some(peer) = self.active_remote_peer().cloned()
+                        && let Some(engine) = &self.connect_engine
+                    {
+                        let next_v = if peer.volume_norm > 0.01 { 0.0 } else { 0.85 };
+                        engine.send_remote_action(RemoteAction::SetVolume {
+                            target_device: peer.device_id,
+                            volume_norm: next_v,
+                        });
+                        self.ui
+                            .ferric_volume_btn(id!(vol_mute_btn))
+                            .trigger_anim(cx);
+                        self.ui
+                            .ferric_volume_btn(id!(fs_vol_mute_btn))
+                            .trigger_anim(cx);
+                        return;
+                    }
                     if self.session_state.volume > 0.01 {
                         self.pre_mute_volume = self.session_state.volume;
                         self.session_state.volume = 0.0;
@@ -19980,7 +20351,7 @@ impl AppMain for App {
                         audio.send(EngineCommand::SetVolume(self.session_state.volume));
                     }
                     self.mark_session_dirty();
-                    self.sync_controls_from_state(cx);
+                    self.sync_playback_controls_only(cx);
                     self.ui
                         .ferric_volume_btn(id!(vol_mute_btn))
                         .trigger_anim(cx);
@@ -19990,12 +20361,23 @@ impl AppMain for App {
                     return;
                 }
                 if ke.key_code == KeyCode::KeyS {
+                    if self.is_controlling_remote()
+                        && let Some(peer) = self.active_remote_peer().cloned()
+                        && let Some(engine) = &self.connect_engine
+                    {
+                        let next_s = !peer.shuffle_enabled;
+                        engine.send_remote_action(RemoteAction::SetShuffle(next_s));
+                        self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
+                        self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
+                        self.show_toast(cx, if next_s { "Shuffle On" } else { "Shuffle Off" });
+                        return;
+                    }
                     let next_s = !self.session_state.shuffle;
                     self.session_state.shuffle = next_s;
                     self.queue.set_shuffle(next_s);
                     self.mark_session_dirty();
                     self.sync_next_deck_to_engine();
-                    self.sync_controls_from_state(cx);
+                    self.sync_playback_controls_only(cx);
                     self.trigger_icon_pulse(cx, id!(shuffle_btn), 0.0);
                     self.trigger_icon_pulse(cx, id!(fs_shuffle_btn), 0.0);
                     self.refresh_right_sidebar(cx);
@@ -20003,6 +20385,18 @@ impl AppMain for App {
                     return;
                 }
                 if ke.key_code == KeyCode::KeyR {
+                    if self.is_controlling_remote()
+                        && let Some(peer) = self.active_remote_peer().cloned()
+                        && let Some(engine) = &self.connect_engine
+                    {
+                        let next_r = peer.repeat_mode.next();
+                        engine.send_remote_action(RemoteAction::SetRepeat(next_r));
+                        self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
+                        self.ui
+                            .ferric_repeat_btn(id!(fs_repeat_btn))
+                            .trigger_anim(cx);
+                        return;
+                    }
                     let next_r = match self.session_state.repeat {
                         RepeatMode::Off => RepeatMode::All,
                         RepeatMode::All => RepeatMode::One,
@@ -20012,7 +20406,7 @@ impl AppMain for App {
                     self.queue.repeat = next_r;
                     self.mark_session_dirty();
                     self.sync_next_deck_to_engine();
-                    self.sync_controls_from_state(cx);
+                    self.sync_playback_controls_only(cx);
                     self.ui.ferric_repeat_btn(id!(repeat_btn)).trigger_anim(cx);
                     self.ui
                         .ferric_repeat_btn(id!(fs_repeat_btn))
@@ -20028,7 +20422,7 @@ impl AppMain for App {
                     return;
                 }
                 if ke.key_code == KeyCode::KeyL
-                    && let Some(cur) = self.queue.current().cloned()
+                    && let Some(cur) = self.effective_display_track()
                 {
                     let next_liked = self.toggle_track_like(cx, &cur);
                     self.trigger_icon_pulse(cx, id!(np_like_btn), 3.0);
@@ -20287,6 +20681,9 @@ fn rgba_to_vec4(c: [f32; 4]) -> Vec4 {
 impl Drop for App {
     fn drop(&mut self) {
         self.flush_session_state_now();
+        if let Some(engine) = self.connect_engine.take() {
+            engine.shutdown();
+        }
     }
 }
 

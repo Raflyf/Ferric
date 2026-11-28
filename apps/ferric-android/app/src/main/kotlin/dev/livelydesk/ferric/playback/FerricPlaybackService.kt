@@ -351,6 +351,16 @@ class FerricPlaybackService : MediaSessionService() {
         return mediaSession
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val st = store.uiState.value
+        val activeLocalPlayback = st.isPlaying && st.connectState.isLocalActiveSpeaker
+        if (!activeLocalPlayback) {
+            stopSelf()
+            store.shutdown()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         audioDeviceCallback?.let { cb ->
             runCatching { audioManager.unregisterAudioDeviceCallback(cb) }
@@ -365,6 +375,10 @@ class FerricPlaybackService : MediaSessionService() {
         mediaSession = null
         bridgePlayer = null
         serviceScope.cancel()
+        val st = store.uiState.value
+        if (!st.isPlaying || !st.connectState.isLocalActiveSpeaker) {
+            store.shutdown()
+        }
         super.onDestroy()
     }
 }

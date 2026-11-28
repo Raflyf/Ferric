@@ -86,6 +86,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -129,6 +130,7 @@ import coil3.size.Precision
 import dev.livelydesk.ferric.R
 import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.core.activeDisplayTrack
 import dev.livelydesk.ferric.formatDurationMs
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.AuroraBackdrop
@@ -197,7 +199,7 @@ fun FullPlayerScreen(
     } else {
         null
     }
-    val track = state.currentTrack
+    val track = state.activeDisplayTrack()
     val displayTitle = activeRemote?.nowPlayingTitle?.ifBlank { null } ?: track?.title ?: "Nothing playing"
     val displayArtist = activeRemote?.nowPlayingArtist?.ifBlank { null } ?: track?.artist ?: "Pick a track to start"
     val displayThumb = activeRemote?.nowPlayingThumbnailUrl ?: track?.thumbnailUrl
@@ -210,6 +212,7 @@ fun FullPlayerScreen(
     val remoteVol = activeRemote?.volumeNorm ?: state.localVolume
     var draggingVol by remember { mutableStateOf(false) }
     var draftVol by remember(activeTargetId) { mutableFloatStateOf(remoteVol.coerceIn(0f, 1f)) }
+    var lastVolPushUptimeMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(remoteVol, draggingVol) {
         if (!draggingVol) draftVol = remoteVol.coerceIn(0f, 1f)
     }
@@ -219,7 +222,7 @@ fun FullPlayerScreen(
         if ((showLyrics || mediaMode == MediaMode.VIDEO) && state.lyricsState.trackId != track.id && !state.lyricsState.isLoading) {
             onLoadLyrics()
         }
-        if (mediaMode == MediaMode.VIDEO && (state.videoStreams.trackId != track.id || state.videoStreams.options.isEmpty())) {
+        if (mediaMode == MediaMode.VIDEO && state.videoStreams.trackId != track.id && !state.videoStreams.isLoading) {
             onResolveVideo()
         }
     }
@@ -739,7 +742,11 @@ fun FullPlayerScreen(
                                 onValueChange = { next ->
                                     draggingVol = true
                                     draftVol = next
-                                    onSetVolume(activeTargetId, next)
+                                    val nowUp = SystemClock.uptimeMillis()
+                                    if (nowUp - lastVolPushUptimeMs >= 85L) {
+                                        lastVolPushUptimeMs = nowUp
+                                        onSetVolume(activeTargetId, next)
+                                    }
                                 },
                                 onValueChangeFinished = {
                                     draggingVol = false
@@ -1273,7 +1280,8 @@ private fun SyncedLyricsViewport(
                 } else {
                     (maxHeight * 0.50f).coerceAtLeast(120.dp)
                 }
-                LaunchedEffect(activeIdx, lyrics.isSynced, lyrics.lines.size, state.currentTrack?.id) {
+                val activeTrackId = state.activeDisplayTrack()?.id
+                LaunchedEffect(activeIdx, lyrics.isSynced, lyrics.lines.size, lyrics.trackId, activeTrackId) {
                     if (lyrics.isSynced && activeIdx >= 0 && !listState.isScrollInProgress) {
                         val activeItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == activeIdx }
                         val fallbackItemH = with(density) { (if (compact) 28.dp else 42.dp).roundToPx() }
@@ -1365,10 +1373,20 @@ private fun DockedVideoStage(
     val lifecycleOwner = LocalLifecycleOwner.current
     val palette = LocalFerricPalette.current
     val progress by progressFlow.collectAsStateWithLifecycle()
+    val effectivePlaying = if (!state.connectState.isLocalActiveSpeaker) {
+        state.connectState.peers.firstOrNull {
+            it.connected && it.deviceId == state.connectState.activeSpeakerId
+        }?.isPlaying ?: state.isPlaying
+    } else {
+        state.isPlaying
+    }
     val video = state.videoStreams
     var selectedOptIdx by remember(video.trackId, video.options.size) { mutableIntStateOf(0) }
     val selectedOption = video.options.getOrNull(selectedOptIdx)
     var lastSyncSeekUptimeMs by remember { mutableLongStateOf(0L) }
+    var pendingInitialSeek by remember(selectedOption?.url) { mutableStateOf(true) }
+    val latestPosMs by rememberUpdatedState(progress.positionMs)
+    val latestPlaying by rememberUpdatedState(effectivePlaying)
 
     val exoPlayer = remember(context) {
         ExoPlayer.Builder(context).build().apply {
@@ -1382,12 +1400,26 @@ private fun DockedVideoStage(
     }
 
     DisposableEffect(exoPlayer, lifecycleOwner) {
+        val playerListener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY) {
+                    val targetPos = latestPosMs.coerceAtLeast(0L)
+                    if (pendingInitialSeek || abs(exoPlayer.currentPosition - targetPos) > 260L) {
+                        pendingInitialSeek = false
+                        lastSyncSeekUptimeMs = SystemClock.uptimeMillis()
+                        exoPlayer.seekTo(targetPos)
+                    }
+                    exoPlayer.playWhenReady = latestPlaying
+                }
+            }
+        }
+        exoPlayer.addListener(playerListener)
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_STOP -> exoPlayer.playWhenReady = false
                 Lifecycle.Event.ON_START -> {
                     if (selectedOption != null) {
-                        exoPlayer.playWhenReady = state.isPlaying
+                        exoPlayer.playWhenReady = latestPlaying
                     }
                 }
                 else -> {}
@@ -1395,6 +1427,7 @@ private fun DockedVideoStage(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            exoPlayer.removeListener(playerListener)
             lifecycleOwner.lifecycle.removeObserver(observer)
             exoPlayer.release()
         }
@@ -1407,25 +1440,25 @@ private fun DockedVideoStage(
     LaunchedEffect(selectedOption?.url) {
         val url = selectedOption?.url
         if (!url.isNullOrBlank()) {
+            pendingInitialSeek = true
             exoPlayer.setMediaItem(MediaItem.fromUri(url))
             exoPlayer.prepare()
             exoPlayer.seekTo(progress.positionMs.coerceAtLeast(0L))
-            exoPlayer.playWhenReady = state.isPlaying
+            exoPlayer.playWhenReady = effectivePlaying
             lastSyncSeekUptimeMs = SystemClock.uptimeMillis()
         } else {
             exoPlayer.stop()
         }
     }
 
-    // Lock ExoPlayer video surface to Rust audio clock only when STATE_READY with cooldown
-    // (prevents buffering seek loops on slow connections).
-    LaunchedEffect(progress.positionMs, state.isPlaying, state.seekSyncNonce, selectedOption?.url) {
+    // Lock ExoPlayer video surface to active audio clock (local or remote Connect speaker).
+    LaunchedEffect(progress.positionMs, effectivePlaying, state.seekSyncNonce, selectedOption?.url) {
         if (selectedOption == null) return@LaunchedEffect
-        exoPlayer.playWhenReady = state.isPlaying
+        exoPlayer.playWhenReady = effectivePlaying
         if (exoPlayer.playbackState == Player.STATE_READY) {
             val now = SystemClock.uptimeMillis()
             val drift = abs(exoPlayer.currentPosition - progress.positionMs)
-            if (drift > 450L && (now - lastSyncSeekUptimeMs) > 1_500L) {
+            if (drift > 260L && (now - lastSyncSeekUptimeMs) > 850L) {
                 lastSyncSeekUptimeMs = now
                 exoPlayer.seekTo(progress.positionMs.coerceAtLeast(0L))
             }

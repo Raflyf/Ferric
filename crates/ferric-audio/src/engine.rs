@@ -2424,18 +2424,14 @@ fn decode_loop(
             dsp_scratch.push(r);
         }
 
-        if let Some(xf) = rt.crossfade_state
+        let decoded_pos_ms = if let Some(xf) = rt.crossfade_state
             && (xf.is_manual_switch || xf.ui_handed_off)
             && let Some(db) = &rt.deck_b
         {
-            telemetry
-                .position_ms
-                .store(db.current_pos_ms(), Ordering::Relaxed);
-        } else if let Some(da) = &rt.deck_a {
-            telemetry
-                .position_ms
-                .store(da.current_pos_ms(), Ordering::Relaxed);
-        }
+            Some(db.current_pos_ms())
+        } else {
+            rt.deck_a.as_ref().map(ActiveDeck::current_pos_ms)
+        };
 
         if !dsp_scratch.is_empty() {
             ducking.step_block(dsp_scratch.len() / 2, out_rate);
@@ -2456,6 +2452,21 @@ fn decode_loop(
             } else {
                 thread::sleep(Duration::from_millis(8));
             }
+        }
+
+        if let Some(raw_pos) = decoded_pos_ms {
+            let audible_pos = if headless {
+                raw_pos
+            } else {
+                let cap = producer.buffer().capacity();
+                let queued_frames = cap.saturating_sub(producer.slots());
+                let spd = f64::from(safe_speed(rt.dsp.playback_speed));
+                let delay_ms = ((queued_frames as f64 * 1_000.0 * spd)
+                    / f64::from(out_rate.max(8_000)))
+                .round() as u64;
+                raw_pos.saturating_sub(delay_ms)
+            };
+            telemetry.position_ms.store(audible_pos, Ordering::Relaxed);
         }
 
         if pause_completed {

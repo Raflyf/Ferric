@@ -801,7 +801,7 @@ impl FerricController {
             st.paused_while_resolving = currently_playing;
         }
         self.send_audio(EngineCommand::TogglePlayPause);
-        self.push_connect_playback_snapshot();
+        self.push_connect_playback_snapshot_override(Some(!currently_playing), None);
         self.wake_monitor();
         Ok(())
     }
@@ -821,7 +821,7 @@ impl FerricController {
             st.paused_while_resolving = false;
         }
         self.send_audio(EngineCommand::Play);
-        self.push_connect_playback_snapshot();
+        self.push_connect_playback_snapshot_override(Some(true), None);
         self.wake_monitor();
         Ok(())
     }
@@ -836,7 +836,8 @@ impl FerricController {
             st.paused_while_resolving = true;
         }
         self.send_audio(EngineCommand::Pause);
-        self.push_connect_playback_snapshot();
+        self.push_connect_playback_snapshot_override(Some(false), None);
+        self.wake_monitor();
     }
 
     pub fn next(self: &Arc<Self>) -> ControllerResult<()> {
@@ -1116,7 +1117,8 @@ impl FerricController {
         self.ensure_audio_started()?;
         if self.telemetry().position_ms > 3_500 {
             self.send_audio(EngineCommand::SeekMs(0));
-            self.push_connect_playback_snapshot();
+            self.push_connect_playback_snapshot_override(None, Some(0));
+            self.wake_monitor();
             return Ok(());
         }
         let current_seq = self.telemetry().track_finished_seq;
@@ -1161,7 +1163,8 @@ impl FerricController {
             return;
         }
         self.send_audio(EngineCommand::SeekMs(pos_ms));
-        self.push_connect_playback_snapshot();
+        self.push_connect_playback_snapshot_override(None, Some(pos_ms));
+        self.wake_monitor();
     }
 
     pub fn set_volume(&self, vol: f32) {

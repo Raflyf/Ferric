@@ -11,7 +11,7 @@ use crate::lan::{
 };
 use crate::relay::{RelayClient, RelayEnvelope, RelayEvent, RelayRoomSpec};
 use crate::{
-    DeviceKind, MAX_FRAME_BYTES, PairingPayload, QueueEntry, RemoteAction, SessionState,
+    DeviceKind, MAX_FRAME_BYTES, PairingPayload, QueueEntry, QueueOp, RemoteAction, SessionState,
     SpeakerAuthority, SyncError, SyncFrame, SyncResult, decode_frame_payload, encode_frame_payload,
     resolve_active_speaker_tie_break,
 };
@@ -28,11 +28,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HANDSHAKE_MAGIC: &[u8; 4] = b"FCH1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const BEACON_INTERVAL: Duration = Duration::from_secs(3);
-const RELAY_HELLO_INTERVAL: Duration = Duration::from_secs(9);
-const RELAY_PEER_TTL: Duration = Duration::from_secs(26);
+const RELAY_HELLO_INTERVAL: Duration = Duration::from_secs(5);
+const RELAY_PEER_TTL: Duration = Duration::from_secs(14);
 const RELAY_STATE_HEARTBEAT: Duration = Duration::from_millis(3_500);
+const LAN_PING_INTERVAL: Duration = Duration::from_secs(5);
+const LAN_READ_TIMEOUT: Duration = Duration::from_secs(12);
+const PENDING_TAKEOVER_TIMEOUT: Duration = Duration::from_millis(2_200);
 const MAX_RELAY_QUEUE_BYTES: usize = 44 * 1024;
-const RECONNECT_BACKOFF: Duration = Duration::from_secs(4);
+const RECONNECT_BACKOFF: Duration = Duration::from_secs(3);
 const MAX_CONNECTED_PEERS: usize = 8;
 const MAX_HANDSHAKE_ID_LEN: usize = 64;
 
@@ -181,6 +184,7 @@ enum InternalMsg {
         device_name: String,
         device_kind: DeviceKind,
         addr: SocketAddr,
+        conn_id: u64,
         writer: Arc<Mutex<PeerWriter>>,
     },
     PeerFrame {
@@ -189,6 +193,7 @@ enum InternalMsg {
     },
     PeerClosed {
         device_id: String,
+        conn_id: u64,
     },
     Relay(RelayEvent),
 }
@@ -215,13 +220,23 @@ struct ConnectedPeer {
     device_name: String,
     device_kind: DeviceKind,
     lan_addr: Option<SocketAddr>,
+    lan_conn_id: u64,
     lan_writer: Option<Arc<Mutex<PeerWriter>>>,
     relay_slot: Option<MatchedRoomSlot>,
     relay_last_seen: Option<Instant>,
+    clock_offset_ms: Option<i64>,
     last_state: Option<SessionState>,
     last_queue: Vec<QueueEntry>,
     last_queue_index: usize,
 }
+
+type LostPeerSnapshot = (
+    String,
+    Option<SessionState>,
+    Vec<QueueEntry>,
+    usize,
+    Option<i64>,
+);
 
 impl ConnectedPeer {
     fn has_lan(&self) -> bool {
@@ -400,6 +415,11 @@ impl ConnectEngine {
                     connected: HashMap::new(),
                     last_dial_attempt: HashMap::new(),
                     last_beacon_at: None,
+                    last_lan_ping_at: None,
+                    next_conn_id: std::sync::atomic::AtomicU64::new(1),
+                    mono_epoch: Instant::now(),
+                    yielded_guard_until: None,
+                    pending_local_takeover: None,
                     int_tx,
                     on_event,
                     latest_snapshot: state_snap_arc,
@@ -581,6 +601,11 @@ struct EngineRunner {
     connected: HashMap<String, ConnectedPeer>,
     last_dial_attempt: HashMap<String, Instant>,
     last_beacon_at: Option<Instant>,
+    last_lan_ping_at: Option<Instant>,
+    next_conn_id: std::sync::atomic::AtomicU64,
+    mono_epoch: Instant,
+    yielded_guard_until: Option<Instant>,
+    pending_local_takeover: Option<(String, Instant)>,
     int_tx: mpsc::Sender<InternalMsg>,
     on_event: Arc<dyn Fn(ConnectEvent) + Send + Sync>,
     latest_snapshot: Arc<Mutex<ConnectSnapshot>>,
@@ -588,6 +613,118 @@ struct EngineRunner {
 }
 
 impl EngineRunner {
+    fn mono_ms(&self) -> u64 {
+        u64::try_from(self.mono_epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn alloc_conn_id(&self) -> u64 {
+        self.next_conn_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn send_goodbye_to_peers(&mut self) {
+        let frame = SyncFrame::Goodbye {
+            device_id: self.local_device_id.clone(),
+        };
+        for peer in self.connected.values() {
+            if let Some(writer) = &peer.lan_writer
+                && let Ok(mut w) = writer.lock()
+            {
+                let _ = w.send_frame(&frame);
+                let _ = w.stream.shutdown(std::net::Shutdown::Write);
+            }
+        }
+        if self.relay_connected && self.keys.has_any_room() {
+            for slot in [
+                MatchedRoomSlot::Spotify,
+                MatchedRoomSlot::YouTubeMusic,
+                MatchedRoomSlot::GuestQr,
+            ] {
+                if let Some((key, _)) = self.keys.key_and_tag_for_slot(slot) {
+                    let topic = derive_relay_topic(key.as_bytes());
+                    self.relay_client.publish_envelope(
+                        &topic,
+                        key,
+                        RelayEnvelope {
+                            sender_id: self.local_device_id.clone(),
+                            sender_name: self.local_device_name.clone(),
+                            sender_kind: self.local_device_kind,
+                            target_id: None,
+                            frame: frame.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn failover_active_speaker_to_local(
+        &mut self,
+        lost_peer_id: &str,
+        lost_snapshot: Option<LostPeerSnapshot>,
+    ) {
+        if self
+            .pending_local_takeover
+            .as_ref()
+            .is_some_and(|(id, _)| id == lost_peer_id)
+        {
+            self.pending_local_takeover = None;
+        }
+        if self.active_speaker_id != lost_peer_id {
+            return;
+        }
+        self.active_speaker_id = self.local_device_id.clone();
+        self.yielded_guard_until = None;
+        self.revision += 1;
+
+        if let Some((peer_name, state_opt, queue, idx, offset_ms)) = lost_snapshot {
+            if let Some(mut st) = state_opt
+                && (st.track_id.is_some() || !queue.is_empty())
+            {
+                let off = offset_ms.unwrap_or(0);
+                let norm_anchor = st.anchor_utc_ms.saturating_sub(off);
+                let elapsed = if st.is_playing && norm_anchor > 0 {
+                    u64::try_from((unix_now_utc_ms() - norm_anchor).clamp(0, 120_000)).unwrap_or(0)
+                } else {
+                    0
+                };
+                let adj_pos = st.base_position_ms.saturating_add(elapsed);
+                st.base_position_ms = if st.duration_ms > 0 {
+                    adj_pos.min(st.duration_ms)
+                } else {
+                    adj_pos
+                };
+                st.active_speaker = Some(self.local_device_id.clone());
+                // Hold paused on failover so the active app takes over output cleanly without abrupt blaring.
+                st.is_playing = false;
+                st.revision = self.revision;
+                (self.on_event)(ConnectEvent::BecameActiveSpeaker {
+                    state: st,
+                    queue,
+                    current_index: idx,
+                });
+                (self.on_event)(ConnectEvent::Toast(format!(
+                    "{peer_name} went offline · Output moved to {}",
+                    self.local_device_name
+                )));
+                return;
+            }
+            (self.on_event)(ConnectEvent::Toast(format!(
+                "{peer_name} went offline · Output moved to {}",
+                self.local_device_name
+            )));
+        }
+    }
+
+    fn send_ping_to_peers(&mut self) {
+        if self.connected.is_empty() {
+            return;
+        }
+        let ping = SyncFrame::Ping {
+            client_send_mono_ms: self.mono_ms(),
+            client_wall_utc_ms: unix_now_utc_ms(),
+        };
+        self.broadcast_frame(&ping, self.relay_connected);
+    }
     fn sync_relay_rooms(&self, include_guest: bool) {
         let mut specs = Vec::with_capacity(3);
         if let Some(sp) = &self.keys.spotify {
@@ -650,13 +787,15 @@ impl EngineRunner {
     ) {
         self.publish_snapshot();
         let mut guest_relay_armed = false;
+        let mut pending_cmd: Option<EngineCommand> = None;
 
         while !shutdown.load(Ordering::Relaxed) {
             let mut dirty = false;
 
-            while let Ok(cmd) = cmd_rx.try_recv() {
+            while let Some(cmd) = pending_cmd.take().or_else(|| cmd_rx.try_recv().ok()) {
                 match cmd {
                     EngineCommand::Shutdown => {
+                        self.send_goodbye_to_peers();
                         self.relay_client.shutdown();
                         return;
                     }
@@ -704,12 +843,16 @@ impl EngineRunner {
                             || prev_track != next_track;
 
                         self.local_playback = *snap;
-                        // If local playback just started playing, claim active speaker authority.
+                        // Claim active speaker authority on explicit play transition outside post-yield fade guard.
+                        let in_yield_guard =
+                            self.yielded_guard_until.is_some_and(|t| Instant::now() < t);
                         if self.local_playback.is_playing
                             && !was_playing
+                            && !in_yield_guard
                             && self.active_speaker_id != self.local_device_id
                         {
                             self.active_speaker_id = self.local_device_id.clone();
+                            self.pending_local_takeover = None;
                             self.revision += 1;
                             dirty = true;
                         }
@@ -799,9 +942,17 @@ impl EngineRunner {
                         device_name,
                         device_kind,
                         addr,
+                        conn_id,
                         writer,
                     } => {
-                        self.on_peer_established(device_id, device_name, device_kind, addr, writer);
+                        self.on_peer_established(
+                            device_id,
+                            device_name,
+                            device_kind,
+                            addr,
+                            conn_id,
+                            writer,
+                        );
                         dirty = true;
                     }
                     InternalMsg::PeerFrame { device_id, frame } => {
@@ -809,21 +960,31 @@ impl EngineRunner {
                             dirty = true;
                         }
                     }
-                    InternalMsg::PeerClosed { device_id } => {
-                        let mut remove_peer = false;
-                        if let Some(peer) = self.connected.get_mut(&device_id) {
+                    InternalMsg::PeerClosed { device_id, conn_id } => {
+                        let mut expired_snapshot = None;
+                        if let Some(peer) = self.connected.get_mut(&device_id)
+                            && peer.lan_conn_id == conn_id
+                        {
                             peer.lan_writer = None;
                             peer.lan_addr = None;
                             if !peer.is_connected() {
-                                remove_peer = true;
+                                expired_snapshot = self.connected.remove(&device_id).map(|p| {
+                                    (
+                                        p.device_name,
+                                        p.last_state,
+                                        p.last_queue,
+                                        p.last_queue_index,
+                                        p.clock_offset_ms,
+                                    )
+                                });
                             } else {
                                 dirty = true;
                             }
                         }
-                        if remove_peer && self.connected.remove(&device_id).is_some() {
-                            if self.active_speaker_id == device_id {
-                                self.active_speaker_id = self.local_device_id.clone();
-                            }
+                        if let Some(snap) = expired_snapshot {
+                            self.discovered.remove(&device_id);
+                            self.beacon.remove_peer(&device_id);
+                            self.failover_active_speaker_to_local(&device_id, Some(snap));
                             dirty = true;
                         }
                     }
@@ -871,6 +1032,15 @@ impl EngineRunner {
                 }
             }
 
+            if !self.connected.is_empty()
+                && self
+                    .last_lan_ping_at
+                    .is_none_or(|t| t.elapsed() >= LAN_PING_INTERVAL)
+            {
+                self.last_lan_ping_at = Some(Instant::now());
+                self.send_ping_to_peers();
+            }
+
             if self.relay_connected
                 && self.keys.has_any_room()
                 && self
@@ -879,6 +1049,25 @@ impl EngineRunner {
             {
                 self.last_relay_hello_at = Some(Instant::now());
                 self.send_relay_hello();
+            }
+
+            if let Some((ref tgt_id, asked_at)) = self.pending_local_takeover.clone()
+                && asked_at.elapsed() >= PENDING_TAKEOVER_TIMEOUT
+            {
+                self.pending_local_takeover = None;
+                let snap = self.connected.remove(tgt_id).map(|p| {
+                    (
+                        p.device_name,
+                        p.last_state,
+                        p.last_queue,
+                        p.last_queue_index,
+                        p.clock_offset_ms,
+                    )
+                });
+                self.discovered.remove(tgt_id);
+                self.beacon.remove_peer(tgt_id);
+                self.failover_active_speaker_to_local(tgt_id, snap);
+                dirty = true;
             }
 
             if self.last_relay_sweep_at.elapsed() >= Duration::from_secs(2) {
@@ -890,9 +1079,17 @@ impl EngineRunner {
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in expired {
-                    self.connected.remove(&id);
-                    if self.active_speaker_id == id {
-                        self.active_speaker_id = self.local_device_id.clone();
+                    if let Some(p) = self.connected.remove(&id) {
+                        self.discovered.remove(&id);
+                        self.beacon.remove_peer(&id);
+                        let snap = (
+                            p.device_name,
+                            p.last_state,
+                            p.last_queue,
+                            p.last_queue_index,
+                            p.clock_offset_ms,
+                        );
+                        self.failover_active_speaker_to_local(&id, Some(snap));
                     }
                     dirty = true;
                 }
@@ -902,14 +1099,19 @@ impl EngineRunner {
                 self.publish_snapshot();
             }
 
-            let sleep_dur = if self.connected.is_empty() {
-                Duration::from_millis(120)
+            let wait = if self.connected.is_empty() {
+                Duration::from_millis(60)
             } else {
-                Duration::from_millis(50)
+                Duration::from_millis(25)
             };
-            thread::sleep(sleep_dur);
+            match cmd_rx.recv_timeout(wait) {
+                Ok(c) => pending_cmd = Some(c),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
         }
 
+        self.send_goodbye_to_peers();
         self.relay_client.shutdown();
     }
 
@@ -973,6 +1175,7 @@ impl EngineRunner {
         let local_name = self.local_device_name.clone();
         let local_kind = self.local_device_kind;
         let int_tx = self.int_tx.clone();
+        let conn_id = self.alloc_conn_id();
         let _ = thread::Builder::new()
             .name("ferric-conn-out".to_string())
             .spawn(move || {
@@ -995,9 +1198,10 @@ impl EngineRunner {
                         device_name: peer_name,
                         device_kind: peer_kind,
                         addr,
+                        conn_id,
                         writer: Arc::clone(&writer_arc),
                     });
-                    run_peer_reader(peer_id, rx_stream, aead_rx, int_tx);
+                    run_peer_reader(peer_id, conn_id, rx_stream, aead_rx, int_tx);
                 }
             });
     }
@@ -1011,6 +1215,7 @@ impl EngineRunner {
         let local_name = self.local_device_name.clone();
         let local_kind = self.local_device_kind;
         let int_tx = self.int_tx.clone();
+        let conn_id = self.alloc_conn_id();
         let _ = thread::Builder::new()
             .name("ferric-conn-in".to_string())
             .spawn(move || {
@@ -1023,9 +1228,10 @@ impl EngineRunner {
                         device_name: peer_name,
                         device_kind: peer_kind,
                         addr,
+                        conn_id,
                         writer: Arc::clone(&writer_arc),
                     });
-                    run_peer_reader(peer_id, rx_stream, aead_rx, int_tx);
+                    run_peer_reader(peer_id, conn_id, rx_stream, aead_rx, int_tx);
                 }
             });
     }
@@ -1036,6 +1242,7 @@ impl EngineRunner {
         device_name: String,
         device_kind: DeviceKind,
         addr: SocketAddr,
+        conn_id: u64,
         writer: Arc<Mutex<PeerWriter>>,
     ) {
         if device_id == self.local_device_id {
@@ -1044,9 +1251,15 @@ impl EngineRunner {
         let clean_name = sanitize_device_name(&device_name);
         let was_known = self.connected.contains_key(&device_id);
         if let Some(existing) = self.connected.get_mut(&device_id) {
+            if let Some(old_writer) = &existing.lan_writer
+                && let Ok(w) = old_writer.lock()
+            {
+                let _ = w.stream.shutdown(std::net::Shutdown::Both);
+            }
             existing.device_name = clean_name.clone();
             existing.device_kind = device_kind;
             existing.lan_addr = Some(addr);
+            existing.lan_conn_id = conn_id;
             existing.lan_writer = Some(Arc::clone(&writer));
         } else {
             self.connected.insert(
@@ -1056,9 +1269,11 @@ impl EngineRunner {
                     device_name: clean_name.clone(),
                     device_kind,
                     lan_addr: Some(addr),
+                    lan_conn_id: conn_id,
                     lan_writer: Some(Arc::clone(&writer)),
                     relay_slot: None,
                     relay_last_seen: None,
+                    clock_offset_ms: None,
                     last_state: None,
                     last_queue: Vec::new(),
                     last_queue_index: 0,
@@ -1066,16 +1281,21 @@ impl EngineRunner {
             );
         }
 
-        // Immediately sync our current playback snapshot & queue over the authenticated LAN channel.
+        // Immediately sync our current playback snapshot, queue, and clock ping over the LAN channel.
         let state_frame = SyncFrame::StateSnapshot(Box::new(self.build_local_session_state()));
         let queue_frame = SyncFrame::QueueFull {
             revision: self.revision,
             tracks: self.local_playback.queue.clone(),
             current_index: self.local_playback.current_index,
         };
+        let ping_frame = SyncFrame::Ping {
+            client_send_mono_ms: self.mono_ms(),
+            client_wall_utc_ms: unix_now_utc_ms(),
+        };
         if let Ok(mut w) = writer.lock() {
             let _ = w.send_frame(&state_frame);
             let _ = w.send_frame(&queue_frame);
+            let _ = w.send_frame(&ping_frame);
         }
         if !was_known {
             (self.on_event)(ConnectEvent::Toast(format!("Connected to {clean_name}")));
@@ -1123,9 +1343,11 @@ impl EngineRunner {
                             device_name: clean_name.clone(),
                             device_kind: envelope.sender_kind,
                             lan_addr: None,
+                            lan_conn_id: 0,
                             lan_writer: None,
                             relay_slot: Some(slot),
                             relay_last_seen: Some(Instant::now()),
+                            clock_offset_ms: None,
                             last_state: None,
                             last_queue: Vec::new(),
                             last_queue_index: 0,
@@ -1133,8 +1355,8 @@ impl EngineRunner {
                     );
                 }
 
-                if is_new_peer {
-                    // Send initial StateSnapshot + QueueFull back so newly joined relay peer syncs at once.
+                if is_new_peer && !matches!(envelope.frame, SyncFrame::Goodbye { .. }) {
+                    // Send initial StateSnapshot, QueueFull, and Ping so newly joined relay peer syncs at once.
                     let state_frame =
                         SyncFrame::StateSnapshot(Box::new(self.build_local_session_state()));
                     let queue_frame = SyncFrame::QueueFull {
@@ -1142,15 +1364,21 @@ impl EngineRunner {
                         tracks: self.local_playback.queue.clone(),
                         current_index: self.local_playback.current_index,
                     };
+                    let ping_frame = SyncFrame::Ping {
+                        client_send_mono_ms: self.mono_ms(),
+                        client_wall_utc_ms: unix_now_utc_ms(),
+                    };
                     self.send_to_peer_targeted(&peer_id, &state_frame);
                     self.send_to_peer_targeted(&peer_id, &queue_frame);
+                    self.send_to_peer_targeted(&peer_id, &ping_frame);
                     (self.on_event)(ConnectEvent::Toast(format!("Connected to {clean_name}")));
                 }
 
                 if had_lan && matches!(envelope.frame, SyncFrame::Hello { .. }) {
                     return is_new_peer;
                 }
-                self.on_peer_frame(&peer_id, envelope.frame) || is_new_peer
+                self.on_peer_frame(&peer_id, envelope.frame)
+                    || (is_new_peer && self.connected.contains_key(&peer_id))
             }
         }
     }
@@ -1163,8 +1391,38 @@ impl EngineRunner {
                 ..
             } => {
                 if let Some(peer) = self.connected.get_mut(peer_id) {
-                    peer.device_name = sanitize_device_name(&device_name);
+                    let clean = sanitize_device_name(&device_name);
+                    let meta_changed = peer.device_name != clean || peer.device_kind != device_kind;
+                    peer.device_name = clean;
                     peer.device_kind = device_kind;
+                    return meta_changed;
+                }
+                false
+            }
+            SyncFrame::Goodbye { device_id } => {
+                let target_id = if device_id.is_empty() {
+                    peer_id.to_string()
+                } else {
+                    device_id
+                };
+                self.discovered.remove(&target_id);
+                self.beacon.remove_peer(&target_id);
+                let removed = self.connected.remove(&target_id).map(|p| {
+                    if let Some(w) = &p.lan_writer
+                        && let Ok(w_guard) = w.lock()
+                    {
+                        let _ = w_guard.stream.shutdown(std::net::Shutdown::Both);
+                    }
+                    (
+                        p.device_name,
+                        p.last_state,
+                        p.last_queue,
+                        p.last_queue_index,
+                        p.clock_offset_ms,
+                    )
+                });
+                if let Some(snap) = removed {
+                    self.failover_active_speaker_to_local(&target_id, Some(snap));
                     return true;
                 }
                 false
@@ -1174,6 +1432,9 @@ impl EngineRunner {
                 let remote_is_claiming_self = st.active_speaker.as_deref() == Some(peer_id);
                 let remote_assigned_local =
                     st.active_speaker.as_deref() == Some(self.local_device_id.as_str());
+                if remote_assigned_local {
+                    self.pending_local_takeover = None;
+                }
 
                 if let Some(peer) = self.connected.get_mut(peer_id) {
                     if let Some(prev) = &peer.last_state
@@ -1181,23 +1442,61 @@ impl EngineRunner {
                     {
                         return false;
                     }
+                    let clean_name = sanitize_device_name(&st.device_name);
+                    let material_diff = peer.last_state.as_ref().is_none_or(|prev| {
+                        let expected_pos = if prev.is_playing
+                            && prev.anchor_utc_ms > 0
+                            && st.anchor_utc_ms >= prev.anchor_utc_ms
+                        {
+                            prev.base_position_ms
+                                .saturating_add((st.anchor_utc_ms - prev.anchor_utc_ms) as u64)
+                        } else {
+                            prev.base_position_ms
+                        };
+                        let pos_jumped = st.base_position_ms.abs_diff(expected_pos) > 900
+                            || (!st.is_playing && st.base_position_ms != prev.base_position_ms);
+                        prev.active_speaker != st.active_speaker
+                            || prev.is_playing != st.is_playing
+                            || prev.track_id != st.track_id
+                            || prev.track_title != st.track_title
+                            || prev.track_artist != st.track_artist
+                            || prev.track_thumbnail_url != st.track_thumbnail_url
+                            || prev.duration_ms != st.duration_ms
+                            || (prev.volume_norm - st.volume_norm).abs() > 0.015
+                            || prev.repeat_mode != st.repeat_mode
+                            || prev.shuffle_enabled != st.shuffle_enabled
+                            || (!clean_name.is_empty() && peer.device_name != clean_name)
+                            || pos_jumped
+                    });
                     if !st.device_name.trim().is_empty() {
-                        peer.device_name = sanitize_device_name(&st.device_name);
+                        peer.device_name = clean_name;
                     }
                     peer.last_state = Some((*st).clone());
-                    changed = true;
+                    changed = material_diff;
                 }
 
                 if remote_assigned_local && self.active_speaker_id != self.local_device_id {
                     self.active_speaker_id = self.local_device_id.clone();
+                    self.pending_local_takeover = None;
+                    self.yielded_guard_until = None;
                     self.revision = self.revision.max(st.revision) + 1;
-                    let (queue, idx) = self
+                    let (mut state, queue, idx, offset_ms) = self
                         .connected
                         .get(peer_id)
-                        .map(|p| (p.last_queue.clone(), p.last_queue_index))
-                        .unwrap_or_default();
+                        .map(|p| {
+                            (
+                                *st.clone(),
+                                p.last_queue.clone(),
+                                p.last_queue_index,
+                                p.clock_offset_ms,
+                            )
+                        })
+                        .unwrap_or_else(|| (*st.clone(), Vec::new(), 0, None));
+                    if let Some(off) = offset_ms {
+                        state.anchor_utc_ms = state.anchor_utc_ms.saturating_sub(off);
+                    }
                     (self.on_event)(ConnectEvent::BecameActiveSpeaker {
-                        state: *st,
+                        state,
                         queue,
                         current_index: idx,
                     });
@@ -1205,7 +1504,6 @@ impl EngineRunner {
                 }
 
                 if remote_is_claiming_self && self.active_speaker_id == self.local_device_id {
-                    // Initial connect or simultaneous play tie-break
                     let local_auth = SpeakerAuthority {
                         device_id: self.local_device_id.clone(),
                         is_playing: self.local_playback.is_playing,
@@ -1213,16 +1511,22 @@ impl EngineRunner {
                         revision: self.revision,
                         anchor_utc_ms: self.local_playback.anchor_utc_ms,
                     };
+                    let off = self
+                        .connected
+                        .get(peer_id)
+                        .and_then(|p| p.clock_offset_ms)
+                        .unwrap_or(0);
                     let remote_auth = SpeakerAuthority {
                         device_id: peer_id.to_string(),
                         is_playing: st.is_playing,
                         has_track: st.track_id.is_some(),
                         revision: st.revision,
-                        anchor_utc_ms: st.anchor_utc_ms,
+                        anchor_utc_ms: st.anchor_utc_ms.saturating_sub(off),
                     };
                     let winner = resolve_active_speaker_tie_break(&local_auth, &remote_auth);
                     if winner == peer_id {
                         self.active_speaker_id = peer_id.to_string();
+                        self.pending_local_takeover = None;
                         self.revision = self.revision.max(st.revision);
                         let speaker_name = self
                             .connected
@@ -1241,9 +1545,11 @@ impl EngineRunner {
                     && st.revision > self.revision
                     && active != &self.local_device_id
                 {
+                    if self.active_speaker_id != *active {
+                        changed = true;
+                    }
                     self.active_speaker_id = active.clone();
                     self.revision = st.revision;
-                    changed = true;
                 }
 
                 changed
@@ -1254,8 +1560,33 @@ impl EngineRunner {
                 ..
             } => {
                 if let Some(peer) = self.connected.get_mut(peer_id) {
+                    let diff = peer.last_queue_index != current_index
+                        || peer.last_queue.len() != tracks.len()
+                        || peer
+                            .last_queue
+                            .iter()
+                            .zip(tracks.iter())
+                            .any(|(a, b)| a.track_id != b.track_id);
                     peer.last_queue = tracks;
                     peer.last_queue_index = current_index;
+                    return diff;
+                }
+                false
+            }
+            SyncFrame::QueueMutation { op, .. } => {
+                if let Some(peer) = self.connected.get_mut(peer_id) {
+                    match op {
+                        QueueOp::Append(entry) => peer.last_queue.push(entry),
+                        QueueOp::RemoveAt(idx) => {
+                            if idx < peer.last_queue.len() {
+                                peer.last_queue.remove(idx);
+                            }
+                        }
+                        QueueOp::Clear => {
+                            peer.last_queue.clear();
+                            peer.last_queue_index = 0;
+                        }
+                    }
                     return true;
                 }
                 false
@@ -1288,6 +1619,27 @@ impl EngineRunner {
                 );
                 false
             }
+            SyncFrame::Pong {
+                client_send_mono_ms,
+                server_recv_utc_ms,
+                server_send_utc_ms,
+            } => {
+                let mono_now = self.mono_ms();
+                let rtt = mono_now.saturating_sub(client_send_mono_ms);
+                if rtt <= 4_000
+                    && let Some(peer) = self.connected.get_mut(peer_id)
+                {
+                    let peer_mid = server_recv_utc_ms
+                        .saturating_add(server_send_utc_ms.saturating_sub(server_recv_utc_ms) / 2);
+                    let local_mid = unix_now_utc_ms().saturating_sub((rtt / 2) as i64);
+                    let sample = peer_mid.saturating_sub(local_mid);
+                    peer.clock_offset_ms = Some(match peer.clock_offset_ms {
+                        Some(prev) => (prev * 3 + sample) / 4,
+                        None => sample,
+                    });
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -1298,6 +1650,7 @@ impl EngineRunner {
         new_speaker: String,
         start_playing: bool,
     ) {
+        self.pending_local_takeover = None;
         if new_speaker == self.local_device_id {
             let source_peer_id = if self.connected.contains_key(&self.active_speaker_id) {
                 self.active_speaker_id.clone()
@@ -1305,12 +1658,16 @@ impl EngineRunner {
                 from_peer_id.to_string()
             };
             self.active_speaker_id = self.local_device_id.clone();
+            self.yielded_guard_until = None;
             self.revision += 1;
             if let Some(peer) = self.connected.get(&source_peer_id) {
                 let mut st = peer
                     .last_state
                     .clone()
                     .unwrap_or_else(|| self.build_local_session_state());
+                if let Some(off) = peer.clock_offset_ms {
+                    st.anchor_utc_ms = st.anchor_utc_ms.saturating_sub(off);
+                }
                 st.active_speaker = Some(self.local_device_id.clone());
                 st.is_playing = start_playing;
                 let queue = peer.last_queue.clone();
@@ -1332,6 +1689,7 @@ impl EngineRunner {
             handoff_state.anchor_utc_ms = unix_now_utc_ms();
 
             self.active_speaker_id = new_speaker.clone();
+            self.yielded_guard_until = Some(Instant::now() + Duration::from_millis(900));
             let target_name = self
                 .connected
                 .get(&new_speaker)
@@ -1359,7 +1717,21 @@ impl EngineRunner {
             return;
         }
         if self.active_speaker_id == self.local_device_id {
-            // We are currently playing -> hand off directly to `target_device_id`.
+            let reachable = self
+                .connected
+                .get(&target_device_id)
+                .is_some_and(|p| p.has_lan() || (self.relay_connected && p.has_live_relay()));
+            if !reachable {
+                let offline_name = self
+                    .connected
+                    .get(&target_device_id)
+                    .map(|p| p.device_name.clone())
+                    .unwrap_or_else(|| "Target device".to_string());
+                self.connected.remove(&target_device_id);
+                self.discovered.remove(&target_device_id);
+                (self.on_event)(ConnectEvent::Toast(format!("{offline_name} is offline")));
+                return;
+            }
             if let Some(peer) = self.connected.get(&target_device_id) {
                 let target_name = peer.device_name.clone();
                 let mut handoff_state = self.build_local_session_state();
@@ -1370,6 +1742,7 @@ impl EngineRunner {
                 handoff_state.anchor_utc_ms = unix_now_utc_ms();
 
                 self.active_speaker_id = target_device_id.clone();
+                self.yielded_guard_until = Some(Instant::now() + Duration::from_millis(900));
 
                 let queue_frame = SyncFrame::QueueFull {
                     revision: self.revision,
@@ -1386,8 +1759,25 @@ impl EngineRunner {
                 });
             }
         } else {
-            // Ask current active speaker to transfer playback to `target_device_id`.
             let active_id = self.active_speaker_id.clone();
+            let active_reachable = self
+                .connected
+                .get(&active_id)
+                .is_some_and(|p| p.has_lan() || (self.relay_connected && p.has_live_relay()));
+            if !active_reachable {
+                let snap = self.connected.remove(&active_id).map(|p| {
+                    (
+                        p.device_name,
+                        p.last_state,
+                        p.last_queue,
+                        p.last_queue_index,
+                        p.clock_offset_ms,
+                    )
+                });
+                self.discovered.remove(&active_id);
+                self.failover_active_speaker_to_local(&active_id, snap);
+                return;
+            }
             self.cmd_seq += 1;
             let cmd = SyncFrame::Command {
                 cmd_id: self.cmd_seq,
@@ -1396,10 +1786,9 @@ impl EngineRunner {
                     start_playing: true,
                 },
             };
-            if self.connected.contains_key(&active_id) {
-                self.send_to_peer_targeted(&active_id, &cmd);
-            } else if target_device_id == self.local_device_id {
-                self.active_speaker_id = self.local_device_id.clone();
+            self.send_to_peer_targeted(&active_id, &cmd);
+            if target_device_id == self.local_device_id {
+                self.pending_local_takeover = Some((active_id, Instant::now()));
             }
         }
     }
@@ -1474,8 +1863,10 @@ impl EngineRunner {
             base_position_ms: self.local_playback.position_ms,
             anchor_utc_ms: if self.local_playback.anchor_utc_ms > 0 {
                 self.local_playback.anchor_utc_ms
-            } else {
+            } else if self.local_playback.is_playing || cur.is_some() {
                 unix_now_utc_ms()
+            } else {
+                0
             },
             volume_norm: self.local_playback.volume_norm.clamp(0.0, 1.5),
             repeat_mode: self.local_playback.repeat_mode,
@@ -1716,6 +2107,8 @@ impl EngineRunner {
             let addr = cp
                 .lan_addr
                 .map_or_else(|| "Cloud E2EE".to_string(), |a| a.to_string());
+            let off = cp.clock_offset_ms.unwrap_or(0);
+            let norm_anchor = st.map_or(0, |s| s.anchor_utc_ms).saturating_sub(off);
             peers.push(ConnectPeerInfo {
                 device_id: cp.device_id.clone(),
                 device_name: cp.device_name.clone(),
@@ -1732,7 +2125,7 @@ impl EngineRunner {
                 now_playing_thumbnail_url: st.and_then(|s| s.track_thumbnail_url.clone()),
                 position_ms: st.map_or(0, |s| s.base_position_ms),
                 duration_ms: st.map_or(0, |s| s.duration_ms),
-                anchor_utc_ms: st.map_or(0, |s| s.anchor_utc_ms),
+                anchor_utc_ms: norm_anchor,
                 repeat_mode: st.map_or(RepeatMode::Off, |s| s.repeat_mode),
                 shuffle_enabled: st.is_some_and(|s| s.shuffle_enabled),
             });
@@ -1748,7 +2141,7 @@ impl EngineRunner {
                 addr: dp.addr.clone(),
                 connected: false,
                 via_relay: false,
-                is_active_speaker: dp.is_active_speaker,
+                is_active_speaker: dp.is_active_speaker && self.active_speaker_id == dp.device_id,
                 is_playing: false,
                 volume_norm: 1.0,
                 active_track_id: None,
@@ -1886,7 +2279,7 @@ fn perform_outbound_handshake(
         _ => return Err(SyncError::AuthFailed),
     };
 
-    let _ = rx_stream_mut.set_read_timeout(None);
+    let _ = rx_stream_mut.set_read_timeout(Some(LAN_READ_TIMEOUT));
     let _ = writer
         .stream
         .set_write_timeout(Some(Duration::from_secs(5)));
@@ -1983,7 +2376,7 @@ fn perform_inbound_handshake(
         _ => return Err(SyncError::AuthFailed),
     };
 
-    let _ = rx_stream_mut.set_read_timeout(None);
+    let _ = rx_stream_mut.set_read_timeout(Some(LAN_READ_TIMEOUT));
     let _ = writer
         .stream
         .set_write_timeout(Some(Duration::from_secs(5)));
@@ -2005,13 +2398,16 @@ fn read_encrypted_frame(stream: &mut TcpStream, rx: &mut AeadReceiver) -> SyncRe
 
 fn run_peer_reader(
     peer_id: String,
+    conn_id: u64,
     mut stream: TcpStream,
     mut rx: AeadReceiver,
     int_tx: mpsc::Sender<InternalMsg>,
 ) {
+    let mut idle_timeouts = 0u8;
     loop {
         match read_encrypted_frame(&mut stream, &mut rx) {
             Ok(frame) => {
+                idle_timeouts = 0;
                 if int_tx
                     .send(InternalMsg::PeerFrame {
                         device_id: peer_id.clone(),
@@ -2022,8 +2418,17 @@ fn run_peer_reader(
                     break;
                 }
             }
+            Err(SyncError::Io(ref e))
+                if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                    && idle_timeouts < 2 =>
+            {
+                idle_timeouts += 1;
+            }
             Err(_) => {
-                let _ = int_tx.send(InternalMsg::PeerClosed { device_id: peer_id });
+                let _ = int_tx.send(InternalMsg::PeerClosed {
+                    device_id: peer_id,
+                    conn_id,
+                });
                 break;
             }
         }
@@ -2439,5 +2844,122 @@ mod tests {
 
         dev_a.shutdown();
         dev_b.shutdown();
+    }
+
+    #[test]
+    fn peer_goodbye_and_unreachable_takeover_failover_cleanly_to_local() {
+        let desktop_events: Arc<Mutex<Vec<ConnectEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let phone_events: Arc<Mutex<Vec<ConnectEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let d_ev = Arc::clone(&desktop_events);
+        let desktop = ConnectEngine::start_with_options(
+            ConnectConfig {
+                device_id: "a_pc_failover".to_string(),
+                device_name: "Failover PC".to_string(),
+                device_kind: DeviceKind::Desktop,
+                bind_ephemeral_udp: true,
+            },
+            Arc::new(move |ev| d_ev.lock().expect("lock").push(ev)),
+            true,
+            Some(Vec::new()),
+        )
+        .expect("start desktop");
+
+        let p_ev = Arc::clone(&phone_events);
+        let phone = ConnectEngine::start_with_options(
+            ConnectConfig {
+                device_id: "z_phone_failover".to_string(),
+                device_name: "Failover Phone".to_string(),
+                device_kind: DeviceKind::Phone,
+                bind_ephemeral_udp: true,
+            },
+            Arc::new(move |ev| p_ev.lock().expect("lock").push(ev)),
+            true,
+            Some(Vec::new()),
+        )
+        .expect("start phone");
+
+        desktop.update_accounts("shared_failover_acct".to_string(), String::new());
+        phone.update_accounts("shared_failover_acct".to_string(), String::new());
+        assert!(wait_until(2_000, || desktop.snapshot().is_account_ready
+            && phone.snapshot().is_account_ready));
+        let ph_snap = phone.snapshot();
+        desktop.notify_mdns_peer(
+            "z_phone_failover".to_string(),
+            "Failover Phone".to_string(),
+            DeviceKind::Phone,
+            "127.0.0.1",
+            ph_snap.local_tcp_port,
+            &ph_snap.room_tags_hex,
+        );
+        assert!(wait_until(4_000, || {
+            desktop.snapshot().peers.iter().any(|p| p.connected)
+                && phone.snapshot().peers.iter().any(|p| p.connected)
+        }));
+
+        let track = QueueEntry {
+            track_id: "trk_failover_1".to_string(),
+            title: "Stay Active".to_string(),
+            artist: "Test Artist".to_string(),
+            album: "Test Album".to_string(),
+            duration_ms: 210_000,
+            spotify_id: None,
+            youtube_video_id: Some("vid12345678".to_string()),
+            thumbnail_url: None,
+        };
+        phone.update_local_playback(LocalPlaybackSnapshot {
+            is_playing: true,
+            current_track: Some(track.clone()),
+            queue: vec![track],
+            current_index: 0,
+            position_ms: 42_000,
+            volume_norm: 0.9,
+            repeat_mode: RepeatMode::Off,
+            shuffle_enabled: false,
+            anchor_utc_ms: unix_now_utc_ms(),
+        });
+
+        assert!(wait_until(4_000, || {
+            let s = desktop.snapshot();
+            !s.is_local_active_speaker
+                && s.active_speaker_id == "z_phone_failover"
+                && s.peers
+                    .iter()
+                    .any(|p| p.active_track_id.as_deref() == Some("trk_failover_1"))
+        }));
+
+        // Exiting the active remote speaker must send Goodbye and move output cleanly back to desktop.
+        phone.shutdown();
+        assert!(wait_until(4_000, || {
+            let s = desktop.snapshot();
+            s.is_local_active_speaker
+                && s.active_speaker_id == "a_pc_failover"
+                && s.peers.is_empty()
+        }));
+        let events_snap = desktop_events.lock().expect("lock").clone();
+        let became_local = events_snap.iter().any(|ev| {
+            matches!(
+                ev,
+                ConnectEvent::BecameActiveSpeaker { state, .. }
+                if !state.is_playing && state.track_id.as_deref() == Some("trk_failover_1")
+            )
+        });
+        assert!(
+            became_local,
+            "desktop must receive failover BecameActiveSpeaker (paused), got events: {events_snap:?}"
+        );
+
+        desktop.shutdown();
+    }
+
+    #[test]
+    fn pong_normalizes_remote_anchor_clock_skew_in_snapshot() {
+        let runner_clock_test_peers = [("peer_fast", 5_000i64)];
+        let raw_remote_anchor_utc_ms = 1_700_005_000i64;
+        let offset_ms = runner_clock_test_peers[0].1;
+        assert_eq!(
+            raw_remote_anchor_utc_ms.saturating_sub(offset_ms),
+            1_700_000_000
+        );
     }
 }

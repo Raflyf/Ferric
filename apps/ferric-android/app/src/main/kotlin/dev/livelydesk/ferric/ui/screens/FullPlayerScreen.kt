@@ -123,7 +123,10 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -133,6 +136,7 @@ import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackUiState
 import dev.livelydesk.ferric.core.activeDisplayTrack
 import dev.livelydesk.ferric.formatDurationMs
+import dev.livelydesk.ferric.playback.ChunkedVideoDataSource
 import dev.livelydesk.ferric.ui.components.ArtworkThumb
 import dev.livelydesk.ferric.ui.components.AuroraBackdrop
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
@@ -1410,28 +1414,45 @@ private fun DockedVideoStage(
     val selectedOption = video.options.getOrNull(selectedOptIdx)
     var lastSyncSeekUptimeMs by remember { mutableLongStateOf(0L) }
     var lastHandledSeekNonce by remember { mutableLongStateOf(state.seekSyncNonce) }
+    var appliedRateMultiplier by remember { mutableFloatStateOf(1.0f) }
     var pendingInitialSeek by remember(selectedOption?.url) { mutableStateOf(true) }
     val latestPosMs by rememberUpdatedState(progress.positionMs)
     val latestPlaying by rememberUpdatedState(effectivePlaying)
 
     val exoPlayer = remember(context) {
-        ExoPlayer.Builder(context).build().apply {
-            // Disable ExoPlayer audio decoder completely; Rust Oboe owns 100% of DSP/EQ audio.
-            trackSelectionParameters = TrackSelectionParameters.Builder()
-                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
-                .build()
-            volume = 0f
-            repeatMode = Player.REPEAT_MODE_OFF
-        }
+        val mediaSourceFactory = ProgressiveMediaSource.Factory(ChunkedVideoDataSource.Factory())
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 4_000,
+                /* maxBufferMs = */ 30_000,
+                /* bufferForPlaybackMs = */ 750,
+                /* bufferForPlaybackAfterRebufferMs = */ 1_500,
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+        ExoPlayer.Builder(context)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
+            .build()
+            .apply {
+                // Disable ExoPlayer audio decoder completely; Rust Oboe owns 100% of DSP/EQ audio.
+                trackSelectionParameters = TrackSelectionParameters.Builder()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                    .build()
+                setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                volume = 0f
+                repeatMode = Player.REPEAT_MODE_OFF
+            }
     }
 
     DisposableEffect(exoPlayer, lifecycleOwner) {
         val playerListener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_READY) {
+                if (playbackState == Player.STATE_READY && pendingInitialSeek) {
+                    pendingInitialSeek = false
                     val targetPos = latestPosMs.coerceAtLeast(0L)
-                    if (pendingInitialSeek || abs(exoPlayer.currentPosition - targetPos) > 260L) {
-                        pendingInitialSeek = false
+                    if (abs(exoPlayer.currentPosition - targetPos) > 450L) {
                         lastSyncSeekUptimeMs = SystemClock.uptimeMillis()
                         exoPlayer.seekTo(targetPos)
                     }
@@ -1459,17 +1480,21 @@ private fun DockedVideoStage(
         }
     }
 
-    LaunchedEffect(playbackSpeed) {
-        exoPlayer.playbackParameters = PlaybackParameters(playbackSpeed.coerceIn(0.5f, 2.0f))
+    LaunchedEffect(playbackSpeed, appliedRateMultiplier) {
+        val desiredRate = (playbackSpeed * appliedRateMultiplier).coerceIn(0.5f, 2.15f)
+        if (abs(exoPlayer.playbackParameters.speed - desiredRate) > 0.005f) {
+            exoPlayer.playbackParameters = PlaybackParameters(desiredRate)
+        }
     }
 
     LaunchedEffect(selectedOption?.url) {
         val url = selectedOption?.url
         if (!url.isNullOrBlank()) {
             pendingInitialSeek = true
-            exoPlayer.setMediaItem(MediaItem.fromUri(url))
+            appliedRateMultiplier = 1.0f
+            val startPosMs = latestPosMs.coerceAtLeast(0L)
+            exoPlayer.setMediaItem(MediaItem.fromUri(url), startPosMs)
             exoPlayer.prepare()
-            exoPlayer.seekTo(progress.positionMs.coerceAtLeast(0L))
             exoPlayer.playWhenReady = effectivePlaying
             lastSyncSeekUptimeMs = SystemClock.uptimeMillis()
         } else {
@@ -1477,18 +1502,29 @@ private fun DockedVideoStage(
         }
     }
 
-    // Lock ExoPlayer video surface to active audio clock (local or remote Connect speaker).
+    // Lock ExoPlayer video clock smoothly to active audio clock: micro rate nudges for normal
+    // 100..1800ms drift eliminate 720p/1080p keyframe re-seek stutters completely.
     LaunchedEffect(progress.positionMs, effectivePlaying, state.seekSyncNonce, selectedOption?.url) {
         if (selectedOption == null) return@LaunchedEffect
         exoPlayer.playWhenReady = effectivePlaying
-        if (exoPlayer.playbackState == Player.STATE_READY) {
+        if (exoPlayer.playbackState == Player.STATE_READY && !pendingInitialSeek) {
             val now = SystemClock.uptimeMillis()
             val explicitSeek = state.seekSyncNonce != lastHandledSeekNonce
-            val drift = abs(exoPlayer.currentPosition - progress.positionMs)
-            if (explicitSeek || (drift > 220L && (now - lastSyncSeekUptimeMs) > 650L)) {
+            val signedDrift = progress.positionMs - exoPlayer.currentPosition
+            val absDrift = abs(signedDrift)
+            if (explicitSeek || (absDrift > 1_800L && (now - lastSyncSeekUptimeMs) > 4_500L)) {
                 lastHandledSeekNonce = state.seekSyncNonce
                 lastSyncSeekUptimeMs = now
+                appliedRateMultiplier = 1.0f
                 exoPlayer.seekTo(progress.positionMs.coerceAtLeast(0L))
+            } else if (effectivePlaying) {
+                appliedRateMultiplier = when {
+                    signedDrift > 260L -> 1.06f
+                    signedDrift > 110L -> 1.025f
+                    signedDrift < -260L -> 0.94f
+                    signedDrift < -110L -> 0.975f
+                    else -> 1.0f
+                }
             }
         }
     }

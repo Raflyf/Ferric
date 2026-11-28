@@ -92,6 +92,7 @@ class FerricBackdropState(
     val blurScale: Float = 0.28f
     var rootOffset: Offset = Offset.Zero
     var hasRecorded: Boolean = false
+    var isRecordingSource: Boolean = false
     var contentSize: IntSize = IntSize.Zero
     var blurDirty: Boolean = true
     var hasBlurred: Boolean = false
@@ -106,7 +107,8 @@ class FerricBackdropState(
         density: Density,
         layoutDirection: LayoutDirection,
     ): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+        if (isRecordingSource ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             !hasRecorded ||
             contentSize.width < 4 ||
             contentSize.height < 4
@@ -166,15 +168,20 @@ fun Modifier.ferricBackdropSource(
         }
         .drawWithContent {
             if (enabled && size.width >= 1f && size.height >= 1f) {
-                backdrop.graphicsLayer.record {
-                    this@drawWithContent.drawContent()
+                backdrop.isRecordingSource = true
+                try {
+                    backdrop.graphicsLayer.record {
+                        this@drawWithContent.drawContent()
+                    }
+                    backdrop.contentSize = IntSize(
+                        size.width.roundToInt().coerceAtLeast(1),
+                        size.height.roundToInt().coerceAtLeast(1),
+                    )
+                    backdrop.hasRecorded = true
+                    backdrop.blurDirty = true
+                } finally {
+                    backdrop.isRecordingSource = false
                 }
-                backdrop.contentSize = IntSize(
-                    size.width.roundToInt().coerceAtLeast(1),
-                    size.height.roundToInt().coerceAtLeast(1),
-                )
-                backdrop.hasRecorded = true
-                backdrop.blurDirty = true
                 drawLayer(backdrop.graphicsLayer)
             } else {
                 drawContent()

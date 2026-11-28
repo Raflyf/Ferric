@@ -92,9 +92,11 @@ import dev.livelydesk.ferric.ui.screens.YouScreen
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
 import dev.livelydesk.ferric.ui.theme.FerricEaseOut
 import dev.livelydesk.ferric.ui.theme.FerricTheme
+import dev.livelydesk.ferric.ui.theme.LocalBackdropState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricBackdropSource
 import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
+import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
 import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
 import java.util.Locale
 import kotlin.math.abs
@@ -395,32 +397,42 @@ private fun FerricMainShell(
         }
     }
 
+    val auroraBackdrop = rememberFerricBackdropState()
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.canvas),
     ) {
         // Layer 1: Full-screen scrollable canvas captured into GPU backdropState so floating
-        // Liquid Glass capsules optically blur, vibrate, and refract live artwork gliding underneath!
+        // Liquid Glass dock/mini-player opt-refract scrolling cards, while scrolling cards sample
+        // sibling auroraBackdrop (strictly acyclic DAG: auroraBackdrop -> tabs -> backdropState -> dock).
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .ferricBackdropSource(backdropState, enabled = !showFullPlayer),
         ) {
-            if (palette.isLiquidGlass) {
-                AuroraBackdrop(
-                    colors = state.coverShade,
-                    baseCanvas = palette.canvas,
-                    isPlaying = state.isPlaying && !showFullPlayer,
-                    intensity = 0.64f,
-                )
-            }
-
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .statusBarsPadding(),
+                    .ferricBackdropSource(auroraBackdrop, enabled = !showFullPlayer && palette.isLiquidGlass),
             ) {
+                if (palette.isLiquidGlass) {
+                    AuroraBackdrop(
+                        colors = state.coverShade,
+                        baseCanvas = palette.canvas,
+                        isPlaying = state.isPlaying && !showFullPlayer,
+                        intensity = 0.64f,
+                    )
+                }
+            }
+
+            androidx.compose.runtime.CompositionLocalProvider(LocalBackdropState provides auroraBackdrop) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding(),
+                ) {
                 var cachedDetail by remember { mutableStateOf<FfiCollectionDetail?>(null) }
                 if (state.activeDetail != null) {
                     cachedDetail = state.activeDetail
@@ -676,6 +688,7 @@ private fun FerricMainShell(
                         )
                     }
                 }
+            }
             }
         }
 

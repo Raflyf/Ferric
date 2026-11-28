@@ -561,10 +561,10 @@ private fun FloatingNavPill(
         modifier = modifier
             .ferricLiquidGlass(
                 cornerRadius = glassRadius,
-                blurRadius = 15.dp,
-                refractionHeight = 16.dp,
-                refractionAmount = 14.dp,
-                chromaticDispersion = 0.62f,
+                blurRadius = 10.dp,
+                refractionHeight = 22.dp,
+                refractionAmount = 22.dp,
+                chromaticDispersion = 0.92f,
                 alwaysGlass = palette.isLiquidGlass,
             )
             .onSizeChanged {
@@ -835,10 +835,10 @@ private fun FloatingMiniPlayerPill(
             }
             .ferricLiquidGlass(
                 cornerRadius = 30.dp,
-                blurRadius = 15.dp,
-                refractionHeight = 16.dp,
-                refractionAmount = 14.dp,
-                chromaticDispersion = 0.60f,
+                blurRadius = 8.5.dp,
+                refractionHeight = 18.dp,
+                refractionAmount = 22.dp,
+                chromaticDispersion = 0.90f,
                 alwaysGlass = palette.isLiquidGlass,
             )
             .pointerInput(cur?.id, activeRemotePeer?.deviceId) {

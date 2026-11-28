@@ -57,6 +57,7 @@ import dev.livelydesk.ferric.ui.components.TrackRow
 import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
+import dev.livelydesk.ferric.ui.theme.blockUnderlyingTouches
 import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import uniffi.ferric_mobile_ffi.FfiCollectionDetail
 import uniffi.ferric_mobile_ffi.FfiDetailSort
@@ -115,6 +116,7 @@ fun DetailScreen(
         state = listState,
         modifier = Modifier
             .fillMaxSize()
+            .blockUnderlyingTouches()
             .background(if (palette.isLiquidGlass) Color.Transparent else palette.canvas),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 180.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),

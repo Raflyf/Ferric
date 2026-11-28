@@ -6,7 +6,6 @@ import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
-import android.os.SystemClock
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.BorderStroke
@@ -66,6 +65,7 @@ import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
@@ -107,7 +107,7 @@ class FerricBackdropState(
     val graphicsLayer: GraphicsLayer,
     val blurredLayer: GraphicsLayer,
 ) {
-    val blurScale: Float = 0.20f
+    val blurScale: Float = 0.25f
     var rootOffset: Offset = Offset.Zero
     var hasRecorded: Boolean = false
     var isRecordingSource: Boolean = false
@@ -117,14 +117,12 @@ class FerricBackdropState(
     var blurredSize: IntSize = IntSize.Zero
     private var lastBlurPx: Float = -1f
     private var lastIsLight: Boolean = false
-    private var lastBlurMs: Long = 0L
     private var sharedBlurEffect: androidx.compose.ui.graphics.RenderEffect? = null
 
     fun ensureBlurred(
         blurPx: Float,
         isLight: Boolean,
-        density: Density,
-        layoutDirection: LayoutDirection,
+        drawScope: androidx.compose.ui.graphics.drawscope.DrawScope,
     ): Boolean {
         if (isRecordingSource ||
             Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
@@ -134,28 +132,29 @@ class FerricBackdropState(
         ) {
             return false
         }
-        val scaledBlur = (blurPx * blurScale).coerceIn(2f, 20f)
+        val scaledBlur = (blurPx * blurScale).coerceIn(1.8f, 22f)
         val bw = kotlin.math.ceil(contentSize.width * blurScale.toDouble()).toInt().coerceAtLeast(1)
         val bh = kotlin.math.ceil(contentSize.height * blurScale.toDouble()).toInt().coerceAtLeast(1)
         val targetSize = IntSize(bw, bh)
-        val configChanged = !hasBlurred ||
+        if (!hasBlurred ||
+            blurDirty ||
             blurredSize != targetSize ||
             sharedBlurEffect == null ||
-            abs(lastBlurPx - scaledBlur) > 0.5f ||
+            abs(lastBlurPx - scaledBlur) > 0.4f ||
             lastIsLight != isLight
-        val nowMs = SystemClock.uptimeMillis()
-        if (configChanged || (blurDirty && nowMs - lastBlurMs >= 24L)) {
+        ) {
             lastBlurPx = scaledBlur
             lastIsLight = isLight
-            lastBlurMs = nowMs
             blurredSize = targetSize
             val fx = buildDecoupledBlurEffect(scaledBlur, isLight)
             sharedBlurEffect = fx
             blurredLayer.clip = false
             blurredLayer.renderEffect = fx
-            blurredLayer.record(density = density, layoutDirection = layoutDirection, size = targetSize) {
-                scale(scaleX = blurScale, scaleY = blurScale, pivot = Offset.Zero) {
-                    drawLayer(graphicsLayer)
+            with(drawScope) {
+                blurredLayer.record(size = targetSize) {
+                    scale(scaleX = blurScale, scaleY = blurScale, pivot = Offset.Zero) {
+                        drawLayer(graphicsLayer)
+                    }
                 }
             }
             blurDirty = false
@@ -188,20 +187,17 @@ fun Modifier.ferricBackdropSource(
         }
         .drawWithContent {
             if (enabled && size.width >= 1f && size.height >= 1f) {
-                val exactSize = IntSize(
-                    size.width.roundToInt().coerceAtLeast(1),
-                    size.height.roundToInt().coerceAtLeast(1),
-                )
                 backdrop.isRecordingSource = true
                 try {
-                    backdrop.graphicsLayer.record(
-                        density = this@drawWithContent,
-                        layoutDirection = layoutDirection,
-                        size = exactSize,
-                    ) {
+                    // Use ContentDrawScope's native record{} extension so drawContent() captures into
+                    // backdrop.graphicsLayer rather than drawing directly to the root window canvas.
+                    backdrop.graphicsLayer.record {
                         this@drawWithContent.drawContent()
                     }
-                    backdrop.contentSize = exactSize
+                    backdrop.contentSize = IntSize(
+                        size.width.roundToInt().coerceAtLeast(1),
+                        size.height.roundToInt().coerceAtLeast(1),
+                    )
                     backdrop.hasRecorded = true
                     backdrop.blurDirty = true
                 } finally {
@@ -260,14 +256,14 @@ half4 main(float2 coord) {
         ? normalize(gBase + normalize(centered + float2(1e-4)) * 0.55)
         : gBase;
 
-    float2 safeMax = max(fullSize - float2(1.0), float2(1.0));
-    float2 refrCoord = clamp(coord - disp * gDir, float2(0.5), safeMax);
+    float2 safeMax = max(fullSize - float2(0.5), float2(1.0));
+    float2 refrCoord = clamp(coord + disp * gDir, float2(0.5), safeMax);
 
     if (chromaticAberration <= 0.001) {
         return content.eval(refrCoord);
     }
-    float edgeFactor = depth * chromaticAberration;
-    float2 chromaDelta = gDir * (disp * edgeFactor * 0.55);
+    float cornerDispersion = chromaticAberration * ((centered.x * centered.y) / max(halfSize.x * halfSize.y, 1.0));
+    float2 chromaDelta = gDir * (disp * cornerDispersion);
     float2 redCoord = clamp(refrCoord + chromaDelta, float2(0.5), safeMax);
     float2 blueCoord = clamp(refrCoord - chromaDelta, float2(0.5), safeMax);
 
@@ -330,28 +326,16 @@ private class GlassCache {
 
 @RequiresApi(Build.VERSION_CODES.S)
 private fun buildVibrancyEffect(isLight: Boolean): RenderEffect {
-    val sat = if (isLight) 1.22f else 1.28f
+    val sat = if (isLight) 1.32f else 1.55f
     val matrix = ColorMatrix().apply {
         setSaturation(sat)
     }
-    // Keep blacks deep and colors crystal-clear with zero milky white haze.
-    val gain = if (isLight) 1.02f else 1.04f
-    val bias = if (isLight) 2f else 0f
-    val lift = ColorMatrix(
-        floatArrayOf(
-            gain, 0f, 0f, 0f, bias,
-            0f, gain, 0f, 0f, bias,
-            0f, 0f, gain, 0f, bias,
-            0f, 0f, 0f, 1f, 0f,
-        ),
-    )
-    matrix.postConcat(lift)
     return RenderEffect.createColorFilterEffect(ColorMatrixColorFilter(matrix))
 }
 
 @RequiresApi(Build.VERSION_CODES.S)
 private fun buildDecoupledBlurEffect(blurPx: Float, isLight: Boolean): androidx.compose.ui.graphics.RenderEffect {
-    val clampedBlur = blurPx.coerceIn(2f, 28f)
+    val clampedBlur = blurPx.coerceIn(1.8f, 24f)
     val blur = RenderEffect.createBlurEffect(clampedBlur, clampedBlur, Shader.TileMode.CLAMP)
     val vibrancy = buildVibrancyEffect(isLight)
     return RenderEffect.createChainEffect(blur, vibrancy).asComposeRenderEffect()
@@ -537,15 +521,14 @@ fun Modifier.ferricLiquidGlass(
             }
 
             val activeBackdrop = backdrop
-            val hasSharedBlur = activeBackdrop?.ensureBlurred(
-                blurPx = blurPx,
-                isLight = palette.isLight,
-                density = this@drawWithContent,
-                layoutDirection = layoutDirection,
-            ) == true
-
-            if (hasSharedBlur) {
-                val dx = cache.elementOffset.x - activeBackdrop!!.rootOffset.x
+            val hasSharedBlur = activeBackdrop != null &&
+                activeBackdrop.ensureBlurred(
+                    blurPx = blurPx,
+                    isLight = palette.isLight,
+                    drawScope = this@drawWithContent,
+                )
+            if (activeBackdrop != null && hasSharedBlur) {
+                val dx = cache.elementOffset.x - activeBackdrop.rootOffset.x
                 val dy = cache.elementOffset.y - activeBackdrop.rootOffset.y
                 val invScale = 1f / activeBackdrop.blurScale
 
@@ -624,16 +607,16 @@ fun Modifier.ferricLiquidGlass(
                     }
                 }
             } else {
-                // Zero-FBO translucent smoked crystal directly over live Aurora or sheet glow.
+                // Zero-FBO translucent smoked crystal directly over live Aurora or HWUI blurred sheet.
                 clipPath(cache.cachedPath) {
                     if (palette.isLight) {
                         drawRect(color = Color.White.copy(alpha = 0.84f))
                     } else {
-                        val crystalAlpha = (0.28f + opacityNorm * 0.28f).coerceIn(0.24f, 0.58f)
-                        drawRect(color = Color(0xFF0B0F19).copy(alpha = crystalAlpha))
-                        drawRect(color = palette.glassTint.copy(alpha = 0.14f))
+                        val crystalAlpha = (0.14f + opacityNorm * 0.16f).coerceIn(0.14f, 0.34f)
+                        drawRect(color = Color(0xFF0A0D16).copy(alpha = crystalAlpha))
+                        drawRect(color = palette.glassTint.copy(alpha = 0.12f))
                         if (accentGlow != Color.Unspecified) {
-                            drawRect(color = accentGlow.copy(alpha = 0.10f))
+                            drawRect(color = accentGlow.copy(alpha = 0.12f))
                         }
                         drawRect(brush = sheenBrush)
                     }
@@ -693,7 +676,7 @@ fun FerricModalBottomSheet(
     }
 
     val opacityNorm = palette.glassOpacity.coerceIn(0.15f, 0.95f)
-    val sheetBgAlpha = (0.56f + opacityNorm * 0.22f).coerceIn(0.50f, 0.78f)
+    val sheetBgAlpha = (0.26f + opacityNorm * 0.22f).coerceIn(0.24f, 0.52f)
     val sheetShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
 
     ModalBottomSheet(
@@ -701,7 +684,7 @@ fun FerricModalBottomSheet(
         modifier = modifier,
         sheetState = sheetState,
         containerColor = Color.Transparent,
-        scrimColor = Color.Black.copy(alpha = 0.28f),
+        scrimColor = Color.Black.copy(alpha = 0.14f),
         dragHandle = null,
     ) {
         val view = LocalView.current
@@ -712,9 +695,9 @@ fun FerricModalBottomSheet(
                     runCatching {
                         window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
                         window.attributes = window.attributes.apply {
-                            blurBehindRadius = 42
+                            blurBehindRadius = 38
                         }
-                        window.setBackgroundBlurRadius(84)
+                        window.setBackgroundBlurRadius(76)
                     }
                 }
             }
@@ -945,5 +928,23 @@ fun FerricSlimSlider(
             radius = thumbR,
             center = Offset(thumbX, midY),
         )
+    }
+}
+
+/**
+ * Seals full-screen overlays against pointer passthrough onto underlying tabs or mini-player bars.
+ * Consumes unhandled changes in [PointerEventPass.Main] (bottom-up) after interactive children
+ * and scroll containers run, avoiding interference with child [PointerEventPass.Final] checks.
+ */
+fun Modifier.blockUnderlyingTouches(): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Main)
+            event.changes.forEach { change ->
+                if (!change.isConsumed) {
+                    change.consume()
+                }
+            }
+        }
     }
 }

@@ -415,7 +415,7 @@ private fun FerricMainShell(
                     colors = state.coverShade,
                     baseCanvas = palette.canvas,
                     isPlaying = state.isPlaying && !showFullPlayer,
-                    intensity = 0.68f,
+                    intensity = 0.86f,
                 )
             }
 

@@ -3,10 +3,17 @@ package dev.livelydesk.ferric.ui.screens
 import android.os.SystemClock
 import android.view.ViewGroup
 import androidx.annotation.OptIn
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -131,6 +138,7 @@ import dev.livelydesk.ferric.ui.theme.FerricModalBottomSheet
 import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalBackdropState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.blockUnderlyingTouches
 import dev.livelydesk.ferric.ui.theme.ferricBackdropSource
 import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
@@ -241,6 +249,7 @@ fun FullPlayerScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .blockUnderlyingTouches()
                 .background(deepTone),
         ) {
             // Layer 1: Edge-to-edge full-bleed cover art (or atmospheric blurred art) captured cleanly
@@ -249,60 +258,76 @@ fun FullPlayerScreen(
                     .fillMaxSize()
                     .ferricBackdropSource(playerBackdrop),
             ) {
-                when {
-                    !showLyrics && mediaMode == MediaMode.AUDIO && !displayThumb.isNullOrBlank() && !isStandardLayout -> {
-                        val backdropCtx = LocalContext.current
-                        val backdropReq = remember(displayThumb, isLiquidBackdropLayout) {
-                            val dim = if (isLiquidBackdropLayout) 480 else 860
-                            ImageRequest.Builder(backdropCtx)
-                                .data(displayThumb)
-                                .size(dim, dim)
-                                .precision(Precision.INEXACT)
-                                .build()
-                        }
-                        Box(modifier = Modifier.fillMaxSize()) {
-                            AsyncImage(
-                                model = backdropReq,
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .then(
-                                        if (isLiquidBackdropLayout) {
-                                            Modifier
-                                                .fillMaxSize()
-                                                .blur(46.dp)
-                                        } else {
-                                            // Full-bleed edge-to-edge cover art melting seamlessly down the canvas
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .fillMaxHeight(0.66f)
-                                                .align(Alignment.TopCenter)
-                                        },
-                                    ),
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(
-                                        Brush.verticalGradient(
-                                            0.0f to Color.Black.copy(alpha = if (isLiquidBackdropLayout) 0.38f else 0.28f),
-                                            0.22f to Color.Transparent,
-                                            0.46f to deepTone.copy(alpha = if (isLiquidBackdropLayout) 0.50f else 0.24f),
-                                            0.60f to deepTone.copy(alpha = 0.90f),
-                                            0.72f to deepTone,
-                                            1.0f to Color.Black.copy(alpha = 0.94f),
+                val backdropStage = when {
+                    !showLyrics && mediaMode == MediaMode.AUDIO && !displayThumb.isNullOrBlank() && !isStandardLayout -> PlayerBackdropStage.ARTWORK
+                    !isStandardLayout -> PlayerBackdropStage.AURORA
+                    else -> PlayerBackdropStage.STANDARD
+                }
+                AnimatedContent(
+                    targetState = backdropStage,
+                    transitionSpec = {
+                        fadeIn(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) togetherWith
+                            fadeOut(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut))
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                    label = "player_backdrop_stage",
+                ) { stage ->
+                    when (stage) {
+                        PlayerBackdropStage.ARTWORK -> {
+                            val backdropCtx = LocalContext.current
+                            val backdropReq = remember(displayThumb, isLiquidBackdropLayout) {
+                                val dim = if (isLiquidBackdropLayout) 480 else 860
+                                ImageRequest.Builder(backdropCtx)
+                                    .data(displayThumb)
+                                    .size(dim, dim)
+                                    .precision(Precision.INEXACT)
+                                    .build()
+                            }
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                AsyncImage(
+                                    model = backdropReq,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .then(
+                                            if (isLiquidBackdropLayout) {
+                                                Modifier
+                                                    .fillMaxSize()
+                                                    .blur(46.dp)
+                                            } else {
+                                                // Full-bleed edge-to-edge cover art melting seamlessly down the canvas
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .fillMaxHeight(0.66f)
+                                                    .align(Alignment.TopCenter)
+                                            },
                                         ),
-                                    ),
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            Brush.verticalGradient(
+                                                0.0f to Color.Black.copy(alpha = if (isLiquidBackdropLayout) 0.38f else 0.28f),
+                                                0.22f to Color.Transparent,
+                                                0.46f to deepTone.copy(alpha = if (isLiquidBackdropLayout) 0.50f else 0.24f),
+                                                0.60f to deepTone.copy(alpha = 0.90f),
+                                                0.72f to deepTone,
+                                                1.0f to Color.Black.copy(alpha = 0.94f),
+                                            ),
+                                        ),
+                                )
+                            }
+                        }
+                        PlayerBackdropStage.AURORA -> {
+                            AuroraBackdrop(
+                                colors = state.coverShade,
+                                baseCanvas = deepTone,
+                                isPlaying = displayPlaying,
+                                intensity = 0.80f,
                             )
                         }
-                    }
-                    !isStandardLayout -> {
-                        AuroraBackdrop(
-                            colors = state.coverShade,
-                            baseCanvas = deepTone,
-                            isPlaying = displayPlaying,
-                            intensity = 0.80f,
-                        )
+                        PlayerBackdropStage.STANDARD -> Unit
                     }
                 }
             }
@@ -362,10 +387,20 @@ fun FullPlayerScreen(
                     ) {
                         MediaMode.entries.forEach { mode ->
                             val selected = mediaMode == mode && !showLyrics
+                            val pillBg by animateColorAsState(
+                                targetValue = if (selected) Color.White.copy(alpha = 0.22f) else Color.Transparent,
+                                animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                                label = "media_mode_pill_bg",
+                            )
+                            val labelTint by animateColorAsState(
+                                targetValue = if (selected) Color.White else Color.White.copy(alpha = 0.72f),
+                                animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                                label = "media_mode_pill_tint",
+                            )
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(16.dp))
-                                    .background(if (selected) Color.White.copy(alpha = 0.22f) else Color.Transparent)
+                                    .background(pillBg)
                                     .clickable {
                                         showLyrics = false
                                         mediaMode = mode
@@ -376,7 +411,7 @@ fun FullPlayerScreen(
                                 Text(
                                     text = mode.label,
                                     style = MaterialTheme.typography.labelLarge,
-                                    color = if (selected) Color.White else Color.White.copy(alpha = 0.72f),
+                                    color = labelTint,
                                 )
                             }
                         }
@@ -431,47 +466,76 @@ fun FullPlayerScreen(
                         ),
                     contentAlignment = Alignment.Center,
                 ) {
-                    when {
-                        showLyrics -> {
-                            SyncedLyricsStage(
-                                state = state,
-                                progressFlow = progressFlow,
-                                onSeek = onSeek,
-                                onNudgeOffset = onNudgeLyricsOffset,
-                                onRetry = onLoadLyrics,
-                                onOpenShareCard = onOpenShareCard,
-                            )
-                        }
-                        mediaMode == MediaMode.VIDEO -> {
-                            DockedVideoStage(
-                                state = state,
-                                progressFlow = progressFlow,
-                                playbackSpeed = speed,
-                                onRetry = onResolveVideo,
-                            )
-                        }
-                        isLiquidBackdropLayout || isStandardLayout -> {
-                            // Frameless rounded square album art floating smoothly without ugly boxes
-                            ArtworkThumb(
-                                url = displayThumb,
-                                size = if (isStandardLayout) 288.dp else 278.dp,
-                                cornerRadius = artCorner,
-                                isActive = displayPlaying,
-                                modifier = Modifier
-                                    .size(if (isStandardLayout) 288.dp else 278.dp)
-                                    .shadow(22.dp, RoundedCornerShape(artCorner), clip = false)
-                                    .clip(RoundedCornerShape(artCorner)),
-                            )
-                        }
-                        else -> {
-                            // Cardless Full-Bleed keeps upper album art 100% open and unobstructed
-                            if (displayThumb.isNullOrBlank()) {
+                    val centerStage = when {
+                        showLyrics -> PlayerCenterStage.LYRICS
+                        mediaMode == MediaMode.VIDEO -> PlayerCenterStage.VIDEO
+                        isLiquidBackdropLayout || isStandardLayout -> PlayerCenterStage.ARTWORK_CARD
+                        else -> PlayerCenterStage.FULL_BLEED_EMPTY
+                    }
+                    AnimatedContent(
+                        targetState = centerStage,
+                        transitionSpec = {
+                            val enter = fadeIn(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) +
+                                scaleIn(
+                                    initialScale = 0.94f,
+                                    animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                                ) +
+                                slideInVertically(
+                                    animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
+                                ) { it / 14 }
+                            val exit = fadeOut(tween(durationMillis = 160, easing = FerricEaseOut)) +
+                                scaleOut(
+                                    targetScale = 0.96f,
+                                    animationSpec = tween(durationMillis = 160, easing = FerricEaseOut),
+                                )
+                            enter togetherWith exit
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                        label = "player_center_stage",
+                    ) { stage ->
+                        when (stage) {
+                            PlayerCenterStage.LYRICS -> {
+                                SyncedLyricsStage(
+                                    state = state,
+                                    progressFlow = progressFlow,
+                                    onSeek = onSeek,
+                                    onNudgeOffset = onNudgeLyricsOffset,
+                                    onRetry = onLoadLyrics,
+                                    onOpenShareCard = onOpenShareCard,
+                                )
+                            }
+                            PlayerCenterStage.VIDEO -> {
+                                DockedVideoStage(
+                                    state = state,
+                                    progressFlow = progressFlow,
+                                    playbackSpeed = speed,
+                                    onRetry = onResolveVideo,
+                                )
+                            }
+                            PlayerCenterStage.ARTWORK_CARD -> {
+                                // Frameless rounded square album art floating smoothly without ugly boxes
                                 ArtworkThumb(
-                                    url = null,
-                                    size = 240.dp,
+                                    url = displayThumb,
+                                    size = if (isStandardLayout) 288.dp else 278.dp,
                                     cornerRadius = artCorner,
                                     isActive = displayPlaying,
+                                    modifier = Modifier
+                                        .size(if (isStandardLayout) 288.dp else 278.dp)
+                                        .shadow(22.dp, RoundedCornerShape(artCorner), clip = false)
+                                        .clip(RoundedCornerShape(artCorner)),
                                 )
+                            }
+                            PlayerCenterStage.FULL_BLEED_EMPTY -> {
+                                // Cardless Full-Bleed keeps upper album art 100% open and unobstructed
+                                if (displayThumb.isNullOrBlank()) {
+                                    ArtworkThumb(
+                                        url = null,
+                                        size = 240.dp,
+                                        cornerRadius = artCorner,
+                                        isActive = displayPlaying,
+                                    )
+                                }
                             }
                         }
                     }
@@ -1336,4 +1400,17 @@ private fun DockedVideoStage(
             }
         }
     }
+}
+
+private enum class PlayerBackdropStage {
+    ARTWORK,
+    AURORA,
+    STANDARD,
+}
+
+private enum class PlayerCenterStage {
+    LYRICS,
+    VIDEO,
+    ARTWORK_CARD,
+    FULL_BLEED_EMPTY,
 }

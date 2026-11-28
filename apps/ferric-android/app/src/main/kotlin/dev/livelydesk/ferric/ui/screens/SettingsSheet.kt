@@ -211,11 +211,14 @@ fun SettingsSheet(
             }
 
             if (matches("storage", "offline", "downloads", "cache", "artwork", "clear", "delete", "database")) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = palette.elevated,
-                    border = BorderStroke(1.dp, palette.border),
-                    modifier = Modifier.fillMaxWidth(),
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = 14.dp,
+                            fallbackColor = palette.elevated,
+                        ),
                 ) {
                     Column(
                         modifier = Modifier.padding(14.dp),

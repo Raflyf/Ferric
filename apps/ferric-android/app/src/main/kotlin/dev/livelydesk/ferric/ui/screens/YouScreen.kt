@@ -210,12 +210,14 @@ fun YouScreen(
                 }
 
                 // Compact OpenSubsonic / Navidrome card
-                Surface(
-                    shape = RoundedCornerShape(palette.cornerRadiusDp),
-                    color = cardBg,
-                    border = BorderStroke(1.dp, dividerColor),
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .ferricGlassSurface(
+                            palette = palette,
+                            cornerRadius = palette.cornerRadiusDp,
+                            fallbackColor = cardBg,
+                        )
                         .clickable(onClick = onOpenAccounts),
                 ) {
                     Row(

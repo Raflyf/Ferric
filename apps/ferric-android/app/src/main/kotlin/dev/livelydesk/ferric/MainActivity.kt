@@ -246,7 +246,7 @@ private fun FerricMainShell(
         tabAnimJob = ioScope.launch(start = CoroutineStart.UNDISPATCHED) {
             tabAnim.snapTo(0f)
             try {
-                tabAnim.animateTo(1f, tween(durationMillis = 280, easing = FerricEaseOut))
+                tabAnim.animateTo(1f, tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut))
             } finally {
                 if (tabAnimGen == seq) {
                     outgoingTab = null
@@ -482,7 +482,7 @@ private fun FerricMainShell(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .ferricBackdropSource(backdropState, enabled = !showFullPlayer && !isTabSliding),
+                        .ferricBackdropSource(backdropState, enabled = !showFullPlayer),
                 ) {
                     if (palette.isLiquidGlass) {
                         // Keep MainShell CoverShade ambient gradient static between track switches so

@@ -811,11 +811,13 @@ impl FerricController {
                     }
                     if let Some(rest) = station_id.strip_prefix("ferric:station:") {
                         let slug = rest.split_once(':').map_or(rest, |(_, s)| s);
-                        let seed_name: String = slug
-                            .split('-')
-                            .filter(|w| !w.is_empty())
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                        let mut seed_name = String::with_capacity(slug.len());
+                        for word in slug.split('-').filter(|w| !w.is_empty()) {
+                            if !seed_name.is_empty() {
+                                seed_name.push(' ');
+                            }
+                            seed_name.push_str(word);
+                        }
                         if !seed_name.is_empty() {
                             return Some(RecommendedStation {
                                 id: station_id.to_string(),
@@ -877,8 +879,10 @@ impl FerricController {
         let _ = thread::Builder::new()
             .name("ferric-station-open".to_string())
             .spawn(move || {
-                let mut tracks = station.cached_tracks.clone();
-                let mut subtitle = station.subtitle.clone();
+                let mut station = station;
+                let mut tracks = std::mem::take(&mut station.cached_tracks);
+                let mut subtitle = std::mem::take(&mut station.subtitle);
+                let was_cached = !tracks.is_empty();
                 let mut share_url = None;
 
                 if tracks.is_empty() {
@@ -923,7 +927,9 @@ impl FerricController {
 
                 let still_active = {
                     let mut st = this.state.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(cached) = st.stations_cache.iter_mut().find(|s| s.id == station.id)
+                    if !was_cached
+                        && let Some(cached) =
+                            st.stations_cache.iter_mut().find(|s| s.id == station.id)
                     {
                         cached.cached_tracks = tracks.clone();
                     }
@@ -1181,9 +1187,9 @@ impl FerricController {
                 }
                 let dq = st.genre_excluded_tracks.entry(g_key).or_default();
                 for t in online_tracks.iter().take(24) {
-                    let k = t.youtube_video_id.clone().unwrap_or_else(|| t.id.clone());
-                    if !dq.contains(&k) {
-                        dq.push_back(k);
+                    let key_ref = t.youtube_video_id.as_deref().unwrap_or(&t.id);
+                    if !dq.iter().any(|existing| existing == key_ref) {
+                        dq.push_back(key_ref.to_owned());
                         while dq.len() > 72 {
                             dq.pop_front();
                         }

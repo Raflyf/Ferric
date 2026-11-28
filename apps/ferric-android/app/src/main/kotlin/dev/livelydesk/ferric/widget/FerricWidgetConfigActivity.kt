@@ -426,7 +426,7 @@ private fun WidgetSettingsScreen(
                 }
             }
 
-            Text("Text size", style = MaterialTheme.typography.labelLarge, color = Color.White)
+            Text("Size (text & controls)", style = MaterialTheme.typography.labelLarge, color = Color.White)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 WidgetTextSize.entries.forEach { sz ->
                     ConfigPill(
@@ -568,7 +568,7 @@ private fun LiveWidgetPreviewBox(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(178.dp),
+                .height(198.dp),
         ) {
             Image(
                 bitmap = bgBitmap.asImageBitmap(),
@@ -580,7 +580,7 @@ private fun LiveWidgetPreviewBox(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -590,7 +590,7 @@ private fun LiveWidgetPreviewBox(
                         Image(
                             bitmap = shapedCover.asImageBitmap(),
                             contentDescription = null,
-                            modifier = Modifier.size(64.dp),
+                            modifier = Modifier.size(config.textSize.coverDp.dp),
                         )
                         Spacer(Modifier.width(14.dp))
                     }
@@ -623,47 +623,63 @@ private fun LiveWidgetPreviewBox(
                             bitmap = streakBmp.asImageBitmap(),
                             contentDescription = null,
                             modifier = Modifier
-                                .height(24.dp)
+                                .height(26.dp)
                                 .align(Alignment.Top),
                         )
                     }
                 }
 
-                Box(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        modifier = Modifier.align(Alignment.Center),
-                        horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (config.showPrevNext) {
-                            val prevBmp = remember(isLight) {
-                                FerricWidgetRenderer.renderTransportIcon(
-                                    "prev",
-                                    if (isLight) AndroidColor.rgb(20, 22, 28) else AndroidColor.WHITE,
-                                )
-                            }
-                            Image(bitmap = prevBmp.asImageBitmap(), contentDescription = null, modifier = Modifier.size(38.dp))
+                    val useSideSpacers = !(config.showLikeButton && config.showPrevNext)
+                    if (useSideSpacers) {
+                        Spacer(Modifier.weight(0.4f))
+                    }
+                    if (config.showPrevNext) {
+                        val prevBmp = remember(isLight) {
+                            FerricWidgetRenderer.renderTransportIcon(
+                                "prev",
+                                if (isLight) AndroidColor.rgb(20, 22, 28) else AndroidColor.WHITE,
+                            )
                         }
                         Image(
-                            bitmap = playIconBmp.asImageBitmap(),
+                            bitmap = prevBmp.asImageBitmap(),
                             contentDescription = null,
-                            modifier = Modifier.size(46.dp),
+                            modifier = Modifier
+                                .size(config.textSize.prevNextDp.dp)
+                                .padding(4.dp),
                         )
-                        if (config.showPrevNext) {
-                            val nextBmp = remember(isLight) {
-                                FerricWidgetRenderer.renderTransportIcon(
-                                    "next",
-                                    if (isLight) AndroidColor.rgb(20, 22, 28) else AndroidColor.WHITE,
-                                )
-                            }
-                            Image(bitmap = nextBmp.asImageBitmap(), contentDescription = null, modifier = Modifier.size(38.dp))
+                        Spacer(Modifier.weight(1f))
+                    }
+                    Image(
+                        bitmap = playIconBmp.asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(config.textSize.playDp.dp)
+                            .padding(2.dp),
+                    )
+                    if (config.showPrevNext) {
+                        Spacer(Modifier.weight(1f))
+                        val nextBmp = remember(isLight) {
+                            FerricWidgetRenderer.renderTransportIcon(
+                                "next",
+                                if (isLight) AndroidColor.rgb(20, 22, 28) else AndroidColor.WHITE,
+                            )
                         }
+                        Image(
+                            bitmap = nextBmp.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .size(config.textSize.prevNextDp.dp)
+                                .padding(4.dp),
+                        )
                     }
                     if (config.showLikeButton) {
+                        Spacer(Modifier.weight(1f))
                         val likeIcon = remember(liked, accentColor, isLight) {
                             val col = if (liked) {
                                 AndroidColor.rgb(
@@ -682,9 +698,12 @@ private fun LiveWidgetPreviewBox(
                             bitmap = likeIcon.asImageBitmap(),
                             contentDescription = null,
                             modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .size(38.dp),
+                                .size(config.textSize.likeDp.dp)
+                                .padding(4.dp),
                         )
+                    }
+                    if (useSideSpacers) {
+                        Spacer(Modifier.weight(0.4f))
                     }
                 }
 
@@ -697,7 +716,7 @@ private fun LiveWidgetPreviewBox(
                         if (config.showTime) {
                             Text(
                                 text = formatDurationMs(elapsedPreviewMs),
-                                fontSize = 12.sp,
+                                fontSize = config.textSize.timeSp.sp,
                                 color = fgSecondary,
                             )
                             Spacer(Modifier.width(10.dp))
@@ -706,14 +725,14 @@ private fun LiveWidgetPreviewBox(
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(5.5.dp)
+                                    .height(7.dp)
                                     .clip(RoundedCornerShape(999.dp))
                                     .background(if (isLight) Color.Black.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.30f)),
                             ) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth(0.65f)
-                                        .height(5.5.dp)
+                                        .height(7.dp)
                                         .clip(RoundedCornerShape(999.dp))
                                         .background(accentColor),
                                 )
@@ -725,7 +744,7 @@ private fun LiveWidgetPreviewBox(
                             Spacer(Modifier.width(10.dp))
                             Text(
                                 text = formatDurationMs(durationMs),
-                                fontSize = 12.sp,
+                                fontSize = config.textSize.timeSp.sp,
                                 color = fgSecondary,
                             )
                         }

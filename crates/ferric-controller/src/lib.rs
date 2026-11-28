@@ -142,7 +142,9 @@ pub(crate) fn sample_library_pool_bounded(
     target_cap: usize,
 ) -> Vec<Track> {
     let mut lib = db.list_liked_tracks().unwrap_or_default();
-    let mut seen_lib: HashSet<String> = HashSet::with_capacity(lib.len().max(64));
+    let reserve_hint = target_cap.max(lib.len().saturating_add(recent_ids.len()));
+    lib.reserve(reserve_hint.saturating_sub(lib.len()));
+    let mut seen_lib: HashSet<String> = HashSet::with_capacity(reserve_hint.max(64));
     for t in &lib {
         seen_lib.insert(t.id.clone());
     }

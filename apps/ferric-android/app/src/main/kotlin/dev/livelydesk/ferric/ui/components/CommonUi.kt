@@ -2,6 +2,7 @@ package dev.livelydesk.ferric.ui.components
 
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
+import android.graphics.Shader
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
@@ -120,6 +121,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
@@ -142,6 +144,7 @@ import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
 import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.StateFlow
@@ -508,9 +511,11 @@ fun FloatingLiquidGlassDock(
                     onOpenConnect = onOpenConnect,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .graphicsLayer {
-                            translationX = miniXDp.toPx()
-                            translationY = miniYDp.toPx()
+                        .offset {
+                            IntOffset(
+                                x = miniXDp.roundToPx(),
+                                y = miniYDp.roundToPx(),
+                            )
                         }
                         .width(miniW),
                 )
@@ -532,11 +537,12 @@ fun FloatingLiquidGlassDock(
     }
 }
 
-// Optical 3D convex magnifier lens + rim chromatic dispersion AGSL shader (Android 13+).
+// Padded optical 3D convex magnifier lens + rim chromatic dispersion AGSL shader (Android 13+).
 private const val NAV_MAGNIFIER_AGSL = """
 uniform shader content;
-uniform float2 fullSize;
+uniform float2 bufferSize;
 uniform float2 halfSize;
+uniform float2 offset;
 uniform float minHalf;
 uniform float cornerRadius;
 uniform float zoomPower;
@@ -559,26 +565,27 @@ float2 gradSdRoundedRect(float2 p, float2 b, float r) {
 }
 
 half4 main(float2 coord) {
-    float2 centered = coord - halfSize;
+    float2 localCoord = coord + offset;
+    float2 centered = localCoord - halfSize;
     float r = min(cornerRadius, minHalf);
     float sd = sdRoundedRect(centered, halfSize, r);
-    if (sd > 0.5) {
-        return half4(0.0);
-    }
 
-    float inward = clamp(-sd / max(rimWidth, 1.0), 0.0, 1.0);
+    float inward = clamp(-min(sd, 0.0) / max(rimWidth, 1.0), 0.0, 1.0);
     float domeFactor = 1.0 - inward;
     float2 normCenter = centered / max(halfSize, float2(1.0));
 
-    // Magnifying convex dome pulls center samples inward (~1.16x optical zoom) and bends rim.
-    float magPull = zoomPower * (0.65 + 0.35 * (1.0 - dot(normCenter, normCenter)));
-    float2 grad = gradSdRoundedRect(centered, halfSize, min(r * 1.25, minHalf));
-    float2 rimBend = grad * (domeFactor * domeFactor * rimWidth * 0.42);
-    float2 safeMax = max(fullSize - float2(0.5), float2(1.0));
-    float2 samplePos = clamp(halfSize + centered * (1.0 - magPull) + rimBend, float2(0.5), safeMax);
+    float magPull = zoomPower * (0.68 + 0.32 * clamp(1.0 - dot(normCenter, normCenter), 0.0, 1.0));
+    float2 grad = gradSdRoundedRect(centered, halfSize, min(r * 1.4, minHalf));
+    float2 rimBend = -grad * (domeFactor * domeFactor * rimWidth * 0.34);
+    float2 safeMax = max(bufferSize - float2(0.5), float2(1.0));
+    float2 samplePos = clamp(
+        (halfSize + centered * (1.0 - magPull) + rimBend) - offset,
+        float2(0.5),
+        safeMax
+    );
 
     float dispersion = chromaAberration * (0.28 + 0.72 * domeFactor);
-    float2 chromaOffset = grad * (dispersion * 3.8 + normCenter.x * dispersion * 1.4);
+    float2 chromaOffset = grad * (dispersion * 2.8);
     float2 redPos = clamp(samplePos + chromaOffset, float2(0.5), safeMax);
     float2 bluePos = clamp(samplePos - chromaOffset, float2(0.5), safeMax);
 
@@ -610,6 +617,7 @@ private fun FloatingNavPill(
     val tabs = FerricTab.entries
 
     val pillContentLayer = rememberGraphicsLayer()
+    val magnifierBgLayer = rememberGraphicsLayer()
     val magnifierGlassLayer = rememberGraphicsLayer()
     var barRootOffset by remember { mutableStateOf(Offset.Zero) }
     var barHeightPx by remember { mutableIntStateOf(0) }
@@ -765,17 +773,26 @@ private fun FloatingNavPill(
                 }
             },
     ) {
-        // Inner clipped glass track (allows the sliding magnifier bubble to cleanly overhang above & below!)
+        // Optical Liquid Glass nav capsule (unified edge-to-center frost + tidy symmetrical lens)
         Box(
             modifier = Modifier
                 .matchParentSize()
-                .graphicsLayer { }
+                .shadow(
+                    elevation = 10.dp,
+                    shape = RoundedCornerShape(glassRadius),
+                    ambientColor = Color.Black.copy(alpha = 0.22f),
+                    spotColor = Color.Black.copy(alpha = 0.30f),
+                )
                 .ferricLiquidGlass(
                     cornerRadius = glassRadius,
-                    blurRadius = 10.dp,
-                    tier = GlassTier.FROSTED_PANEL,
+                    blurRadius = 12.dp,
+                    refractionHeight = 16.dp,
+                    refractionAmount = 11.dp,
+                    chromaticDispersion = 0.65f,
+                    saturation = 1.50f,
+                    veilScale = 0.30f,
+                    tier = GlassTier.HERO_LENS,
                     alwaysGlass = palette.isLiquidGlass,
-                    screenOffsetProvider = { barRootOffset },
                 ),
         )
 
@@ -817,14 +834,20 @@ private fun FloatingNavPill(
                             .clip(RoundedCornerShape(27.dp))
                             .background(
                                 Brush.verticalGradient(
-                                    0.0f to Color.White.copy(alpha = if (palette.isLight) 0.24f else 0.22f),
-                                    0.45f to restPillBg.copy(alpha = 0.08f),
-                                    1.0f to palette.accent.copy(alpha = 0.12f),
+                                    0.0f to Color.White.copy(alpha = if (palette.isLight) 0.74f else 0.22f),
+                                    0.45f to restPillBg.copy(alpha = if (palette.isLight) 0.44f else 0.08f),
+                                    1.0f to (if (palette.isLight) Color.White.copy(alpha = 0.36f) else Color.White.copy(alpha = 0.13f)),
                                 ),
                             )
                             .border(
-                                width = 1.dp,
-                                color = Color.White.copy(alpha = 0.46f),
+                                width = 0.85.dp,
+                                brush = Brush.linearGradient(
+                                    colors = listOf(
+                                        Color.White.copy(alpha = if (palette.isLight) 0.88f else 0.48f),
+                                        Color.White.copy(alpha = 0.12f),
+                                        Color.White.copy(alpha = if (palette.isLight) 0.42f else 0.28f),
+                                    ),
+                                ),
                                 shape = RoundedCornerShape(27.dp),
                             ),
                     )
@@ -926,36 +949,66 @@ private fun FloatingNavPill(
                     clipPath(path) {
                         val shader = magnifierShader
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && shader != null) {
-                            shader.setFloatUniform("fullSize", w, h)
+                            val padPx = ceil(20.dp.toPx().toDouble()).toInt().coerceIn(8, 56)
+                            val padF = padPx.toFloat()
+                            val bufW = (w.roundToInt().coerceAtLeast(1) + 2 * padPx)
+                            val bufH = (h.roundToInt().coerceAtLeast(1) + 2 * padPx)
+                            val bufSize = IntSize(bufW, bufH)
+                            val bg = backdrop?.takeIf { it.hasRecorded && !it.isRecordingSource }
+
+                            // CRITICAL: Record magnifierBgLayer BEFORE magnifierGlassLayer.record (never nest
+                            // LayoutNodeDrawScope.record calls — nested record() overflows CanvasDrawScope stack).
+                            if (bg != null) {
+                                val blurPx = 10.dp.toPx().coerceIn(4f, 48f)
+                                magnifierBgLayer.clip = true
+                                magnifierBgLayer.renderEffect = RenderEffect.createBlurEffect(
+                                    blurPx,
+                                    blurPx,
+                                    Shader.TileMode.CLAMP,
+                                ).asComposeRenderEffect()
+                                magnifierBgLayer.record(size = bufSize) {
+                                    drawRect(palette.canvas)
+                                    translate(
+                                        left = padF - (barDx + lensLeftInBar),
+                                        top = padF - (barDy + lensTopInBar),
+                                    ) {
+                                        drawLayer(bg.graphicsLayer)
+                                    }
+                                }
+                            }
+
+                            shader.setFloatUniform("bufferSize", bufW.toFloat(), bufH.toFloat())
                             shader.setFloatUniform("halfSize", w * 0.5f, h * 0.5f)
+                            shader.setFloatUniform("offset", -padF, -padF)
                             shader.setFloatUniform("minHalf", radiusPx)
                             shader.setFloatUniform("cornerRadius", radiusPx)
-                            shader.setFloatUniform("zoomPower", 0.16f * dragFocus)
+                            shader.setFloatUniform("zoomPower", 0.18f * dragFocus)
                             shader.setFloatUniform("rimWidth", 18.dp.toPx())
-                            shader.setFloatUniform("chromaAberration", 0.92f * dragFocus)
+                            shader.setFloatUniform("chromaAberration", 1.0f * dragFocus)
                             magnifierGlassLayer.clip = true
                             magnifierGlassLayer.renderEffect =
                                 RenderEffect.createRuntimeShaderEffect(shader, "content").asComposeRenderEffect()
-                            magnifierGlassLayer.record(size = androidx.compose.ui.unit.IntSize(w.roundToInt(), h.roundToInt())) {
-                                val bg = backdrop
-                                if (bg != null && bg.hasBlurred) {
-                                    val invScale = 1f / bg.blurScale
-                                    translate(
-                                        left = -(barDx + lensLeftInBar),
-                                        top = -(barDy + lensTopInBar),
-                                    ) {
-                                        scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
-                                            drawLayer(bg.blurredLayer)
-                                        }
-                                    }
+                            magnifierGlassLayer.record(size = bufSize) {
+                                drawRect(palette.canvas)
+                                if (bg != null) {
+                                    drawLayer(magnifierBgLayer)
+                                    drawRect(
+                                        if (palette.isLight) {
+                                            Color.White.copy(alpha = 0.36f)
+                                        } else {
+                                            Color(0xFF101216).copy(alpha = 0.22f)
+                                        },
+                                    )
                                 } else {
-                                    drawRect(palette.surface.copy(alpha = 0.85f))
+                                    drawRect(palette.surface.copy(alpha = 0.68f))
                                 }
-                                translate(left = -lensLeftInBar, top = -lensTopInBar) {
+                                translate(left = padF - lensLeftInBar, top = padF - lensTopInBar) {
                                     drawLayer(pillContentLayer)
                                 }
                             }
-                            drawLayer(magnifierGlassLayer)
+                            translate(left = -padF, top = -padF) {
+                                drawLayer(magnifierGlassLayer)
+                            }
                         } else {
                             translate(left = -lensLeftInBar, top = -lensTopInBar) {
                                 scale(
@@ -1072,17 +1125,19 @@ private fun FloatingMiniPlayerPill(
 
     val pillShape = RoundedCornerShape(30.dp)
     val outerBackdrop = LocalBackdropState.current
-    var pillOffset by remember { mutableStateOf(Offset.Zero) }
 
     Box(
         modifier = modifier
             .height(60.dp)
+            .offset {
+                IntOffset(
+                    x = (animDragX * 0.42f).roundToInt(),
+                    y = (if (animDragY > 0f) animDragY * 0.65f else animDragY * 0.28f).roundToInt(),
+                )
+            }
             .graphicsLayer {
-                translationX = animDragX * 0.42f
-                translationY = if (animDragY > 0f) animDragY * 0.65f else animDragY * 0.28f
                 alpha = if (animDragY > 0f) (1f - (animDragY / 210f)).coerceIn(0.45f, 1f) else 1f
             }
-            .onGloballyPositioned { coords -> pillOffset = coords.positionInRoot() }
             .pointerInput(cur?.id, activeRemotePeer?.deviceId) {
                 var dragX = 0f
                 var dragY = 0f
@@ -1124,21 +1179,30 @@ private fun FloatingMiniPlayerPill(
                     },
                 )
             }
+            .shadow(
+                elevation = 10.dp,
+                shape = pillShape,
+                ambientColor = Color.Black.copy(alpha = 0.24f),
+                spotColor = Color.Black.copy(alpha = 0.32f),
+            )
             .clip(pillShape)
             .clickable(onClick = onOpenFullPlayer),
     ) {
-        // Decoupled Liquid Glass backdrop layer (0 extra offscreen FBO; immune to 5 Hz progress ticks).
+        // Optical Liquid Glass mini-player capsule (matched blur & smooth full-surface lens)
         CompositionLocalProvider(LocalBackdropState provides outerBackdrop) {
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .graphicsLayer { }
                     .ferricLiquidGlass(
                         cornerRadius = 30.dp,
-                        blurRadius = 8.5.dp,
-                        tier = GlassTier.FROSTED_PANEL,
+                        blurRadius = 12.dp,
+                        refractionHeight = 15.dp,
+                        refractionAmount = 10.dp,
+                        chromaticDispersion = 0.65f,
+                        saturation = 1.52f,
+                        veilScale = 0.34f,
+                        tier = GlassTier.HERO_LENS,
                         alwaysGlass = palette.isLiquidGlass,
-                        screenOffsetProvider = { pillOffset },
                     ),
             )
         }
@@ -1407,10 +1471,14 @@ fun FerricSnackbar(
             if (palette.isLiquidGlass) {
                 base.ferricLiquidGlass(
                     cornerRadius = snackCorner,
-                    blurRadius = 9.dp,
+                    blurRadius = 12.dp,
+                    refractionHeight = 14.dp,
+                    refractionAmount = 10.dp,
+                    chromaticDispersion = 0.65f,
+                    saturation = 1.52f,
+                    veilScale = 0.42f,
                     alwaysGlass = true,
-                    tier = GlassTier.FROSTED_PANEL,
-                    anchorAlphaOverride = if (palette.isLight) 0f else 0.24f,
+                    tier = GlassTier.HERO_LENS,
                 )
             } else {
                 base
@@ -1567,14 +1635,15 @@ fun FerricUpdateDialogOverlay(
                             .matchParentSize()
                             .ferricLiquidGlass(
                                 cornerRadius = cardCorner,
-                                blurRadius = 12.dp,
-                                refractionHeight = 18.dp,
-                                refractionAmount = 18.dp,
-                                chromaticDispersion = 0.85f,
+                                blurRadius = 14.dp,
+                                refractionHeight = 16.dp,
+                                refractionAmount = 10.dp,
+                                chromaticDispersion = 0.55f,
+                                saturation = 1.50f,
+                                veilScale = 0.58f,
                                 alwaysGlass = true,
                                 tier = GlassTier.HERO_LENS,
                                 accentGlow = palette.accent,
-                                anchorAlphaOverride = if (palette.isLight) 0.46f else 0.36f,
                                 screenOffsetProvider = { cardRestOffset },
                             ),
                     )

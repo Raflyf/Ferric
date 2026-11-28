@@ -367,8 +367,13 @@ fun FullPlayerScreen(
                             .size(40.dp)
                             .ferricLiquidGlass(
                                 cornerRadius = 20.dp,
-                                blurRadius = 14.dp,
-                                tier = GlassTier.FROSTED_PANEL,
+                                blurRadius = 12.dp,
+                                refractionHeight = 14.dp,
+                                refractionAmount = 10.dp,
+                                chromaticDispersion = 0.62f,
+                                saturation = 1.52f,
+                                veilScale = 0.34f,
+                                tier = GlassTier.HERO_LENS,
                                 alwaysGlass = true,
                             )
                             .clickable(onClick = onCollapse),
@@ -389,8 +394,13 @@ fun FullPlayerScreen(
                             .height(38.dp)
                             .ferricLiquidGlass(
                                 cornerRadius = 19.dp,
-                                blurRadius = 16.dp,
-                                tier = GlassTier.FROSTED_PANEL,
+                                blurRadius = 12.dp,
+                                refractionHeight = 14.dp,
+                                refractionAmount = 10.dp,
+                                chromaticDispersion = 0.62f,
+                                saturation = 1.52f,
+                                veilScale = 0.34f,
+                                tier = GlassTier.HERO_LENS,
                                 alwaysGlass = true,
                             )
                             .padding(3.dp),
@@ -435,8 +445,13 @@ fun FullPlayerScreen(
                             .size(40.dp)
                             .ferricLiquidGlass(
                                 cornerRadius = 20.dp,
-                                blurRadius = 14.dp,
-                                tier = GlassTier.FROSTED_PANEL,
+                                blurRadius = 12.dp,
+                                refractionHeight = 14.dp,
+                                refractionAmount = 10.dp,
+                                chromaticDispersion = 0.62f,
+                                saturation = 1.52f,
+                                veilScale = 0.34f,
+                                tier = GlassTier.HERO_LENS,
                                 alwaysGlass = true,
                             )
                             .clickable(onClick = onOpenThemeStudio),

@@ -92,10 +92,66 @@ enum class WidgetCoverShape(val id: String, val label: String) {
     }
 }
 
-enum class WidgetTextSize(val id: String, val label: String, val titleSp: Float, val artistSp: Float) {
-    SMALL("small", "Small", 14.5f, 12f),
-    MEDIUM("medium", "Medium", 16.5f, 13f),
-    LARGE("large", "Large", 18.5f, 14f),
+enum class WidgetTextSize(
+    val id: String,
+    val label: String,
+    val titleSp: Float,
+    val artistSp: Float,
+    val timeSp: Float,
+    val coverDp: Float,
+    val prevNextDp: Float,
+    val playDp: Float,
+    val likeDp: Float,
+    val compactCoverDp: Float,
+    val compactBtnDp: Float,
+    val compactPlayDp: Float,
+    val squareCoverDp: Float,
+) {
+    SMALL(
+        id = "small",
+        label = "Small",
+        titleSp = 15f,
+        artistSp = 12f,
+        timeSp = 11.5f,
+        coverDp = 56f,
+        prevNextDp = 38f,
+        playDp = 46f,
+        likeDp = 36f,
+        compactCoverDp = 46f,
+        compactBtnDp = 34f,
+        compactPlayDp = 42f,
+        squareCoverDp = 44f,
+    ),
+    MEDIUM(
+        id = "medium",
+        label = "Medium",
+        titleSp = 18.5f,
+        artistSp = 14f,
+        timeSp = 12.5f,
+        coverDp = 66f,
+        prevNextDp = 44f,
+        playDp = 54f,
+        likeDp = 42f,
+        compactCoverDp = 52f,
+        compactBtnDp = 38f,
+        compactPlayDp = 46f,
+        squareCoverDp = 52f,
+    ),
+    LARGE(
+        id = "large",
+        label = "Large",
+        titleSp = 22f,
+        artistSp = 16f,
+        timeSp = 14f,
+        coverDp = 76f,
+        prevNextDp = 52f,
+        playDp = 64f,
+        likeDp = 48f,
+        compactCoverDp = 56f,
+        compactBtnDp = 42f,
+        compactPlayDp = 50f,
+        squareCoverDp = 60f,
+    ),
     ;
 
     companion object {
@@ -1313,42 +1369,47 @@ object FerricWidgetRenderer {
         fgArgb: Int,
         roundFillArgb: Int? = null,
     ): Bitmap {
-        val s = 96
+        val s = 128
         val bmp = createBitmap(s, s, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         val cx = s * 0.5f
         val cy = s * 0.5f
         if (roundFillArgb != null) {
-            c.drawCircle(cx, cy, s * 0.46f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = roundFillArgb })
+            c.drawCircle(cx, cy, s * 0.47f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = roundFillArgb })
         }
         val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fgArgb }
         when (kind) {
             "play" -> {
-                val left = if (roundFillArgb != null) s * 0.37f else s * 0.27f
-                val right = if (roundFillArgb != null) s * 0.74f else s * 0.80f
+                val left = if (roundFillArgb != null) s * 0.36f else s * 0.24f
+                val right = if (roundFillArgb != null) s * 0.76f else s * 0.84f
+                val top = if (roundFillArgb != null) s * 0.24f else s * 0.17f
+                val bot = if (roundFillArgb != null) s * 0.76f else s * 0.83f
                 val path = Path().apply {
-                    moveTo(left, s * 0.23f)
+                    moveTo(left, top)
                     lineTo(right, cy)
-                    lineTo(left, s * 0.77f)
+                    lineTo(left, bot)
                     close()
                 }
                 c.drawPath(path, p)
             }
             "pause" -> {
-                c.drawRoundRect(RectF(s * 0.28f, s * 0.24f, s * 0.42f, s * 0.76f), 6f, 6f, p)
-                c.drawRoundRect(RectF(s * 0.58f, s * 0.24f, s * 0.72f, s * 0.76f), 6f, 6f, p)
+                val barTop = if (roundFillArgb != null) s * 0.25f else s * 0.18f
+                val barBot = if (roundFillArgb != null) s * 0.75f else s * 0.82f
+                val rad = 8f
+                c.drawRoundRect(RectF(s * 0.26f, barTop, s * 0.43f, barBot), rad, rad, p)
+                c.drawRoundRect(RectF(s * 0.57f, barTop, s * 0.74f, barBot), rad, rad, p)
             }
             "next" -> {
                 val t1 = Path().apply {
-                    moveTo(s * 0.16f, s * 0.24f)
-                    lineTo(s * 0.50f, cy)
-                    lineTo(s * 0.16f, s * 0.76f)
+                    moveTo(s * 0.12f, s * 0.19f)
+                    lineTo(s * 0.49f, cy)
+                    lineTo(s * 0.12f, s * 0.81f)
                     close()
                 }
                 val t2 = Path().apply {
-                    moveTo(s * 0.50f, s * 0.24f)
-                    lineTo(s * 0.84f, cy)
-                    lineTo(s * 0.50f, s * 0.76f)
+                    moveTo(s * 0.49f, s * 0.19f)
+                    lineTo(s * 0.88f, cy)
+                    lineTo(s * 0.49f, s * 0.81f)
                     close()
                 }
                 c.drawPath(t1, p)
@@ -1356,15 +1417,15 @@ object FerricWidgetRenderer {
             }
             "prev" -> {
                 val t1 = Path().apply {
-                    moveTo(s * 0.84f, s * 0.24f)
-                    lineTo(s * 0.50f, cy)
-                    lineTo(s * 0.84f, s * 0.76f)
+                    moveTo(s * 0.88f, s * 0.19f)
+                    lineTo(s * 0.51f, cy)
+                    lineTo(s * 0.88f, s * 0.81f)
                     close()
                 }
                 val t2 = Path().apply {
-                    moveTo(s * 0.50f, s * 0.24f)
-                    lineTo(s * 0.16f, cy)
-                    lineTo(s * 0.50f, s * 0.76f)
+                    moveTo(s * 0.51f, s * 0.19f)
+                    lineTo(s * 0.12f, cy)
+                    lineTo(s * 0.51f, s * 0.81f)
                     close()
                 }
                 c.drawPath(t1, p)
@@ -1381,7 +1442,7 @@ object FerricWidgetRenderer {
                 }
                 if (kind == "heart_off") {
                     p.style = Paint.Style.STROKE
-                    p.strokeWidth = 7.5f
+                    p.strokeWidth = 9.5f
                     p.strokeJoin = Paint.Join.ROUND
                     p.strokeCap = Paint.Cap.ROUND
                 }
@@ -1694,10 +1755,17 @@ object FerricWidgetUpdater {
             val minH = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 0)
             val wDp = (if (maxW > 0) maxW else if (minW > 0) minW else defaultWdp).coerceAtLeast(48)
             val hDp = (if (minH > 0) minH else defaultHdp).coerceAtLeast(48)
-            val scale = min(density, 1.85f).coerceAtLeast(1.35f)
-            val wPx = (wDp * scale).roundToInt().coerceIn(220, 620)
-            val hPx = (hDp * scale).roundToInt().coerceIn(96, 340)
+            val scale = min(density, 2.0f).coerceAtLeast(1.45f)
+            val wPx = (wDp * scale).roundToInt().coerceIn(240, 720)
+            val hPx = (hDp * scale).roundToInt().coerceIn(110, 420)
             return Triple(wPx, hPx, wPx.toFloat() / wDp.toFloat())
+        }
+
+        fun applySquareDpSize(views: RemoteViews, viewId: Int, dp: Float) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                views.setViewLayoutWidth(viewId, dp, TypedValue.COMPLEX_UNIT_DIP)
+                views.setViewLayoutHeight(viewId, dp, TypedValue.COMPLEX_UNIT_DIP)
+            }
         }
 
         fun bindThemedCommon(
@@ -1705,6 +1773,9 @@ object FerricWidgetUpdater {
             widgetId: Int,
             defWdp: Int,
             defHdp: Int,
+            coverDpForSize: (WidgetTextSize) -> Float,
+            btnDpForSize: (WidgetTextSize) -> Float,
+            playDpForSize: (WidgetTextSize) -> Float,
             hasProgressViews: Boolean,
         ) {
             val cfg = FerricWidgetPrefs.load(context, widgetId)
@@ -1723,12 +1794,19 @@ object FerricWidgetUpdater {
             val bgBmp = FerricWidgetRenderer.renderGlassBackgroundBitmap(wPx, hPx, cfg, artBitmap, state.coverShade, pxPerDp, wallpaperTint)
             views.setImageViewBitmap(R.id.widget_glass_bg, bgBmp)
 
+            val artDp = coverDpForSize(cfg.textSize)
+            val btnDp = btnDpForSize(cfg.textSize)
+            val playDp = playDpForSize(cfg.textSize)
+            applySquareDpSize(views, R.id.widget_art, artDp)
+            applySquareDpSize(views, R.id.widget_btn_play, playDp)
+
+            val compactTextScale = if (!hasProgressViews && defHdp <= 96) 0.84f else if (!hasProgressViews) 0.88f else 1.0f
             views.setTextViewText(R.id.widget_title, title)
             views.setTextViewText(R.id.widget_artist, artist)
             views.setTextColor(R.id.widget_title, fgPrimary)
             views.setTextColor(R.id.widget_artist, fgSecondary)
-            views.setTextViewTextSize(R.id.widget_title, TypedValue.COMPLEX_UNIT_SP, cfg.textSize.titleSp)
-            views.setTextViewTextSize(R.id.widget_artist, TypedValue.COMPLEX_UNIT_SP, cfg.textSize.artistSp)
+            views.setTextViewTextSize(R.id.widget_title, TypedValue.COMPLEX_UNIT_SP, cfg.textSize.titleSp * compactTextScale)
+            views.setTextViewTextSize(R.id.widget_artist, TypedValue.COMPLEX_UNIT_SP, cfg.textSize.artistSp * compactTextScale)
 
             if (cfg.showCover) {
                 views.setViewVisibility(R.id.widget_art, View.VISIBLE)
@@ -1761,7 +1839,16 @@ object FerricWidgetUpdater {
                     )
                 }
 
+                applySquareDpSize(views, R.id.widget_btn_prev, btnDp)
+                applySquareDpSize(views, R.id.widget_btn_next, btnDp)
+                applySquareDpSize(views, R.id.widget_btn_like, cfg.textSize.likeDp)
+
                 views.setViewVisibility(R.id.widget_btn_like, if (cfg.showLikeButton) View.VISIBLE else View.GONE)
+                views.setViewVisibility(R.id.widget_transport_like_gap, if (cfg.showLikeButton) View.VISIBLE else View.GONE)
+                val useSideSpacers = !(cfg.showLikeButton && cfg.showPrevNext)
+                views.setViewVisibility(R.id.widget_transport_lead_spacer, if (useSideSpacers) View.VISIBLE else View.GONE)
+                views.setViewVisibility(R.id.widget_transport_trail_spacer, if (useSideSpacers) View.VISIBLE else View.GONE)
+
                 if (cfg.showLikeButton) {
                     val liked = snap.liked
                     val likeColor = if (liked) accent else fgPrimary
@@ -1774,6 +1861,8 @@ object FerricWidgetUpdater {
                 val prevNextVis = if (cfg.showPrevNext) View.VISIBLE else View.GONE
                 views.setViewVisibility(R.id.widget_btn_prev, prevNextVis)
                 views.setViewVisibility(R.id.widget_btn_next, prevNextVis)
+                views.setViewVisibility(R.id.widget_transport_gap_left, prevNextVis)
+                views.setViewVisibility(R.id.widget_transport_gap_right, prevNextVis)
                 if (cfg.showPrevNext) {
                     views.setImageViewBitmap(R.id.widget_btn_prev, FerricWidgetRenderer.renderTransportIcon("prev", fgPrimary))
                     views.setImageViewBitmap(R.id.widget_btn_next, FerricWidgetRenderer.renderTransportIcon("next", fgPrimary))
@@ -1796,6 +1885,8 @@ object FerricWidgetUpdater {
                     views.setTextViewText(R.id.widget_time_total, totalStr)
                     views.setTextColor(R.id.widget_time_elapsed, fgSecondary)
                     views.setTextColor(R.id.widget_time_total, fgSecondary)
+                    views.setTextViewTextSize(R.id.widget_time_elapsed, TypedValue.COMPLEX_UNIT_SP, cfg.textSize.timeSp)
+                    views.setTextViewTextSize(R.id.widget_time_total, TypedValue.COMPLEX_UNIT_SP, cfg.textSize.timeSp)
                 }
                 if (cfg.showProgressBar) {
                     views.setImageViewBitmap(
@@ -1811,7 +1902,18 @@ object FerricWidgetUpdater {
             val isLight = cfg.style == FerricWidgetStyle.LIGHT
             val fgPrimary = if (isLight) Color.rgb(20, 22, 28) else Color.WHITE
             val views = RemoteViews(context.packageName, R.layout.widget_compact_strip).apply {
-                bindThemedCommon(this, widgetId, 320, 76, hasProgressViews = false)
+                bindThemedCommon(
+                    this,
+                    widgetId,
+                    320,
+                    76,
+                    coverDpForSize = { it.compactCoverDp },
+                    btnDpForSize = { it.compactBtnDp },
+                    playDpForSize = { it.compactPlayDp },
+                    hasProgressViews = false,
+                )
+                applySquareDpSize(this, R.id.widget_btn_prev, cfg.textSize.compactBtnDp)
+                applySquareDpSize(this, R.id.widget_btn_next, cfg.textSize.compactBtnDp)
                 val prevNextVis = if (cfg.showPrevNext) View.VISIBLE else View.GONE
                 setViewVisibility(R.id.widget_btn_prev, prevNextVis)
                 setViewVisibility(R.id.widget_btn_next, prevNextVis)
@@ -1840,7 +1942,18 @@ object FerricWidgetUpdater {
             )
             val liked = snap.liked
             val views = RemoteViews(context.packageName, R.layout.widget_square_cover).apply {
-                bindThemedCommon(this, widgetId, 180, 180, hasProgressViews = false)
+                bindThemedCommon(
+                    this,
+                    widgetId,
+                    180,
+                    180,
+                    coverDpForSize = { it.squareCoverDp },
+                    btnDpForSize = { it.compactBtnDp },
+                    playDpForSize = { it.compactPlayDp },
+                    hasProgressViews = false,
+                )
+                applySquareDpSize(this, R.id.widget_btn_next, cfg.textSize.compactBtnDp)
+                applySquareDpSize(this, R.id.widget_btn_like, cfg.textSize.compactBtnDp)
                 setViewVisibility(R.id.widget_btn_next, if (cfg.showPrevNext) View.VISIBLE else View.GONE)
                 if (cfg.showPrevNext) {
                     setImageViewBitmap(R.id.widget_btn_next, FerricWidgetRenderer.renderTransportIcon("next", fgPrimary))
@@ -1862,7 +1975,16 @@ object FerricWidgetUpdater {
 
         glassIds.forEach { widgetId ->
             val views = RemoteViews(context.packageName, R.layout.widget_liquid_glass).apply {
-                bindThemedCommon(this, widgetId, 330, 160, hasProgressViews = true)
+                bindThemedCommon(
+                    this,
+                    widgetId,
+                    340,
+                    175,
+                    coverDpForSize = { it.coverDp },
+                    btnDpForSize = { it.prevNextDp },
+                    playDpForSize = { it.playDp },
+                    hasProgressViews = true,
+                )
                 setOnClickPendingIntent(R.id.widget_root, openAppIntent)
                 setOnClickPendingIntent(R.id.widget_btn_prev, actionPi(301, ACTION_WIDGET_PREV))
                 setOnClickPendingIntent(R.id.widget_btn_play, actionPi(302, ACTION_WIDGET_PLAY_PAUSE))

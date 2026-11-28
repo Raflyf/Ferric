@@ -58,6 +58,7 @@ pub struct AudioTelemetry {
 }
 
 impl AudioTelemetry {
+    #[inline]
     pub fn snapshot(&self) -> TelemetrySnapshot {
         // Acquire-load `track_finished_seq` FIRST so subsequent loads observe the metadata and
         // `auto_transitioned` writes published before `track_finished_seq.fetch_add(1, AcqRel)`.
@@ -65,8 +66,10 @@ impl AudioTelemetry {
         let auto_transitioned = self.auto_transitioned.load(Ordering::Acquire);
         let is_playing = self.is_playing.load(Ordering::Acquire);
         let mut bins = [0_u32; 8];
-        for (i, slot) in self.spectrum_bins.iter().enumerate() {
-            bins[i] = slot.load(Ordering::Relaxed);
+        if !self.spectrum_disabled.load(Ordering::Relaxed) {
+            for (dst, slot) in bins.iter_mut().zip(&self.spectrum_bins) {
+                *dst = slot.load(Ordering::Relaxed);
+            }
         }
         TelemetrySnapshot {
             is_playing,
@@ -88,6 +91,7 @@ impl AudioTelemetry {
             .wrapping_add(1)
     }
 
+    #[inline]
     fn store_spectrum(&self, bins: [u32; 8]) {
         for (slot, val) in self.spectrum_bins.iter().zip(bins) {
             slot.store(val, Ordering::Relaxed);
@@ -842,15 +846,18 @@ impl AudioEngine {
         let _ = self.cmd_tx.send(cmd);
     }
 
+    #[inline]
     pub fn telemetry(&self) -> TelemetrySnapshot {
         self.telemetry.snapshot()
     }
 
+    #[inline]
     pub fn telemetry_arc(&self) -> &Arc<AudioTelemetry> {
         &self.telemetry
     }
 
     /// Enable or disable 8-band FFT/Goertzel spectrum calculation on the decode/DSP thread.
+    #[inline]
     pub fn set_spectrum_enabled(&self, enabled: bool) {
         self.telemetry
             .spectrum_disabled

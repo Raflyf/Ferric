@@ -335,10 +335,12 @@ fun Modifier.ferricGlassSurface(
     return if (palette.isLiquidGlass) {
         this.ferricLiquidGlass(
             cornerRadius = cornerRadius,
-            blurRadius = 14.dp,
+            blurRadius = 12.dp,
             refractionHeight = 14.dp,
-            refractionAmount = if (tier == GlassTier.HERO_LENS) 12.dp else 0.dp,
-            chromaticDispersion = if (tier == GlassTier.HERO_LENS) 0.45f else 0f,
+            refractionAmount = if (tier == GlassTier.HERO_LENS) 10.dp else 0.dp,
+            chromaticDispersion = if (tier == GlassTier.HERO_LENS) 0.60f else 0f,
+            saturation = 1.52f,
+            veilScale = 0.38f,
             tier = tier,
             accentGlow = accentGlow,
         )

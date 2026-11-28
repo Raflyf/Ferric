@@ -15,9 +15,9 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
-        android:paddingHorizontal="16dp"
-        android:paddingTop="13dp"
-        android:paddingBottom="12dp">
+        android:paddingHorizontal="18dp"
+        android:paddingTop="15dp"
+        android:paddingBottom="14dp">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -27,8 +27,8 @@
 
             <ImageView
                 android:id="@+id/widget_art"
-                android:layout_width="64dp"
-                android:layout_height="64dp"
+                android:layout_width="76dp"
+                android:layout_height="76dp"
                 android:layout_marginEnd="14dp"
                 android:contentDescription="@string/app_name"
                 android:scaleType="fitCenter"
@@ -53,14 +53,14 @@
                     android:shadowRadius="4"
                     android:text="@string/widget_ready"
                     android:textColor="#FFFFFFFF"
-                    android:textSize="18sp"
+                    android:textSize="22sp"
                     android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/widget_artist"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
+                    android:layout_marginTop="3dp"
                     android:ellipsize="end"
                     android:maxLines="1"
                     android:shadowColor="#55000000"
@@ -69,13 +69,13 @@
                     android:shadowRadius="3"
                     android:text="@string/app_name"
                     android:textColor="#D8FFFFFF"
-                    android:textSize="14sp" />
+                    android:textSize="16sp" />
             </LinearLayout>
 
             <ImageView
                 android:id="@+id/widget_streak_badge"
-                android:layout_width="64dp"
-                android:layout_height="24dp"
+                android:layout_width="68dp"
+                android:layout_height="26dp"
                 android:layout_gravity="top"
                 android:layout_marginStart="8dp"
                 android:contentDescription="@null"
@@ -83,60 +83,81 @@
                 android:visibility="gone" />
         </LinearLayout>
 
-        <FrameLayout
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1">
+            android:layout_weight="1"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:gravity="center"
-                android:orientation="horizontal">
+            <FrameLayout
+                android:id="@+id/widget_transport_lead_spacer"
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="0.4" />
 
-                <ImageButton
-                    android:id="@+id/widget_btn_prev"
-                    android:layout_width="38dp"
-                    android:layout_height="38dp"
-                    android:layout_marginHorizontal="4dp"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/widget_prev"
-                    android:padding="2dp"
-                    android:scaleType="fitCenter" />
+            <ImageButton
+                android:id="@+id/widget_btn_prev"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:background="@android:color/transparent"
+                android:contentDescription="@string/widget_prev"
+                android:padding="4dp"
+                android:scaleType="fitCenter" />
 
-                <ImageButton
-                    android:id="@+id/widget_btn_play"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
-                    android:layout_marginHorizontal="4dp"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/widget_play_pause"
-                    android:padding="1dp"
-                    android:scaleType="fitCenter" />
+            <FrameLayout
+                android:id="@+id/widget_transport_gap_left"
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
 
-                <ImageButton
-                    android:id="@+id/widget_btn_next"
-                    android:layout_width="38dp"
-                    android:layout_height="38dp"
-                    android:layout_marginHorizontal="4dp"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/widget_next"
-                    android:padding="2dp"
-                    android:scaleType="fitCenter" />
-            </LinearLayout>
+            <ImageButton
+                android:id="@+id/widget_btn_play"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:background="@android:color/transparent"
+                android:contentDescription="@string/widget_play_pause"
+                android:padding="2dp"
+                android:scaleType="fitCenter" />
+
+            <FrameLayout
+                android:id="@+id/widget_transport_gap_right"
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <ImageButton
+                android:id="@+id/widget_btn_next"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:background="@android:color/transparent"
+                android:contentDescription="@string/widget_next"
+                android:padding="4dp"
+                android:scaleType="fitCenter" />
+
+            <FrameLayout
+                android:id="@+id/widget_transport_like_gap"
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1"
+                android:visibility="gone" />
 
             <ImageButton
                 android:id="@+id/widget_btn_like"
-                android:layout_width="38dp"
-                android:layout_height="38dp"
-                android:layout_gravity="end|center_vertical"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:background="@android:color/transparent"
                 android:contentDescription="@string/widget_like"
-                android:padding="2dp"
+                android:padding="4dp"
                 android:scaleType="fitCenter"
                 android:visibility="gone" />
-        </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/widget_transport_trail_spacer"
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="0.4" />
+        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/widget_progress_row"
@@ -157,12 +178,12 @@
                 android:shadowRadius="3"
                 android:text="0:00"
                 android:textColor="#E0FFFFFF"
-                android:textSize="12sp" />
+                android:textSize="14sp" />
 
             <ImageView
                 android:id="@+id/widget_progress_track"
                 android:layout_width="0dp"
-                android:layout_height="6dp"
+                android:layout_height="7dp"
                 android:layout_weight="1"
                 android:contentDescription="@null"
                 android:scaleType="fitXY" />
@@ -178,7 +199,7 @@
                 android:shadowRadius="3"
                 android:text="0:00"
                 android:textColor="#E0FFFFFF"
-                android:textSize="12sp" />
+                android:textSize="14sp" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

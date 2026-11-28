@@ -318,11 +318,15 @@ float sdRoundedRect(float2 coord, float2 halfSize, float radius) {
 
 float2 gradSdRoundedRect(float2 coord, float2 halfSize, float radius) {
     float2 cornerCoord = abs(coord) - (halfSize - float2(radius));
+    float2 s = sign(coord);
     if (cornerCoord.x >= 0.0 || cornerCoord.y >= 0.0) {
-        return sign(coord) * normalize(max(cornerCoord, 0.0) + float2(1e-4));
+        return s * normalize(max(cornerCoord, 0.0) + float2(1e-4));
     } else {
-        float gradX = step(cornerCoord.y, cornerCoord.x);
-        return sign(coord) * float2(gradX, 1.0 - gradX);
+        // Smooth C1 transition across diagonal skeleton prevents sharp "X" creases on square cards & sheets,
+        // while capsule pills (radius >= halfH) stay strictly in the upper branch and remain identical.
+        float band = max(min(halfSize.x, halfSize.y) * 0.55, 28.0);
+        float w = smoothstep(-band, band, cornerCoord.x - cornerCoord.y);
+        return s * normalize(float2(w, 1.0 - w) + float2(1e-4));
     }
 }
 
@@ -341,23 +345,28 @@ half4 main(float2 coord) {
     float sd = min(sdRoundedRect(centeredCoord, halfSize, radius), 0.0);
     float distIn = -sd;
 
-    // 1. Full-surface optical curve across 100% of pill depth (center spine u=1 -> rim u=0)
+    float2 aspectCoord = centeredCoord / max(halfSize, float2(1.0));
+    float ellipseR = clamp(length(aspectCoord), 0.0, 1.0);
     float u = clamp(distIn / max(minHalf, 1.0), 0.0, 1.0);
-    float s = 1.0 - u;
+    float edgeT = clamp(1.0 - (distIn / max(refractionHeight, 1.0)), 0.0, 1.0);
+
+    // On square/tall cards & bottom sheets (radius << minHalf), blend interior distance smoothly toward a
+    // spherical radial dome so diagonals stay completely smooth; capsule pills (radius ~ minHalf) keep boxRatio=0.
+    float boxRatio = clamp((minHalf - radius) / max(minHalf * 0.35, 1.0), 0.0, 1.0);
+    float s = mix(1.0 - u, ellipseR, boxRatio * (1.0 - edgeT));
     float fullSurfaceCurve = sin(s * 1.5707963);
 
-    // 2. Smooth bevel shoulder blended into the whole surface (no isolated ring boundary)
-    float edgeT = clamp(1.0 - (distIn / max(refractionHeight, 1.0)), 0.0, 1.0);
     float rimCurve = smoothCircleMap(edgeT);
     float combinedCurve = mix(fullSurfaceCurve, rimCurve, 0.30);
 
-    // Strictly symmetrical boundary normal + aspect-normalized radial normal (identical on all sides)
+    // Symmetrical boundary normal: pills keep exact pillGrad bit-for-bit; cards/sheets smoothly eliminate diagonals.
     float gradRadius = min(radius * 1.25, minHalf);
     float2 gradBase = gradSdRoundedRect(centeredCoord, halfSize, gradRadius);
-    float2 aspectCoord = centeredCoord / max(halfSize, float2(1.0));
     float2 radialDir = dot(aspectCoord, aspectCoord) > 1e-5 ? normalize(aspectCoord) : float2(0.0);
+    float2 pillGrad = normalize(gradBase + radialDir * (0.28 * (1.0 - 0.35 * u)));
+    float2 boxGrad = normalize(mix(gradBase, radialDir, clamp(0.88 * (1.0 - edgeT * 0.65), 0.0, 1.0)));
     float2 grad = depthEffect > 0.5
-        ? normalize(gradBase + radialDir * (0.28 * (1.0 - 0.35 * u)))
+        ? normalize(mix(pillGrad, boxGrad, boxRatio))
         : gradBase;
 
     // Inward convex barrel dome + full-surface lens bend: curves text & art across center AND rims

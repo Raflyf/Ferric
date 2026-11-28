@@ -6,8 +6,10 @@ import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
-import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.annotation.RequiresApi
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -15,11 +17,18 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,12 +43,19 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,15 +78,24 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.Velocity
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
@@ -115,6 +140,7 @@ class FerricBackdropState(
     var blurDirty: Boolean = true
     var hasBlurred: Boolean = false
     var blurredSize: IntSize = IntSize.Zero
+    var blurVersion: Long = 0L
     private var lastBlurPx: Float = -1f
     private var lastIsLight: Boolean = false
     private var sharedBlurEffect: androidx.compose.ui.graphics.RenderEffect? = null
@@ -159,6 +185,7 @@ class FerricBackdropState(
             }
             blurDirty = false
             hasBlurred = true
+            blurVersion++
         }
         return hasBlurred
     }
@@ -308,13 +335,16 @@ half4 main(float2 coord) {
 """
 
 private class GlassCache {
-    var elementOffset: Offset = Offset.Zero
+    var elementOffset by mutableStateOf(Offset.Zero)
     var lastSize: IntSize = IntSize.Zero
     var lastRadiusPx: Float = -1f
     var lastRefractionHeightPx: Float = -1f
     var lastRefractionAmountPx: Float = -1f
     var lastLightMode: Boolean = false
     var lastDispersion: Float = -1f
+    var lastRecordedVersion: Long = -1L
+    var lastDx: Float = Float.NaN
+    var lastDy: Float = Float.NaN
     var cachedRefractEffect: androidx.compose.ui.graphics.RenderEffect? = null
     var refractionShader: Any? = null
     var rimShader: Any? = null
@@ -412,6 +442,8 @@ fun Modifier.ferricLiquidGlass(
     alwaysGlass: Boolean = false,
     tier: GlassTier = GlassTier.HERO_LENS,
     accentGlow: Color = Color.Unspecified,
+    anchorAlphaOverride: Float? = null,
+    screenOffsetProvider: (() -> Offset)? = null,
 ): Modifier = composed {
     val palette = LocalFerricPalette.current
     val backdrop = LocalBackdropState.current
@@ -433,12 +465,11 @@ fun Modifier.ferricLiquidGlass(
 
     // Clear smoked crystal optics matching Auralys: underlying colors shine cleanly through with
     // zero chalky white milk wash while white typography & icons stay razor-sharp.
-    val anchorAlpha = if (palette.isLight) {
-        0f
-    } else if (isHero) {
-        (0.10f + opacityNorm * 0.16f).coerceIn(0.12f, 0.28f)
-    } else {
-        (0.18f + opacityNorm * 0.22f).coerceIn(0.20f, 0.42f)
+    val anchorAlpha = when {
+        anchorAlphaOverride != null -> anchorAlphaOverride.coerceIn(0f, 0.85f)
+        palette.isLight -> 0f
+        isHero -> (0.10f + opacityNorm * 0.16f).coerceIn(0.12f, 0.28f)
+        else -> (0.18f + opacityNorm * 0.22f).coerceIn(0.20f, 0.42f)
     }
     val anchorColor = Color(
         red = 0.04f + palette.glassTint.red * 0.10f,
@@ -491,9 +522,15 @@ fun Modifier.ferricLiquidGlass(
     }
 
     this
-        .onGloballyPositioned { coords ->
-            cache.elementOffset = coords.positionInRoot()
-        }
+        .then(
+            if (screenOffsetProvider == null) {
+                Modifier.onGloballyPositioned { coords ->
+                    cache.elementOffset = coords.positionInRoot()
+                }
+            } else {
+                Modifier
+            },
+        )
         .drawWithContent {
             val w = size.width
             val h = size.height
@@ -528,8 +565,9 @@ fun Modifier.ferricLiquidGlass(
                     drawScope = this@drawWithContent,
                 )
             if (activeBackdrop != null && hasSharedBlur) {
-                val dx = cache.elementOffset.x - activeBackdrop.rootOffset.x
-                val dy = cache.elementOffset.y - activeBackdrop.rootOffset.y
+                val elementPos = screenOffsetProvider?.invoke() ?: cache.elementOffset
+                val dx = elementPos.x - activeBackdrop.rootOffset.x
+                val dy = elementPos.y - activeBackdrop.rootOffset.y
                 val invScale = 1f / activeBackdrop.blurScale
 
                 if (isHero && glassLayer != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -572,12 +610,21 @@ fun Modifier.ferricLiquidGlass(
                     val refractFx = cache.cachedRefractEffect
                     clipPath(cache.cachedPath) {
                         if (refractFx != null) {
-                            glassLayer.clip = true
-                            glassLayer.renderEffect = refractFx
-                            glassLayer.record(size = intSize) {
-                                translate(left = -dx, top = -dy) {
-                                    scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
-                                        drawLayer(activeBackdrop.blurredLayer)
+                            val recordNeeded = needsRebuild ||
+                                cache.lastRecordedVersion != activeBackdrop.blurVersion ||
+                                abs(cache.lastDx - dx) > 0.5f ||
+                                abs(cache.lastDy - dy) > 0.5f
+                            if (recordNeeded) {
+                                cache.lastRecordedVersion = activeBackdrop.blurVersion
+                                cache.lastDx = dx
+                                cache.lastDy = dy
+                                glassLayer.clip = true
+                                glassLayer.renderEffect = refractFx
+                                glassLayer.record(size = intSize) {
+                                    translate(left = -dx, top = -dy) {
+                                        scale(scaleX = invScale, scaleY = invScale, pivot = Offset.Zero) {
+                                            drawLayer(activeBackdrop.blurredLayer)
+                                        }
                                     }
                                 }
                             }
@@ -649,10 +696,298 @@ fun Modifier.ferricLiquidGlass(
         .clip(shape)
 }
 
+@Stable
+internal class FerricSheetEntry(
+    onDismiss: () -> Unit,
+    coverShade: CoverShadeColors,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    var onDismiss by mutableStateOf(onDismiss)
+    var coverShade by mutableStateOf(coverShade)
+    var content by mutableStateOf(content)
+    var requestClose: (() -> Unit)? = null
+}
+
 /**
- * Translucent Liquid Glass modal bottom sheet container with hardware compositor blur behind the
- * dialog window (API 31+) and an internal [FerricBackdropState] so every card, button, and chip
- * inside the sheet renders as luminous Liquid Glass instead of an opaque dark block.
+ * In-window bottom sheet stack manager enabling every sheet across the app to render as a genuine
+ * AGSL optical Liquid Glass lens over the active window backdrop without Dialog window boundaries.
+ */
+@Stable
+class FerricSheetHostState internal constructor() {
+    internal val entries = mutableStateListOf<FerricSheetEntry>()
+    val hasActiveSheets: Boolean get() = entries.isNotEmpty()
+
+    internal fun add(entry: FerricSheetEntry) {
+        if (!entries.contains(entry)) {
+            entries.add(entry)
+        }
+    }
+
+    internal fun remove(entry: FerricSheetEntry) {
+        entries.remove(entry)
+    }
+}
+
+val LocalFerricSheetHost = compositionLocalOf<FerricSheetHostState?> { null }
+
+@Composable
+fun rememberFerricSheetHostState(): FerricSheetHostState = remember { FerricSheetHostState() }
+
+/**
+ * Renders active sheets in the same Activity window above [sheetBackdrop], giving every bottom
+ * sheet genuine Home-Pill AGSL blur, convex-lens bevel refraction, and diagonal chromatic dispersion.
+ */
+@Composable
+fun FerricSheetPortalOverlay(
+    host: FerricSheetHostState,
+    sheetBackdrop: FerricBackdropState,
+) {
+    if (!host.hasActiveSheets) return
+
+    val palette = LocalFerricPalette.current
+    BackHandler(enabled = host.hasActiveSheets) {
+        host.entries.lastOrNull()?.let { top ->
+            top.requestClose?.invoke() ?: top.onDismiss()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        host.entries.forEach { entry ->
+            key(entry) {
+                FerricSheetWindowItem(
+                    entry = entry,
+                    sheetBackdrop = sheetBackdrop,
+                    palette = palette,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FerricSheetWindowItem(
+    entry: FerricSheetEntry,
+    sheetBackdrop: FerricBackdropState,
+    palette: FerricVisualPalette,
+) {
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    val config = LocalConfiguration.current
+    val screenHeightPx = with(density) { config.screenHeightDp.dp.toPx() }.coerceAtLeast(1200f)
+    val maxSheetHeight = (config.screenHeightDp * 0.88f).dp
+    val dismissThresholdPx = with(density) { 108.dp.toPx() }
+
+    val offsetY = remember(entry) { Animatable(screenHeightPx * 0.55f) }
+    val scrimAlpha = remember(entry) { Animatable(0f) }
+    var sheetHeightPx by remember(entry) { mutableFloatStateOf(screenHeightPx * 0.60f) }
+    var isClosing by remember(entry) { mutableStateOf(false) }
+
+    val dismissAnimated: () -> Unit = remember(entry) {
+        {
+            if (!isClosing) {
+                isClosing = true
+                scope.launch {
+                    coroutineScope {
+                        launch { offsetY.animateTo(sheetHeightPx + 120f, tween(180, easing = FerricEaseOut)) }
+                        launch { scrimAlpha.animateTo(0f, tween(160, easing = FerricEaseOut)) }
+                    }
+                    entry.onDismiss()
+                }
+            }
+        }
+    }
+    SideEffect { entry.requestClose = dismissAnimated }
+
+    LaunchedEffect(entry) {
+        coroutineScope {
+            launch { offsetY.animateTo(0f, tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) }
+            launch { scrimAlpha.animateTo(1f, tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) }
+        }
+    }
+
+    val nestedScrollConnection = remember(entry) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (isClosing || available.y >= 0f || offsetY.value <= 0f) return Offset.Zero
+                val next = (offsetY.value + available.y).coerceAtLeast(0f)
+                val consumedY = next - offsetY.value
+                scope.launch { offsetY.snapTo(next) }
+                return Offset(0f, consumedY)
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+                if (isClosing || source != NestedScrollSource.UserInput || available.y <= 0f) {
+                    return Offset.Zero
+                }
+                val next = (offsetY.value + available.y).coerceAtLeast(0f)
+                scope.launch { offsetY.snapTo(next) }
+                return Offset(0f, available.y)
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (offsetY.value <= 0f) return Velocity.Zero
+                if (offsetY.value > dismissThresholdPx || available.y > 950f) {
+                    dismissAnimated()
+                } else {
+                    offsetY.animateTo(0f, tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut))
+                }
+                return available
+            }
+        }
+    }
+
+    val sheetCorner = 28.dp
+    val solidShape = RoundedCornerShape(topStart = sheetCorner, topEnd = sheetCorner)
+    val liquidShape = RoundedCornerShape(sheetCorner)
+    val opacityNorm = palette.glassOpacity.coerceIn(0.15f, 0.95f)
+    val sheetAnchorAlpha = (0.12f + opacityNorm * 0.14f).coerceIn(0.14f, 0.28f)
+    val dismissInteraction = remember { MutableInteractionSource() }
+    var sheetRestOffset by remember(entry) { mutableStateOf(Offset.Zero) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // 1. Sharp unblurred underlying screen softly dimmed behind the optical glass lens
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .blockUnderlyingTouches()
+                .background(Color.Black.copy(alpha = (if (palette.isLiquidGlass) 0.26f else 0.48f) * scrimAlpha.value))
+                .clickable(
+                    interactionSource = dismissInteraction,
+                    indication = null,
+                    onClick = dismissAnimated,
+                ),
+        )
+
+        // 2. Floating Bottom Sheet Portal Container (outer box measures true rest coords without transform)
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(horizontal = if (palette.isLiquidGlass) 8.dp else 0.dp)
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(bottom = if (palette.isLiquidGlass) 8.dp else 0.dp)
+                .heightIn(max = maxSheetHeight)
+                .onGloballyPositioned { coords ->
+                    sheetRestOffset = coords.positionInRoot()
+                }
+                .onSizeChanged { if (it.height > 0) sheetHeightPx = it.height.toFloat() },
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        translationY = offsetY.value.coerceAtLeast(0f)
+                    }
+                    .nestedScroll(nestedScrollConnection)
+                    .blockUnderlyingTouches(),
+            ) {
+                // Layer A: Decoupled Liquid Glass backdrop shell (never redraws when scrolling sheet lists)
+                if (palette.isLiquidGlass) {
+                    CompositionLocalProvider(LocalBackdropState provides sheetBackdrop) {
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .ferricLiquidGlass(
+                                    cornerRadius = sheetCorner,
+                                    blurRadius = 10.dp,
+                                    refractionHeight = 24.dp,
+                                    refractionAmount = 24.dp,
+                                    chromaticDispersion = 0.96f,
+                                    anchorAlphaOverride = sheetAnchorAlpha,
+                                    alwaysGlass = true,
+                                    tier = GlassTier.HERO_LENS,
+                                    screenOffsetProvider = {
+                                        Offset(
+                                            x = sheetRestOffset.x,
+                                            y = sheetRestOffset.y + offsetY.value.coerceAtLeast(0f),
+                                        )
+                                    },
+                                ),
+                        )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .clip(solidShape)
+                            .background(palette.surface)
+                            .border(1.dp, palette.border, solidShape),
+                    )
+                }
+
+                // Layer B: Sheet Handle + Body Content isolated cleanly over the Liquid Glass lens
+                CompositionLocalProvider(LocalBackdropState provides null) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(if (palette.isLiquidGlass) liquidShape else solidShape),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .pointerInput(entry) {
+                                    detectVerticalDragGestures(
+                                        onDragEnd = {
+                                            if (offsetY.value > dismissThresholdPx) {
+                                                dismissAnimated()
+                                            } else if (!isClosing) {
+                                                scope.launch {
+                                                    offsetY.animateTo(0f, tween(FERRIC_MOTION_MS, easing = FerricEaseOut))
+                                                }
+                                            }
+                                        },
+                                        onDragCancel = {
+                                            if (!isClosing) {
+                                                scope.launch {
+                                                    offsetY.animateTo(0f, tween(FERRIC_MOTION_MS, easing = FerricEaseOut))
+                                                }
+                                            }
+                                        },
+                                        onVerticalDrag = { _, dy ->
+                                            if (!isClosing) {
+                                                val next = (offsetY.value + dy).coerceAtLeast(0f)
+                                                scope.launch { offsetY.snapTo(next) }
+                                            }
+                                        },
+                                    )
+                                }
+                                .padding(top = 12.dp, bottom = 6.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(42.dp)
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(
+                                        if (palette.isLiquidGlass) {
+                                            Color.White.copy(alpha = 0.62f)
+                                        } else {
+                                            palette.textSecondary.copy(alpha = 0.45f)
+                                        },
+                                    ),
+                            )
+                        }
+                        entry.content(this)
+                        if (palette.isLiquidGlass) {
+                            Spacer(Modifier.height(10.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Optical Liquid Glass bottom sheet container matching the Home pill's AGSL refraction, blur, and
+ * chromatic dispersion when hosted inside [LocalFerricSheetHost]. Falls back cleanly to Material
+ * [ModalBottomSheet] outside the main Activity tree.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -663,6 +998,27 @@ fun FerricModalBottomSheet(
     coverShade: CoverShadeColors = CoverShadeColors(),
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val host = LocalFerricSheetHost.current
+    if (host != null) {
+        val entry = remember {
+            FerricSheetEntry(
+                onDismiss = onDismissRequest,
+                coverShade = coverShade,
+                content = content,
+            )
+        }
+        SideEffect {
+            entry.onDismiss = onDismissRequest
+            entry.coverShade = coverShade
+            entry.content = content
+        }
+        DisposableEffect(host, entry) {
+            host.add(entry)
+            onDispose { host.remove(entry) }
+        }
+        return
+    }
+
     val palette = LocalFerricPalette.current
     if (!palette.isLiquidGlass) {
         ModalBottomSheet(
@@ -693,10 +1049,6 @@ fun FerricModalBottomSheet(
                 val window = (view.parent as? DialogWindowProvider)?.window
                 if (window != null) {
                     runCatching {
-                        window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
-                        window.attributes = window.attributes.apply {
-                            blurBehindRadius = 38
-                        }
                         window.setBackgroundBlurRadius(76)
                     }
                 }
@@ -732,8 +1084,8 @@ fun FerricModalBottomSheet(
                         .background(
                             Brush.radialGradient(
                                 colors = listOf(
-                                    coverShade.accent.copy(alpha = 0.16f),
-                                    coverShade.orb1.copy(alpha = 0.16f),
+                                    coverShade.accent.copy(alpha = 0.14f),
+                                    coverShade.orb1.copy(alpha = 0.14f),
                                     Color.Transparent,
                                 ),
                                 center = Offset(220f, 140f),
@@ -741,20 +1093,6 @@ fun FerricModalBottomSheet(
                             ),
                         ),
                 )
-                Box(
-                    modifier = Modifier
-                        .matchParentSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(
-                                    Color.White.copy(alpha = 0.12f),
-                                    Color.Transparent,
-                                    Color.White.copy(alpha = 0.04f),
-                                ),
-                            ),
-                        ),
-                )
-
                 CompositionLocalProvider(LocalBackdropState provides null) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Box(

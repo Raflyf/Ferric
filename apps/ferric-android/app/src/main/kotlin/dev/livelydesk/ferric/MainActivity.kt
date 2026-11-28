@@ -40,6 +40,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -91,13 +92,15 @@ import dev.livelydesk.ferric.ui.screens.ThemeStudioSheet
 import dev.livelydesk.ferric.ui.screens.YouScreen
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
 import dev.livelydesk.ferric.ui.theme.FerricEaseOut
+import dev.livelydesk.ferric.ui.theme.FerricSheetPortalOverlay
 import dev.livelydesk.ferric.ui.theme.FerricTheme
 import dev.livelydesk.ferric.ui.theme.LocalBackdropState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.LocalFerricSheetHost
 import dev.livelydesk.ferric.ui.theme.ferricBackdropSource
 import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
 import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
-import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
+import dev.livelydesk.ferric.ui.theme.rememberFerricSheetHostState
 import java.util.Locale
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
@@ -187,6 +190,9 @@ private fun FerricMainShell(
     val palette = LocalFerricPalette.current
     val state by store.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val sheetHost = rememberFerricSheetHostState()
+    val sheetBackdrop = rememberFerricBackdropState()
+    val hasActiveSheets = sheetHost.hasActiveSheets
 
     var activeTab by rememberSaveable { mutableStateOf(FerricTab.HOME) }
     var dockCollapsed by rememberSaveable { mutableStateOf(false) }
@@ -397,29 +403,36 @@ private fun FerricMainShell(
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(palette.canvas),
-    ) {
-        // Layer 1: Full-screen scrollable canvas captured into ONE shared backdropState so the
-        // floating Liquid Glass dock & mini-player opt-refract scrolling cards. Inner page cards draw
-        // directly over live AuroraBackdrop as zero-FBO translucent crystal glass.
+    CompositionLocalProvider(LocalFerricSheetHost provides sheetHost) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .ferricBackdropSource(backdropState, enabled = !showFullPlayer),
+                .background(palette.canvas),
         ) {
-            if (palette.isLiquidGlass) {
-                AuroraBackdrop(
-                    colors = state.coverShade,
-                    baseCanvas = palette.canvas,
-                    isPlaying = state.isPlaying && !showFullPlayer,
-                    intensity = 0.86f,
-                )
-            }
+            // Active screen host captured into sheetBackdrop ONLY when a sheet is open
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .ferricBackdropSource(sheetBackdrop, enabled = hasActiveSheets),
+            ) {
+                // Layer 1: Full-screen scrollable canvas captured into ONE shared backdropState so the
+                // floating Liquid Glass dock & mini-player opt-refract scrolling cards. Inner page cards draw
+                // directly over live AuroraBackdrop as zero-FBO translucent crystal glass.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .ferricBackdropSource(backdropState, enabled = !showFullPlayer),
+                ) {
+                    if (palette.isLiquidGlass) {
+                        AuroraBackdrop(
+                            colors = state.coverShade,
+                            baseCanvas = palette.canvas,
+                            isPlaying = state.isPlaying && !showFullPlayer && !hasActiveSheets,
+                            intensity = 0.86f,
+                        )
+                    }
 
-            androidx.compose.runtime.CompositionLocalProvider(LocalBackdropState provides null) {
+                    CompositionLocalProvider(LocalBackdropState provides null) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -751,20 +764,27 @@ private fun FerricMainShell(
                 onOpenOutputSwitcher = onOpenOutputSwitcher,
                 onLoadLyrics = { store.loadLyricsForCurrent() },
                 onNudgeLyricsOffset = { delta -> store.nudgeLyricsOffsetMs(delta) },
-                onResolveVideo = { store.resolveVideoForCurrent() },
-            )
+                    onResolveVideo = { store.resolveVideoForCurrent() },
+                )
+            }
         }
 
-        // Layer 4: Top-most SnackbarHost so toasts are always visible even over FullPlayerScreen
+        // Layer 4: In-Window Optical Liquid Glass Sheet Portal matching Home Pill optics
+        FerricSheetPortalOverlay(
+            host = sheetHost,
+            sheetBackdrop = sheetBackdrop,
+        )
+
+        // Layer 5: Top-most SnackbarHost so toasts remain visible above sheets & FullPlayer
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = if (showFullPlayer) 16.dp else 148.dp, start = 16.dp, end = 16.dp),
+                .padding(bottom = if (showFullPlayer || hasActiveSheets) 16.dp else 148.dp, start = 16.dp, end = 16.dp),
         )
 
-        // Layer 5: Cold-start Auralys-style animated Ferric Type-I cassette splash intro
+        // Layer 6: Cold-start Auralys-style animated Ferric Type-I cassette splash intro
         if (showLaunchSplash) {
             FerricLaunchSplash(onFinished = { showLaunchSplash = false })
         }
@@ -957,6 +977,7 @@ private fun FerricMainShell(
                 }
             },
         )
+    }
     }
 }
 

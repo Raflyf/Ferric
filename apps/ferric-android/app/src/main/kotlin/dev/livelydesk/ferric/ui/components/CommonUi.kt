@@ -75,6 +75,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -95,6 +96,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
@@ -124,6 +126,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import coil3.request.crossfade
 import coil3.size.Precision
 import dev.livelydesk.ferric.BuildConfig
 import dev.livelydesk.ferric.core.PlaybackProgress
@@ -195,11 +198,13 @@ fun ArtworkThumb(
             modifier = Modifier.size((size.value * 0.42f).dp),
         )
         if (!url.isNullOrBlank()) {
-            val req = remember(url, targetPx) {
+            val disableCrossfade = size <= 72.dp
+            val req = remember(url, targetPx, disableCrossfade) {
                 ImageRequest.Builder(context)
                     .data(url)
                     .size(targetPx, targetPx)
                     .precision(Precision.INEXACT)
+                    .apply { if (disableCrossfade) crossfade(false) }
                     .build()
             }
             AsyncImage(
@@ -488,6 +493,8 @@ fun FloatingLiquidGlassDock(
                 .height(dockHeight),
         ) {
             if (miniVisible > 0.01f) {
+                val miniXDp = miniX
+                val miniYDp = -miniBottom + hideOffsetY
                 FloatingMiniPlayerPill(
                     state = state,
                     progressFlow = progressFlow,
@@ -501,7 +508,10 @@ fun FloatingLiquidGlassDock(
                     onOpenConnect = onOpenConnect,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .offset(x = miniX, y = -miniBottom + hideOffsetY)
+                        .graphicsLayer {
+                            translationX = miniXDp.toPx()
+                            translationY = miniYDp.toPx()
+                        }
                         .width(miniW),
                 )
             }
@@ -759,13 +769,13 @@ private fun FloatingNavPill(
         Box(
             modifier = Modifier
                 .matchParentSize()
+                .graphicsLayer { }
                 .ferricLiquidGlass(
                     cornerRadius = glassRadius,
                     blurRadius = 10.dp,
-                    refractionHeight = 22.dp,
-                    refractionAmount = 22.dp,
-                    chromaticDispersion = 0.92f,
+                    tier = GlassTier.FROSTED_PANEL,
                     alwaysGlass = palette.isLiquidGlass,
+                    screenOffsetProvider = { barRootOffset },
                 ),
         )
 
@@ -794,14 +804,16 @@ private fun FloatingNavPill(
             ) {
                 if (slotWidthPx > 0f && (!isDetailOpen || isDragging) && dragFocus < 0.95f) {
                     val restBubbleW = with(density) { (slotWidthPx * 0.92f).toDp() }
-                    val restOffsetX = (animatedCenterPx - (slotWidthPx * 0.46f)).roundToInt()
+                    val halfBubblePx = slotWidthPx * 0.46f
                     Box(
                         modifier = Modifier
                             .align(Alignment.CenterStart)
-                            .offset { IntOffset(x = restOffsetX, y = 0) }
                             .width(restBubbleW)
                             .height(54.dp)
-                            .graphicsLayer { alpha = (1f - dragFocus).coerceIn(0f, 1f) }
+                            .graphicsLayer {
+                                translationX = animatedCenterPx - halfBubblePx
+                                alpha = (1f - dragFocus).coerceIn(0f, 1f)
+                            }
                             .clip(RoundedCornerShape(27.dp))
                             .background(
                                 Brush.verticalGradient(
@@ -1058,6 +1070,10 @@ private fun FloatingMiniPlayerPill(
         label = "mini_drag_y",
     )
 
+    val pillShape = RoundedCornerShape(30.dp)
+    val outerBackdrop = LocalBackdropState.current
+    var pillOffset by remember { mutableStateOf(Offset.Zero) }
+
     Box(
         modifier = modifier
             .height(60.dp)
@@ -1066,14 +1082,7 @@ private fun FloatingMiniPlayerPill(
                 translationY = if (animDragY > 0f) animDragY * 0.65f else animDragY * 0.28f
                 alpha = if (animDragY > 0f) (1f - (animDragY / 210f)).coerceIn(0.45f, 1f) else 1f
             }
-            .ferricLiquidGlass(
-                cornerRadius = 30.dp,
-                blurRadius = 8.5.dp,
-                refractionHeight = 18.dp,
-                refractionAmount = 22.dp,
-                chromaticDispersion = 0.90f,
-                alwaysGlass = palette.isLiquidGlass,
-            )
+            .onGloballyPositioned { coords -> pillOffset = coords.positionInRoot() }
             .pointerInput(cur?.id, activeRemotePeer?.deviceId) {
                 var dragX = 0f
                 var dragY = 0f
@@ -1115,8 +1124,25 @@ private fun FloatingMiniPlayerPill(
                     },
                 )
             }
+            .clip(pillShape)
             .clickable(onClick = onOpenFullPlayer),
     ) {
+        // Decoupled Liquid Glass backdrop layer (0 extra offscreen FBO; immune to 5 Hz progress ticks).
+        CompositionLocalProvider(LocalBackdropState provides outerBackdrop) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer { }
+                    .ferricLiquidGlass(
+                        cornerRadius = 30.dp,
+                        blurRadius = 8.5.dp,
+                        tier = GlassTier.FROSTED_PANEL,
+                        alwaysGlass = palette.isLiquidGlass,
+                        screenOffsetProvider = { pillOffset },
+                    ),
+            )
+        }
+        CompositionLocalProvider(LocalBackdropState provides null) {
         Column(modifier = Modifier.fillMaxSize()) {
             Row(
                 modifier = Modifier
@@ -1217,6 +1243,7 @@ private fun FloatingMiniPlayerPill(
                 trackColor = palette.textSecondary.copy(alpha = 0.16f),
             )
         }
+        }
     }
 }
 
@@ -1228,24 +1255,42 @@ private fun MiniProgressBar(
     accent: Color,
     trackColor: Color,
 ) {
-    val progress by progressFlow.collectAsStateWithLifecycle()
-    val frac = if (remoteDurationMs != null && remoteDurationMs > 0L && remotePositionMs != null) {
-        (remotePositionMs.toFloat() / remoteDurationMs.toFloat()).coerceIn(0f, 1f)
-    } else if (progress.durationMs > 0L) {
-        (progress.positionMs.toFloat() / progress.durationMs.toFloat()).coerceIn(0f, 1f)
-    } else {
-        0f
+    val progressState = progressFlow.collectAsStateWithLifecycle()
+    val steppedFrac by remember(remotePositionMs, remoteDurationMs) {
+        derivedStateOf {
+            val progress = progressState.value
+            val raw = if (remoteDurationMs != null && remoteDurationMs > 0L && remotePositionMs != null) {
+                (remotePositionMs.toFloat() / remoteDurationMs.toFloat()).coerceIn(0f, 1f)
+            } else if (progress.durationMs > 0L) {
+                (progress.positionMs.toFloat() / progress.durationMs.toFloat()).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+            (raw * 240f).roundToInt() / 240f
+        }
     }
-    LinearProgressIndicator(
-        progress = { frac },
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 24.dp)
             .height(2.dp)
-            .clip(RoundedCornerShape(1.dp)),
-        color = accent,
-        trackColor = trackColor,
-    )
+            .graphicsLayer {
+                clip = true
+                shape = RoundedCornerShape(1.dp)
+            }
+            .background(trackColor),
+    ) {
+        // Scale purely on RenderNode matrix, quantized to visible ~1dp steps (~1 Hz idle GPU cadence).
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = steppedFrac
+                    transformOrigin = TransformOrigin(0f, 0.5f)
+                }
+                .background(accent),
+        )
+    }
 }
 
 @Composable
@@ -1363,11 +1408,8 @@ fun FerricSnackbar(
                 base.ferricLiquidGlass(
                     cornerRadius = snackCorner,
                     blurRadius = 9.dp,
-                    refractionHeight = 16.dp,
-                    refractionAmount = 18.dp,
-                    chromaticDispersion = 0.88f,
                     alwaysGlass = true,
-                    tier = GlassTier.HERO_LENS,
+                    tier = GlassTier.FROSTED_PANEL,
                     anchorAlphaOverride = if (palette.isLight) 0f else 0.24f,
                 )
             } else {

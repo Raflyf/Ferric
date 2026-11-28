@@ -41,6 +41,8 @@ pub struct AudioTelemetry {
     pub auto_transitioned: AtomicBool,
     /// `true` while Deck A and Deck B are actively overlapping in a crossfade transition.
     pub is_crossfading: AtomicBool,
+    /// Set to `true` when the frontend does not consume `spectrum_bins`, skipping DSP DFT work.
+    pub spectrum_disabled: AtomicBool,
     /// Lock-free 8-band visualizer energy levels (`0..=1000`).
     pub spectrum_bins: [AtomicU32; 8],
     /// Monotonic epoch incremented on seek/load/stop so the RT callback drops stale frames
@@ -846,6 +848,13 @@ impl AudioEngine {
 
     pub fn telemetry_arc(&self) -> &Arc<AudioTelemetry> {
         &self.telemetry
+    }
+
+    /// Enable or disable 8-band FFT/Goertzel spectrum calculation on the decode/DSP thread.
+    pub fn set_spectrum_enabled(&self, enabled: bool) {
+        self.telemetry
+            .spectrum_disabled
+            .store(!enabled, Ordering::Relaxed);
     }
 }
 
@@ -2681,7 +2690,9 @@ fn decode_loop(
                 &mut smoothed_volume,
                 effective_target,
             );
-            telemetry.store_spectrum(rt.spectrum.analyze_interleaved(&dsp_scratch));
+            if !telemetry.spectrum_disabled.load(Ordering::Relaxed) {
+                telemetry.store_spectrum(rt.spectrum.analyze_interleaved(&dsp_scratch));
+            }
             if !headless {
                 let push_epoch = telemetry.active_epoch.load(Ordering::Acquire);
                 for &[l, r] in dsp_scratch.as_chunks::<2>().0 {

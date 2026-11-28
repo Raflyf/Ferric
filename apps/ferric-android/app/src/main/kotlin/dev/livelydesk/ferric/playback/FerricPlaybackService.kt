@@ -130,7 +130,7 @@ object PlaybackFocusCoordinator {
      */
     fun requestFocusForPlayback(startService: Boolean = true): Boolean {
         if (!initialized) return true
-        if (startService) {
+        if (startService && !FerricPlaybackService.isForegroundActive) {
             runCatching {
                 ContextCompat.startForegroundService(
                     appContext,
@@ -401,15 +401,15 @@ class FerricPlaybackService : MediaSessionService() {
         if (!hasActiveForegroundMediaNotification()) {
             promoteToForegroundImmediately()
         }
-        val result = super.onStartCommand(intent, flags, startId)
-        if (mediaSession != null) {
-            triggerNotificationUpdate()
-        }
-        return result
+        // Do not call triggerNotificationUpdate() here: Media3's MediaNotificationManager invokes
+        // startForegroundService(this) inside onUpdateNotification() while playing, so calling
+        // triggerNotificationUpdate() in onStartCommand() creates a 250Hz self-retrigger loop.
+        return super.onStartCommand(intent, flags, startId)
     }
 
     override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
         foregroundPromoted = true
+        isForegroundActive = true
         super.onUpdateNotification(session, startInForegroundRequired)
     }
 
@@ -464,6 +464,7 @@ class FerricPlaybackService : MediaSessionService() {
         runCatching {
             ServiceCompat.startForeground(this, PLAYBACK_NOTIFICATION_ID, notification, fgType)
             foregroundPromoted = true
+            isForegroundActive = true
         }
     }
 
@@ -482,6 +483,7 @@ class FerricPlaybackService : MediaSessionService() {
             st.copy(isPlaying = false),
         )
         foregroundPromoted = false
+        isForegroundActive = false
         mediaSession?.let { session ->
             removeSession(session)
             session.release()
@@ -495,10 +497,14 @@ class FerricPlaybackService : MediaSessionService() {
     companion object {
         private const val PLAYBACK_CHANNEL_ID = "ferric_playback"
         private const val PLAYBACK_NOTIFICATION_ID = 1001
+
+        @Volatile
+        internal var isForegroundActive: Boolean = false
     }
 
     override fun onDestroy() {
         foregroundPromoted = false
+        isForegroundActive = false
         audioDeviceCallback?.let { cb ->
             runCatching { audioManager.unregisterAudioDeviceCallback(cb) }
         }

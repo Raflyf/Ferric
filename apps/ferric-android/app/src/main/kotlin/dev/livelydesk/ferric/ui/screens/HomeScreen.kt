@@ -45,6 +45,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -384,46 +385,48 @@ fun HomeScreen(
                                             ),
                                         contentAlignment = Alignment.Center,
                                     ) {
-                                        Canvas(modifier = Modifier.size(14.dp)) {
-                                            val w = size.width
-                                            val h = size.height
-                                            val outer = Path().apply {
-                                                moveTo(w * 0.56f, h * 0.06f)
-                                                cubicTo(w * 0.68f, h * 0.28f, w * 0.90f, h * 0.42f, w * 0.88f, h * 0.66f)
-                                                cubicTo(w * 0.86f, h * 0.88f, w * 0.68f, h * 0.98f, w * 0.49f, h * 0.98f)
-                                                cubicTo(w * 0.26f, h * 0.98f, w * 0.12f, h * 0.82f, w * 0.13f, h * 0.60f)
-                                                cubicTo(w * 0.14f, h * 0.44f, w * 0.25f, h * 0.36f, w * 0.32f, h * 0.29f)
-                                                cubicTo(w * 0.33f, h * 0.38f, w * 0.39f, h * 0.41f, w * 0.43f, h * 0.34f)
-                                                cubicTo(w * 0.48f, h * 0.25f, w * 0.48f, h * 0.14f, w * 0.56f, h * 0.06f)
-                                                close()
-                                            }
-                                            drawPath(
-                                                path = outer,
-                                                brush = Brush.verticalGradient(
-                                                    listOf(
-                                                        Color(0xFFFFE05C),
-                                                        Color(0xFFFF8324),
-                                                        Color(0xFFF23F1A),
-                                                    ),
-                                                ),
-                                            )
-                                            val core = Path().apply {
-                                                moveTo(w * 0.52f, h * 0.40f)
-                                                cubicTo(w * 0.62f, h * 0.50f, w * 0.70f, h * 0.62f, w * 0.67f, h * 0.76f)
-                                                cubicTo(w * 0.65f, h * 0.87f, w * 0.57f, h * 0.92f, w * 0.49f, h * 0.92f)
-                                                cubicTo(w * 0.39f, h * 0.92f, w * 0.33f, h * 0.84f, w * 0.34f, h * 0.73f)
-                                                cubicTo(w * 0.35f, h * 0.61f, w * 0.44f, h * 0.51f, w * 0.52f, h * 0.40f)
-                                                close()
-                                            }
-                                            drawPath(
-                                                path = core,
-                                                brush = Brush.verticalGradient(
-                                                    listOf(Color(0xFFFFF8D6), Color(0xFFFFB83E)),
-                                                    startY = h * 0.40f,
-                                                    endY = h * 0.92f,
-                                                ),
-                                            )
-                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .size(14.dp)
+                                                .drawWithCache {
+                                                    val w = size.width
+                                                    val h = size.height
+                                                    val outer = Path().apply {
+                                                        moveTo(w * 0.56f, h * 0.06f)
+                                                        cubicTo(w * 0.68f, h * 0.28f, w * 0.90f, h * 0.42f, w * 0.88f, h * 0.66f)
+                                                        cubicTo(w * 0.86f, h * 0.88f, w * 0.68f, h * 0.98f, w * 0.49f, h * 0.98f)
+                                                        cubicTo(w * 0.26f, h * 0.98f, w * 0.12f, h * 0.82f, w * 0.13f, h * 0.60f)
+                                                        cubicTo(w * 0.14f, h * 0.44f, w * 0.25f, h * 0.36f, w * 0.32f, h * 0.29f)
+                                                        cubicTo(w * 0.33f, h * 0.38f, w * 0.39f, h * 0.41f, w * 0.43f, h * 0.34f)
+                                                        cubicTo(w * 0.48f, h * 0.25f, w * 0.48f, h * 0.14f, w * 0.56f, h * 0.06f)
+                                                        close()
+                                                    }
+                                                    val outerBrush = Brush.verticalGradient(
+                                                        listOf(
+                                                            Color(0xFFFFE05C),
+                                                            Color(0xFFFF8324),
+                                                            Color(0xFFF23F1A),
+                                                        ),
+                                                    )
+                                                    val core = Path().apply {
+                                                        moveTo(w * 0.52f, h * 0.40f)
+                                                        cubicTo(w * 0.62f, h * 0.50f, w * 0.70f, h * 0.62f, w * 0.67f, h * 0.76f)
+                                                        cubicTo(w * 0.65f, h * 0.87f, w * 0.57f, h * 0.92f, w * 0.49f, h * 0.92f)
+                                                        cubicTo(w * 0.39f, h * 0.92f, w * 0.33f, h * 0.84f, w * 0.34f, h * 0.73f)
+                                                        cubicTo(w * 0.35f, h * 0.61f, w * 0.44f, h * 0.51f, w * 0.52f, h * 0.40f)
+                                                        close()
+                                                    }
+                                                    val coreBrush = Brush.verticalGradient(
+                                                        listOf(Color(0xFFFFF8D6), Color(0xFFFFB83E)),
+                                                        startY = h * 0.40f,
+                                                        endY = h * 0.92f,
+                                                    )
+                                                    onDrawBehind {
+                                                        drawPath(path = outer, brush = outerBrush)
+                                                        drawPath(path = core, brush = coreBrush)
+                                                    }
+                                                },
+                                        )
                                     }
                                     Text(
                                         text = "${streakDays}d",

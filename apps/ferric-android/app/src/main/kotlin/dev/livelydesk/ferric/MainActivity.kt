@@ -18,7 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -47,6 +47,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
@@ -110,7 +112,9 @@ import dev.livelydesk.ferric.ui.theme.rememberFerricBackdropState
 import dev.livelydesk.ferric.ui.theme.rememberFerricSheetHostState
 import java.util.Locale
 import kotlin.math.abs
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import uniffi.ferric_mobile_ffi.FfiCollectionDetail
@@ -221,7 +225,35 @@ private fun FerricMainShell(
     val hasActiveSnackbar = snackbarHostState.currentSnackbarData != null
 
     var activeTab by rememberSaveable { mutableStateOf(FerricTab.HOME) }
+    var outgoingTab by remember { mutableStateOf<FerricTab?>(null) }
+    var slideDirection by remember { mutableIntStateOf(1) }
+    var tabAnimGen by remember { mutableIntStateOf(0) }
+    var tabAnimJob by remember { mutableStateOf<Job?>(null) }
+    val tabAnim = remember { Animatable(1f) }
     var dockCollapsed by rememberSaveable { mutableStateOf(false) }
+
+    fun selectTab(nextTab: FerricTab) {
+        store.closeDetail()
+        dockCollapsed = false
+        if (nextTab == activeTab) return
+        val prev = activeTab
+        val seq = tabAnimGen + 1
+        tabAnimGen = seq
+        slideDirection = if (nextTab.ordinal >= prev.ordinal) 1 else -1
+        outgoingTab = prev
+        activeTab = nextTab
+        tabAnimJob?.cancel()
+        tabAnimJob = ioScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            tabAnim.snapTo(0f)
+            try {
+                tabAnim.animateTo(1f, tween(durationMillis = 280, easing = FerricEaseOut))
+            } finally {
+                if (tabAnimGen == seq) {
+                    outgoingTab = null
+                }
+            }
+        }
+    }
     var showFullPlayer by rememberSaveable { mutableStateOf(false) }
     var showQueueSheet by rememberSaveable { mutableStateOf(false) }
     var showAccountsSheet by rememberSaveable { mutableStateOf(false) }
@@ -442,19 +474,23 @@ private fun FerricMainShell(
                     .fillMaxSize()
                     .ferricBackdropSource(sheetBackdrop, enabled = hasActiveSheets),
             ) {
+                val isTabSliding = outgoingTab != null
+
                 // Layer 1: Full-screen scrollable canvas captured into ONE shared backdropState so the
                 // floating Liquid Glass dock & mini-player opt-refract scrolling cards. Inner page cards draw
                 // directly over live AuroraBackdrop as zero-FBO translucent crystal glass.
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .ferricBackdropSource(backdropState, enabled = !showFullPlayer),
+                        .ferricBackdropSource(backdropState, enabled = !showFullPlayer && !isTabSliding),
                 ) {
                     if (palette.isLiquidGlass) {
+                        // Keep MainShell CoverShade ambient gradient static between track switches so
+                        // music playback never invalidates the full-screen backdrop 12x/sec during scroll.
                         AuroraBackdrop(
                             colors = state.coverShade,
                             baseCanvas = palette.canvas,
-                            isPlaying = state.isPlaying && !showFullPlayer && !hasActiveSheets,
+                            isPlaying = false,
                             intensity = 0.86f,
                         )
                     }
@@ -470,65 +506,67 @@ private fun FerricMainShell(
                     cachedDetail = state.activeDetail
                 }
                 val isDetailShowing = state.activeDetail != null
-                val tabProgress by animateFloatAsState(
-                    targetValue = activeTab.ordinal.toFloat(),
-                    animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
-                    label = "main_tab_slide",
-                )
-                val tabsLayerAlpha by animateFloatAsState(
-                    targetValue = if (isDetailShowing) 0f else 1f,
-                    animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
-                    label = "tabs_under_detail_alpha",
-                )
+                val detailHidden = isDetailShowing
 
-                // Keep all 4 primary tabs permanently mounted so Coil art and scroll state never flash or reload.
+                // Keep all 4 primary tabs mounted (preserving scroll & images) while animating a silky
+                // zero-blink, zero-bounce simultaneous cross-fade + subtle directional glide (ModulateAlpha).
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .layout { measurable, constraints ->
-                            if (tabsLayerAlpha < 0.01f) {
+                            if (detailHidden) {
                                 layout(0, 0) {}
                             } else {
                                 val placeable = measurable.measure(constraints)
                                 layout(placeable.width, placeable.height) {
-                                    if (tabsLayerAlpha >= 0.999f) {
-                                        placeable.placeRelative(0, 0)
-                                    } else {
-                                        placeable.placeRelativeWithLayer(0, 0) {
-                                            alpha = tabsLayerAlpha
-                                            val s = 0.96f + 0.04f * tabsLayerAlpha
-                                            scaleX = s
-                                            scaleY = s
-                                        }
-                                    }
+                                    placeable.placeRelative(0, 0)
                                 }
                             }
                         },
                 ) {
                     FerricTab.entries.forEach { tab ->
-                        val delta = tab.ordinal.toFloat() - tabProgress
+                        val isIncoming = tab == activeTab
+                        val isOutgoing = tab == outgoingTab
+                        val tabVisible = !detailHidden && (isIncoming || isOutgoing)
+                        val retainedState = remember(tab) { mutableStateOf(state) }
+                        if (tabVisible) {
+                            retainedState.value = state
+                        }
+                        val tabState = retainedState.value
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .layout { measurable, constraints ->
-                                    // Unplace any neighbor >= 0.995 tabs away so only transitioning
-                                    // or active tabs measure, draw, and receive touch events.
-                                    if (abs(delta) >= 0.995f) {
+                                    if (!isIncoming && !isOutgoing) {
                                         layout(0, 0) {}
                                     } else {
                                         val placeable = measurable.measure(constraints)
                                         layout(placeable.width, placeable.height) {
-                                            if (abs(delta) < 0.001f) {
-                                                placeable.placeRelative(0, 0)
-                                            } else {
-                                                placeable.placeRelativeWithLayer(
-                                                    0,
-                                                    0,
-                                                    zIndex = 1f - abs(delta),
-                                                ) {
-                                                    translationX = delta * placeable.width * 0.22f
-                                                    alpha = (1f - abs(delta)).coerceIn(0f, 1f)
-                                                }
+                                            placeable.placeRelative(0, 0)
+                                        }
+                                    }
+                                }
+                                .graphicsLayer {
+                                    if (!isTabSliding) {
+                                        compositingStrategy = CompositingStrategy.Auto
+                                        translationX = 0f
+                                        alpha = 1f
+                                    } else {
+                                        compositingStrategy = CompositingStrategy.ModulateAlpha
+                                        val p = tabAnim.value
+                                        val shiftPx = 22.dp.toPx()
+                                        when {
+                                            isIncoming -> {
+                                                alpha = p.coerceIn(0f, 1f)
+                                                translationX = slideDirection * shiftPx * (1f - p)
+                                            }
+                                            isOutgoing -> {
+                                                alpha = (1f - p).coerceIn(0f, 1f)
+                                                translationX = -slideDirection * shiftPx * p
+                                            }
+                                            else -> {
+                                                alpha = 0f
+                                                translationX = 0f
                                             }
                                         }
                                     }
@@ -536,7 +574,7 @@ private fun FerricMainShell(
                         ) {
                             when (tab) {
                                 FerricTab.HOME -> HomeScreen(
-                                    state = state,
+                                    state = tabState,
                                     listState = homeListState,
                                     onRefresh = { store.loadHome(forceRefresh = true, moodIdx = null) },
                                     onLoadMoreHome = { store.loadHomeMore() },
@@ -567,7 +605,7 @@ private fun FerricMainShell(
                                 )
 
                                 FerricTab.SEARCH -> SearchScreen(
-                                    state = state,
+                                    state = tabState,
                                     listState = searchListState,
                                     onInstantLocalSearch = { q -> store.instantSearchLocal(q) },
                                     onOnlineSearch = { q -> store.searchOnline(q) },
@@ -596,7 +634,7 @@ private fun FerricMainShell(
                                 )
 
                                 FerricTab.LIBRARY -> LibraryScreen(
-                                    state = state,
+                                    state = tabState,
                                     listState = libraryListState,
                                     onPlayQueue = { list, idx, ctx -> store.playQueue(list, idx, ctx) },
                                     onOpenPlaylist = { id -> store.openPlaylistDetail(id) },
@@ -641,13 +679,14 @@ private fun FerricMainShell(
                                 )
 
                                 FerricTab.YOU -> YouScreen(
-                                    state = state,
+                                    state = tabState,
                                     listState = youListState,
                                     onOpenHistory = {
+                                        val rec = store.uiState.value.recentTracks
                                         store.openLocalCollectionDetail(
                                             "Listening History",
-                                            "${state.recentTracks.size} recent tracks",
-                                            state.recentTracks,
+                                            "${rec.size} recent tracks",
+                                            rec,
                                         )
                                     },
                                     onOpenStats = { showStatsSheet = true },
@@ -669,10 +708,10 @@ private fun FerricMainShell(
 
                 AnimatedVisibility(
                     visible = isDetailShowing,
-                    enter = slideInHorizontally(animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) { it / 4 } +
+                    enter = slideInHorizontally(animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) { it / 8 } +
                         fadeIn(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)),
-                    exit = slideOutHorizontally(animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) { it / 4 } +
-                        fadeOut(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)),
+                    exit = slideOutHorizontally(animationSpec = tween(durationMillis = 220, easing = FerricEaseOut)) { it / 10 } +
+                        fadeOut(tween(durationMillis = 220, easing = FerricEaseOut)),
                 ) {
                     val detail = state.activeDetail ?: cachedDetail
                     if (detail != null) {
@@ -741,11 +780,7 @@ private fun FerricMainShell(
                 activeTab = activeTab,
                 isDetailOpen = state.activeDetail != null,
                 isCollapsed = dockCollapsed,
-                onSelectTab = { tab ->
-                    store.closeDetail()
-                    activeTab = tab
-                    dockCollapsed = false
-                },
+                onSelectTab = { tab -> selectTab(tab) },
                 onExpandDock = { dockCollapsed = false },
                 onTogglePlayPause = { store.togglePlayPause() },
                 onNext = { store.next() },
@@ -760,10 +795,10 @@ private fun FerricMainShell(
         // Layer 3: Full Player rendered as sibling overlay (preserves all tab scroll positions!)
         AnimatedVisibility(
             visible = showFullPlayer,
-            enter = slideInVertically(animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) { it / 2 } +
+            enter = slideInVertically(animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) { it / 5 } +
                 fadeIn(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)),
-            exit = slideOutVertically(animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) { it / 2 } +
-                fadeOut(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)),
+            exit = slideOutVertically(animationSpec = tween(durationMillis = 240, easing = FerricEaseOut)) { it / 6 } +
+                fadeOut(tween(durationMillis = 240, easing = FerricEaseOut)),
         ) {
             FullPlayerScreen(
                 state = state,

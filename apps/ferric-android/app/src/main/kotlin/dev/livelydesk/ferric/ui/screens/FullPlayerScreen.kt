@@ -291,7 +291,7 @@ fun FullPlayerScreen(
                         PlayerBackdropStage.ARTWORK -> {
                             val backdropCtx = LocalContext.current
                             val backdropReq = remember(displayThumb, isLiquidBackdropLayout) {
-                                val dim = if (isLiquidBackdropLayout) 480 else 860
+                                val dim = if (isLiquidBackdropLayout) 128 else 860
                                 ImageRequest.Builder(backdropCtx)
                                     .data(displayThumb)
                                     .size(dim, dim)
@@ -308,7 +308,7 @@ fun FullPlayerScreen(
                                             if (isLiquidBackdropLayout) {
                                                 Modifier
                                                     .fillMaxSize()
-                                                    .blur(46.dp)
+                                                    .blur(20.dp)
                                             } else {
                                                 // Full-bleed edge-to-edge cover art melting seamlessly down the canvas
                                                 Modifier
@@ -338,7 +338,7 @@ fun FullPlayerScreen(
                             AuroraBackdrop(
                                 colors = state.coverShade,
                                 baseCanvas = deepTone,
-                                isPlaying = displayPlaying && !showSleepSheet && !hasExternalOverlay,
+                                isPlaying = false,
                                 intensity = 0.80f,
                             )
                         }
@@ -368,9 +368,7 @@ fun FullPlayerScreen(
                             .ferricLiquidGlass(
                                 cornerRadius = 20.dp,
                                 blurRadius = 14.dp,
-                                refractionHeight = 12.dp,
-                                refractionAmount = 10.dp,
-                                chromaticDispersion = 0.45f,
+                                tier = GlassTier.FROSTED_PANEL,
                                 alwaysGlass = true,
                             )
                             .clickable(onClick = onCollapse),
@@ -392,9 +390,7 @@ fun FullPlayerScreen(
                             .ferricLiquidGlass(
                                 cornerRadius = 19.dp,
                                 blurRadius = 16.dp,
-                                refractionHeight = 14.dp,
-                                refractionAmount = 12.dp,
-                                chromaticDispersion = 0.55f,
+                                tier = GlassTier.FROSTED_PANEL,
                                 alwaysGlass = true,
                             )
                             .padding(3.dp),
@@ -440,9 +436,7 @@ fun FullPlayerScreen(
                             .ferricLiquidGlass(
                                 cornerRadius = 20.dp,
                                 blurRadius = 14.dp,
-                                refractionHeight = 12.dp,
-                                refractionAmount = 10.dp,
-                                chromaticDispersion = 0.45f,
+                                tier = GlassTier.FROSTED_PANEL,
                                 alwaysGlass = true,
                             )
                             .clickable(onClick = onOpenThemeStudio),

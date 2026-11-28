@@ -30,6 +30,7 @@ All notable changes to Ferric are documented in this file.
 ### Fixed & Hardening
 
 - **Rich `MediaStyle` Notification, Service Lifecycle & Player Polish:** Bound `MediaSession` directly in `FerricPlaybackService`, eliminated `ForegroundServiceDidNotStartInTimeException` races and bare non-MediaStyle overwrites, added shared `fullPlayerBackdrop` capture, fixed Warm Cream Light contrast and `ShareCardSheet` storage permissions on Android 9, stripped debug/verbose logging in R8 release builds, and enforced release keystore checks in CI.
+- **60 FPS Playback & Navigation Performance:** Eliminated the `FerricPlaybackService.onStartCommand` self-retrigger loop, isolated `MiniProgressBar` GPU transforms and `0.25x` static `AuroraBackdrop` caching, bounded `open_station` and `browse_genre` candidate sampling off-lock in `ferric-controller`, skipped unused mobile FFT spectrum computation, and added non-blinking `selectTab` cross-glide transitions.
 
 ---
 

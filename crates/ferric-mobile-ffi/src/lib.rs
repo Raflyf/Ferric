@@ -681,7 +681,17 @@ struct EventSinkBridge(Box<dyn FfiEventSink>);
 
 impl ControllerEventSink for EventSinkBridge {
     fn on_telemetry(&self, telemetry: TelemetrySnapshot) {
-        self.0.on_playback_telemetry(telemetry.into());
+        // Android UI does not read 8-band visualizer bins from telemetry callbacks; skip allocating
+        // and marshaling a Vec<u32> across JNI 5x/sec while keeping get_telemetry() intact.
+        self.0.on_playback_telemetry(FfiTelemetry {
+            is_playing: telemetry.is_playing,
+            position_ms: telemetry.position_ms,
+            duration_ms: telemetry.duration_ms,
+            sample_rate: telemetry.sample_rate,
+            output_rate: telemetry.output_rate,
+            is_crossfading: telemetry.is_crossfading,
+            spectrum_bins: Vec::new(),
+        });
     }
 
     fn on_now_playing(&self, track: Option<Track>) {
@@ -785,6 +795,7 @@ impl FerricMobileCore {
             headless_audio,
         };
         let controller = FerricController::new(cfg, Arc::new(EventSinkBridge(sink)))?;
+        controller.set_spectrum_enabled(false);
         Ok(Arc::new(Self { controller }))
     }
 

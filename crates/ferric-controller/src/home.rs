@@ -113,13 +113,26 @@ fn clean_home_tracks(tracks: Vec<Track>) -> Vec<Track> {
         .collect()
 }
 
-/// Build the exact Desktop/Spotify-parity weighted taste profile over the entire SQLite library:
-/// sublinear play weighting + exponential recency decay + liked boost + cross-library artist
-/// frequency + evenly strided 400-track library sample so Home matches Desktop quality 1:1.
-fn build_home_taste_profile(
-    st: &crate::ControllerState,
+struct HomeTasteSessionRef<'a> {
+    recent_track_ids: &'a [String],
+    track_play_counts: &'a HashMap<String, u32>,
+    artist_play_counts: &'a HashMap<String, u32>,
+    recent_searches: &'a [String],
+}
+
+struct HomeTasteExclusions {
+    track_ids: HashSet<String>,
+    card_ids: HashSet<String>,
+    artists: HashSet<String>,
+    continuation_token: Option<String>,
+}
+
+/// Build the exact Desktop/Spotify-parity weighted taste profile from borrowed session/library
+/// slices so callers can assemble inputs under a short lock and score off-lock when desired.
+fn build_home_taste_profile_from_parts(
+    session: HomeTasteSessionRef<'_>,
     lib: &[Track],
-    apply_exclusions: bool,
+    exclusions: Option<HomeTasteExclusions>,
 ) -> YtmHomeTasteProfile {
     let mut by_id: HashMap<&str, usize> = HashMap::with_capacity(lib.len());
     for (idx, t) in lib.iter().enumerate() {
@@ -130,17 +143,17 @@ fn build_home_taste_profile(
 
     let play_weight = |plays: u32| -> i32 { ((1.0 + plays as f32).ln() * 22.0).round() as i32 };
 
-    for (pos, id) in st.session.recent_track_ids.iter().enumerate() {
+    for (pos, id) in session.recent_track_ids.iter().enumerate() {
         if let Some(&idx) = by_id.get(id.as_str())
             && seen_ids.insert(lib[idx].id.as_str())
         {
-            let plays = st.session.track_play_counts.get(id).copied().unwrap_or(1);
+            let plays = session.track_play_counts.get(id).copied().unwrap_or(1);
             let recency = (44.0 * (-0.09 * pos as f32).exp()).round() as i32;
             let liked_bonus = if lib[idx].liked { 18 } else { 0 };
             scored_tracks.push((play_weight(plays) + recency + liked_bonus, idx));
         }
     }
-    for (id, &plays) in &st.session.track_play_counts {
+    for (id, &plays) in session.track_play_counts {
         if let Some(&idx) = by_id.get(id.as_str())
             && seen_ids.insert(lib[idx].id.as_str())
         {
@@ -219,7 +232,7 @@ fn build_home_taste_profile(
     }
 
     let mut artist_scores: HashMap<String, (String, i32)> = HashMap::new();
-    for (artist, &cnt) in &st.session.artist_play_counts {
+    for (artist, &cnt) in session.artist_play_counts {
         let key = primary_artist_key(artist);
         if !key.is_empty() {
             let norm = key.to_ascii_lowercase();
@@ -244,30 +257,47 @@ fn build_home_taste_profile(
     let mut artist_list: Vec<(String, i32)> = artist_scores.into_values().collect();
     artist_list.sort_by_key(|a| std::cmp::Reverse(a.1));
     let top_artists: Vec<String> = artist_list.into_iter().take(48).map(|(a, _)| a).collect();
+    let excl = exclusions.unwrap_or(HomeTasteExclusions {
+        track_ids: HashSet::new(),
+        card_ids: HashSet::new(),
+        artists: HashSet::new(),
+        continuation_token: None,
+    });
 
     YtmHomeTasteProfile {
         top_tracks,
         library_tracks,
         top_artists,
-        recent_searches: st.session.recent_searches.clone(),
-        excluded_track_ids: if apply_exclusions {
-            st.home_excluded_tracks.clone()
-        } else {
-            HashSet::new()
-        },
-        excluded_card_ids: if apply_exclusions {
-            st.home_excluded_cards.clone()
-        } else {
-            HashSet::new()
-        },
-        excluded_artists: if apply_exclusions {
-            st.home_excluded_artists.clone()
-        } else {
-            HashSet::new()
-        },
-        continuation_token: st.home_continuation.clone(),
+        recent_searches: session.recent_searches.to_vec(),
+        excluded_track_ids: excl.track_ids,
+        excluded_card_ids: excl.card_ids,
+        excluded_artists: excl.artists,
+        continuation_token: excl.continuation_token,
         refresh_mood_params: None,
     }
+}
+
+/// Build the exact Desktop/Spotify-parity weighted taste profile from `ControllerState`.
+fn build_home_taste_profile(
+    st: &crate::ControllerState,
+    lib: &[Track],
+    apply_exclusions: bool,
+) -> YtmHomeTasteProfile {
+    build_home_taste_profile_from_parts(
+        HomeTasteSessionRef {
+            recent_track_ids: &st.session.recent_track_ids,
+            track_play_counts: &st.session.track_play_counts,
+            artist_play_counts: &st.session.artist_play_counts,
+            recent_searches: &st.session.recent_searches,
+        },
+        lib,
+        apply_exclusions.then(|| HomeTasteExclusions {
+            track_ids: st.home_excluded_tracks.clone(),
+            card_ids: st.home_excluded_cards.clone(),
+            artists: st.home_excluded_artists.clone(),
+            continuation_token: st.home_continuation.clone(),
+        }),
+    )
 }
 
 fn track_share_url_for_browse(browse_id: &str, kind: CardKind) -> Option<String> {
@@ -814,16 +844,29 @@ impl FerricController {
                 )));
             };
             st.detail_gen = st.detail_gen.wrapping_add(1);
-            let lib = st.db.list_tracks("").unwrap_or_default();
-            let liked: HashSet<String> = lib
-                .iter()
-                .filter(|t| t.liked)
-                .filter_map(|t| t.spotify_id.clone())
-                .collect();
+            let sp_tok = active_spotify_token(&st.accounts);
+            let needs_fetch = found.cached_tracks.is_empty();
+            let is_spotify_fetch =
+                needs_fetch && found.spotify_playlist_id.is_some() && sp_tok.is_some();
+            let liked: HashSet<String> = if is_spotify_fetch {
+                st.db
+                    .list_liked_tracks()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|t| t.spotify_id)
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let lib = if needs_fetch && !is_spotify_fetch {
+                crate::sample_library_pool_bounded(&st.db, &st.session.recent_track_ids, 240)
+            } else {
+                Vec::new()
+            };
             (
                 found,
                 active_ytm_session(&st.accounts),
-                active_spotify_token(&st.accounts),
+                sp_tok,
                 lib,
                 liked,
                 st.detail_gen,
@@ -1050,7 +1093,17 @@ impl FerricController {
         let local_tracks = self.instant_search_local(&g)?;
         let g_key = g.to_ascii_lowercase();
 
-        let (session, gen_id, epoch, taste, excluded_ids) = {
+        let (
+            session,
+            gen_id,
+            epoch,
+            lib,
+            recent_track_ids,
+            track_play_counts,
+            artist_play_counts,
+            recent_searches,
+            excluded_ids,
+        ) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             st.search_gen = st.search_gen.wrapping_add(1);
             let gen_id = st.search_gen;
@@ -1062,19 +1115,16 @@ impl FerricController {
                 .get(&g_key)
                 .map(|dq| dq.iter().cloned().collect())
                 .unwrap_or_default();
-            let lib: Vec<Track> = st
-                .db
-                .list_tracks("")
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|t| !t.id.starts_with("demo:"))
-                .collect();
-            let taste = build_home_taste_profile(&st, &lib, false);
+            let lib = crate::sample_library_pool_bounded(&st.db, &st.session.recent_track_ids, 320);
             (
                 active_ytm_session(&st.accounts),
                 gen_id,
                 epoch,
-                taste,
+                lib,
+                st.session.recent_track_ids.clone(),
+                st.session.track_play_counts.clone(),
+                st.session.artist_play_counts.clone(),
+                st.session.recent_searches.clone(),
                 excluded_ids,
             )
         };
@@ -1091,6 +1141,16 @@ impl FerricController {
         let _ = thread::Builder::new()
             .name("ferric-genre-browse".to_string())
             .spawn(move || {
+                let taste = build_home_taste_profile_from_parts(
+                    HomeTasteSessionRef {
+                        recent_track_ids: &recent_track_ids,
+                        track_play_counts: &track_play_counts,
+                        artist_play_counts: &artist_play_counts,
+                        recent_searches: &recent_searches,
+                    },
+                    &lib,
+                    None,
+                );
                 let (online_tracks, online_cards) =
                     match fetch_rich_genre_browse(&session, &g, epoch, &taste, &excluded_ids) {
                         Ok(rich) => (

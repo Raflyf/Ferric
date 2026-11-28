@@ -40,6 +40,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -80,7 +81,9 @@ fun YouScreen(
 ) {
     val palette = LocalFerricPalette.current
     val accounts = state.accountStatus
-    val connectedPeers = state.connectState.peers.filter { it.connected }
+    val connectedPeers = remember(state.connectState.peers) {
+        state.connectState.peers.filter { it.connected }
+    }
     val cardBg = if (palette.isLight) {
         palette.surface.copy(alpha = if (palette.isLiquidGlass) (palette.glassOpacity + 0.16f).coerceIn(0.35f, 0.96f) else 0.90f)
     } else if (palette.isLiquidGlass) {

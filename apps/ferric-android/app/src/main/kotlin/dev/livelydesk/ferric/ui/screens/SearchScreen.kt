@@ -53,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -158,13 +159,15 @@ fun SearchScreen(
     val distinctRecent = remember(state.recentSearches) {
         state.recentSearches.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
     }
-    val filteredCards = results.onlineCards.filter { card ->
-        when (selectedCategory) {
-            SearchCategory.ALL -> true
-            SearchCategory.ALBUMS -> card.kind == FfiCardKind.ALBUM
-            SearchCategory.ARTISTS -> card.kind == FfiCardKind.ARTIST
-            SearchCategory.PLAYLISTS -> card.kind == FfiCardKind.PLAYLIST
-            SearchCategory.SONGS -> false
+    val filteredCards = remember(results.onlineCards, selectedCategory) {
+        results.onlineCards.filter { card ->
+            when (selectedCategory) {
+                SearchCategory.ALL -> true
+                SearchCategory.ALBUMS -> card.kind == FfiCardKind.ALBUM
+                SearchCategory.ARTISTS -> card.kind == FfiCardKind.ARTIST
+                SearchCategory.PLAYLISTS -> card.kind == FfiCardKind.PLAYLIST
+                SearchCategory.SONGS -> false
+            }
         }
     }
     val searchPillBg = if (palette.isLight) {
@@ -328,14 +331,20 @@ fun SearchScreen(
                 }
 
                 if (results.isLoading && searchScope == SearchScope.ONLINE) {
-                    LinearProgressIndicator(
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(2.dp)
-                            .clip(RoundedCornerShape(1.dp)),
-                        color = palette.accent,
-                        trackColor = palette.border.copy(alpha = 0.4f),
-                    )
+                            .graphicsLayer { },
+                    ) {
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(2.dp)
+                                .clip(RoundedCornerShape(1.dp)),
+                            color = palette.accent,
+                            trackColor = palette.border.copy(alpha = 0.4f),
+                        )
+                    }
                 }
             }
         }

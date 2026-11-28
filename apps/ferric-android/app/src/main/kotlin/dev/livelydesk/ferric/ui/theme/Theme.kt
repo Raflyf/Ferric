@@ -60,8 +60,8 @@ data class FerricVisualPalette(
     val playerLayout: String = "liquid_glass",
 )
 
-val FerricEaseOut = CubicBezierEasing(0.22f, 1.0f, 0.36f, 1.0f)
-const val FERRIC_MOTION_MS = 320
+val FerricEaseOut = CubicBezierEasing(0.25f, 0.08f, 0.18f, 1.0f)
+const val FERRIC_MOTION_MS = 300
 
 val LocalFerricPalette = staticCompositionLocalOf { FerricVisualPalette() }
 val LocalHazeState = compositionLocalOf<HazeState?> { null }
@@ -359,8 +359,17 @@ fun FerricTheme(
     backdropState: FerricBackdropState? = null,
     content: @Composable () -> Unit,
 ) {
-    val palette = remember(themeConfig, coverShade) {
-        buildVisualPalette(themeConfig, coverShade)
+    val effectiveCoverShade = if (
+        themeConfig != null &&
+        themeConfig.backgroundMode != FfiBackgroundMode.WARM_CREAM &&
+        (themeConfig.adaptiveAlbumArt || themeConfig.adaptiveAcrylicTint)
+    ) {
+        coverShade
+    } else {
+        null
+    }
+    val palette = remember(themeConfig, effectiveCoverShade) {
+        buildVisualPalette(themeConfig, effectiveCoverShade ?: CoverShadeColors())
     }
     val scheme = remember(palette) {
         if (palette.isLight) {

@@ -63,11 +63,13 @@ import uniffi.ferric_mobile_ffi.FfiVideoStreamsState
  * High-frequency (5 Hz) playback progress stream separated from [PlaybackUiState] so only
  * seekbars, timestamps, lyrics highlighter, and spectrum meters recompose during playback.
  */
+private val EMPTY_SPECTRUM: List<Int> = emptyList()
+
 @Immutable
 data class PlaybackProgress(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
-    val spectrumBins: List<Int> = List(8) { 0 },
+    val spectrumBins: List<Int> = EMPTY_SPECTRUM,
 )
 
 @Immutable
@@ -80,6 +82,7 @@ data class UpdateCheckOutcome(
     val error: String? = null,
 )
 
+@Immutable
 data class PlaybackUiState(
     val tracks: List<FfiTrack> = emptyList(),
     val likedTracks: List<FfiTrack> = emptyList(),
@@ -248,14 +251,18 @@ object PlaybackStateReducer {
         val safeDur = if (reportedDur > 0L) reportedDur else prev.durationMs.coerceAtLeast(0L)
         val rawPos = t.positionMs.toLong().coerceAtLeast(0L)
         val safePos = if (safeDur > 0L) rawPos.coerceIn(0L, safeDur) else rawPos
+        val nextBins = if (t.spectrumBins.size == 8) {
+            t.spectrumBins.map { it.toInt().coerceIn(0, 1000) }
+        } else {
+            prev.spectrumBins
+        }
+        if (prev.positionMs == safePos && prev.durationMs == safeDur && nextBins === prev.spectrumBins) {
+            return prev
+        }
         return PlaybackProgress(
             positionMs = safePos,
             durationMs = safeDur,
-            spectrumBins = if (t.spectrumBins.size == 8) {
-                t.spectrumBins.map { it.toInt().coerceIn(0, 1000) }
-            } else {
-                prev.spectrumBins
-            },
+            spectrumBins = nextBins,
         )
     }
 
@@ -625,7 +632,9 @@ class CoreStateStore(private val appContext: Context) {
         scope.launch {
             val colors = CoverShadeExtractor.extract(appContext, artUrl)
             _uiState.update { it.copy(coverShade = colors) }
-            FerricWidgetUpdater.updateAll(appContext, _uiState.value)
+            if (FerricWidgetUpdater.hasAnyWidgets(appContext)) {
+                FerricWidgetUpdater.updateAll(appContext, _uiState.value, persistToPrefs = false)
+            }
         }
     }
 

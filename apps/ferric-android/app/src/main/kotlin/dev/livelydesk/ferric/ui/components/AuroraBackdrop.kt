@@ -15,14 +15,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.layer.CompositingStrategy as LayerCompositingStrategy
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.livelydesk.ferric.ui.theme.CoverShadeColors
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
@@ -84,6 +91,9 @@ fun AuroraBackdrop(
         )
     }
 
+    val cachedLayer = rememberGraphicsLayer()
+    val cacheState = remember { AuroraStaticCache() }
+
     Canvas(
         modifier = modifier
             .fillMaxSize()
@@ -94,28 +104,98 @@ fun AuroraBackdrop(
                 }
             },
     ) {
-        drawRect(baseCanvas)
         val w = size.width
         val h = size.height
         if (w <= 0f || h <= 0f) return@Canvas
 
-        // Read animated value inside draw phase only and reuse cached brushes (0 per-frame allocations).
-        val phase = phaseState.value
-        val c1x = w * (0.28f + 0.14f * cos(phase))
-        val c1y = h * (0.18f + 0.10f * sin(phase))
-        val c2x = w * (0.78f + 0.12f * sin(phase * 0.8f))
-        val c2y = h * (0.56f + 0.12f * cos(phase * 0.9f))
-        val c3x = w * (0.44f + 0.15f * cos(phase * 1.1f + 1.4f))
-        val c3y = h * (0.84f + 0.08f * sin(phase * 0.7f))
+        val phase = phaseState.floatValue
+        if (!animate && w >= 16f && h >= 16f) {
+            val cacheScale = 0.25f
+            val cw = (w * cacheScale).roundToInt().coerceAtLeast(16)
+            val ch = (h * cacheScale).roundToInt().coerceAtLeast(16)
+            val targetSize = IntSize(cw, ch)
+            if (!cacheState.valid ||
+                cacheState.size != targetSize ||
+                cacheState.colors != colors ||
+                cacheState.baseCanvas != baseCanvas ||
+                cacheState.intensity != intensity ||
+                cacheState.canvasRadius != canvasRadius
+            ) {
+                cachedLayer.compositingStrategy = LayerCompositingStrategy.Offscreen
+                cachedLayer.record(size = targetSize) {
+                    scale(scaleX = cacheScale, scaleY = cacheScale, pivot = Offset.Zero) {
+                        drawAuroraGradients(
+                            width = w,
+                            height = h,
+                            baseCanvas = baseCanvas,
+                            canvasRadius = canvasRadius,
+                            phase = phase,
+                            orb1Brush = orb1Brush,
+                            orb2Brush = orb2Brush,
+                            orb3Brush = orb3Brush,
+                        )
+                    }
+                }
+                cacheState.valid = true
+                cacheState.size = targetSize
+                cacheState.colors = colors
+                cacheState.baseCanvas = baseCanvas
+                cacheState.intensity = intensity
+                cacheState.canvasRadius = canvasRadius
+            }
+            scale(scaleX = w / cw.toFloat(), scaleY = h / ch.toFloat(), pivot = Offset.Zero) {
+                drawLayer(cachedLayer)
+            }
+            return@Canvas
+        }
 
-        translate(left = c1x, top = c1y) {
-            drawCircle(brush = orb1Brush, radius = canvasRadius, center = Offset.Zero)
-        }
-        translate(left = c2x, top = c2y) {
-            drawCircle(brush = orb2Brush, radius = canvasRadius, center = Offset.Zero)
-        }
-        translate(left = c3x, top = c3y) {
-            drawCircle(brush = orb3Brush, radius = canvasRadius * 0.85f, center = Offset.Zero)
-        }
+        drawAuroraGradients(
+            width = w,
+            height = h,
+            baseCanvas = baseCanvas,
+            canvasRadius = canvasRadius,
+            phase = phase,
+            orb1Brush = orb1Brush,
+            orb2Brush = orb2Brush,
+            orb3Brush = orb3Brush,
+        )
+    }
+}
+
+private class AuroraStaticCache {
+    var valid: Boolean = false
+    var size: IntSize = IntSize.Zero
+    var colors: CoverShadeColors? = null
+    var baseCanvas: Color = Color.Unspecified
+    var intensity: Float = -1f
+    var canvasRadius: Float = -1f
+}
+
+private fun DrawScope.drawAuroraGradients(
+    width: Float,
+    height: Float,
+    baseCanvas: Color,
+    canvasRadius: Float,
+    phase: Float,
+    orb1Brush: Brush,
+    orb2Brush: Brush,
+    orb3Brush: Brush,
+) {
+    drawRect(baseCanvas)
+    val c1x = width * (0.28f + 0.14f * cos(phase))
+    val c1y = height * (0.18f + 0.10f * sin(phase))
+    val c2x = width * (0.78f + 0.12f * sin(phase * 0.8f))
+    val c2y = height * (0.56f + 0.12f * cos(phase * 0.9f))
+    val c3x = width * (0.44f + 0.15f * cos(phase * 1.1f + 1.4f))
+    val c3y = height * (0.84f + 0.08f * sin(phase * 0.7f))
+
+    translate(left = c1x, top = c1y) {
+        drawCircle(brush = orb1Brush, radius = canvasRadius, center = Offset.Zero)
+    }
+    translate(left = c2x, top = c2y) {
+        drawCircle(brush = orb2Brush, radius = canvasRadius, center = Offset.Zero)
+    }
+    translate(left = c3x, top = c3y) {
+        drawCircle(brush = orb3Brush, radius = canvasRadius * 0.85f, center = Offset.Zero)
     }
 }

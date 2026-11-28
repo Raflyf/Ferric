@@ -133,6 +133,35 @@ pub struct FerricController {
     connect: Mutex<Option<Arc<ferric_sync::ConnectEngine>>>,
     monitor_sync: Arc<MonitorSync>,
     monitor_handle: Mutex<Option<thread::JoinHandle<()>>>,
+    spectrum_enabled: AtomicBool,
+}
+
+pub(crate) fn sample_library_pool_bounded(
+    db: &LibraryDb,
+    recent_ids: &[String],
+    target_cap: usize,
+) -> Vec<Track> {
+    let mut lib = db.list_liked_tracks().unwrap_or_default();
+    let mut seen_lib: HashSet<String> = HashSet::with_capacity(lib.len().max(64));
+    for t in &lib {
+        seen_lib.insert(t.id.clone());
+    }
+    for t in db.list_tracks_by_ids(recent_ids).unwrap_or_default() {
+        if seen_lib.insert(t.id.clone()) {
+            lib.push(t);
+        }
+    }
+    if lib.len() < target_cap {
+        for t in db.list_local_tracks().unwrap_or_default() {
+            if seen_lib.insert(t.id.clone()) {
+                lib.push(t);
+            }
+            if lib.len() >= target_cap {
+                break;
+            }
+        }
+    }
+    lib
 }
 
 fn unix_now_secs() -> i64 {
@@ -232,6 +261,7 @@ impl FerricController {
                 shutdown_flag: AtomicBool::new(false),
             }),
             monitor_handle: Mutex::new(None),
+            spectrum_enabled: AtomicBool::new(true),
         });
 
         {
@@ -316,6 +346,7 @@ impl FerricController {
         } else {
             AudioEngine::start_supervised(eq, dsp.output_device.clone())?
         };
+        engine.set_spectrum_enabled(self.spectrum_enabled.load(Ordering::Relaxed));
         engine.send(EngineCommand::SetDspSettings(dsp));
         engine.send(EngineCommand::SetVolume(volume));
 
@@ -324,6 +355,15 @@ impl FerricController {
             *guard = Some(engine);
         }
         Ok(())
+    }
+
+    /// Enable or disable real-time 8-band spectrum computation in the audio engine.
+    pub fn set_spectrum_enabled(&self, enabled: bool) {
+        self.spectrum_enabled.store(enabled, Ordering::Relaxed);
+        let guard = self.audio.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(eng) = guard.as_ref() {
+            eng.set_spectrum_enabled(enabled);
+        }
     }
 
     /// Release idle audio engine resources when paused/stopped for prolonged background standby.
@@ -1079,27 +1119,7 @@ impl FerricController {
                 .filter(|a| !a.is_empty())
                 .collect();
 
-            let mut lib = st.db.list_liked_tracks().unwrap_or_default();
-            let mut seen_lib: HashSet<String> = lib.iter().map(|t| t.id.clone()).collect();
-            for t in st
-                .db
-                .list_tracks_by_ids(&st.session.recent_track_ids)
-                .unwrap_or_default()
-            {
-                if seen_lib.insert(t.id.clone()) {
-                    lib.push(t);
-                }
-            }
-            if lib.len() < 40 {
-                for t in st.db.list_local_tracks().unwrap_or_default() {
-                    if seen_lib.insert(t.id.clone()) {
-                        lib.push(t);
-                    }
-                    if lib.len() >= 120 {
-                        break;
-                    }
-                }
-            }
+            let lib = sample_library_pool_bounded(&st.db, &st.session.recent_track_ids, 120);
             st.extend_queue_gen = st.extend_queue_gen.wrapping_add(1);
             st.is_extending_queue = true;
             (

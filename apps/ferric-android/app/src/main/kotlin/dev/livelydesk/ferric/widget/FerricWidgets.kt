@@ -1425,6 +1425,7 @@ object FerricWidgetUpdater {
         context: Context,
         state: PlaybackUiState,
         progress: PlaybackProgress,
+        persistToPrefs: Boolean = true,
     ): WidgetDisplaySnapshot {
         val live = state.activeDisplayTrack()
         val recentFallback = if (live == null) state.recentTracks.firstOrNull() else null
@@ -1456,20 +1457,22 @@ object FerricWidgetUpdater {
             } else {
                 null
             }
-            FerricWidgetPrefs.saveLastTrack(
-                context,
-                CachedWidgetTrack(
-                    trackId = chosen.id,
-                    title = title,
-                    artist = artist,
-                    album = chosen.album,
-                    thumbnailUrl = chosen.thumbnailUrl,
-                    durationMs = durMs,
-                    liked = liked,
-                    lastPositionMs = posMs,
-                    accentArgb = accent ?: 0,
-                ),
-            )
+            if (persistToPrefs) {
+                FerricWidgetPrefs.saveLastTrack(
+                    context,
+                    CachedWidgetTrack(
+                        trackId = chosen.id,
+                        title = title,
+                        artist = artist,
+                        album = chosen.album,
+                        thumbnailUrl = chosen.thumbnailUrl,
+                        durationMs = durMs,
+                        liked = liked,
+                        lastPositionMs = posMs,
+                        accentArgb = accent ?: 0,
+                    ),
+                )
+            }
             return WidgetDisplaySnapshot(
                 trackId = chosen.id,
                 title = title,
@@ -1545,7 +1548,7 @@ object FerricWidgetUpdater {
         val frac = if (durMs > 0L) (posMs.toFloat() / durMs.toFloat()).coerceIn(0f, 1f) else 0f
         val elapsedStr = formatDurationMs(posMs)
         val totalStr = formatDurationMs(durMs)
-        val snap = resolveDisplaySnapshot(context, state, progress)
+        val snap = resolveDisplaySnapshot(context, state, progress, persistToPrefs = false)
         val memArt = if (!snap.thumbnailUrl.isNullOrBlank() && snap.thumbnailUrl == cachedArtUrl) cachedArtBitmap else null
 
         glassIds.forEach { widgetId ->
@@ -1573,7 +1576,11 @@ object FerricWidgetUpdater {
         }
     }
 
-    fun updateAll(context: Context, overrideState: PlaybackUiState? = null) {
+    fun updateAll(
+        context: Context,
+        overrideState: PlaybackUiState? = null,
+        persistToPrefs: Boolean = true,
+    ) {
         val appCtx = context.applicationContext
         val app = appCtx as? FerricApp
         val state = overrideState ?: app?.store?.uiState?.value ?: PlaybackUiState()
@@ -1586,9 +1593,11 @@ object FerricWidgetUpdater {
             val stripIds = manager.getAppWidgetIds(ComponentName(appCtx, CompactStripWidgetProvider::class.java))
             val squareIds = manager.getAppWidgetIds(ComponentName(appCtx, SquareCoverWidgetProvider::class.java))
             val glassIds = manager.getAppWidgetIds(ComponentName(appCtx, LiquidGlassWidgetProvider::class.java))
+            val noWidgets = stripIds.isEmpty() && squareIds.isEmpty() && glassIds.isEmpty()
+            if (noWidgets && !persistToPrefs) return@launch
 
-            val snap = resolveDisplaySnapshot(appCtx, state, progress)
-            if (stripIds.isEmpty() && squareIds.isEmpty() && glassIds.isEmpty()) return@launch
+            val snap = resolveDisplaySnapshot(appCtx, state, progress, persistToPrefs = persistToPrefs)
+            if (noWidgets) return@launch
 
             val artUrl = snap.thumbnailUrl
             val cachedBmp = if (!artUrl.isNullOrBlank() && artUrl == cachedArtUrl && cachedArtBitmap != null) {

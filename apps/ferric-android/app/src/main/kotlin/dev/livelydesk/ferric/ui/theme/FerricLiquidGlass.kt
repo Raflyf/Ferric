@@ -81,6 +81,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.CompositingStrategy as LayerCompositingStrategy
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
@@ -134,7 +135,7 @@ class FerricBackdropState(
     val graphicsLayer: GraphicsLayer,
     val blurredLayer: GraphicsLayer,
 ) {
-    val blurScale: Float = 0.25f
+    val blurScale: Float = 0.16f
     var rootOffset: Offset = Offset.Zero
     var hasRecorded: Boolean = false
     var isRecordingSource: Boolean = false
@@ -143,6 +144,7 @@ class FerricBackdropState(
     var hasBlurred: Boolean = false
     var blurredSize: IntSize = IntSize.Zero
     var blurVersion: Long = 0L
+    private var lastBlurNanos: Long = 0L
     private var lastBlurPx: Float = -1f
     private var lastIsLight: Boolean = false
     private var sharedBlurEffect: androidx.compose.ui.graphics.RenderEffect? = null
@@ -160,24 +162,31 @@ class FerricBackdropState(
         ) {
             return false
         }
-        val scaledBlur = (blurPx * blurScale).coerceIn(1.8f, 22f)
+        val scaledBlur = (blurPx * blurScale).coerceIn(1.6f, 20f)
         val bw = kotlin.math.ceil(contentSize.width * blurScale.toDouble()).toInt().coerceAtLeast(1)
         val bh = kotlin.math.ceil(contentSize.height * blurScale.toDouble()).toInt().coerceAtLeast(1)
         val targetSize = IntSize(bw, bh)
-        if (!hasBlurred ||
-            blurDirty ||
-            blurredSize != targetSize ||
-            sharedBlurEffect == null ||
+        val effectDirty = sharedBlurEffect == null ||
             abs(lastBlurPx - scaledBlur) > 0.4f ||
             lastIsLight != isLight
+        val nowNanos = System.nanoTime()
+        val cadenceReady = !hasBlurred || effectDirty || blurredSize != targetSize ||
+            (nowNanos - lastBlurNanos) >= 32_000_000L
+        if (!hasBlurred ||
+            blurredSize != targetSize ||
+            effectDirty ||
+            (blurDirty && cadenceReady)
         ) {
-            lastBlurPx = scaledBlur
-            lastIsLight = isLight
+            if (effectDirty) {
+                lastBlurPx = scaledBlur
+                lastIsLight = isLight
+                val fx = buildDecoupledBlurEffect(scaledBlur, isLight)
+                sharedBlurEffect = fx
+                blurredLayer.clip = false
+                blurredLayer.compositingStrategy = LayerCompositingStrategy.Offscreen
+                blurredLayer.renderEffect = fx
+            }
             blurredSize = targetSize
-            val fx = buildDecoupledBlurEffect(scaledBlur, isLight)
-            sharedBlurEffect = fx
-            blurredLayer.clip = false
-            blurredLayer.renderEffect = fx
             with(drawScope) {
                 blurredLayer.record(size = targetSize) {
                     scale(scaleX = blurScale, scaleY = blurScale, pivot = Offset.Zero) {
@@ -187,6 +196,7 @@ class FerricBackdropState(
             }
             blurDirty = false
             hasBlurred = true
+            lastBlurNanos = nowNanos
             blurVersion++
         }
         return hasBlurred

@@ -100,17 +100,8 @@ impl FerricController {
                 .or(st.pending_handoff_seek_ms)
                 .unwrap_or(tele.position_ms);
             let current_track = st.queue.current().map(QueueEntry::from_track);
-            let queue: Vec<QueueEntry> = st
-                .queue
-                .tracks()
-                .iter()
-                .take(200)
-                .map(QueueEntry::from_track)
-                .collect();
-            let current_index = current_track
-                .as_ref()
-                .and_then(|cur| queue.iter().position(|t| t.track_id == cur.track_id))
-                .unwrap_or(0);
+            let (ordered, current_index) = st.queue.ordered_queue_window(200);
+            let queue: Vec<QueueEntry> = ordered.into_iter().map(QueueEntry::from_track).collect();
             LocalPlaybackSnapshot {
                 is_playing,
                 current_track,
@@ -350,6 +341,19 @@ impl FerricController {
                 let _ = self.toggle_play_pause_local_only();
             }
             RemoteAction::SeekTo { position_ms } => {
+                {
+                    let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    let is_pending_online = st
+                        .queue
+                        .current()
+                        .and_then(|t| t.path.as_ref())
+                        .is_none_or(|p| !p.is_file());
+                    st.pending_handoff_seek_ms = if is_pending_online {
+                        Some(position_ms)
+                    } else {
+                        None
+                    };
+                }
                 self.send_audio(EngineCommand::SeekMs(position_ms));
                 self.push_connect_playback_snapshot_override(None, Some(position_ms));
                 self.wake_monitor();
@@ -361,19 +365,7 @@ impl FerricController {
                 let _ = self.prev_local_only();
             }
             RemoteAction::JumpToQueueIndex { index } => {
-                let (tracks, ctx) = {
-                    let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                    (st.queue.tracks().to_vec(), st.queue_context.clone())
-                };
-                if !tracks.is_empty() {
-                    let clamped = index.min(tracks.len() - 1);
-                    let this = Arc::clone(self);
-                    let _ = std::thread::Builder::new()
-                        .name("ferric-connect-jump".to_string())
-                        .spawn(move || {
-                            let _ = this.play_queue_local_only(tracks, clamped, ctx);
-                        });
-                }
+                let _ = self.jump_to_connect_window_local_only(index);
             }
             RemoteAction::PlayQueue {
                 tracks,

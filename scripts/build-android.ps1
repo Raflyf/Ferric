@@ -16,14 +16,14 @@ if ($FastDev) {
 }
 
 $ws = (Resolve-Path (Split-Path -Parent $PSScriptRoot)).ProviderPath
-$cargoTomlPath = Join-Path $ws 'Cargo.toml'
-$cargoToml = Get-Content -Raw -LiteralPath $cargoTomlPath
+$gradlePath = Join-Path $ws 'apps\ferric-android\app\build.gradle.kts'
+$gradleText = Get-Content -Raw -LiteralPath $gradlePath
 if (-not [string]::IsNullOrWhiteSpace($VersionOverride)) {
     $appVersion = $VersionOverride.Trim()
-} elseif ($cargoToml -match '(?m)^version\s*=\s*"(\d+\.\d+\.\d+)"') {
+} elseif ($gradleText -match '(?m)versionName\s*=\s*"(\d+\.\d+\.\d+)"') {
     $appVersion = $Matches[1]
 } else {
-    throw "Failed to read workspace version from $cargoTomlPath"
+    throw "Failed to read Android versionName from $gradlePath"
 }
 
 $androidHome = if (-not [string]::IsNullOrWhiteSpace($env:ANDROID_HOME)) {
@@ -70,6 +70,7 @@ $prevAndroidHome = $env:ANDROID_HOME
 $prevAndroidSdkRoot = $env:ANDROID_SDK_ROOT
 $prevAndroidNdkHome = $env:ANDROID_NDK_HOME
 $prevRustflags = $env:RUSTFLAGS
+$prevEncodedRustflags = $env:CARGO_ENCODED_RUSTFLAGS
 
 & subst $freeDrive $ws
 if ($LASTEXITCODE -ne 0) {
@@ -87,7 +88,24 @@ try {
     $jniLibsDir = "${freeDrive}\apps\ferric-android\app\src\main\jniLibs"
     New-Item -ItemType Directory -Force -Path $jniLibsDir | Out-Null
 
-    $env:RUSTFLAGS = '-C link-arg=-Wl,-z,max-page-size=16384'
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    $rustFlags = @(
+        '-C', 'link-arg=-Wl,-z,max-page-size=16384',
+        "--remap-path-prefix=${freeDrive}\=/s",
+        "--remap-path-prefix=${freeDrive}/=/s",
+        "--remap-path-prefix=$ws=/s",
+        "--remap-path-prefix=$($ws.Replace('\', '/'))=/s",
+        "--remap-path-prefix=$cargoHome=/c",
+        "--remap-path-prefix=$($cargoHome.Replace('\', '/'))=/c",
+        "--remap-path-prefix=$($env:USERPROFILE)=/u",
+        "--remap-path-prefix=$($env:USERPROFILE.Replace('\', '/'))=/u"
+    )
+    if ($env:CARGO_TARGET_DIR) {
+        $rustFlags += "--remap-path-prefix=$($env:CARGO_TARGET_DIR)=/t"
+        $rustFlags += "--remap-path-prefix=$($env:CARGO_TARGET_DIR.Replace('\', '/'))=/t"
+    }
+    $env:RUSTFLAGS = $null
+    $env:CARGO_ENCODED_RUSTFLAGS = $rustFlags -join ([char]0x1F)
     $ndkArgs = @('ndk')
     foreach ($abi in $Abis) {
         $ndkArgs += @('-t', $abi)
@@ -139,6 +157,7 @@ try {
 
     Write-Host '[3/5] Generating UniFFI Kotlin bindings from host ferric-mobile-ffi'
     $env:RUSTFLAGS = $prevRustflags
+    $env:CARGO_ENCODED_RUSTFLAGS = $prevEncodedRustflags
     & cargo build -p ferric-mobile-ffi --locked
     if ($LASTEXITCODE -ne 0) {
         throw "Host ferric-mobile-ffi build failed (exit $LASTEXITCODE)."
@@ -252,4 +271,5 @@ try {
     $env:ANDROID_SDK_ROOT = $prevAndroidSdkRoot
     $env:ANDROID_NDK_HOME = $prevAndroidNdkHome
     $env:RUSTFLAGS = $prevRustflags
+    $env:CARGO_ENCODED_RUSTFLAGS = $prevEncodedRustflags
 }

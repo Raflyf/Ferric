@@ -90,11 +90,12 @@ Ferric is a native Windows desktop music player built in Rust with a GPU-acceler
 
 | Package | Best for |
 | :--- | :--- |
-| [Windows installer (`ferricsetup-v0.1.3.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.3.msi>) | Per-user installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
-| [Portable ZIP (`Ferric-v0.1.3-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.3-windows-x86_64.zip>) | Running without installation |
+| [Windows installer (`ferricsetup-v0.1.3.msi`)](<https://github.com/Raflyf/Ferric/releases/latest/download/ferricsetup-v0.1.3.msi>) | Per-user Windows installation, Start Menu shortcut (`AppUserModelID`), and clean root-level uninstall |
+| [Portable ZIP (`Ferric-v0.1.3-windows-x86_64.zip`)](<https://github.com/Raflyf/Ferric/releases/latest/download/Ferric-v0.1.3-windows-x86_64.zip>) | Running on Windows without installation |
+| Android APK (`ferric-v0.1.0-android-arm64-v8a.apk` / `universal`) | Android 9+ initial release (`arm64-v8a` / universal) via [Android CI builds](<.github/workflows/ci-android.yml>) or manual APK install |
 | [SHA-256 checksums (`SHA256SUMS.txt`)](<https://github.com/Raflyf/Ferric/releases/latest/download/SHA256SUMS.txt>) | Verifying installer and portable archive integrity before running |
 
-**Requirements:** Windows 10 or Windows 11 on a 64-bit (`x86_64`) PC. No administrator rights are required. Native Windows Acrylic backdrop works best on Windows 11.
+**Requirements:** Windows 10 or Windows 11 on a 64-bit (`x86_64`) PC (no administrator rights required; native Windows Acrylic backdrop works best on Windows 11), or Android 9+ (API 28+).
 
 Browse [all releases](<https://github.com/Raflyf/Ferric/releases>) &middot; [LivelyDesk showcase](<https://livelydesk.vercel.app/ferric>) &middot; [LivelyDesk User Guide](<https://livelydesk.vercel.app/doc#ferric-install>) &middot; [Report an issue](<https://github.com/Raflyf/Ferric/issues>)
 
@@ -103,7 +104,7 @@ Browse [all releases](<https://github.com/Raflyf/Ferric/releases>) &middot; [Liv
 1. Download the MSI installer or extract the portable ZIP, and verify its hash against `SHA256SUMS.txt`.
 2. Launch Ferric. Open **Settings > Accounts** to sign in with your **Spotify (Free & Premium)** account and press **Sync Library** to sync your Liked Songs and playlists (or optionally connect YouTube Music or OpenSubsonic/Navidrome), and add local music folders under **Settings > Storage**.
 3. Open **Settings > Appearance** to switch between `AMOLED Black`, `Native Acrylic`, `Obsidian Studio`, and `Warm Cream Light`, adjust UI zoom (`Ctrl -` / `Ctrl +` / `Ctrl 0`), or tune Acrylic opacity and glass tint.
-4. Useful shortcuts: `Space` (play/pause), `Shift+Left` / `Shift+Right` (previous/next track), `M` (mute), `S` (shuffle), `R` (repeat), `L` (lyrics panel), `F` (fullscreen lyrics), `Ctrl+K` (command palette), `Esc` (close overlay).
+4. Useful shortcuts: `Space` (play/pause), `Shift+Left` / `Shift+Right` (previous/next track), `M` (mute), `S` (shuffle), `R` (repeat), `L` (like/unlike current track), `Ctrl+L` (lyrics panel), `F` (fullscreen lyrics), `Ctrl+K` (command palette), `Ctrl+Shift+C` (copy song link), `Esc` (close overlay).
 
 ## Building from source
 
@@ -141,7 +142,7 @@ Network connections are limited to the following endpoints:
 - **Update check (startup, opt-out in Settings > About):** Sends one read-only HTTPS `GET` to `api.github.com/repos/Raflyf/Ferric/releases/latest` (`User-Agent: Ferric/<version>`). Updates download only after you click **Update Now** from `github.com` / `objects.githubusercontent.com` / `release-assets.githubusercontent.com` and verify against `SHA256SUMS.txt`.
 - **Home discovery & artwork (startup and browsing):** Loads YouTube Music shelves and recommendations from `music.youtube.com` and cover thumbnails from `*.googleusercontent.com`, `*.ggpht.com`, and `i.ytimg.com`. When signed in to Spotify, Recommended Stations also query `clienttoken.spotify.com` and `api-partner.spotify.com` (with `open.spotify.com` / `open.spotifycdn.com` on query hash refresh) and load covers from `*.scdn.co` / `*.spotifycdn.com`.
 - **Playback, video clips & lyrics (on play):** Online playback resolves streams via `www.youtube.com` and streams audio/video from `*.googlevideo.com`. When no local `.lrc` file or embedded tag is present, lyrics are queried from `lrclib.net` with `api.lyrics.ovh` as fallback.
-- **Optional accounts & integrations (user action only):** Sign-in, library sync, and user-initiated playlist or liked-song edits contact `accounts.google.com`, `accounts.spotify.com`, `api.spotify.com`, `music.youtube.com`, or your user-configured OpenSubsonic/Navidrome server. Optional Discord Rich Presence communicates locally over `\\.\pipe\discord-ipc-0..9` (passing Ferric's public icon URL on `raw.githubusercontent.com` and optional Spotify / YouTube Music track link buttons in the Discord activity payload). Optional Ferric Connect LAN discovery broadcasts on local UDP port `43821` only while **Settings > Connect** is open.
+- **Optional accounts & integrations (user action only):** Sign-in, library sync, and user-initiated playlist or liked-song edits contact `accounts.google.com`, `accounts.spotify.com`, `api.spotify.com`, `music.youtube.com`, or your user-configured OpenSubsonic/Navidrome server. Optional Discord Rich Presence communicates locally over `\\.\pipe\discord-ipc-0..9` (passing Ferric's public icon URL on `raw.githubusercontent.com` and optional Spotify / YouTube Music track link buttons in the Discord activity payload). When Ferric Connect is enabled, LAN discovery uses UDP port `43821` and optional Cloud Relay links your signed-in Spotify/YouTube Music devices.
 
 ## License
 

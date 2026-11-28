@@ -199,11 +199,15 @@ fun PlaybackUiState.activeDisplayTrack(): FfiTrack? {
         !peer.activeTrackId.isNullOrBlank() -> connectState.activeRemoteQueue.firstOrNull { it.id == peer.activeTrackId }
         else -> null
     }
-    if (queueMatch != null) return queueMatch
+    if (queueMatch != null) {
+        val isLiked = queueMatch.liked || likedTracks.any { it.id == queueMatch.id }
+        return if (isLiked != queueMatch.liked) queueMatch.copy(liked = isLiked) else queueMatch
+    }
     if (peer.nowPlayingTitle.isBlank() && peer.activeTrackId.isNullOrBlank()) return currentTrack
     val tid = peer.activeTrackId?.takeIf { it.isNotBlank() } ?: "remote:${peer.deviceId}"
     val ytVid = tid.removePrefix("yt:video:").takeIf { tid.startsWith("yt:video:") && it.isNotBlank() }
     val spId = tid.removePrefix("sp:track:").takeIf { tid.startsWith("sp:track:") && it.isNotBlank() }
+    val remoteLiked = likedTracks.any { it.id == tid }
     return FfiTrack(
         id = tid,
         title = peer.nowPlayingTitle,
@@ -220,7 +224,7 @@ fun PlaybackUiState.activeDisplayTrack(): FfiTrack? {
         youtubeVideoId = ytVid,
         thumbnailUrl = peer.nowPlayingThumbnailUrl,
         replayGainDb = 0,
-        liked = false,
+        liked = remoteLiked,
     )
 }
 
@@ -415,10 +419,6 @@ class CoreStateStore(private val appContext: Context) {
 
         override fun onNowPlayingChanged(track: FfiTrack?) {
             val prevId = _uiState.value.currentTrack?.id
-            _uiState.update {
-                val next = PlaybackStateReducer.applyNowPlaying(it, track)
-                if (track != null) next.copy(miniPlayerDismissed = false) else next
-            }
             if (track == null) {
                 _playbackProgress.update { PlaybackProgress() }
             } else if (track.id != prevId) {
@@ -428,6 +428,10 @@ class CoreStateStore(private val appContext: Context) {
                         durationMs = track.durationMs.toLong().coerceAtLeast(0L),
                     )
                 }
+            }
+            _uiState.update {
+                val next = PlaybackStateReducer.applyNowPlaying(it, track)
+                if (track != null) next.copy(miniPlayerDismissed = false) else next
             }
             FerricWidgetUpdater.updateAll(appContext, _uiState.value)
             if (track != null && track.id != prevId) {
@@ -763,6 +767,24 @@ class CoreStateStore(private val appContext: Context) {
 
     fun stopAndDismissMiniPlayer() {
         PlaybackFocusCoordinator.onExplicitPause()
+        val prevState = _uiState.value
+        val prevProgress = _playbackProgress.value
+        prevState.activeDisplayTrack()?.let { prev ->
+            dev.livelydesk.ferric.widget.FerricWidgetPrefs.saveLastTrack(
+                appContext,
+                dev.livelydesk.ferric.widget.CachedWidgetTrack(
+                    trackId = prev.id,
+                    title = prev.title,
+                    artist = prev.artist,
+                    album = prev.album,
+                    thumbnailUrl = prev.thumbnailUrl,
+                    durationMs = prevProgress.durationMs.coerceAtLeast(prev.durationMs.toLong()).coerceAtLeast(prevState.durationMs).coerceAtLeast(0L),
+                    liked = prev.liked || prevState.likedTracks.any { it.id == prev.id },
+                    lastPositionMs = prevProgress.positionMs.coerceAtLeast(0L),
+                    accentArgb = prevState.coverShade.accent.hashCode().let { 0 },
+                ),
+            )
+        }
         _uiState.update {
             it.copy(
                 miniPlayerDismissed = true,
@@ -810,8 +832,15 @@ class CoreStateStore(private val appContext: Context) {
         }
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
-            if (state.currentTrack == null && state.tracks.isNotEmpty() && state.connectState.isLocalActiveSpeaker) {
-                runCatching { handle.playTrack(state.tracks.first().id) }
+            if (state.currentTrack == null && state.connectState.isLocalActiveSpeaker) {
+                val resumeId = state.recentTracks.firstOrNull()?.id
+                    ?: dev.livelydesk.ferric.widget.FerricWidgetPrefs.loadLastTrack(appContext)?.trackId
+                    ?: state.tracks.firstOrNull()?.id
+                if (!resumeId.isNullOrBlank()) {
+                    runCatching { handle.playTrack(resumeId) }
+                } else {
+                    runCatching { handle.togglePlayPause() }
+                }
             } else {
                 runCatching { handle.togglePlayPause() }
             }
@@ -833,8 +862,15 @@ class CoreStateStore(private val appContext: Context) {
         scope.launch {
             val handle = getOrCreateCore() ?: return@launch
             val state = _uiState.value
-            if (state.currentTrack == null && state.tracks.isNotEmpty()) {
-                runCatching { handle.playTrack(state.tracks.first().id) }
+            val resumeId = if (state.currentTrack == null) {
+                state.recentTracks.firstOrNull()?.id
+                    ?: dev.livelydesk.ferric.widget.FerricWidgetPrefs.loadLastTrack(appContext)?.trackId
+                    ?: state.tracks.firstOrNull()?.id
+            } else {
+                null
+            }
+            if (!resumeId.isNullOrBlank()) {
+                runCatching { handle.playTrack(resumeId) }
             } else {
                 runCatching { handle.play() }
             }
@@ -846,17 +882,47 @@ class CoreStateStore(private val appContext: Context) {
     }
 
     fun next() {
-        if (_uiState.value.connectState.isLocalActiveSpeaker) {
+        val state = _uiState.value
+        if (state.connectState.isLocalActiveSpeaker) {
             PlaybackFocusCoordinator.requestFocusForPlayback()
         }
-        scope.launch { runCatching { getOrCreateCore()?.next() } }
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            if (state.currentTrack == null && state.connectState.isLocalActiveSpeaker) {
+                val resumeId = state.recentTracks.firstOrNull()?.id
+                    ?: dev.livelydesk.ferric.widget.FerricWidgetPrefs.loadLastTrack(appContext)?.trackId
+                    ?: state.tracks.firstOrNull()?.id
+                if (!resumeId.isNullOrBlank()) {
+                    runCatching { handle.playTrack(resumeId) }
+                    return@launch
+                }
+            }
+            runCatching { handle.next() }
+        }
     }
 
     fun prev() {
-        if (_uiState.value.connectState.isLocalActiveSpeaker) {
+        val state = _uiState.value
+        if (state.connectState.isLocalActiveSpeaker) {
             PlaybackFocusCoordinator.requestFocusForPlayback()
         }
-        scope.launch { runCatching { getOrCreateCore()?.prev() } }
+        if (_playbackProgress.value.positionMs > 3_500L) {
+            _playbackProgress.update { it.copy(positionMs = 0L) }
+            _uiState.update { it.copy(seekSyncNonce = it.seekSyncNonce + 1L) }
+        }
+        scope.launch {
+            val handle = getOrCreateCore() ?: return@launch
+            if (state.currentTrack == null && state.connectState.isLocalActiveSpeaker) {
+                val resumeId = state.recentTracks.firstOrNull()?.id
+                    ?: dev.livelydesk.ferric.widget.FerricWidgetPrefs.loadLastTrack(appContext)?.trackId
+                    ?: state.tracks.firstOrNull()?.id
+                if (!resumeId.isNullOrBlank()) {
+                    runCatching { handle.playTrack(resumeId) }
+                    return@launch
+                }
+            }
+            runCatching { handle.prev() }
+        }
     }
 
     fun seekTo(positionMs: Long) {
@@ -1507,12 +1573,31 @@ class CoreStateStore(private val appContext: Context) {
                         val curTrack = st.currentTrack?.let { c ->
                             if (c.id == trackId) c.copy(liked = liked) else c
                         }
+                        val nextRecent = st.recentTracks.map { r ->
+                            if (r.id == trackId) r.copy(liked = liked) else r
+                        }
+                        val nextLiked = if (liked) {
+                            if (st.likedTracks.any { it.id == trackId }) {
+                                st.likedTracks.map { if (it.id == trackId) it.copy(liked = true) else it }
+                            } else {
+                                val target = st.activeDisplayTrack()?.takeIf { it.id == trackId }
+                                    ?: orig.firstOrNull { it.id == trackId }
+                                    ?: nextRecent.firstOrNull { it.id == trackId }
+                                if (target != null) listOf(target.copy(liked = true)) + st.likedTracks else st.likedTracks
+                            }
+                        } else {
+                            st.likedTracks.filterNot { it.id == trackId }
+                        }
                         st.copy(
                             activeDetail = detail,
                             originalDetailTracks = orig,
                             currentTrack = curTrack,
+                            recentTracks = nextRecent,
+                            likedTracks = nextLiked,
                         )
                     }
+                    dev.livelydesk.ferric.widget.FerricWidgetPrefs.updateLastTrackLiked(appContext, trackId, liked)
+                    FerricWidgetUpdater.updateAll(appContext, _uiState.value)
                 }
                 .onFailure { err -> _uiState.update { it.copy(statusMessage = err.message) } }
         }

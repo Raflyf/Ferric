@@ -1,6 +1,8 @@
 package dev.livelydesk.ferric.ui.screens
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,7 +29,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Favorite
-import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -161,7 +163,7 @@ fun HomeScreen(
         }
     }
 
-    // Build Spotify-style 2-column quick shortcuts when user has playlists/liked songs.
+    // Build 2-column quick shortcuts when user has playlists/liked songs.
     val quickShortcuts = remember(state.playlists, state.likedTracks.size) {
         buildList {
             if (state.likedTracks.isNotEmpty()) {
@@ -348,25 +350,85 @@ fun HomeScreen(
                                     .ferricGlassSurface(
                                         palette = palette,
                                         cornerRadius = 999.dp,
-                                        accentGlow = palette.accent,
-                                        fallbackColor = palette.accent.copy(alpha = 0.16f),
+                                        accentGlow = Color(0xFFFF7A26),
+                                        fallbackColor = if (palette.isLight) Color(0x20FF7A26) else Color(0x2A1A1412),
+                                    )
+                                    .border(
+                                        width = 1.dp,
+                                        brush = Brush.linearGradient(
+                                            listOf(
+                                                Color(0x99FFC27A),
+                                                Color(0x33FF6B22),
+                                            ),
+                                        ),
+                                        shape = CircleShape,
                                     )
                                     .clickable(onClick = onOpenStats),
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.LocalFireDepartment,
-                                        contentDescription = null,
-                                        tint = palette.accent,
-                                        modifier = Modifier.size(16.dp),
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(22.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                Brush.radialGradient(
+                                                    listOf(
+                                                        Color(0x55FF7B24),
+                                                        Color(0x14FF551A),
+                                                    ),
+                                                ),
+                                            ),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Canvas(modifier = Modifier.size(14.dp)) {
+                                            val w = size.width
+                                            val h = size.height
+                                            val outer = Path().apply {
+                                                moveTo(w * 0.56f, h * 0.06f)
+                                                cubicTo(w * 0.68f, h * 0.28f, w * 0.90f, h * 0.42f, w * 0.88f, h * 0.66f)
+                                                cubicTo(w * 0.86f, h * 0.88f, w * 0.68f, h * 0.98f, w * 0.49f, h * 0.98f)
+                                                cubicTo(w * 0.26f, h * 0.98f, w * 0.12f, h * 0.82f, w * 0.13f, h * 0.60f)
+                                                cubicTo(w * 0.14f, h * 0.44f, w * 0.25f, h * 0.36f, w * 0.32f, h * 0.29f)
+                                                cubicTo(w * 0.33f, h * 0.38f, w * 0.39f, h * 0.41f, w * 0.43f, h * 0.34f)
+                                                cubicTo(w * 0.48f, h * 0.25f, w * 0.48f, h * 0.14f, w * 0.56f, h * 0.06f)
+                                                close()
+                                            }
+                                            drawPath(
+                                                path = outer,
+                                                brush = Brush.verticalGradient(
+                                                    listOf(
+                                                        Color(0xFFFFE05C),
+                                                        Color(0xFFFF8324),
+                                                        Color(0xFFF23F1A),
+                                                    ),
+                                                ),
+                                            )
+                                            val core = Path().apply {
+                                                moveTo(w * 0.52f, h * 0.40f)
+                                                cubicTo(w * 0.62f, h * 0.50f, w * 0.70f, h * 0.62f, w * 0.67f, h * 0.76f)
+                                                cubicTo(w * 0.65f, h * 0.87f, w * 0.57f, h * 0.92f, w * 0.49f, h * 0.92f)
+                                                cubicTo(w * 0.39f, h * 0.92f, w * 0.33f, h * 0.84f, w * 0.34f, h * 0.73f)
+                                                cubicTo(w * 0.35f, h * 0.61f, w * 0.44f, h * 0.51f, w * 0.52f, h * 0.40f)
+                                                close()
+                                            }
+                                            drawPath(
+                                                path = core,
+                                                brush = Brush.verticalGradient(
+                                                    listOf(Color(0xFFFFF8D6), Color(0xFFFFB83E)),
+                                                    startY = h * 0.40f,
+                                                    endY = h * 0.92f,
+                                                ),
+                                            )
+                                        }
+                                    }
                                     Text(
                                         text = "${streakDays}d",
                                         style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
                                         color = palette.textPrimary,
                                     )
                                 }
@@ -413,7 +475,7 @@ fun HomeScreen(
             }
         }
 
-        // Spotify-style 2-column quick access grid (when user has synced playlists / Liked Songs)
+        // 2-column quick access grid (when user has synced playlists / Liked Songs)
         if (quickShortcuts.size >= 2) {
             item(key = "home_quick_shortcuts") {
                 Column(
@@ -822,6 +884,7 @@ private fun VisualGoToCell(
                 .background(palette.elevated),
             contentAlignment = Alignment.Center,
         ) {
+            ArtworkThumb(url = null, size = 56.dp, cornerRadius = cellRadius, modifier = Modifier.fillMaxSize())
             if (!tile.thumbnailUrl.isNullOrBlank()) {
                 val req = remember(tile.thumbnailUrl) {
                     ImageRequest.Builder(context)
@@ -836,8 +899,6 @@ private fun VisualGoToCell(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                 )
-            } else {
-                ArtworkThumb(url = null, size = 56.dp, cornerRadius = cellRadius)
             }
         }
         Text(

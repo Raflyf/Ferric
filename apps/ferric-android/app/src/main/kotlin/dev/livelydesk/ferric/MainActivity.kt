@@ -184,6 +184,13 @@ class MainActivity : ComponentActivity() {
         val st = store.uiState.value
         val activeLocalPlayback = st.isPlaying && st.connectState.isLocalActiveSpeaker
         if (isFinishing && !activeLocalPlayback) {
+            dev.livelydesk.ferric.widget.FerricWidgetUpdater.updateAll(
+                applicationContext,
+                st.copy(isPlaying = false),
+            )
+            runCatching {
+                stopService(Intent(this, dev.livelydesk.ferric.playback.FerricPlaybackService::class.java))
+            }
             store.shutdown()
         }
         super.onDestroy()

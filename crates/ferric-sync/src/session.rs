@@ -30,7 +30,7 @@ const HANDSHAKE_MAGIC: &[u8; 4] = b"FCH1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const BEACON_INTERVAL: Duration = Duration::from_secs(3);
 const RELAY_HELLO_INTERVAL: Duration = Duration::from_secs(4);
-const RELAY_PEER_TTL: Duration = Duration::from_secs(10);
+const RELAY_PEER_TTL: Duration = Duration::from_secs(35);
 const RELAY_STATE_HEARTBEAT: Duration = Duration::from_millis(3_500);
 const LAN_PING_INTERVAL: Duration = Duration::from_secs(4);
 const LAN_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -883,7 +883,13 @@ impl EngineRunner {
                         let next_track = snap.current_track.as_ref().map(|t| t.track_id.clone());
                         let queue_changed = self.local_playback.queue.len() != snap.queue.len()
                             || self.local_playback.current_index != snap.current_index
-                            || prev_track != next_track;
+                            || prev_track != next_track
+                            || self
+                                .local_playback
+                                .queue
+                                .iter()
+                                .zip(snap.queue.iter())
+                                .any(|(a, b)| a.track_id != b.track_id);
 
                         self.local_playback = *snap;
                         // Claim active speaker authority on explicit play transition outside post-yield fade guard.
@@ -1885,12 +1891,17 @@ impl EngineRunner {
                 self.failover_active_speaker_to_local(&active_id, snap);
                 return;
             }
+            let start_playing = self
+                .connected
+                .get(&active_id)
+                .and_then(|p| p.last_state.as_ref())
+                .is_none_or(|s| s.is_playing);
             self.cmd_seq += 1;
             let cmd = SyncFrame::Command {
                 cmd_id: self.cmd_seq,
                 action: RemoteAction::TransferActiveSpeaker {
                     new_speaker: target_device_id.clone(),
-                    start_playing: true,
+                    start_playing,
                 },
             };
             self.send_to_peer_targeted(&active_id, &cmd);

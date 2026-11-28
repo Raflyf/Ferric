@@ -114,6 +114,12 @@ pub enum EngineCommand {
         replay_gain_db: i32,
         fallback_duration_ms: u64,
     },
+    LoadPausedTrack {
+        path: PathBuf,
+        replay_gain_db: i32,
+        fallback_duration_ms: u64,
+        seek_ms: u64,
+    },
     CrossfadeToTrack {
         path: PathBuf,
         replay_gain_db: i32,
@@ -1906,6 +1912,28 @@ impl DecodeRuntime {
         out_rate: u32,
         telemetry: &AudioTelemetry,
     ) {
+        self.load_primary_with_state(
+            path,
+            replay_gain_db,
+            fallback_duration_ms,
+            out_rate,
+            telemetry,
+            true,
+            0,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_primary_with_state(
+        &mut self,
+        path: &Path,
+        replay_gain_db: i32,
+        fallback_duration_ms: u64,
+        out_rate: u32,
+        telemetry: &AudioTelemetry,
+        start_playing: bool,
+        seek_ms: u64,
+    ) {
         match ActiveDeck::open(
             path,
             out_rate,
@@ -1924,6 +1952,9 @@ impl DecodeRuntime {
                         self.dsp.playback_speed,
                     );
                 }
+                if seek_ms > 1_000 {
+                    let _ = deck.seek_ms(seek_ms, self.dsp.playback_speed);
+                }
                 telemetry.bump_epoch();
                 telemetry.auto_transitioned.store(false, Ordering::Release);
                 telemetry.is_crossfading.store(false, Ordering::Relaxed);
@@ -1936,14 +1967,16 @@ impl DecodeRuntime {
                 telemetry
                     .position_ms
                     .store(deck.current_pos_ms(), Ordering::Relaxed);
-                telemetry.is_playing.store(true, Ordering::Release);
+                telemetry.is_playing.store(start_playing, Ordering::Release);
                 self.eq.reset();
                 self.bass_swap.reset();
                 self.crossfade_state = None;
                 self.deck_b = None;
                 self.queued_next = None;
                 self.bump_preload_gen();
-                self.micro_fade = if self.dsp.fade_in_play_ms > 0 {
+                self.micro_fade = if !start_playing {
+                    MicroFade::Steady(0.0)
+                } else if self.dsp.fade_in_play_ms > 0 {
                     MicroFade::FadingIn {
                         start_gain: 0.0,
                         elapsed_frames: 0,
@@ -2166,6 +2199,22 @@ fn decode_loop(
                         fallback_duration_ms,
                         out_rate,
                         &telemetry,
+                    );
+                }
+                EngineCommand::LoadPausedTrack {
+                    path,
+                    replay_gain_db,
+                    fallback_duration_ms,
+                    seek_ms,
+                } => {
+                    rt.load_primary_with_state(
+                        &path,
+                        replay_gain_db,
+                        fallback_duration_ms,
+                        out_rate,
+                        &telemetry,
+                        false,
+                        seek_ms,
                     );
                 }
                 EngineCommand::CrossfadeToTrack {

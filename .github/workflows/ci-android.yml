@@ -65,7 +65,7 @@ jobs:
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           echo "ANDROID_HOME=${SDK_ROOT}" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "$GITHUB_ENV"
-          yes | "${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --sdk_root="${SDK_ROOT}" \
+          { yes 2>/dev/null || true; } | "${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --sdk_root="${SDK_ROOT}" \
             "platforms;android-36" \
             "platforms;android-35" \
             "build-tools;36.0.0" \
@@ -91,11 +91,12 @@ jobs:
 
       - name: Build Android native libraries (arm64-v8a, armeabi-v7a, x86_64) with 16 KB ELF alignment
         shell: bash
-        env:
-          RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
         run: |
           set -euo pipefail
-          mkdir -p apps/ferric-android/app/src/main/jniLibs
+          export CARGO_HOME="${{ github.workspace }}/.cargo-ci-tmp"
+          export CARGO_ENCODED_RUSTFLAGS=$'-C\x1flink-arg=-Wl,-z,max-page-size=16384\x1f--remap-path-prefix='"${{ github.workspace }}"$'=.\x1f--remap-path-prefix='"${CARGO_HOME}"$'=cargo-home'
+          mkdir -p apps/ferric-android/app/src/main/jniLibs "${CARGO_HOME}"
+          cp -r "${HOME}/.cargo/." "${CARGO_HOME}/" 2>/dev/null || true
           cargo ndk \
             -t arm64-v8a \
             -t armeabi-v7a \
@@ -103,6 +104,7 @@ jobs:
             --platform 28 \
             -o apps/ferric-android/app/src/main/jniLibs \
             build --release -p ferric-mobile-ffi --locked
+          rm -rf "${CARGO_HOME}"
 
       - name: Verify 16 KB ELF LOAD alignment on 64-bit native libraries
         shell: bash
@@ -155,7 +157,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VER="$(sed -n 's/^version = "\([0-9]\+\.[0-9]\+\.[0-9]\+\)"/\1/p' Cargo.toml | head -n 1)"
+          VER="$(sed -n 's/.*versionName = "\([0-9]\+\.[0-9]\+\.[0-9]\+\)".*/\1/p' apps/ferric-android/app/build.gradle.kts | head -n 1)"
           test -n "${VER}"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           mkdir -p dist/android

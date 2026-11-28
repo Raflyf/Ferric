@@ -452,7 +452,7 @@ fun SearchScreen(
             }
         }
 
-        // Idle state: Recent Searches + 2-Column Spotify-style Browse All genre cards
+        // Idle state: Recent Searches + 2-Column Browse All genre cards
         if (query.isBlank()) {
             if (distinctRecent.isNotEmpty()) {
                 item(key = "recent_searches") {

@@ -482,7 +482,7 @@ impl FerricController {
         if should_auto_extend {
             let _ = self.extend_queue_up_next();
         }
-        self.push_connect_playback_snapshot_override(None, handoff_seek_ms);
+        self.push_connect_playback_snapshot_override(Some(!start_paused), handoff_seek_ms);
         self.wake_monitor();
         Ok(())
     }
@@ -494,19 +494,28 @@ impl FerricController {
     ) -> ControllerResult<()> {
         let local_path = self.resolve_immediate_path(track);
         if let Some(path) = local_path {
-            let immediate_seek = {
+            let (immediate_seek, start_paused) = {
                 let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                st.pending_handoff_seek_ms.take()
+                (st.pending_handoff_seek_ms.take(), st.paused_while_resolving)
             };
-            self.send_audio(EngineCommand::LoadAndPlayTrack {
-                path,
-                replay_gain_db: track.replay_gain_db,
-                fallback_duration_ms: track.duration_ms,
-            });
-            if let Some(ms) = immediate_seek
-                && ms > 1_000
-            {
-                self.send_audio(EngineCommand::SeekMs(ms));
+            if start_paused {
+                self.send_audio(EngineCommand::LoadPausedTrack {
+                    path,
+                    replay_gain_db: track.replay_gain_db,
+                    fallback_duration_ms: track.duration_ms,
+                    seek_ms: immediate_seek.unwrap_or(0),
+                });
+            } else {
+                self.send_audio(EngineCommand::LoadAndPlayTrack {
+                    path,
+                    replay_gain_db: track.replay_gain_db,
+                    fallback_duration_ms: track.duration_ms,
+                });
+                if let Some(ms) = immediate_seek
+                    && ms > 1_000
+                {
+                    self.send_audio(EngineCommand::SeekMs(ms));
+                }
             }
             self.queue_upcoming_deck_b();
             self.prefetch_upcoming_online_track();
@@ -667,22 +676,29 @@ impl FerricController {
                     if let Some(cur) = updated_cur {
                         self.sink.on_now_playing(Some(cur));
                     }
-                    self.send_audio(EngineCommand::LoadAndPlayTrack {
-                        path,
-                        replay_gain_db: track.replay_gain_db,
-                        fallback_duration_ms: if duration_ms > 0 {
-                            duration_ms
-                        } else {
-                            track.duration_ms
-                        },
-                    });
-                    if let Some(ms) = pending_seek
-                        && ms > 1_000
-                    {
-                        self.send_audio(EngineCommand::SeekMs(ms));
-                    }
+                    let fallback_dur = if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        track.duration_ms
+                    };
                     if was_paused {
-                        self.send_audio(EngineCommand::Pause);
+                        self.send_audio(EngineCommand::LoadPausedTrack {
+                            path,
+                            replay_gain_db: track.replay_gain_db,
+                            fallback_duration_ms: fallback_dur,
+                            seek_ms: pending_seek.unwrap_or(0),
+                        });
+                    } else {
+                        self.send_audio(EngineCommand::LoadAndPlayTrack {
+                            path,
+                            replay_gain_db: track.replay_gain_db,
+                            fallback_duration_ms: fallback_dur,
+                        });
+                        if let Some(ms) = pending_seek
+                            && ms > 1_000
+                        {
+                            self.send_audio(EngineCommand::SeekMs(ms));
+                        }
                     }
                     self.queue_upcoming_deck_b();
                     self.prefetch_upcoming_online_track();
@@ -692,8 +708,14 @@ impl FerricController {
             }
             Err(err) => {
                 let is_still_current = {
-                    let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                    st.resolve_gen == gen_id
+                    let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    if st.resolve_gen == gen_id {
+                        st.pending_handoff_seek_ms = None;
+                        st.paused_while_resolving = false;
+                        true
+                    } else {
+                        false
+                    }
                 };
                 if !is_still_current {
                     return;
@@ -918,6 +940,7 @@ impl FerricController {
             let next_t = st.queue.next_track_manual().cloned();
             st.last_finished_seq = current_seq;
             st.paused_while_resolving = false;
+            st.pending_handoff_seek_ms = None;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
             let upcoming: Vec<Track> = st
                 .queue
@@ -1209,6 +1232,7 @@ impl FerricController {
             let prev_t = st.queue.prev_track().cloned();
             st.last_finished_seq = current_seq;
             st.paused_while_resolving = false;
+            st.pending_handoff_seek_ms = None;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
             let upcoming: Vec<Track> = st
                 .queue
@@ -1273,6 +1297,17 @@ impl FerricController {
 
     #[must_use]
     pub fn toggle_shuffle(&self) -> bool {
+        if self.is_controlling_remote() {
+            let snap = self.get_connect_state();
+            let remote_shuffle = snap
+                .peers
+                .iter()
+                .find(|p| p.connected && p.device_id == snap.active_speaker_id)
+                .is_some_and(|p| p.shuffle_enabled);
+            let next_val = !remote_shuffle;
+            self.forward_remote_action(ferric_sync::RemoteAction::SetShuffle(next_val));
+            return next_val;
+        }
         let (enabled, up_next) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let next_val = !st.queue.shuffle;
@@ -1286,18 +1321,25 @@ impl FerricController {
                 .collect();
             (next_val, upcoming)
         };
-        if self.is_controlling_remote() {
-            self.forward_remote_action(ferric_sync::RemoteAction::SetShuffle(enabled));
-        } else {
-            self.queue_upcoming_deck_b();
-            self.push_connect_playback_snapshot();
-        }
+        self.queue_upcoming_deck_b();
+        self.push_connect_playback_snapshot();
         self.sink.on_queue_changed(up_next);
         enabled
     }
 
     #[must_use]
     pub fn cycle_repeat(&self) -> RepeatMode {
+        if self.is_controlling_remote() {
+            let snap = self.get_connect_state();
+            let remote_repeat = snap
+                .peers
+                .iter()
+                .find(|p| p.connected && p.device_id == snap.active_speaker_id)
+                .map_or(RepeatMode::Off, |p| p.repeat_mode);
+            let next_mode = remote_repeat.next();
+            self.forward_remote_action(ferric_sync::RemoteAction::SetRepeat(next_mode));
+            return next_mode;
+        }
         let (mode, up_next) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let next_mode = st.queue.repeat.next();
@@ -1311,12 +1353,8 @@ impl FerricController {
                 .collect();
             (next_mode, upcoming)
         };
-        if self.is_controlling_remote() {
-            self.forward_remote_action(ferric_sync::RemoteAction::SetRepeat(mode));
-        } else {
-            self.queue_upcoming_deck_b();
-            self.push_connect_playback_snapshot();
-        }
+        self.queue_upcoming_deck_b();
+        self.push_connect_playback_snapshot();
         self.sink.on_queue_changed(up_next);
         mode
     }
@@ -1443,6 +1481,17 @@ impl FerricController {
     ) -> Result<Option<(String, String, String, String)>, String> {
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let found = ferric_providers::updater::check_latest_release(current_version, &cancel)?;
+        Ok(found.map(|r| (r.tag, r.version, r.release_url, r.summary)))
+    }
+
+    /// Query GitHub Releases for a newer stable Android release relative to `current_version`.
+    pub fn check_latest_android_release(
+        &self,
+        current_version: &str,
+    ) -> Result<Option<(String, String, String, String)>, String> {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let found =
+            ferric_providers::updater::check_latest_android_release(current_version, &cancel)?;
         Ok(found.map(|r| (r.tag, r.version, r.release_url, r.summary)))
     }
 
@@ -1693,8 +1742,8 @@ impl Drop for FerricController {
     }
 }
 
-/// Score and sequence Up Next candidates using Spotify-style blend (80% cohesive radio
-/// discovery + 20% personal affinity mix) and strict 3-slot artist cooldown separation.
+/// Score and sequence Up Next candidates using radio discovery (80%) paired with personal
+/// affinity mix (20%) and strict 3-slot artist cooldown separation.
 #[allow(clippy::too_many_arguments)]
 fn sequence_spotify_up_next(
     radio_pools: &[Vec<Track>],
@@ -1781,7 +1830,7 @@ fn sequence_spotify_up_next(
         }
     }
 
-    // Inject Spotify-style personal affinity bridges (~20% mix) from unseen library tracks
+    // Inject personal affinity bridges (~20% mix) from unseen library tracks
     let mut lib_candidates: Vec<(i32, Track)> = Vec::with_capacity(32);
     for t in library_pool {
         if existing_ids.contains(&t.id)
@@ -1877,7 +1926,7 @@ fn sequence_spotify_up_next(
         idx.map(|i| bucket.remove(i))
     };
 
-    // Spotify cadence: 4 radio discovery tracks -> 1 affinity bridge track, respecting 3-artist cooldown.
+    // Blended cadence: 4 radio discovery tracks -> 1 affinity bridge track, enforcing artist cooldown.
     let mut slot = 0usize;
     while out.len() < limit && (!radio_bucket.is_empty() || !affinity_bucket.is_empty()) {
         let prefer_affinity =
@@ -1899,6 +1948,26 @@ fn sequence_spotify_up_next(
                     &seen_ids,
                     &seen_cores,
                     3,
+                )
+            })
+            .or_else(|| {
+                pop_next_coherent(
+                    &mut affinity_bucket,
+                    &artist_window,
+                    &prev_album,
+                    &seen_ids,
+                    &seen_cores,
+                    1,
+                )
+            })
+            .or_else(|| {
+                pop_next_coherent(
+                    &mut radio_bucket,
+                    &artist_window,
+                    &prev_album,
+                    &seen_ids,
+                    &seen_cores,
+                    1,
                 )
             })
         } else {
@@ -1940,7 +2009,9 @@ fn sequence_spotify_up_next(
                     1,
                 )
             })
-            .or_else(|| {
+        }
+        .or_else(|| {
+            if out.is_empty() {
                 pop_next_coherent(
                     &mut radio_bucket,
                     &artist_window,
@@ -1949,8 +2020,10 @@ fn sequence_spotify_up_next(
                     &seen_cores,
                     0,
                 )
-            })
-        };
+            } else {
+                None
+            }
+        });
 
         let Some(cand) = picked else {
             break;

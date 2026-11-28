@@ -239,6 +239,48 @@ impl PlayQueue {
         &self.tracks
     }
 
+    /// Returns an ordered queue slice up to `max_len` items following `self.order` (respecting
+    /// active Shuffle ordering) plus the cursor index inside that slice, used by Ferric Connect.
+    pub fn ordered_queue_window(&self, max_len: usize) -> (Vec<&Track>, usize) {
+        let len = self.order.len();
+        if len == 0 || max_len == 0 {
+            return (Vec::new(), 0);
+        }
+        let cur_pos = self.cursor.unwrap_or(0).min(len - 1);
+        let start = if len <= max_len {
+            0
+        } else {
+            cur_pos.saturating_sub(25).min(len - max_len)
+        };
+        let end = (start + max_len).min(len);
+        let items = self.order[start..end]
+            .iter()
+            .filter_map(|&idx| self.tracks.get(idx))
+            .collect();
+        (items, cur_pos.saturating_sub(start))
+    }
+
+    /// Jumps to a position inside the active `ordered_queue_window(max_len)` without re-shuffling.
+    pub fn jump_to_connect_window_index(
+        &mut self,
+        window_idx: usize,
+        max_len: usize,
+    ) -> Option<&Track> {
+        let len = self.order.len();
+        if len == 0 || max_len == 0 {
+            return None;
+        }
+        let cur_pos = self.cursor.unwrap_or(0).min(len - 1);
+        let start = if len <= max_len {
+            0
+        } else {
+            cur_pos.saturating_sub(25).min(len - max_len)
+        };
+        let target = start.saturating_add(window_idx).min(len - 1);
+        self.cursor = Some(target);
+        self.current()
+    }
+
     pub fn len(&self) -> usize {
         self.order.len()
     }
@@ -597,5 +639,28 @@ mod tests {
         let removed = q.remove_upcoming(0);
         assert_eq!(removed.as_ref().map(|t| t.id.as_str()), Some("2"));
         assert_eq!(q.current().map(|t| t.id.as_str()), Some("3"));
+    }
+
+    #[test]
+    fn ordered_queue_window_and_jump_preserve_shuffle_order() {
+        let tracks: Vec<Track> = (0..10)
+            .map(|i| dummy_track(&format!("{i}"), &format!("Artist {i}")))
+            .collect();
+        let mut q = PlayQueue::new();
+        q.set_tracks(tracks, Some(4));
+        q.set_shuffle(true);
+        let (win, cur) = q.ordered_queue_window(200);
+        assert_eq!(cur, 0);
+        assert_eq!(win.len(), 10);
+        assert_eq!(win[0].id, "4");
+        let expected_third = win[3].id.clone();
+        let jumped = q.jump_to_connect_window_index(3, 200).cloned();
+        assert_eq!(
+            jumped.as_ref().map(|t| t.id.as_str()),
+            Some(expected_third.as_str())
+        );
+        let (win_after, cur_after) = q.ordered_queue_window(200);
+        assert_eq!(cur_after, 3);
+        assert_eq!(win_after[0].id, "4");
     }
 }

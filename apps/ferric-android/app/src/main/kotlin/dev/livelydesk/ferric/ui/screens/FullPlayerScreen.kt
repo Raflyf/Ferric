@@ -98,6 +98,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -375,10 +376,11 @@ fun FullPlayerScreen(
                             .clickable(onClick = onCollapse),
                         contentAlignment = Alignment.Center,
                     ) {
+                        val topBarTint = if (isStandardLayout && palette.isLight) palette.textPrimary else Color.White
                         Icon(
                             imageVector = Icons.Rounded.KeyboardArrowDown,
                             contentDescription = "Minimize player",
-                            tint = Color.White,
+                            tint = topBarTint,
                             modifier = Modifier.size(26.dp),
                         )
                     }
@@ -399,15 +401,16 @@ fun FullPlayerScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
+                        val topBarTextTint = if (isStandardLayout && palette.isLight) palette.textPrimary else Color.White
                         MediaMode.entries.forEach { mode ->
                             val selected = mediaMode == mode && !showLyrics
                             val pillBg by animateColorAsState(
-                                targetValue = if (selected) Color.White.copy(alpha = 0.22f) else Color.Transparent,
+                                targetValue = if (selected) topBarTextTint.copy(alpha = 0.22f) else Color.Transparent,
                                 animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
                                 label = "media_mode_pill_bg",
                             )
                             val labelTint by animateColorAsState(
-                                targetValue = if (selected) Color.White else Color.White.copy(alpha = 0.72f),
+                                targetValue = if (selected) topBarTextTint else topBarTextTint.copy(alpha = 0.72f),
                                 animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut),
                                 label = "media_mode_pill_tint",
                             )
@@ -448,7 +451,7 @@ fun FullPlayerScreen(
                         Icon(
                             imageVector = Icons.Rounded.Palette,
                             contentDescription = "Theme Studio",
-                            tint = Color.White,
+                            tint = if (isStandardLayout && palette.isLight) palette.textPrimary else Color.White,
                             modifier = Modifier.size(20.dp),
                         )
                     }
@@ -694,16 +697,18 @@ fun FullPlayerScreen(
                                 modifier = Modifier.size(36.dp),
                             )
                         }
+                        val playBgColor = if (isStandardLayout || palette.isLight) palette.accent else Color.White
+                        val playIconTint = if (playBgColor.luminance() > 0.45f) Color.Black else Color.White
                         Surface(
                             shape = CircleShape,
-                            color = if (isStandardLayout || palette.isLight) palette.accent else Color.White,
+                            color = playBgColor,
                             modifier = Modifier.size(66.dp),
                         ) {
                             IconButton(onClick = onTogglePlayPause) {
                                 Icon(
                                     imageVector = if (displayPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                     contentDescription = if (displayPlaying) "Pause" else "Play",
-                                    tint = if (isStandardLayout && palette.isLight) Color.White else Color.Black,
+                                    tint = playIconTint,
                                     modifier = Modifier.size(36.dp),
                                 )
                             }
@@ -746,8 +751,8 @@ fun FullPlayerScreen(
                             SleekScrubSlider(
                                 value = draftVol,
                                 valueRange = 0f..1f,
-                                activeColor = Color.White.copy(alpha = 0.90f),
-                                inactiveColor = Color.White.copy(alpha = 0.22f),
+                                activeColor = onCanvasPrimary.copy(alpha = 0.90f),
+                                inactiveColor = onCanvasPrimary.copy(alpha = 0.22f),
                                 thumbSize = 11.dp,
                                 trackHeight = 3.5.dp,
                                 onValueChange = { next ->
@@ -1484,6 +1489,8 @@ private fun DockedVideoStage(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        val isStandardLight = palette.playerLayout == "standard" && palette.isLight
+        val videoTextColor = if (isStandardLight) palette.textPrimary else Color.White
         when {
             video.isLoading -> {
                 Box(
@@ -1491,13 +1498,13 @@ private fun DockedVideoStage(
                         .fillMaxWidth()
                         .aspectRatio(16f / 9f)
                         .clip(RoundedCornerShape(20.dp))
-                        .background(Color.Black.copy(alpha = 0.35f)),
+                        .background(Color.Black.copy(alpha = if (isStandardLight) 0.10f else 0.35f)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = palette.accent)
                         Spacer(Modifier.height(10.dp))
-                        Text("Resolving official music video...", color = Color.White.copy(alpha = 0.72f))
+                        Text("Resolving official music video...", color = videoTextColor.copy(alpha = 0.72f))
                     }
                 }
             }
@@ -1507,11 +1514,11 @@ private fun DockedVideoStage(
                         .fillMaxWidth()
                         .aspectRatio(16f / 9f)
                         .clip(RoundedCornerShape(20.dp))
-                        .background(Color.Black.copy(alpha = 0.35f)),
+                        .background(Color.Black.copy(alpha = if (isStandardLight) 0.10f else 0.35f)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("No music video stream available.", color = Color.White.copy(alpha = 0.72f))
+                        Text("No music video stream available.", color = videoTextColor.copy(alpha = 0.72f))
                         Spacer(Modifier.height(6.dp))
                         TextButton(onClick = onRetryVideo) { Text("Retry Video", color = palette.accent) }
                     }
@@ -1554,14 +1561,18 @@ private fun DockedVideoStage(
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(999.dp))
-                                    .background(if (sel) palette.accent else Color.White.copy(alpha = 0.14f))
+                                    .background(if (sel) palette.accent else videoTextColor.copy(alpha = 0.14f))
                                     .clickable { selectedOptIdx = idx }
                                     .padding(horizontal = 10.dp, vertical = 4.dp),
                             ) {
                                 Text(
                                     text = opt.label,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = if (sel) Color.Black else Color.White,
+                                    color = if (sel) {
+                                        if (palette.accent.luminance() > 0.45f) Color.Black else Color.White
+                                    } else {
+                                        videoTextColor
+                                    },
                                 )
                             }
                         }
@@ -1569,7 +1580,7 @@ private fun DockedVideoStage(
                     Text(
                         text = if (video.isOfficialMv) "MV · Synced" else "Synced",
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color.White.copy(alpha = 0.64f),
+                        color = videoTextColor.copy(alpha = 0.64f),
                         modifier = Modifier.padding(start = 8.dp),
                     )
                 }
@@ -1580,7 +1591,7 @@ private fun DockedVideoStage(
             state = state,
             progressFlow = progressFlow,
             compact = true,
-            lyricsTextColor = Color.White,
+            lyricsTextColor = videoTextColor,
             onSeek = onSeek,
             onRetry = onRetryLyrics,
             modifier = Modifier

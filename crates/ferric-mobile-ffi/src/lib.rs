@@ -1511,7 +1511,7 @@ impl FerricMobileCore {
     ) -> Result<Option<FfiReleaseInfo>, FfiError> {
         let res = self
             .controller
-            .check_latest_release(&current_version)
+            .check_latest_android_release(&current_version)
             .map_err(|reason| FfiError::Internal { reason })?;
         Ok(
             res.map(|(tag, version, release_url, summary)| FfiReleaseInfo {

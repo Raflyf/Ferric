@@ -1,5 +1,6 @@
 package dev.livelydesk.ferric.playback
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -32,6 +33,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.MediaStyleNotificationHelper
 import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
@@ -43,6 +45,8 @@ import dev.livelydesk.ferric.FerricApp
 import dev.livelydesk.ferric.MainActivity
 import dev.livelydesk.ferric.R
 import dev.livelydesk.ferric.core.CoreStateStore
+import dev.livelydesk.ferric.core.activeDisplayIsPlaying
+import dev.livelydesk.ferric.core.activeDisplayTrack
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -195,6 +199,7 @@ class FerricPlaybackService : MediaSessionService() {
     private var audioDeviceCallback: AudioDeviceCallback? = null
     private var lastArtUrl: String? = null
     private var cachedArtBytes: ByteArray? = null
+    private var foregroundPromoted = false
 
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -221,7 +226,6 @@ class FerricPlaybackService : MediaSessionService() {
                     setSmallIcon(R.drawable.ic_launcher_monochrome)
                 },
         )
-        promoteToForegroundImmediately()
 
         // Lazily initialize Rust Oboe audio inside the foreground MediaSessionService.
         serviceScope.launch(Dispatchers.IO) {
@@ -261,6 +265,11 @@ class FerricPlaybackService : MediaSessionService() {
             .setSessionActivity(openAppPi)
             .setCallback(sessionCallback)
             .build()
+            .also { addSession(it) }
+        val initUi = store.uiState.value
+        if (initUi.activeDisplayIsPlaying() && !hasActiveForegroundMediaNotification()) {
+            promoteToForegroundImmediately()
+        }
 
         ContextCompat.registerReceiver(
             this,
@@ -287,14 +296,19 @@ class FerricPlaybackService : MediaSessionService() {
         serviceScope.launch {
             store.uiState
                 .map { ui ->
+                    val disp = ui.activeDisplayTrack()
                     SessionStateKey(
-                        trackId = ui.currentTrack?.id,
-                        title = ui.currentTrack?.title,
-                        artist = ui.currentTrack?.artist,
-                        album = ui.currentTrack?.album,
-                        thumbnailUrl = ui.currentTrack?.thumbnailUrl,
-                        isPlaying = ui.isPlaying,
-                        durationMs = ui.durationMs,
+                        trackId = disp?.id,
+                        title = disp?.title,
+                        artist = disp?.artist,
+                        album = disp?.album,
+                        thumbnailUrl = disp?.thumbnailUrl,
+                        isPlaying = ui.activeDisplayIsPlaying(),
+                        durationMs = if (ui.connectState.isLocalActiveSpeaker) {
+                            ui.durationMs
+                        } else {
+                            disp?.durationMs?.toLong()?.coerceAtLeast(0L) ?: 0L
+                        },
                         playbackSpeed = ui.dspSettings?.playbackSpeed ?: 1f,
                         seekSyncNonce = ui.seekSyncNonce,
                     )
@@ -312,6 +326,9 @@ class FerricPlaybackService : MediaSessionService() {
                         positionMs = posMs,
                         artworkBytes = artBytes,
                     )
+                    if (key.trackId != null) {
+                        triggerNotificationUpdate()
+                    }
                     val artUrl = key.thumbnailUrl
                     if (!artUrl.isNullOrBlank() && artUrl != lastArtUrl) {
                         fetchArtworkForNotification(artUrl, player)
@@ -341,17 +358,22 @@ class FerricPlaybackService : MediaSessionService() {
             if (bytes != null) {
                 serviceScope.launch(Dispatchers.Main.immediate) {
                     val current = store.uiState.value
-                    if (current.currentTrack?.thumbnailUrl == url) {
+                    val disp = current.activeDisplayTrack()
+                    if (disp?.thumbnailUrl == url) {
                         lastArtUrl = url
                         cachedArtBytes = bytes
                         val key = SessionStateKey(
-                            trackId = current.currentTrack.id,
-                            title = current.currentTrack.title,
-                            artist = current.currentTrack.artist,
-                            album = current.currentTrack.album,
-                            thumbnailUrl = current.currentTrack.thumbnailUrl,
-                            isPlaying = current.isPlaying,
-                            durationMs = current.durationMs,
+                            trackId = disp.id,
+                            title = disp.title,
+                            artist = disp.artist,
+                            album = disp.album,
+                            thumbnailUrl = disp.thumbnailUrl,
+                            isPlaying = current.activeDisplayIsPlaying(),
+                            durationMs = if (current.connectState.isLocalActiveSpeaker) {
+                                current.durationMs
+                            } else {
+                                disp.durationMs.toLong().coerceAtLeast(0L)
+                            },
                             playbackSpeed = current.dspSettings?.playbackSpeed ?: 1f,
                             seekSyncNonce = current.seekSyncNonce,
                         )
@@ -360,15 +382,35 @@ class FerricPlaybackService : MediaSessionService() {
                             positionMs = store.playbackProgress.value.positionMs,
                             artworkBytes = bytes,
                         )
+                        triggerNotificationUpdate()
                     }
                 }
             }
         }
     }
 
+    private fun hasActiveForegroundMediaNotification(): Boolean = runCatching {
+        val nm = getSystemService(NotificationManager::class.java) ?: return false
+        nm.activeNotifications.any {
+            it.id == PLAYBACK_NOTIFICATION_ID &&
+                (it.notification.flags and Notification.FLAG_FOREGROUND_SERVICE) != 0
+        }
+    }.getOrDefault(false)
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        promoteToForegroundImmediately()
-        return super.onStartCommand(intent, flags, startId)
+        if (!hasActiveForegroundMediaNotification()) {
+            promoteToForegroundImmediately()
+        }
+        val result = super.onStartCommand(intent, flags, startId)
+        if (mediaSession != null) {
+            triggerNotificationUpdate()
+        }
+        return result
+    }
+
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        foregroundPromoted = true
+        super.onUpdateNotification(session, startInForegroundRequired)
     }
 
     private fun ensurePlaybackChannel() {
@@ -397,9 +439,10 @@ class FerricPlaybackService : MediaSessionService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val snap = if (::store.isInitialized) store.uiState.value else null
-        val title = snap?.currentTrack?.title?.ifBlank { null } ?: "Ferric"
-        val artist = snap?.currentTrack?.artist?.ifBlank { null } ?: "Preparing playback"
-        val notification = NotificationCompat.Builder(this, PLAYBACK_CHANNEL_ID)
+        val disp = snap?.activeDisplayTrack()
+        val title = disp?.title?.ifBlank { null } ?: "Ferric"
+        val artist = disp?.artist?.ifBlank { null } ?: "Preparing playback"
+        val builder = NotificationCompat.Builder(this, PLAYBACK_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle(title)
             .setContentText(artist)
@@ -409,7 +452,10 @@ class FerricPlaybackService : MediaSessionService() {
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .build()
+        mediaSession?.let { session ->
+            builder.setStyle(MediaStyleNotificationHelper.MediaStyle(session))
+        }
+        val notification = builder.build()
         val fgType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
         } else {
@@ -417,6 +463,7 @@ class FerricPlaybackService : MediaSessionService() {
         }
         runCatching {
             ServiceCompat.startForeground(this, PLAYBACK_NOTIFICATION_ID, notification, fgType)
+            foregroundPromoted = true
         }
     }
 
@@ -427,12 +474,22 @@ class FerricPlaybackService : MediaSessionService() {
     override fun onTaskRemoved(rootIntent: Intent?) {
         val st = store.uiState.value
         val activeLocalPlayback = st.isPlaying && st.connectState.isLocalActiveSpeaker
-        if (!activeLocalPlayback) {
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            store.shutdown()
+        if (activeLocalPlayback) {
+            return
         }
-        super.onTaskRemoved(rootIntent)
+        dev.livelydesk.ferric.widget.FerricWidgetUpdater.updateAll(
+            applicationContext,
+            st.copy(isPlaying = false),
+        )
+        foregroundPromoted = false
+        mediaSession?.let { session ->
+            removeSession(session)
+            session.release()
+        }
+        mediaSession = null
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        store.shutdown()
     }
 
     companion object {
@@ -441,6 +498,7 @@ class FerricPlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        foregroundPromoted = false
         audioDeviceCallback?.let { cb ->
             runCatching { audioManager.unregisterAudioDeviceCallback(cb) }
         }
@@ -507,6 +565,7 @@ private class RustBridgePlayer(
             listOf(
                 MediaItemData.Builder(id)
                     .setMediaItem(mediaItem)
+                    .setIsSeekable(key.durationMs > 0L)
                     .setDurationUs(
                         if (key.durationMs > 0L) key.durationMs * 1_000L else C.TIME_UNSET,
                     )

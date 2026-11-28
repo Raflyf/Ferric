@@ -12709,25 +12709,23 @@ impl App {
         if self.is_controlling_remote()
             && let Some(engine) = &self.connect_engine
         {
-            let entries: Vec<QueueEntry> = self
-                .queue
-                .tracks()
-                .iter()
-                .take(200)
-                .map(QueueEntry::from_track)
-                .collect();
-            let idx = entries
-                .iter()
-                .position(|t| t.track_id == track.id)
-                .unwrap_or(0);
-            let tracks_to_send = if entries.is_empty() {
-                vec![QueueEntry::from_track(&track)]
+            let (ordered, idx) = self.queue.ordered_queue_window(200);
+            let entries: Vec<QueueEntry> =
+                ordered.into_iter().map(QueueEntry::from_track).collect();
+            let (tracks_to_send, start_index) = if entries.is_empty() {
+                (vec![QueueEntry::from_track(&track)], 0)
             } else {
-                entries
+                let found_idx = entries
+                    .get(idx)
+                    .is_some_and(|e| e.track_id == track.id)
+                    .then_some(idx)
+                    .or_else(|| entries.iter().position(|t| t.track_id == track.id))
+                    .unwrap_or(idx);
+                (entries, found_idx)
             };
             engine.send_remote_action(RemoteAction::PlayQueue {
                 tracks: tracks_to_send,
-                start_index: idx,
+                start_index,
                 context: self.queue_context.clone(),
             });
             return;
@@ -12736,10 +12734,42 @@ impl App {
         self.push_connect_playback_snapshot();
     }
 
+    fn send_remote_queue_play(&self, tracks: &[Track], start_index: usize, context: &str) {
+        if tracks.is_empty() {
+            return;
+        }
+        if let Some(engine) = &self.connect_engine {
+            let entries: Vec<QueueEntry> = tracks
+                .iter()
+                .take(200)
+                .map(QueueEntry::from_track)
+                .collect();
+            let idx = start_index.min(entries.len().saturating_sub(1));
+            engine.send_remote_action(RemoteAction::PlayQueue {
+                tracks: entries,
+                start_index: idx,
+                context: context.to_string(),
+            });
+        }
+    }
+
     fn play_track_inner(&mut self, cx: &mut Cx, track: Track, reset_failures: bool) {
+        self.play_track_inner_with_handoff(cx, track, reset_failures, false, None);
+    }
+
+    fn play_track_inner_with_handoff(
+        &mut self,
+        cx: &mut Cx,
+        track: Track,
+        reset_failures: bool,
+        handoff_start_paused: bool,
+        handoff_seek_ms: Option<u64>,
+    ) {
         if reset_failures {
             self.consecutive_stream_failures = 0;
         }
+        self.pending_handoff_paused = handoff_start_paused;
+        self.pending_handoff_seek_ms = handoff_seek_ms;
         let is_hidden = self.window_hidden_or_minimized || win32_is_window_hidden_or_minimized();
         self.last_pos_txt.clear();
         self.last_dur_txt.clear();
@@ -12750,11 +12780,40 @@ impl App {
         if let Some(path) = track.path.as_ref().filter(|p| p.is_file()).cloned() {
             self.pending_stream_track_id = None;
             self.pending_stream_track = None;
-            self.send_play_or_crossfade(path, track.replay_gain_db, track.duration_ms);
+            self.pending_handoff_seek_ms = None;
+            self.pending_handoff_paused = false;
+            if handoff_start_paused {
+                if let Some(seek_ms) = handoff_seek_ms
+                    && seek_ms > 1_000
+                {
+                    self.last_seek_override = Some((seek_ms, std::time::Instant::now()));
+                }
+                if let Some(audio) = &self.audio {
+                    audio.send(EngineCommand::LoadPausedTrack {
+                        path,
+                        replay_gain_db: track.replay_gain_db,
+                        fallback_duration_ms: track.duration_ms,
+                        seek_ms: handoff_seek_ms.unwrap_or(0),
+                    });
+                }
+            } else {
+                self.send_play_or_crossfade(path, track.replay_gain_db, track.duration_ms);
+                if let Some(seek_ms) = handoff_seek_ms
+                    && seek_ms > 1_000
+                    && let Some(audio) = &self.audio
+                {
+                    self.last_seek_override = Some((seek_ms, std::time::Instant::now()));
+                    audio.send(EngineCommand::SeekMs(seek_ms));
+                }
+            }
             self.sync_next_deck_to_engine();
             self.prefetch_next_online_track();
             self.maybe_fetch_radio_for_track(&track, false);
-            self.update_now_playing_metadata(cx, &track);
+            if handoff_start_paused {
+                self.sync_now_playing_ui_widgets(cx, &track, false);
+            } else {
+                self.update_now_playing_metadata(cx, &track);
+            }
             return;
         }
 
@@ -14429,6 +14488,14 @@ impl App {
     }
 
     fn push_connect_playback_snapshot(&self) {
+        self.push_connect_playback_snapshot_override(None, None);
+    }
+
+    fn push_connect_playback_snapshot_override(
+        &self,
+        is_playing_override: Option<bool>,
+        pos_override_ms: Option<u64>,
+    ) {
         let Some(engine) = &self.connect_engine else {
             return;
         };
@@ -14438,31 +14505,29 @@ impl App {
             .map(|a| a.telemetry())
             .unwrap_or_default();
         let current_track = self.queue.current().map(QueueEntry::from_track);
-        let queue: Vec<QueueEntry> = self
-            .queue
-            .tracks()
-            .iter()
-            .take(200)
-            .map(QueueEntry::from_track)
-            .collect();
-        let current_index = current_track
-            .as_ref()
-            .and_then(|cur| queue.iter().position(|t| t.track_id == cur.track_id))
-            .unwrap_or(0);
+        let (ordered, current_index) = self.queue.ordered_queue_window(200);
+        let queue: Vec<QueueEntry> = ordered.into_iter().map(QueueEntry::from_track).collect();
         let now_utc_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let effective_pos_ms = self
-            .pending_handoff_seek_ms
+        let effective_pos_ms = pos_override_ms
+            .or(self.pending_handoff_seek_ms)
             .or_else(|| {
                 self.last_seek_override.and_then(|(ms, at)| {
                     (at.elapsed() < std::time::Duration::from_millis(800)).then_some(ms)
                 })
             })
             .unwrap_or(tele.position_ms);
+        let is_playing = is_playing_override.unwrap_or_else(|| {
+            if self.pending_stream_track_id.is_some() {
+                !self.pending_handoff_paused
+            } else {
+                tele.is_playing
+            }
+        });
         engine.update_local_playback(LocalPlaybackSnapshot {
-            is_playing: tele.is_playing,
+            is_playing,
             current_track,
             queue,
             current_index,
@@ -14825,31 +14890,25 @@ impl App {
                         0
                     };
                     let seek_ms = state.base_position_ms.saturating_add(drift);
-                    let has_local_file = chosen.path.as_ref().is_some_and(|p| p.is_file());
-                    self.pending_handoff_seek_ms = Some(seek_ms);
-                    self.pending_handoff_paused = !state.is_playing;
-                    self.play_track_inner(cx, chosen, true);
-                    if has_local_file {
-                        self.pending_handoff_seek_ms = None;
-                        self.pending_handoff_paused = false;
-                        if seek_ms > 1_000
-                            && let Some(audio) = &self.audio
-                        {
-                            self.last_seek_override = Some((seek_ms, std::time::Instant::now()));
-                            audio.send(EngineCommand::SeekMs(seek_ms));
-                        }
-                        if !state.is_playing
-                            && let Some(audio) = &self.audio
-                        {
-                            audio.send(EngineCommand::Pause);
-                        }
-                    }
+                    self.play_track_inner_with_handoff(
+                        cx,
+                        chosen,
+                        true,
+                        !state.is_playing,
+                        Some(seek_ms),
+                    );
                     self.sync_controls_from_state(cx);
                     self.refresh_right_sidebar(cx);
                     self.show_toast(cx, "Switched playback to Desktop PC");
+                    self.refresh_connect_panel(cx);
+                    self.push_connect_playback_snapshot_override(
+                        Some(state.is_playing),
+                        Some(seek_ms),
+                    );
+                } else {
+                    self.refresh_connect_panel(cx);
+                    self.push_connect_playback_snapshot();
                 }
-                self.refresh_connect_panel(cx);
-                self.push_connect_playback_snapshot();
             }
             ConnectEvent::YieldedActiveSpeaker {
                 new_speaker_name, ..
@@ -14868,26 +14927,44 @@ impl App {
     }
 
     fn apply_incoming_connect_action(&mut self, cx: &mut Cx, action: RemoteAction) {
+        let mut is_playing_ov: Option<bool> = None;
+        let mut pos_ov: Option<u64> = None;
         match action {
             RemoteAction::Play => {
-                if let Some(audio) = &self.audio {
+                self.pending_handoff_paused = false;
+                if self.pending_stream_track_id.is_none()
+                    && let Some(audio) = &self.audio
+                {
                     audio.send(EngineCommand::Play);
                 }
+                is_playing_ov = Some(true);
             }
             RemoteAction::Pause => {
+                self.pending_handoff_paused = true;
                 if let Some(audio) = &self.audio {
                     audio.send(EngineCommand::Pause);
                 }
+                is_playing_ov = Some(false);
             }
             RemoteAction::TogglePlayPause => {
-                if let Some(audio) = &self.audio {
+                if self.pending_stream_track_id.is_some() {
+                    self.pending_handoff_paused = !self.pending_handoff_paused;
+                    is_playing_ov = Some(!self.pending_handoff_paused);
+                } else if let Some(audio) = &self.audio {
+                    let was_playing = audio.telemetry().is_playing;
                     audio.send(EngineCommand::TogglePlayPause);
+                    is_playing_ov = Some(!was_playing);
                 }
             }
             RemoteAction::SeekTo { position_ms } => {
-                if let Some(audio) = &self.audio {
+                self.last_seek_override = Some((position_ms, std::time::Instant::now()));
+                if self.pending_stream_track_id.is_some() {
+                    self.pending_handoff_seek_ms = Some(position_ms);
+                } else if let Some(audio) = &self.audio {
                     audio.send(EngineCommand::SeekMs(position_ms));
+                    self.update_lyrics_display(cx, position_ms);
                 }
+                pos_ov = Some(position_ms);
             }
             RemoteAction::SkipNext => {
                 self.pending_handoff_seek_ms = None;
@@ -14906,11 +14983,7 @@ impl App {
             RemoteAction::JumpToQueueIndex { index } => {
                 self.pending_handoff_seek_ms = None;
                 self.pending_handoff_paused = false;
-                let tracks = self.queue.tracks().to_vec();
-                if !tracks.is_empty() {
-                    let idx = index.min(tracks.len() - 1);
-                    let chosen = tracks[idx].clone();
-                    self.queue.set_tracks(tracks, Some(idx));
+                if let Some(chosen) = self.queue.jump_to_connect_window_index(index, 200).cloned() {
                     self.play_track_inner(cx, chosen, true);
                 }
             }
@@ -15012,7 +15085,7 @@ impl App {
             }
             RemoteAction::TransferActiveSpeaker { .. } | RemoteAction::SetSimulcastMode { .. } => {}
         }
-        self.push_connect_playback_snapshot();
+        self.push_connect_playback_snapshot_override(is_playing_ov, pos_ov);
     }
 
     fn hydrate_connect_tracks(&self, entries: Vec<QueueEntry>) -> Vec<Track> {
@@ -16264,18 +16337,32 @@ impl App {
                         let dur_ms = resolved_track.as_ref().map_or(stream.duration_ms, |t| {
                             t.duration_ms.max(stream.duration_ms)
                         });
-                        self.send_play_or_crossfade(stream.path, rg, dur_ms);
-                        if let Some(seek_ms) = self.pending_handoff_seek_ms.take()
-                            && seek_ms > 1_000
-                            && let Some(audio) = &self.audio
-                        {
-                            self.last_seek_override = Some((seek_ms, std::time::Instant::now()));
-                            audio.send(EngineCommand::SeekMs(seek_ms));
-                        }
+                        let seek_ms = self.pending_handoff_seek_ms.take();
                         let start_paused = self.pending_handoff_paused;
                         self.pending_handoff_paused = false;
-                        if start_paused && let Some(audio) = &self.audio {
-                            audio.send(EngineCommand::Pause);
+                        if start_paused {
+                            if let Some(ms) = seek_ms
+                                && ms > 1_000
+                            {
+                                self.last_seek_override = Some((ms, std::time::Instant::now()));
+                            }
+                            if let Some(audio) = &self.audio {
+                                audio.send(EngineCommand::LoadPausedTrack {
+                                    path: stream.path,
+                                    replay_gain_db: rg,
+                                    fallback_duration_ms: dur_ms,
+                                    seek_ms: seek_ms.unwrap_or(0),
+                                });
+                            }
+                        } else {
+                            self.send_play_or_crossfade(stream.path, rg, dur_ms);
+                            if let Some(ms) = seek_ms
+                                && ms > 1_000
+                                && let Some(audio) = &self.audio
+                            {
+                                self.last_seek_override = Some((ms, std::time::Instant::now()));
+                                audio.send(EngineCommand::SeekMs(ms));
+                            }
                         }
                         self.sync_next_deck_to_engine();
                         self.prefetch_next_online_track();
@@ -16286,7 +16373,7 @@ impl App {
                                 self.update_now_playing_metadata(cx, &tr);
                             }
                         }
-                        self.push_connect_playback_snapshot();
+                        self.push_connect_playback_snapshot_override(Some(!start_paused), seek_ms);
                     } else {
                         self.sync_next_deck_to_engine();
                     }
@@ -16307,6 +16394,8 @@ impl App {
                     {
                         self.pending_stream_track_id = None;
                         self.pending_stream_track = None;
+                        self.pending_handoff_seek_ms = None;
+                        self.pending_handoff_paused = false;
                         self.consecutive_stream_failures =
                             self.consecutive_stream_failures.saturating_add(1);
                         if self.consecutive_stream_failures <= 3
@@ -16540,7 +16629,9 @@ impl App {
                             position_ms: target_ms,
                         });
                     } else if let Some(a) = &self.audio {
+                        self.last_seek_override = Some((target_ms, std::time::Instant::now()));
                         a.send(EngineCommand::SeekMs(target_ms));
+                        self.push_connect_playback_snapshot_override(None, Some(target_ms));
                     }
                 }
                 SmtcCommand::SeekRelativeMs(delta_ms) => {
@@ -16555,7 +16646,9 @@ impl App {
                     } else if let Some(a) = &self.audio {
                         let cur_ms = a.telemetry().position_ms as i64;
                         let target_ms = (cur_ms + delta_ms).max(0) as u64;
+                        self.last_seek_override = Some((target_ms, std::time::Instant::now()));
                         a.send(EngineCommand::SeekMs(target_ms));
+                        self.push_connect_playback_snapshot_override(None, Some(target_ms));
                     }
                 }
             }
@@ -17177,9 +17270,13 @@ impl App {
         if self.ui.button(id!(home_play_all_btn)).clicked(actions) {
             let pool = self.home_quick_picks_pool();
             if let Some(first) = pool.first().cloned() {
-                self.queue_context = "Quick picks".to_string();
-                self.queue.set_tracks(pool, Some(0));
-                self.play_track(cx, first);
+                if self.is_controlling_remote() {
+                    self.send_remote_queue_play(&pool, 0, "Quick picks");
+                } else {
+                    self.queue_context = "Quick picks".to_string();
+                    self.queue.set_tracks(pool, Some(0));
+                    self.play_track(cx, first);
+                }
             }
         }
         if self.ui.button(id!(qp_prev_btn)).clicked(actions) && self.qp_page > 0 {
@@ -17508,17 +17605,24 @@ impl App {
             && !self.filtered_tracks.is_empty()
         {
             let start_idx = fastrand::usize(..self.filtered_tracks.len());
-            self.queue_context = "Library Shuffle".to_string();
-            self.queue
-                .set_tracks((*self.filtered_tracks).clone(), Some(start_idx));
-            self.queue.set_shuffle(true);
-            self.session_state.shuffle = true;
-            if let Some(db) = &self.db {
-                let _ = db.save_session_state(&self.session_state);
-            }
-            self.sync_controls_from_state(cx);
-            if let Some(first) = self.queue.current().cloned() {
-                self.play_track(cx, first);
+            if self.is_controlling_remote() {
+                self.send_remote_queue_play(&self.filtered_tracks, start_idx, "Library Shuffle");
+                if let Some(engine) = &self.connect_engine {
+                    engine.send_remote_action(RemoteAction::SetShuffle(true));
+                }
+            } else {
+                self.queue_context = "Library Shuffle".to_string();
+                self.queue
+                    .set_tracks((*self.filtered_tracks).clone(), Some(start_idx));
+                self.queue.set_shuffle(true);
+                self.session_state.shuffle = true;
+                if let Some(db) = &self.db {
+                    let _ = db.save_session_state(&self.session_state);
+                }
+                self.sync_controls_from_state(cx);
+                if let Some(first) = self.queue.current().cloned() {
+                    self.play_track(cx, first);
+                }
             }
         }
 
@@ -17763,9 +17867,13 @@ impl App {
         if self.ui.button(id!(detail_play_btn)).clicked(actions) {
             let visible_tracks = (*self.detail_tracks).clone();
             if let Some(first) = visible_tracks.first().cloned() {
-                self.queue_context = self.detail_state.title.clone();
-                self.queue.set_tracks(visible_tracks, Some(0));
-                self.play_track(cx, first);
+                if self.is_controlling_remote() {
+                    self.send_remote_queue_play(&visible_tracks, 0, &self.detail_state.title);
+                } else {
+                    self.queue_context = self.detail_state.title.clone();
+                    self.queue.set_tracks(visible_tracks, Some(0));
+                    self.play_track(cx, first);
+                }
             }
         }
         if self.ui.button(id!(detail_shuffle_btn)).clicked(actions)
@@ -17773,14 +17881,21 @@ impl App {
         {
             let visible_tracks = (*self.detail_tracks).clone();
             let start_idx = fastrand::usize(..visible_tracks.len());
-            self.queue_context = self.detail_state.title.clone();
-            self.queue.set_tracks(visible_tracks, Some(start_idx));
-            self.queue.set_shuffle(true);
-            self.session_state.shuffle = true;
-            self.mark_session_dirty();
-            self.sync_controls_from_state(cx);
-            if let Some(first) = self.queue.current().cloned() {
-                self.play_track(cx, first);
+            if self.is_controlling_remote() {
+                self.send_remote_queue_play(&visible_tracks, start_idx, &self.detail_state.title);
+                if let Some(engine) = &self.connect_engine {
+                    engine.send_remote_action(RemoteAction::SetShuffle(true));
+                }
+            } else {
+                self.queue_context = self.detail_state.title.clone();
+                self.queue.set_tracks(visible_tracks, Some(start_idx));
+                self.queue.set_shuffle(true);
+                self.session_state.shuffle = true;
+                self.mark_session_dirty();
+                self.sync_controls_from_state(cx);
+                if let Some(first) = self.queue.current().cloned() {
+                    self.play_track(cx, first);
+                }
             }
         }
         if self.ui.button(id!(detail_save_pl_btn)).clicked(actions) {
@@ -18334,7 +18449,9 @@ impl App {
             if (rv.ferric_cover_art(id!(art)).clicked(actions) || view_clicked(&rv, actions))
                 && let Some(t) = hist_tracks.get(i).cloned()
             {
-                if self.queue.current().is_none() {
+                if self.is_controlling_remote() {
+                    self.send_remote_queue_play(std::slice::from_ref(&t), 0, "History");
+                } else if self.queue.current().is_none() {
                     if t.youtube_video_id.is_some() && self.session_state.autoplay_radio {
                         self.queue_context = format!("{} radio", t.title);
                         self.queue.set_tracks(vec![t.clone()], Some(0));
@@ -20597,8 +20714,10 @@ impl AppMain for App {
                         if snap.duration_ms > 0 {
                             let next_ms =
                                 snap.position_ms.saturating_add(5_000).min(snap.duration_ms);
+                            self.last_seek_override = Some((next_ms, std::time::Instant::now()));
                             audio.send(EngineCommand::SeekMs(next_ms));
                             self.update_lyrics_display(cx, next_ms);
+                            self.push_connect_playback_snapshot_override(None, Some(next_ms));
                         }
                         return;
                     }
@@ -20621,8 +20740,10 @@ impl AppMain for App {
                         let snap = audio.telemetry();
                         if snap.duration_ms > 0 {
                             let next_ms = snap.position_ms.saturating_sub(5_000);
+                            self.last_seek_override = Some((next_ms, std::time::Instant::now()));
                             audio.send(EngineCommand::SeekMs(next_ms));
                             self.update_lyrics_display(cx, next_ms);
+                            self.push_connect_playback_snapshot_override(None, Some(next_ms));
                         }
                         return;
                     }

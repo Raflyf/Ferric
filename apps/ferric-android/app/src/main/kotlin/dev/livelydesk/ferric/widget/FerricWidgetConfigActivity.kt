@@ -36,16 +36,21 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,9 +58,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,14 +72,57 @@ import coil3.request.SuccessResult
 import coil3.request.allowHardware
 import coil3.toBitmap
 import dev.livelydesk.ferric.FerricApp
-import dev.livelydesk.ferric.R
-import dev.livelydesk.ferric.core.activeDisplayIsPlaying
-import dev.livelydesk.ferric.core.activeDisplayTrack
+import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.formatDurationMs
+import dev.livelydesk.ferric.ui.theme.FerricOrange
 import dev.livelydesk.ferric.ui.theme.FerricSlimSlider
 import dev.livelydesk.ferric.ui.theme.FerricTheme
+import dev.livelydesk.ferric.ui.theme.FerricVisualPalette
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
 import kotlin.math.roundToInt
+
+private enum class WidgetVariant { LIQUID_GLASS, COMPACT_STRIP, SQUARE_COVER }
+
+private val FerricWidgetConfigSaver = listSaver<FerricWidgetConfig, Any>(
+    save = { cfg ->
+        listOf(
+            cfg.style.id,
+            cfg.accentSwatchIndex,
+            cfg.glassShine,
+            cfg.glassThickness,
+            cfg.cornerRoundness,
+            cfg.frost,
+            cfg.coverShape.id,
+            cfg.textSize.id,
+            cfg.playButtonStyle.id,
+            cfg.showCover,
+            cfg.showProgressBar,
+            cfg.showTime,
+            cfg.showLikeButton,
+            cfg.showPrevNext,
+            cfg.showStreak,
+        )
+    },
+    restore = { list ->
+        FerricWidgetConfig(
+            style = FerricWidgetStyle.fromId(list[0] as String),
+            accentSwatchIndex = (list[1] as Int).coerceIn(-1, FerricWidgetConfig.ACCENT_SWATCHES.lastIndex),
+            glassShine = (list[2] as Float).coerceIn(0f, 1f),
+            glassThickness = (list[3] as Float).coerceIn(0f, 1f),
+            cornerRoundness = (list[4] as Float).coerceIn(0f, 1f),
+            frost = (list[5] as Float).coerceIn(0f, 1f),
+            coverShape = WidgetCoverShape.fromId(list[6] as String),
+            textSize = WidgetTextSize.fromId(list[7] as String),
+            playButtonStyle = WidgetPlayButtonStyle.fromId(list[8] as String),
+            showCover = list[9] as Boolean,
+            showProgressBar = list[10] as Boolean,
+            showTime = list[11] as Boolean,
+            showLikeButton = list[12] as Boolean,
+            showPrevNext = list[13] as Boolean,
+            showStreak = list[14] as Boolean,
+        )
+    },
+)
 
 /**
  * Reconfigurable Home-Screen Widget settings for optical Liquid Glass customization:
@@ -95,6 +143,17 @@ class FerricWidgetConfigActivity : ComponentActivity() {
             AppWidgetManager.INVALID_APPWIDGET_ID,
         ) ?: AppWidgetManager.INVALID_APPWIDGET_ID
 
+        val providerClassName = if (appWidgetId != AppWidgetManager.INVALID_APPWIDGET_ID) {
+            AppWidgetManager.getInstance(this).getAppWidgetInfo(appWidgetId)?.provider?.className.orEmpty()
+        } else {
+            ""
+        }
+        val widgetVariant = when {
+            providerClassName.endsWith("CompactStripWidgetProvider") -> WidgetVariant.COMPACT_STRIP
+            providerClassName.endsWith("SquareCoverWidgetProvider") -> WidgetVariant.SQUARE_COVER
+            else -> WidgetVariant.LIQUID_GLASS
+        }
+
         val app = application as FerricApp
         val store = app.store
 
@@ -104,27 +163,45 @@ class FerricWidgetConfigActivity : ComponentActivity() {
                 themeConfig = state.themeConfig,
                 coverShade = state.coverShade,
             ) {
-                var config by remember(appWidgetId) {
+                var config by rememberSaveable(appWidgetId, stateSaver = FerricWidgetConfigSaver) {
                     mutableStateOf(FerricWidgetPrefs.load(this, appWidgetId))
                 }
-                WidgetSettingsScreen(
-                    config = config,
-                    state = state,
-                    onConfigChange = { config = it },
-                    onDone = {
-                        FerricWidgetPrefs.save(this, appWidgetId, config)
-                        FerricWidgetUpdater.updateAll(applicationContext, state)
-                        if (appWidgetId != AppWidgetManager.INVALID_APPWIDGET_ID) {
-                            setResult(
-                                RESULT_OK,
-                                Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId),
-                            )
-                        } else {
-                            setResult(RESULT_OK)
-                        }
-                        finish()
-                    },
-                )
+                val darkConfigPalette = remember {
+                    FerricVisualPalette(
+                        canvas = Color(0xFF0B0C10),
+                        surface = Color(0xFF14161D),
+                        elevated = Color(0xFF1E212B),
+                        border = Color.White.copy(alpha = 0.24f),
+                        textPrimary = Color.White,
+                        textSecondary = Color(0xFF9EA2AF),
+                        accent = FerricOrange,
+                        isLight = false,
+                        isLiquidGlass = true,
+                    )
+                }
+                CompositionLocalProvider(LocalFerricPalette provides darkConfigPalette) {
+                    WidgetSettingsScreen(
+                        config = config,
+                        variant = widgetVariant,
+                        state = state,
+                        onConfigChange = { config = it },
+                        onReset = { config = FerricWidgetConfig() },
+                        onCancel = { finish() },
+                        onDone = {
+                            FerricWidgetPrefs.save(this, appWidgetId, config)
+                            FerricWidgetUpdater.updateAll(applicationContext, state)
+                            if (appWidgetId != AppWidgetManager.INVALID_APPWIDGET_ID) {
+                                setResult(
+                                    RESULT_OK,
+                                    Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId),
+                                )
+                            } else {
+                                setResult(RESULT_OK)
+                            }
+                            finish()
+                        },
+                    )
+                }
             }
         }
     }
@@ -134,23 +211,30 @@ class FerricWidgetConfigActivity : ComponentActivity() {
 @Composable
 private fun WidgetSettingsScreen(
     config: FerricWidgetConfig,
+    variant: WidgetVariant,
     state: dev.livelydesk.ferric.core.PlaybackUiState,
     onConfigChange: (FerricWidgetConfig) -> Unit,
+    onReset: () -> Unit,
+    onCancel: () -> Unit,
     onDone: () -> Unit,
 ) {
     val context = LocalContext.current
-    val palette = LocalFerricPalette.current
     var coverBmp by remember { mutableStateOf<Bitmap?>(null) }
-    val activeTrack = state.activeDisplayTrack()
-    val activePlaying = state.activeDisplayIsPlaying()
-    val artUrl = activeTrack?.thumbnailUrl
+    val snap = remember(state) {
+        FerricWidgetUpdater.resolveDisplaySnapshot(context, state, PlaybackProgress())
+    }
+    val artUrl = snap.thumbnailUrl
 
     LaunchedEffect(artUrl) {
+        val diskBmp = FerricWidgetPrefs.loadLastCoverBitmap(context, artUrl)
+        if (diskBmp != null) {
+            coverBmp = diskBmp
+        }
         if (artUrl.isNullOrBlank()) {
-            coverBmp = null
+            if (diskBmp == null) coverBmp = null
             return@LaunchedEffect
         }
-        coverBmp = runCatching {
+        val fetched = runCatching {
             val loader = SingletonImageLoader.get(context.applicationContext)
             val req = ImageRequest.Builder(context.applicationContext)
                 .data(artUrl)
@@ -159,18 +243,40 @@ private fun WidgetSettingsScreen(
                 .build()
             (loader.execute(req) as? SuccessResult)?.image?.toBitmap()
         }.getOrNull()
+        if (fetched != null) {
+            coverBmp = fetched
+            FerricWidgetPrefs.saveLastCoverBitmap(context, artUrl, fetched)
+        } else if (diskBmp == null) {
+            coverBmp = null
+        }
     }
 
     Scaffold(
         containerColor = Color(0xFF0B0C10),
         bottomBar = {
-            Box(
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xF00B0C10))
                     .navigationBarsPadding()
                     .padding(horizontal = 18.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
+                OutlinedButton(
+                    onClick = onCancel,
+                    shape = RoundedCornerShape(999.dp),
+                    border = BorderStroke(1.dp, Color(0xFF323642)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFD0D4DE)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp),
+                ) {
+                    Text(
+                        text = "Cancel",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
                 Button(
                     onClick = onDone,
                     shape = RoundedCornerShape(999.dp),
@@ -179,7 +285,7 @@ private fun WidgetSettingsScreen(
                         contentColor = Color(0xFF101116),
                     ),
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .weight(1.4f)
                         .height(50.dp),
                 ) {
                     Text(
@@ -200,12 +306,25 @@ private fun WidgetSettingsScreen(
                 .padding(horizontal = 18.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text(
-                text = "Widget settings",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Medium,
-                color = Color.White,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Widget settings",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White,
+                )
+                TextButton(onClick = onReset) {
+                    Text(
+                        text = "Reset",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color(0xFF9EA2AF),
+                    )
+                }
+            }
 
             // Live preview frame simulating home wallpaper behind Clear glass / Glass
             val cachedStreak = remember { FerricWidgetPrefs.loadLastKnownStreak(context) }
@@ -214,12 +333,14 @@ private fun WidgetSettingsScreen(
             }
             LiveWidgetPreviewBox(
                 config = config,
-                title = activeTrack?.title?.ifBlank { null } ?: "Ready to play",
-                artist = activeTrack?.artist?.ifBlank { null } ?: "Ferric",
-                isPlaying = activePlaying,
-                liked = activeTrack?.liked == true,
+                title = snap.title,
+                artist = snap.artist,
+                durationMs = snap.durationMs.takeIf { it > 0L } ?: 238_000L,
+                isPlaying = snap.isPlaying,
+                liked = snap.liked,
                 streakDays = resolvedStreak,
                 artBitmap = coverBmp,
+                cachedAccentArgb = snap.cachedAccentArgb,
                 coverShade = state.coverShade,
             )
 
@@ -330,20 +451,29 @@ private fun WidgetSettingsScreen(
             ToggleRow("Show cover", config.showCover) {
                 onConfigChange(config.copy(showCover = it))
             }
-            ToggleRow("Show progress bar", config.showProgressBar) {
-                onConfigChange(config.copy(showProgressBar = it))
+            if (variant == WidgetVariant.LIQUID_GLASS) {
+                ToggleRow("Show progress bar", config.showProgressBar) {
+                    onConfigChange(config.copy(showProgressBar = it))
+                }
+                ToggleRow("Show time", config.showTime) {
+                    onConfigChange(config.copy(showTime = it))
+                }
             }
-            ToggleRow("Show time", config.showTime) {
-                onConfigChange(config.copy(showTime = it))
+            if (variant != WidgetVariant.COMPACT_STRIP) {
+                ToggleRow("Show like button", config.showLikeButton) {
+                    onConfigChange(config.copy(showLikeButton = it))
+                }
             }
-            ToggleRow("Show like button", config.showLikeButton) {
-                onConfigChange(config.copy(showLikeButton = it))
-            }
-            ToggleRow("Show previous and next", config.showPrevNext) {
+            ToggleRow(
+                label = if (variant == WidgetVariant.SQUARE_COVER) "Show next button" else "Show previous and next",
+                checked = config.showPrevNext,
+            ) {
                 onConfigChange(config.copy(showPrevNext = it))
             }
-            ToggleRow("Show streak", config.showStreak) {
-                onConfigChange(config.copy(showStreak = it))
+            if (variant == WidgetVariant.LIQUID_GLASS) {
+                ToggleRow("Show streak", config.showStreak) {
+                    onConfigChange(config.copy(showStreak = it))
+                }
             }
         }
     }
@@ -354,10 +484,12 @@ private fun LiveWidgetPreviewBox(
     config: FerricWidgetConfig,
     title: String,
     artist: String,
+    durationMs: Long,
     isPlaying: Boolean,
     liked: Boolean,
     streakDays: Int,
     artBitmap: Bitmap?,
+    cachedAccentArgb: Int?,
     coverShade: dev.livelydesk.ferric.ui.theme.CoverShadeColors,
 ) {
     val context = LocalContext.current
@@ -375,17 +507,27 @@ private fun LiveWidgetPreviewBox(
     ) {
         FerricWidgetRenderer.renderGlassBackgroundBitmap(528, 256, config, artBitmap, coverShade, pxPerDp = 1.6f, wallpaperTintArgb = wpTint)
     }
-    val shapedCover = remember(artBitmap, config.coverShape, config.showCover) {
+    val isLight = config.style == FerricWidgetStyle.LIGHT
+    val accentColor = remember(config.accentSwatchIndex, coverShade, artBitmap, cachedAccentArgb, isLight) {
+        Color(
+            FerricWidgetRenderer.resolveAccentArgb(
+                config,
+                coverShade,
+                artBitmap = artBitmap,
+                cachedAccentArgb = cachedAccentArgb,
+                isLight = isLight,
+            ),
+        )
+    }
+    val shapedCover = remember(artBitmap, config.coverShape, config.showCover, accentColor, isLight) {
         if (config.showCover && artBitmap != null) {
             FerricWidgetRenderer.shapeCoverBitmap(artBitmap, config.coverShape)
+        } else if (config.showCover) {
+            FerricWidgetRenderer.renderFerricFallbackCover(context, config.coverShape, accentColor.toArgb(), isLight)
         } else {
             null
         }
     }
-    val accentColor = remember(config.accentSwatchIndex, coverShade) {
-        Color(FerricWidgetRenderer.resolveAccentArgb(config, coverShade))
-    }
-    val isLight = config.style == FerricWidgetStyle.LIGHT
     val fgPrimary = if (isLight) Color(0xFF14161C) else Color.White
     val fgSecondary = if (isLight) Color(0xCC242832) else Color(0xD8FFFFFF)
     val playKind = if (isPlaying) "pause" else "play"
@@ -444,23 +586,12 @@ private fun LiveWidgetPreviewBox(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (config.showCover) {
-                        if (shapedCover != null) {
-                            Image(
-                                bitmap = shapedCover.asImageBitmap(),
-                                contentDescription = null,
-                                modifier = Modifier.size(64.dp),
-                            )
-                        } else {
-                            Image(
-                                painter = painterResource(id = R.drawable.ic_launcher_foreground),
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .size(64.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(Color(0xFF13151B)),
-                            )
-                        }
+                    if (config.showCover && shapedCover != null) {
+                        Image(
+                            bitmap = shapedCover.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier.size(64.dp),
+                        )
                         Spacer(Modifier.width(14.dp))
                     }
                     Column(
@@ -552,19 +683,20 @@ private fun LiveWidgetPreviewBox(
                             contentDescription = null,
                             modifier = Modifier
                                 .align(Alignment.CenterEnd)
-                                .size(34.dp),
+                                .size(38.dp),
                         )
                     }
                 }
 
                 if (config.showProgressBar || config.showTime) {
+                    val elapsedPreviewMs = (durationMs * 0.65).roundToInt().toLong().coerceAtLeast(1_000L)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (config.showTime) {
                             Text(
-                                text = formatDurationMs(158_000L),
+                                text = formatDurationMs(elapsedPreviewMs),
                                 fontSize = 12.sp,
                                 color = fgSecondary,
                             )
@@ -592,7 +724,7 @@ private fun LiveWidgetPreviewBox(
                         if (config.showTime) {
                             Spacer(Modifier.width(10.dp))
                             Text(
-                                text = formatDurationMs(238_000L),
+                                text = formatDurationMs(durationMs),
                                 fontSize = 12.sp,
                                 color = fgSecondary,
                             )

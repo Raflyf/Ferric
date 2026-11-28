@@ -1,5 +1,10 @@
 package dev.livelydesk.ferric.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -53,8 +58,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -240,6 +247,19 @@ fun ShareCardSheet(
                                 )
                             }
                             ShareCardStyle.LIQUID_GLASS -> {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            Brush.radialGradient(
+                                                colors = listOf(
+                                                    state.coverShade.accent.copy(alpha = 0.65f),
+                                                    state.coverShade.orb1.copy(alpha = 0.80f),
+                                                    Color(0xFF0A0D16),
+                                                ),
+                                            ),
+                                        ),
+                                )
                                 if (!track.thumbnailUrl.isNullOrBlank()) {
                                     val bgReq = remember(track.thumbnailUrl) {
                                         ImageRequest.Builder(context)
@@ -253,20 +273,6 @@ fun ShareCardSheet(
                                         contentDescription = null,
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier.fillMaxSize(),
-                                    )
-                                } else {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(
-                                                Brush.radialGradient(
-                                                    colors = listOf(
-                                                        state.coverShade.accent.copy(alpha = 0.65f),
-                                                        state.coverShade.orb1.copy(alpha = 0.80f),
-                                                        Color(0xFF0A0D16),
-                                                    ),
-                                                ),
-                                            ),
                                     )
                                 }
                                 Box(
@@ -501,6 +507,36 @@ fun ShareCardSheet(
             }
 
             // Dual actions: Save PNG directly to Pictures/Ferric + Share Sheet
+            val performSavePng = {
+                if (!exporting) {
+                    exporting = true
+                    scope.launch {
+                        val res = ShareCardRenderer.saveToGalleryPng(
+                            context = context,
+                            track = track,
+                            lyricLines = selectedLines,
+                            aspect = aspect,
+                            style = style,
+                            coverShade = state.coverShade,
+                            fontFamilyName = palette.fontFamilyName,
+                            editorialMode = palette.editorialMode,
+                        )
+                        exporting = false
+                        res.onSuccess { path -> onMessage("Saved card to $path") }
+                            .onFailure { err -> onMessage("Save failed: ${err.message}") }
+                    }
+                }
+            }
+            val writeStorageLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestPermission(),
+            ) { granted ->
+                if (granted) {
+                    performSavePng()
+                } else {
+                    onMessage("Storage permission needed to save PNG on Android 9")
+                }
+            }
+            val onAccent = if (palette.accent.luminance() > 0.45f) Color.Black else Color.White
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -508,21 +544,12 @@ fun ShareCardSheet(
                 OutlinedButton(
                     onClick = {
                         if (exporting) return@OutlinedButton
-                        exporting = true
-                        scope.launch {
-                            val res = ShareCardRenderer.saveToGalleryPng(
-                                context = context,
-                                track = track,
-                                lyricLines = selectedLines,
-                                aspect = aspect,
-                                style = style,
-                                coverShade = state.coverShade,
-                                fontFamilyName = palette.fontFamilyName,
-                                editorialMode = palette.editorialMode,
-                            )
-                            exporting = false
-                            res.onSuccess { path -> onMessage("Saved card to $path") }
-                                .onFailure { err -> onMessage("Save failed: ${err.message}") }
+                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+                            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            writeStorageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        } else {
+                            performSavePng()
                         }
                     },
                     enabled = !exporting,
@@ -558,7 +585,7 @@ fun ShareCardSheet(
                     shape = RoundedCornerShape(999.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = palette.accent,
-                        contentColor = Color.Black,
+                        contentColor = onAccent,
                     ),
                     modifier = Modifier.weight(1.3f),
                 ) {
@@ -582,6 +609,7 @@ private fun SharePillOption(
 ) {
     val palette = LocalFerricPalette.current
     if (selected) {
+        val selectedContent = if (palette.accent.luminance() > 0.45f) Color.Black else Color.White
         Surface(
             shape = RoundedCornerShape(999.dp),
             color = palette.accent,
@@ -596,7 +624,7 @@ private fun SharePillOption(
                     text = label,
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = Color.Black,
+                    color = selectedContent,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )

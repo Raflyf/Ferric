@@ -230,6 +230,100 @@ pub fn parse_latest_release(
     }))
 }
 
+/// Strictly parse GitHub `/releases` JSON array for the newest stable Android release
+/// (either an `android-vX.Y.Z` tag or a `vX.Y.Z` release carrying at least one `.apk` asset).
+pub fn parse_latest_android_release(
+    json_text: &str,
+    current_version: &str,
+) -> Result<Option<ReleaseInfo>, String> {
+    let local = parse_version(current_version)
+        .ok_or_else(|| "Application version is not X.Y.Z".to_string())?;
+    let val: serde_json::Value =
+        serde_json::from_str(json_text).map_err(|e| format!("Invalid release JSON: {e}"))?;
+    let arr = val
+        .as_array()
+        .ok_or_else(|| "Releases payload is not a JSON array".to_string())?;
+
+    let mut best: Option<((u32, u32, u32), ReleaseInfo)> = None;
+    for entry in arr {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let draft = obj
+            .get("draft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let prerelease = obj
+            .get("prerelease")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if draft || prerelease {
+            continue;
+        }
+        let Some(tag_raw) = obj.get("tag_name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let has_apk_asset = obj
+            .get("assets")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|assets| {
+                assets.iter().any(|a| {
+                    a.get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|n| n.ends_with(".apk"))
+                })
+            });
+        let (parsed, is_android_tag) = if let Some(rest) = tag_raw.strip_prefix("android-v") {
+            match parse_version(rest) {
+                Some(v) => (v, true),
+                None => continue,
+            }
+        } else if let Some(rest) = tag_raw.strip_prefix('v') {
+            if !has_apk_asset {
+                continue;
+            }
+            match parse_version(rest) {
+                Some(v) => (v, false),
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+
+        if parsed <= local {
+            continue;
+        }
+        let version = format!("{}.{}.{}", parsed.0, parsed.1, parsed.2);
+        let tag = if is_android_tag {
+            format!("android-v{version}")
+        } else {
+            format!("v{version}")
+        };
+        let release_url = format!("https://github.com/{GITHUB_REPO}/releases/tag/{tag}");
+        let summary = obj
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .map(extract_short_summary)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                format!("You are on {current_version}. Read what changed, or update now.")
+            });
+
+        if best.as_ref().is_none_or(|(b, _)| parsed > *b) {
+            best = Some((
+                parsed,
+                ReleaseInfo {
+                    tag,
+                    version,
+                    release_url,
+                    summary,
+                },
+            ));
+        }
+    }
+    Ok(best.map(|(_, info)| info))
+}
+
 fn extract_short_summary(body: &str) -> String {
     let mut lines = Vec::new();
     for raw in body.lines() {
@@ -329,6 +423,44 @@ pub fn check_latest_release(
     check_cancelled(cancelled, deadline)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "Release JSON is not UTF-8".to_string())?;
     parse_latest_release(text, current_version)
+}
+
+/// Query GitHub `/releases` for a newer Android Ferric release (`android-vX.Y.Z` or `.apk` release).
+pub fn check_latest_android_release(
+    current_version: &str,
+    cancelled: &AtomicBool,
+) -> Result<Option<ReleaseInfo>, String> {
+    let deadline = Instant::now() + CHECK_TIMEOUT;
+    check_cancelled(cancelled, deadline)?;
+
+    let agent = crate::shared_http_agent();
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=15");
+    let resp = agent
+        .get(&url)
+        .header("User-Agent", format!("Ferric-Android/{current_version}"))
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| format!("Network error while checking updates: {e}"))?;
+
+    check_cancelled(cancelled, deadline)?;
+    let status = resp.status().as_u16();
+    if status == 404 {
+        return Ok(None);
+    }
+    if status != 200 {
+        return Err(format!("GitHub update check returned HTTP {status}"));
+    }
+
+    let bytes = resp
+        .into_body()
+        .into_with_config()
+        .limit(MAX_RELEASE_JSON_BYTES as u64)
+        .read_to_vec()
+        .map_err(|e| format!("Could not read GitHub release response: {e}"))?;
+
+    check_cancelled(cancelled, deadline)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "Release JSON is not UTF-8".to_string())?;
+    parse_latest_android_release(text, current_version)
 }
 
 fn open_verified_github_response(
@@ -640,5 +772,48 @@ mod tests {
     fn cancelled_check_skips_network() {
         let err = check_latest_release("0.1.0", &AtomicBool::new(true)).unwrap_err();
         assert!(err.contains("cancelled"));
+    }
+
+    #[test]
+    fn android_release_parser_ignores_desktop_only_releases() {
+        let desktop_only = r#"[
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v0.1.3",
+                "body": "Desktop release",
+                "assets": [
+                    { "name": "ferricsetup-v0.1.3.msi" },
+                    { "name": "Ferric-v0.1.3-windows-x86_64.zip" }
+                ]
+            }
+        ]"#;
+        assert!(
+            parse_latest_android_release(desktop_only, "0.1.0")
+                .expect("parse desktop-only json")
+                .is_none()
+        );
+
+        let mixed = r#"[
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v0.1.3",
+                "body": "Desktop only",
+                "assets": [{ "name": "ferricsetup-v0.1.3.msi" }]
+            },
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "android-v0.1.1",
+                "body": "Android update",
+                "assets": [{ "name": "ferric-v0.1.1-android-arm64-v8a.apk" }]
+            }
+        ]"#;
+        let found = parse_latest_android_release(mixed, "0.1.0")
+            .expect("parse android release")
+            .expect("android release found");
+        assert_eq!(found.tag, "android-v0.1.1");
+        assert_eq!(found.version, "0.1.1");
     }
 }

@@ -69,7 +69,7 @@ live_design! {
                     c3 = mix(self.zone3.xyz, acc_pigment * 0.88, 0.18);
                 }
 
-                // 4 orbiting Gaussian liquid-mesh color orbs (Apple Music / studio concert-hall atmosphere)
+                // 4 orbiting Gaussian liquid-mesh color orbs (studio concert-hall atmosphere)
                 let p0 = vec2(0.22 + sin(t * 0.17) * 0.10, 0.30 + cos(t * 0.13) * 0.12);
                 let p1 = vec2(0.74 + cos(t * 0.14) * 0.12, 0.24 + sin(t * 0.18) * 0.11);
                 let p2 = vec2(0.28 + cos(t * 0.16) * 0.11, 0.78 + sin(t * 0.15) * 0.10);

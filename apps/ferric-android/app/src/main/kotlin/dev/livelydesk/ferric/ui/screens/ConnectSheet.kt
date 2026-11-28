@@ -165,7 +165,7 @@ fun ConnectSheet(
                 }
             }
 
-            // Active Speaker Highlight Card (Spotify Connect style)
+            // Active Speaker Highlight Card (Connect-style)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -1158,6 +1158,7 @@ impl FerricController {
         }
     }
 
+    /// Jumps directly to the `offset`-th upcoming item in `Up Next` (`0` = first item under Up Next).
     pub fn jump_to_upcoming(self: &Arc<Self>, offset: usize) -> ControllerResult<()> {
         if self.is_controlling_remote() {
             let snap = self.get_connect_state();
@@ -1170,12 +1171,39 @@ impl FerricController {
             });
             return Ok(());
         }
+        self.jump_queue_with(|queue| queue.jump_to_upcoming(offset).cloned())
+    }
+
+    pub(crate) fn jump_to_connect_window_local_only(
+        self: &Arc<Self>,
+        window_idx: usize,
+    ) -> ControllerResult<()> {
+        self.jump_queue_with(|queue| queue.jump_to_connect_window_index(window_idx, 200).cloned())
+    }
+
+    fn jump_queue_with<F>(self: &Arc<Self>, pick: F) -> ControllerResult<()>
+    where
+        F: FnOnce(&mut ferric_core::queue::PlayQueue) -> Option<Track>,
+    {
         self.ensure_audio_started()?;
+        let current_seq = self.telemetry().track_finished_seq;
         let (target, up_next, gen_id) = {
             let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let next_t = st.queue.jump_to_upcoming(offset).cloned();
+            let next_t = pick(&mut st.queue);
+            st.last_finished_seq = current_seq;
+            st.paused_while_resolving = false;
+            st.pending_handoff_seek_ms = None;
             st.resolve_gen = st.resolve_gen.wrapping_add(1);
             let upcoming: Vec<Track> = st.queue.peek_upcoming(250).into_iter().cloned().collect();
+            if let Some(t) = &next_t {
+                st.play_tracker = Some(crate::ActivePlayTracker {
+                    track_id: t.id.clone(),
+                    artist: t.artist.clone(),
+                    duration_ms: t.duration_ms,
+                    listened_ms: 0,
+                    logged: false,
+                });
+            }
             (next_t, upcoming, st.resolve_gen)
         };
         self.sink.on_now_playing(target.clone());

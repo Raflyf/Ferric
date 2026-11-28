@@ -3,7 +3,10 @@ package dev.livelydesk.ferric
 import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackStateReducer
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.core.UpdateCheckOutcome
+import dev.livelydesk.ferric.core.UpdatePopupPolicy
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -80,5 +83,51 @@ class PlaybackStateReducerTest {
         assertEquals("Slow Refraction", updated.currentTrack?.title)
         assertEquals(195_000L, updated.durationMs)
         assertEquals("3:15", formatDurationMs(195_000L))
+    }
+
+    @Test
+    fun startupUpdatePopupPolicyHonorsToggleErrorsAndSkippedVersion() {
+        val available = UpdateCheckOutcome(
+            hasUpdate = true,
+            tag = "android-v0.1.1",
+            releaseUrl = "https://github.com/Raflyf/Ferric/releases/tag/android-v0.1.1",
+            summary = "Update ready",
+        )
+        assertEquals(
+            available,
+            UpdatePopupPolicy.resolveStartupPopup(
+                outcome = available,
+                autoCheckEnabled = true,
+                skippedTag = null,
+            ),
+        )
+        assertNull(
+            UpdatePopupPolicy.resolveStartupPopup(
+                outcome = available,
+                autoCheckEnabled = false,
+                skippedTag = null,
+            ),
+        )
+        assertNull(
+            UpdatePopupPolicy.resolveStartupPopup(
+                outcome = available,
+                autoCheckEnabled = true,
+                skippedTag = "android-v0.1.1",
+            ),
+        )
+        assertNull(
+            UpdatePopupPolicy.resolveStartupPopup(
+                outcome = UpdateCheckOutcome(error = "offline"),
+                autoCheckEnabled = true,
+                skippedTag = null,
+            ),
+        )
+        assertNull(
+            UpdatePopupPolicy.resolveStartupPopup(
+                outcome = UpdateCheckOutcome(upToDate = true),
+                autoCheckEnabled = true,
+                skippedTag = null,
+            ),
+        )
     }
 }

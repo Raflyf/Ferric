@@ -170,7 +170,7 @@ jobs:
         working-directory: apps/ferric-android
         env:
           FERRIC_KEYSTORE_PASSWORD: ${{ secrets.FERRIC_KEYSTORE_PASSWORD }}
-          FERRIC_KEY_ALIAS: ${{ secrets.FERRIC_KEY_ALIAS }}
+          FERRIC_KEY_ALIAS: ${{ secrets.FERRIC_KEYSTORE_ALIAS }}
           FERRIC_KEY_PASSWORD: ${{ secrets.FERRIC_KEY_PASSWORD }}
         run: |
           set -euo pipefail

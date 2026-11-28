@@ -44,6 +44,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -84,6 +86,7 @@ private const val SUPPORT_SAWERIA_URL = "https://saweria.co/BuyMatcha"
 fun AboutSheet(
     state: PlaybackUiState,
     onCheckForUpdates: ((UpdateCheckOutcome) -> Unit) -> Unit,
+    onToggleAutoCheckUpdates: (Boolean) -> Unit,
     onMessage: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -92,6 +95,7 @@ fun AboutSheet(
     val dividerColor = palette.border.copy(alpha = if (palette.isLiquidGlass) 0.40f else 0.70f)
     var updateOutcome by remember { mutableStateOf<UpdateCheckOutcome?>(null) }
     var checkingUpdate by remember { mutableStateOf(false) }
+    val shownOutcome = updateOutcome ?: state.availableUpdate
 
     fun openUrl(url: String) {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
@@ -186,70 +190,99 @@ fun AboutSheet(
                         cornerRadius = palette.cornerRadiusDp,
                         tier = GlassTier.FROSTED_PANEL,
                         fallbackColor = palette.elevated,
-                    )
-                    .clickable(enabled = !checkingUpdate) {
-                        val availableUrl = updateOutcome?.releaseUrl
-                        if (availableUrl != null && updateOutcome?.hasUpdate == true) {
-                            openUrl(availableUrl)
-                        } else {
-                            checkingUpdate = true
-                            onCheckForUpdates { res ->
-                                checkingUpdate = false
-                                updateOutcome = res
+                    ),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !checkingUpdate) {
+                                val availableUrl = shownOutcome?.releaseUrl
+                                if (availableUrl != null && shownOutcome.hasUpdate) {
+                                    openUrl(availableUrl)
+                                } else {
+                                    checkingUpdate = true
+                                    onCheckForUpdates { res ->
+                                        checkingUpdate = false
+                                        updateOutcome = res
+                                    }
+                                }
+                            }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CloudDownload,
+                            contentDescription = null,
+                            tint = palette.accent,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = when {
+                                    checkingUpdate -> "Checking for updates..."
+                                    shownOutcome?.hasUpdate == true -> "Update available: ${shownOutcome.tag}"
+                                    shownOutcome?.upToDate == true -> "Up to date (v${BuildConfig.VERSION_NAME})"
+                                    shownOutcome?.error != null -> "Update check failed · Tap to retry"
+                                    else -> "Check for updates"
+                                },
+                                style = MaterialTheme.typography.titleMedium,
+                                color = palette.textPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            val detail = shownOutcome?.error ?: shownOutcome?.summary
+                            if (!detail.isNullOrBlank()) {
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = detail,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = palette.textSecondary,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
                         }
-                    },
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.CloudDownload,
-                        contentDescription = null,
-                        tint = palette.accent,
-                        modifier = Modifier.size(22.dp),
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = when {
-                                checkingUpdate -> "Checking for updates..."
-                                updateOutcome?.hasUpdate == true -> "Update available: ${updateOutcome?.tag}"
-                                updateOutcome?.upToDate == true -> "Up to date (v${BuildConfig.VERSION_NAME})"
-                                updateOutcome?.error != null -> "Update check failed · Tap to retry"
-                                else -> "Check for updates"
-                            },
-                            style = MaterialTheme.typography.titleMedium,
-                            color = palette.textPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        val detail = updateOutcome?.error ?: updateOutcome?.summary
-                        if (!detail.isNullOrBlank()) {
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                text = detail,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = palette.textSecondary,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
+                        if (checkingUpdate) {
+                            CircularProgressIndicator(
+                                color = palette.accent,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = palette.textSecondary,
                             )
                         }
                     }
-                    if (checkingUpdate) {
-                        CircularProgressIndicator(
-                            color = palette.accent,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                            contentDescription = null,
-                            tint = palette.textSecondary,
+                    HorizontalDivider(color = dividerColor, modifier = Modifier.padding(horizontal = 16.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Notify on app launch",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = palette.textPrimary,
+                            )
+                            Text(
+                                text = "Show update popup automatically if a newer APK is published",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = palette.textSecondary,
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Switch(
+                            checked = state.autoCheckUpdates,
+                            onCheckedChange = onToggleAutoCheckUpdates,
+                            colors = SwitchDefaults.colors(checkedTrackColor = palette.accent),
                         )
                     }
                 }

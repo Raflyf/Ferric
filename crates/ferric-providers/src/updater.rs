@@ -230,6 +230,74 @@ pub fn parse_latest_release(
     }))
 }
 
+/// Strictly parse GitHub `/releases` JSON array for the newest stable Desktop release
+/// (`vX.Y.Z` tag, ignoring drafts, prereleases, and `android-v*` tags).
+pub fn parse_latest_desktop_release(
+    json_text: &str,
+    current_version: &str,
+) -> Result<Option<ReleaseInfo>, String> {
+    let local = parse_version(current_version)
+        .ok_or_else(|| "Application version is not X.Y.Z".to_string())?;
+    let val: serde_json::Value =
+        serde_json::from_str(json_text).map_err(|e| format!("Invalid release JSON: {e}"))?;
+    let arr = val
+        .as_array()
+        .ok_or_else(|| "Releases payload is not a JSON array".to_string())?;
+
+    let mut best: Option<((u32, u32, u32), ReleaseInfo)> = None;
+    for entry in arr {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let draft = obj
+            .get("draft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let prerelease = obj
+            .get("prerelease")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if draft || prerelease {
+            continue;
+        }
+        let Some(tag_raw) = obj.get("tag_name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(rest) = tag_raw.strip_prefix('v') else {
+            continue;
+        };
+        let Some(parsed) = parse_version(rest) else {
+            continue;
+        };
+        if parsed <= local {
+            continue;
+        }
+        let version = format!("{}.{}.{}", parsed.0, parsed.1, parsed.2);
+        let tag = format!("v{version}");
+        let release_url = release_page_url(Some(&tag));
+        let summary = obj
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .map(extract_short_summary)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                format!("You are on {current_version}. Read what changed, or update now.")
+            });
+        if best.as_ref().is_none_or(|(b, _)| parsed > *b) {
+            best = Some((
+                parsed,
+                ReleaseInfo {
+                    tag,
+                    version,
+                    release_url,
+                    summary,
+                },
+            ));
+        }
+    }
+    Ok(best.map(|(_, info)| info))
+}
+
 /// Strictly parse GitHub `/releases` JSON array for the newest stable Android release
 /// (either an `android-vX.Y.Z` tag or a `vX.Y.Z` release carrying at least one `.apk` asset).
 pub fn parse_latest_android_release(
@@ -422,7 +490,47 @@ pub fn check_latest_release(
 
     check_cancelled(cancelled, deadline)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "Release JSON is not UTF-8".to_string())?;
-    parse_latest_release(text, current_version)
+    if let Ok(parsed) = parse_latest_release(text, current_version) {
+        return Ok(parsed);
+    }
+    // If GitHub `/releases/latest` currently points to an `android-v*` release, inspect
+    // `/releases` directly so Desktop update checks still discover the latest `vX.Y.Z` tag.
+    let is_android_tagged = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| {
+            v.get("tag_name")?
+                .as_str()
+                .map(|s| s.starts_with("android-v"))
+        })
+        .unwrap_or(false);
+    if !is_android_tagged {
+        return parse_latest_release(text, current_version);
+    }
+
+    check_cancelled(cancelled, deadline)?;
+    let list_url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=15");
+    let list_resp = agent
+        .get(&list_url)
+        .header("User-Agent", format!("Ferric/{current_version}"))
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| format!("Network error while checking updates: {e}"))?;
+    let list_status = list_resp.status().as_u16();
+    if list_status == 404 {
+        return Ok(None);
+    }
+    if list_status != 200 {
+        return Err(format!("GitHub update check returned HTTP {list_status}"));
+    }
+    let list_bytes = list_resp
+        .into_body()
+        .into_with_config()
+        .limit(MAX_RELEASE_JSON_BYTES as u64)
+        .read_to_vec()
+        .map_err(|e| format!("Could not read GitHub release response: {e}"))?;
+    let list_text =
+        std::str::from_utf8(&list_bytes).map_err(|_| "Release JSON is not UTF-8".to_string())?;
+    parse_latest_desktop_release(list_text, current_version)
 }
 
 /// Query GitHub `/releases` for a newer Android Ferric release (`android-vX.Y.Z` or `.apk` release).
@@ -815,5 +923,28 @@ mod tests {
             .expect("android release found");
         assert_eq!(found.tag, "android-v0.1.1");
         assert_eq!(found.version, "0.1.1");
+    }
+
+    #[test]
+    fn desktop_releases_array_skips_android_tags() {
+        let mixed = r#"[
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "android-v0.9.0",
+                "body": "Android release"
+            },
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v0.1.4",
+                "body": "Desktop update"
+            }
+        ]"#;
+        let found = parse_latest_desktop_release(mixed, "0.1.3")
+            .expect("parse desktop releases")
+            .expect("desktop release found");
+        assert_eq!(found.tag, "v0.1.4");
+        assert_eq!(found.version, "0.1.4");
     }
 }

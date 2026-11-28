@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -21,6 +22,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -77,6 +80,7 @@ import dev.livelydesk.ferric.ui.components.AuroraBackdrop
 import dev.livelydesk.ferric.ui.components.FerricLaunchSplash
 import dev.livelydesk.ferric.ui.components.FerricSnackbar
 import dev.livelydesk.ferric.ui.components.FerricTab
+import dev.livelydesk.ferric.ui.components.FerricUpdateDialogOverlay
 import dev.livelydesk.ferric.ui.components.FloatingLiquidGlassDock
 import dev.livelydesk.ferric.ui.screens.AboutSheet
 import dev.livelydesk.ferric.ui.screens.AccountsSheet
@@ -832,6 +836,34 @@ private fun FerricMainShell(
             }
         }
 
+        // Layer 5.5: Theme-synced startup update notification overlay
+        AnimatedVisibility(
+            visible = !showLaunchSplash && state.startupUpdatePopup != null,
+            enter = fadeIn(tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)) +
+                scaleIn(initialScale = 0.94f, animationSpec = tween(durationMillis = FERRIC_MOTION_MS, easing = FerricEaseOut)),
+            exit = fadeOut(tween(durationMillis = 180, easing = FerricEaseOut)) +
+                scaleOut(targetScale = 0.96f, animationSpec = tween(durationMillis = 180, easing = FerricEaseOut)),
+        ) {
+            val updateOutcome = state.startupUpdatePopup
+            if (updateOutcome != null) {
+                CompositionLocalProvider(LocalBackdropState provides snackBackdrop) {
+                    FerricUpdateDialogOverlay(
+                        outcome = updateOutcome,
+                        onUpdateNow = { url ->
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            runCatching { context.startActivity(intent) }
+                                .onFailure { store.postToast("Could not open release page") }
+                            store.dismissStartupUpdatePopup()
+                        },
+                        onLater = { store.dismissStartupUpdatePopup() },
+                        onSkipVersion = { tag -> store.skipUpdateVersion(tag) },
+                    )
+                }
+            }
+        }
+
         // Layer 6: Cold-start animated Ferric Type-I cassette splash intro
         if (showLaunchSplash) {
             FerricLaunchSplash(onFinished = { showLaunchSplash = false })
@@ -966,6 +998,7 @@ private fun FerricMainShell(
         AboutSheet(
             state = state,
             onCheckForUpdates = { callback -> store.checkForUpdates(callback) },
+            onToggleAutoCheckUpdates = { enabled -> store.setAutoCheckUpdates(enabled) },
             onMessage = { msg -> store.postToast(msg) },
             onDismiss = { showAboutSheet = false },
         )

@@ -183,6 +183,9 @@ data class PlaybackUiState(
         activeRemoteQueueIndex = 0u,
     ),
     val connectQrCode: FfiQrCode? = null,
+    val autoCheckUpdates: Boolean = true,
+    val availableUpdate: UpdateCheckOutcome? = null,
+    val startupUpdatePopup: UpdateCheckOutcome? = null,
     val statusMessage: String? = null,
     val isReady: Boolean = false,
 )
@@ -297,6 +300,20 @@ object PlaybackStateReducer {
     )
 }
 
+object UpdatePopupPolicy {
+    fun resolveStartupPopup(
+        outcome: UpdateCheckOutcome?,
+        autoCheckEnabled: Boolean,
+        skippedTag: String?,
+    ): UpdateCheckOutcome? {
+        if (!autoCheckEnabled || outcome == null) return null
+        if (!outcome.hasUpdate || outcome.error != null) return null
+        val tag = outcome.tag?.trim().orEmpty()
+        if (tag.isEmpty() || tag == skippedTag?.trim()) return null
+        return outcome
+    }
+}
+
 /**
  * Singleton runtime bridge owning the Rust [FerricMobileCore] handle and exposing Compose-friendly
  * [StateFlow] snapshots. All FFI mutations execute off the Main Thread via [Dispatchers.IO].
@@ -309,6 +326,7 @@ class CoreStateStore(private val appContext: Context) {
     private var core: FerricMobileCore? = null
 
     private val appForeground = AtomicBoolean(true)
+    private val startupUpdateChecked = AtomicBoolean(false)
 
     @Volatile
     private var lastExtractedArtUrl: String? = null
@@ -645,6 +663,7 @@ class CoreStateStore(private val appContext: Context) {
                 val connect = handle.getConnectState()
                 val tzOffsetSecs = (TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000L)
                 val stats = runCatching { handle.getListeningStats(tzOffsetSecs) }.getOrNull()
+                val autoCheckUpdates = prefs.getBoolean(PREF_AUTO_CHECK_UPDATES, true)
                 _uiState.update {
                     it.copy(
                         accountStatus = accounts,
@@ -657,6 +676,7 @@ class CoreStateStore(private val appContext: Context) {
                         localVolume = userVol,
                         connectState = connect,
                         listeningStats = stats ?: it.listeningStats,
+                        autoCheckUpdates = autoCheckUpdates,
                         isReady = true,
                     )
                 }
@@ -670,6 +690,7 @@ class CoreStateStore(private val appContext: Context) {
                     )
                 }
                 handle.loadHome(forceRefresh = false, moodIdx = null)
+                triggerStartupUpdateCheckIfEnabled(handle)
             } catch (err: Exception) {
                 _uiState.update { it.copy(statusMessage = "Init failed: ${err.message}") }
             }
@@ -1879,6 +1900,62 @@ class CoreStateStore(private val appContext: Context) {
         scope.launch { core?.trimMemory() }
     }
 
+    private fun triggerStartupUpdateCheckIfEnabled(handle: FerricMobileCore) {
+        if (!startupUpdateChecked.compareAndSet(false, true)) return
+        val prefs = appContext.getSharedPreferences(PREFS_DEVICE, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(PREF_AUTO_CHECK_UPDATES, true)) return
+        scope.launch {
+            val found = runCatching {
+                handle.checkLatestRelease(BuildConfig.VERSION_NAME)
+            }.getOrNull() ?: return@launch
+            val outcome = UpdateCheckOutcome(
+                hasUpdate = true,
+                tag = found.tag,
+                releaseUrl = found.releaseUrl,
+                summary = found.summary.ifBlank { "New Ferric release ${found.tag} is available." },
+            )
+            val popup = UpdatePopupPolicy.resolveStartupPopup(
+                outcome = outcome,
+                autoCheckEnabled = prefs.getBoolean(PREF_AUTO_CHECK_UPDATES, true),
+                skippedTag = prefs.getString(PREF_SKIPPED_UPDATE_TAG, null),
+            )
+            _uiState.update {
+                it.copy(
+                    availableUpdate = outcome,
+                    startupUpdatePopup = popup ?: it.startupUpdatePopup,
+                )
+            }
+        }
+    }
+
+    fun setAutoCheckUpdates(enabled: Boolean) {
+        appContext.getSharedPreferences(PREFS_DEVICE, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(PREF_AUTO_CHECK_UPDATES, enabled)
+            .apply()
+        _uiState.update {
+            it.copy(
+                autoCheckUpdates = enabled,
+                startupUpdatePopup = if (enabled) it.startupUpdatePopup else null,
+            )
+        }
+    }
+
+    fun dismissStartupUpdatePopup() {
+        _uiState.update { it.copy(startupUpdatePopup = null) }
+    }
+
+    fun skipUpdateVersion(tag: String) {
+        val cleanTag = tag.trim()
+        if (cleanTag.isNotEmpty()) {
+            appContext.getSharedPreferences(PREFS_DEVICE, Context.MODE_PRIVATE)
+                .edit()
+                .putString(PREF_SKIPPED_UPDATE_TAG, cleanTag)
+                .apply()
+        }
+        _uiState.update { it.copy(startupUpdatePopup = null) }
+    }
+
     fun checkForUpdates(onResult: (UpdateCheckOutcome) -> Unit) {
         scope.launch {
             val outcome = runCatching {
@@ -1886,6 +1963,10 @@ class CoreStateStore(private val appContext: Context) {
                     ?: error("Core runtime unavailable")
                 val found = handle.checkLatestRelease(BuildConfig.VERSION_NAME)
                 if (found != null) {
+                    appContext.getSharedPreferences(PREFS_DEVICE, Context.MODE_PRIVATE)
+                        .edit()
+                        .remove(PREF_SKIPPED_UPDATE_TAG)
+                        .apply()
                     UpdateCheckOutcome(
                         hasUpdate = true,
                         tag = found.tag,
@@ -1903,10 +1984,23 @@ class CoreStateStore(private val appContext: Context) {
                     error = err.message ?: "Unable to reach GitHub Releases.",
                 )
             }
+            if (outcome.hasUpdate || outcome.upToDate) {
+                _uiState.update {
+                    it.copy(
+                        availableUpdate = if (outcome.hasUpdate) outcome else null,
+                    )
+                }
+            }
             withContext(Dispatchers.Main) {
                 onResult(outcome)
             }
         }
+    }
+
+    companion object {
+        private const val PREFS_DEVICE = "ferric_device"
+        private const val PREF_AUTO_CHECK_UPDATES = "auto_check_updates"
+        private const val PREF_SKIPPED_UPDATE_TAG = "skipped_update_tag"
     }
 
     fun shutdown() {

@@ -25,7 +25,7 @@ All notable changes to Ferric are documented in this file.
 ### Added
 
 - **Overhanging Optical Convex Magnifier Pill & Reconfigurable Glass Widgets:** Added an optical 3D convex magnifying lens bottom navigation pill with rim chromatic dispersion, plus `FerricWidgetConfigActivity` (`android:configure`, reconfigurable) supporting `Glass`, `Clear glass`, `Dark`, `Light`, `Cover colour`, dynamic "From the cover" accent extraction across chromatic and monochrome artwork, refined cassette fallback cover rendering, persistent last-played track display after stop or app close, symmetrical centered transport controls with a spacious right-aligned Like toggle, and an amber dual-tone flame streak badge pill.
-- **Standalone About Sheet & Streamlined `You` Hub:** Separated `About` from `Settings` into a dedicated Liquid Glass sheet with Android-scoped GitHub release checks, `Raflyf/Ferric` & `livelydesk.vercel.app/ferric` links, changelog/issue shortcuts, and creator support links, plus a compact `You` hub.
+- **Standalone About Sheet & Theme-Synced Startup Update Popup:** Separated `About` from `Settings` into a dedicated Liquid Glass sheet with Android-scoped GitHub release checks, `Notify on app launch` toggle, `Raflyf/Ferric` & `livelydesk.vercel.app/ferric` links, changelog/issue shortcuts, creator support links, a compact `You` hub, and an in-window theme-synced startup update dialog (`FerricUpdateDialogOverlay`) with per-version skip persistence.
 
 ### Fixed & Hardening
 

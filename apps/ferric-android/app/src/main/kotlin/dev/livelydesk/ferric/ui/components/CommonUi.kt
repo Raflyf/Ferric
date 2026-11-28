@@ -3,6 +3,7 @@ package dev.livelydesk.ferric.ui.components
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -14,16 +15,19 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -31,11 +35,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
@@ -50,6 +58,8 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -57,11 +67,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarData
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -90,6 +102,7 @@ import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -112,13 +125,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.size.Precision
+import dev.livelydesk.ferric.BuildConfig
 import dev.livelydesk.ferric.core.PlaybackProgress
 import dev.livelydesk.ferric.core.PlaybackUiState
+import dev.livelydesk.ferric.core.UpdateCheckOutcome
 import dev.livelydesk.ferric.ui.theme.FERRIC_MOTION_MS
 import dev.livelydesk.ferric.ui.theme.FerricEaseOut
 import dev.livelydesk.ferric.ui.theme.GlassTier
 import dev.livelydesk.ferric.ui.theme.LocalBackdropState
 import dev.livelydesk.ferric.ui.theme.LocalFerricPalette
+import dev.livelydesk.ferric.ui.theme.blockUnderlyingTouches
 import dev.livelydesk.ferric.ui.theme.ferricDialogContainerColor
 import dev.livelydesk.ferric.ui.theme.ferricGlassSurface
 import dev.livelydesk.ferric.ui.theme.ferricLiquidGlass
@@ -1404,6 +1420,281 @@ fun FerricSnackbar(
                     color = palette.accent,
                     modifier = Modifier.clickable { snackbarData.performAction() },
                 )
+            }
+        }
+    }
+}
+
+/**
+ * In-window theme-synchronized startup update popup. Adapts surface, refraction, corner radius,
+ * contrast, typography, and accent glow to whichever preset or custom theme is currently active.
+ */
+@Composable
+fun FerricUpdateDialogOverlay(
+    outcome: UpdateCheckOutcome,
+    onUpdateNow: (String) -> Unit,
+    onLater: () -> Unit,
+    onSkipVersion: (String) -> Unit,
+) {
+    val palette = LocalFerricPalette.current
+    val backdrop = LocalBackdropState.current
+    val releaseTag = outcome.tag?.takeIf { it.isNotBlank() } ?: "Latest"
+    val targetUrl = outcome.releaseUrl?.takeIf { it.isNotBlank() }
+        ?: "https://github.com/Raflyf/Ferric/releases"
+    val cardCorner = if (palette.isLiquidGlass) {
+        26.dp
+    } else {
+        palette.cornerRadiusDp.coerceIn(12.dp, 26.dp)
+    }
+    val shape = RoundedCornerShape(cardCorner)
+    val buttonCorner = if (palette.isLiquidGlass) 999.dp else (cardCorner.value * 0.65f).coerceIn(8f, 18f).dp
+    val buttonShape = RoundedCornerShape(buttonCorner)
+
+    val titleColor = if (palette.isLiquidGlass && !palette.isLight) Color.White else palette.textPrimary
+    val bodyColor = if (palette.isLiquidGlass && !palette.isLight) Color.White.copy(alpha = 0.84f) else palette.textSecondary
+    val accentLum = palette.accent.luminance()
+    val darkCtaInk = Color(0xFF0E0E13)
+    val contrastWithDark = (accentLum + 0.05f) / (darkCtaInk.luminance() + 0.05f)
+    val contrastWithWhite = (1.0f + 0.05f) / (accentLum + 0.05f)
+    val onAccentColor = if (contrastWithDark >= contrastWithWhite) darkCtaInk else Color.White
+    val outlineBorderColor = if (palette.isLiquidGlass && !palette.isLight) {
+        Color.White.copy(alpha = 0.28f)
+    } else {
+        palette.border
+    }
+    val scrimColor = Color.Black.copy(
+        alpha = when {
+            palette.isLight -> 0.28f
+            palette.isLiquidGlass -> 0.36f
+            else -> 0.62f
+        },
+    )
+    val glassTextShadow = if (palette.isLiquidGlass && !palette.isLight) {
+        Shadow(color = Color.Black.copy(alpha = 0.48f), offset = Offset(0f, 1f), blurRadius = 4f)
+    } else {
+        null
+    }
+
+    var cardRestOffset by remember { mutableStateOf(Offset.Zero) }
+    val scrimInteraction = remember { MutableInteractionSource() }
+    val cardInteraction = remember { MutableInteractionSource() }
+
+    BackHandler(onBack = onLater)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .blockUnderlyingTouches(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(scrimColor)
+                .clickable(
+                    interactionSource = scrimInteraction,
+                    indication = null,
+                    onClick = onLater,
+                ),
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .widthIn(max = 420.dp)
+                .onGloballyPositioned { coords ->
+                    cardRestOffset = coords.positionInRoot()
+                }
+                .clickable(
+                    interactionSource = cardInteraction,
+                    indication = null,
+                    onClick = {},
+                )
+                .shadow(
+                    elevation = if (palette.isLiquidGlass) 20.dp else 14.dp,
+                    shape = shape,
+                    ambientColor = Color.Black.copy(alpha = 0.38f),
+                    spotColor = palette.accent.copy(alpha = 0.24f),
+                ),
+        ) {
+            if (palette.isLiquidGlass) {
+                CompositionLocalProvider(LocalBackdropState provides backdrop) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .ferricLiquidGlass(
+                                cornerRadius = cardCorner,
+                                blurRadius = 12.dp,
+                                refractionHeight = 18.dp,
+                                refractionAmount = 18.dp,
+                                chromaticDispersion = 0.85f,
+                                alwaysGlass = true,
+                                tier = GlassTier.HERO_LENS,
+                                accentGlow = palette.accent,
+                                anchorAlphaOverride = if (palette.isLight) 0.46f else 0.36f,
+                                screenOffsetProvider = { cardRestOffset },
+                            ),
+                    )
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clip(shape)
+                        .background(palette.elevated)
+                        .border(
+                            width = 1.dp,
+                            brush = Brush.verticalGradient(
+                                listOf(
+                                    palette.accent.copy(alpha = if (palette.isLight) 0.42f else 0.50f),
+                                    palette.border,
+                                ),
+                            ),
+                            shape = shape,
+                        ),
+                )
+            }
+
+            CompositionLocalProvider(LocalBackdropState provides null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(shape)
+                        .padding(horizontal = 20.dp, vertical = 18.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(palette.accent.copy(alpha = if (palette.isLight) 0.14f else 0.20f))
+                                .border(
+                                    1.dp,
+                                    palette.accent.copy(alpha = if (palette.isLight) 0.34f else 0.44f),
+                                    RoundedCornerShape(14.dp),
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudDownload,
+                                contentDescription = null,
+                                tint = palette.accent,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Update Available",
+                                style = MaterialTheme.typography.titleLarge.copy(shadow = glassTextShadow),
+                                color = titleColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = "v${BuildConfig.VERSION_NAME} -> $releaseTag",
+                                style = MaterialTheme.typography.labelMedium.copy(shadow = glassTextShadow),
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.accent,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        IconButton(
+                            onClick = onLater,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Close",
+                                tint = bodyColor,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+
+                    val summaryText = outcome.summary?.takeIf { it.isNotBlank() }
+                        ?: "A newer Ferric Android release ($releaseTag) is ready on GitHub."
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 180.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        Text(
+                            text = summaryText,
+                            style = MaterialTheme.typography.bodyMedium.copy(shadow = glassTextShadow),
+                            color = bodyColor,
+                        )
+                    }
+
+                    Spacer(Modifier.height(18.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = onLater,
+                            shape = buttonShape,
+                            border = BorderStroke(1.dp, outlineBorderColor),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 11.dp),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                text = "Later",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = titleColor,
+                            )
+                        }
+                        Button(
+                            onClick = { onUpdateNow(targetUrl) },
+                            shape = buttonShape,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = palette.accent,
+                                contentColor = onAccentColor,
+                            ),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 11.dp),
+                            modifier = Modifier.weight(1.35f),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudDownload,
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp),
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                text = "Update",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+
+                    if (!outcome.tag.isNullOrBlank()) {
+                        TextButton(
+                            onClick = { onSkipVersion(outcome.tag) },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .align(Alignment.CenterHorizontally)
+                                .padding(top = 6.dp)
+                                .heightIn(min = 32.dp),
+                        ) {
+                            Text(
+                                text = "Skip $releaseTag",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = bodyColor.copy(alpha = 0.82f),
+                            )
+                        }
+                    }
+                }
             }
         }
     }

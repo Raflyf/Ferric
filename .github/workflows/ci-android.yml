@@ -81,6 +81,13 @@ jobs:
             cargo install cargo-ndk --locked
           fi
 
+      - name: Install Linux audio development libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+
       - name: Check formatting, Clippy, and unit tests on shared Rust crates
         shell: bash
         run: |
@@ -114,22 +121,21 @@ jobs:
           for abi in arm64-v8a x86_64; do
             SO="apps/ferric-android/app/src/main/jniLibs/${abi}/libferric_mobile_ffi.so"
             test -f "${SO}"
-            "${READELF}" -l "${SO}" | awk '
-              $1 == "LOAD" {
-                found++;
-                align = strtonum($NF);
-                if (align < 16384) {
-                  print "ERROR: alignment < 16384 in " ENVIRON["SO"] ": " $0 > "/dev/stderr";
-                  exit 1;
-                }
-              }
-              END {
-                if (found == 0) {
-                  print "ERROR: no LOAD segments found" > "/dev/stderr";
-                  exit 1;
-                }
-              }
-            '
+            python3 - "${SO}" "${READELF}" <<'PY'
+          import subprocess, sys
+          so, readelf = sys.argv[1], sys.argv[2]
+          out = subprocess.check_output([readelf, "-l", so], text=True)
+          found = 0
+          for line in out.splitlines():
+              parts = line.split()
+              if parts and parts[0] == "LOAD":
+                  found += 1
+                  align = int(parts[-1], 0)
+                  if align < 16384:
+                      sys.exit(f"ERROR: alignment < 16384 in {so}: {line}")
+          if found == 0:
+              sys.exit(f"ERROR: no LOAD segments found in {so}")
+          PY
           done
 
       - name: Generate UniFFI Kotlin bindings
@@ -145,16 +151,19 @@ jobs:
             --no-format
 
       - name: Decode Android release keystore from repository secrets
-        if: ${{ secrets.FERRIC_KEYSTORE_BASE64 != '' }}
         shell: bash
         env:
           KEYSTORE_B64: ${{ secrets.FERRIC_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
-          KS_FILE="${RUNNER_TEMP}/ferric-release.jks"
-          printf '%s' "${KEYSTORE_B64}" | base64 -d > "${KS_FILE}"
-          chmod 600 "${KS_FILE}"
-          echo "FERRIC_KEYSTORE_PATH=${KS_FILE}" >> "$GITHUB_ENV"
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            KS_FILE="${RUNNER_TEMP}/ferric-release.jks"
+            printf '%s' "${KEYSTORE_B64}" | base64 -d > "${KS_FILE}"
+            chmod 600 "${KS_FILE}"
+            echo "FERRIC_KEYSTORE_PATH=${KS_FILE}" >> "$GITHUB_ENV"
+          else
+            echo "FERRIC_KEYSTORE_BASE64 secret not configured; skipping release keystore decode."
+          fi
 
       - name: Run Android Gradle unit tests, lint, and dual-APK release build
         shell: bash
